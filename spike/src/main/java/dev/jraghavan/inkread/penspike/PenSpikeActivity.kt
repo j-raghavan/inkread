@@ -116,21 +116,44 @@ class PenSpikeActivity : Activity(), SurfaceHolder.Callback {
         hasSurface = false; holder = null
     }
 
+    // ---- DIAG (RR19-FR4b): catch EVERY event reaching the window, on every channel, so we can
+    // see exactly what Android delivers for the Wacom pen (tool type + source + action). These
+    // dispatch hooks fire before any view-level handling. Remove once the channel is known.
+    private fun diag(tag: String, e: MotionEvent) {
+        Log.i(TAG, "$tag act=${e.actionMasked} tool=${e.getToolType(0)} " +
+            "src=0x${Integer.toHexString(e.source)} x=${e.x} y=${e.y} press=${e.pressure} n=${e.pointerCount}")
+    }
+
+    override fun dispatchTouchEvent(event: MotionEvent): Boolean {
+        diag("DISPATCH-TOUCH", event)
+        return super.dispatchTouchEvent(event)
+    }
+
+    override fun dispatchGenericMotionEvent(event: MotionEvent): Boolean {
+        diag("DISPATCH-GENERIC", event)
+        return super.dispatchGenericMotionEvent(event)
+    }
+
+    override fun onGenericMotionEvent(event: MotionEvent): Boolean {
+        diag("GENERIC", event)
+        return super.onGenericMotionEvent(event)
+    }
+
     private val legendHeight = 150
     private fun inLegend(y: Float) = y < legendHeight
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
+        diag("TOUCH", event)
         // Tapping the legend band cycles routes (and runs the route's one-shot setup probe).
         if (event.actionMasked == MotionEvent.ACTION_DOWN && inLegend(event.y)) {
             cycleRoute()
             return true
         }
 
-        // RR19-FR7: only stylus inks; ignore finger/palm.
+        // DIAG: temporarily accept ALL tool types so any pointer draws (the RR19-FR7
+        // stylus-only filter is restored once the pen's delivery channel/tool-type is known).
+        @Suppress("UNUSED_VARIABLE")
         val ti = event.getToolType(0)
-        if (ti != MotionEvent.TOOL_TYPE_STYLUS && ti != MotionEvent.TOOL_TYPE_ERASER) {
-            return true
-        }
 
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
