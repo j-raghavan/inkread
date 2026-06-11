@@ -1,0 +1,58 @@
+# ───────────────────────────────────────────────────────────────
+# Local / private — never commit
+# ───────────────────────────────────────────────────────────────
+# Design docs & ADRs live locally only (reference the private research).
+spec/
+
+# Claude Code / Ruflo working config (per-machine, not project source).
+CLAUDE*
+.claude/
+.claude-flow/
+.mcp*
+
+# Reverse-engineering reference material is NEVER committed (clean-room,
+# 3rd-party copyright). Kept out of the public repo defensively.
+neoreader/
+supernote/
+*.apk
+*.so
+!**/jniLibs/**          # (allow vendored runtime .so under jniLibs if ever needed)
+
+# ───────────────────────────────────────────────────────────────
+# Rust
+# ───────────────────────────────────────────────────────────────
+/target/
+**/*.rs.bk
+*.pdb
+# (this is an app, not a library → Cargo.lock IS committed)
+
+# ───────────────────────────────────────────────────────────────
+# Android / Gradle / Kotlin
+# ───────────────────────────────────────────────────────────────
+.gradle/
+build/
+app/build/
+local.properties
+*.iml
+.idea/
+.cxx/
+.kotlin/
+captures/
+
+# Signing keys — NEVER commit (debug.keystore is fine to keep)
+*.keystore
+*.jks
+!debug.keystore
+keystore.properties
+
+# Build outputs
+*.aab
+outputs/
+
+# ───────────────────────────────────────────────────────────────
+# OS / editor / logs
+# ───────────────────────────────────────────────────────────────
+.DS_Store
+*.swp
+logcat.txt
+*.log
