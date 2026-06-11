@@ -16,7 +16,11 @@ neoreader/
 supernote/
 *.apk
 *.so
-!**/jniLibs/**          # (allow vendored runtime .so under jniLibs if ever needed)
+# Note: jniLibs/*.so are NOT committed — libreader.so is built by cargo-ndk and
+# libpdfium.so is download-staged + sha256-verified by buildApk.sh (stage_pdfium).
+# So all *.so stay ignored; the build reproduces them. (An earlier
+# "!**/jniLibs/**" negation here was a no-op — an inline '#comment' is part of the
+# pattern, not a comment — and is intentionally removed.)
 
 # ───────────────────────────────────────────────────────────────
 # Rust

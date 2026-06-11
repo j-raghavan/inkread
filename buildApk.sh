@@ -5,9 +5,13 @@ set -euo pipefail
 # buildApk.sh — build the inkread Android APK
 #
 # Pipeline (see spec/SPEC-RUST-READER.md RR1 / RR29):
-#   1. cargo-ndk → compile the Rust core (libreader.so) into app/src/main/jniLibs
-#   2. gradle    → assemble + sign the APK (bundles libreader.so + libpdfium.so + fonts)
-#   3. (opt)     → adb install to the connected Supernote
+#   1. cargo-ndk → compile the Rust core (libreader.so) into app/src/main/jniLibs,
+#                  then PRUNE stray dep dylibs cargo-ndk also copies (libpdfium_render*,
+#                  libreader_core) and strip libreader.so — keep the APK lean.
+#   2. pdfium    → stage the pinned vendored libpdfium.so into jniLibs (download +
+#                  sha256-verify if absent) so the build is self-contained (RR5-FR5).
+#   3. gradle    → assemble + sign the APK (bundles libreader.so + libpdfium.so + fonts)
+#   4. (opt)     → adb install to the connected Supernote
 #
 # Conventions (color output, JDK guard, fail-fast) mirror sn-dictionary/buildPlugin.sh.
 #
@@ -22,6 +26,12 @@ set -euo pipefail
 ABIS="${INKREAD_ABIS:-arm64-v8a}"        # RK3566 = arm64; add armeabi-v7a if needed
 APP_MODULE="${INKREAD_APP_MODULE:-app}"  # gradle module that produces the APK
 PKG_ID="${INKREAD_PKG_ID:-dev.jraghavan.inkread}"
+
+# Vendored pdfium runtime (bblanchon prebuilt, BSD-3-Clause; see LICENSES-3RDPARTY.md,
+# RR5-FR1/FR5). Pinned for a reproducible build. The arm64 binary is sha256-verified;
+# other ABIs are ELF-sanity-checked only (v1 ships arm64-v8a).
+PDFIUM_TAG="${INKREAD_PDFIUM_TAG:-chromium/7881}"   # = PDFium 151.0.7881.0
+PDFIUM_SHA256_ARM64="${INKREAD_PDFIUM_SHA256_ARM64:-d043f50a7ab42c91b6dfa98a1bcbd64b77cf27532991f331318a357bcf7cb363}"
 
 # =========================================================
 # write_color_output — colored stderr message ($1 msg, $2 color)
@@ -84,6 +94,106 @@ build_rust() {
     ( cd "$root" && cargo ndk "${targets[@]}" -o "$jnilibs" build $profile_flag -p reader-core --features jni-bridge ) \
         && write_color_output "Rust core built (libreader.so staged in jniLibs)" "Green" \
         || die "cargo-ndk build failed"
+
+    prune_stray_libs "$jnilibs"
+    strip_reader_lib "$jnilibs"
+}
+
+# =========================================================
+# prune_stray_libs — cargo-ndk's -o copies EVERY .so it builds, including Rust
+# dep dylibs (libpdfium_render*.so, ~33 MB) and the stale pre-rename
+# libreader_core.so. The APK needs only our cdylib (libreader.so) + the vendored
+# runtime (libpdfium.so). Drop everything else so the APK stays lean (RR29).
+# =========================================================
+prune_stray_libs() {
+    local jnilibs="$1" abi dir f
+    IFS=',' read -ra _abis <<< "$ABIS"
+    for abi in "${_abis[@]}"; do
+        dir="$jnilibs/$abi"
+        [[ -d "$dir" ]] || continue
+        while IFS= read -r f; do
+            [[ -n "$f" ]] && write_color_output "pruned stray lib: $(basename "$f")" "Yellow"
+        done < <(find "$dir" -maxdepth 1 -name '*.so' ! -name 'libreader.so' ! -name 'libpdfium.so' -print)
+        find "$dir" -maxdepth 1 -name '*.so' ! -name 'libreader.so' ! -name 'libpdfium.so' -delete
+    done
+}
+
+# =========================================================
+# strip_reader_lib — best-effort strip of libreader.so via the NDK's llvm-strip
+# (a debug-profile lib is large with debuginfo; release is already stripped).
+# Never fails the build — if no NDK/strip tool is found, leave the lib as-is.
+# =========================================================
+strip_reader_lib() {
+    local jnilibs="$1" ndk="" strip_bin="" abi lib
+    ndk="${ANDROID_NDK_HOME:-}"
+    if [[ -z "$ndk" && -n "${ANDROID_HOME:-}" ]]; then
+        ndk="$(ls -d "$ANDROID_HOME"/ndk/* 2>/dev/null | sort -V | tail -1)"
+    fi
+    [[ -n "$ndk" ]] && strip_bin="$(ls "$ndk"/toolchains/llvm/prebuilt/*/bin/llvm-strip 2>/dev/null | head -1)"
+    [[ -n "$strip_bin" ]] || return 0
+    IFS=',' read -ra _abis <<< "$ABIS"
+    for abi in "${_abis[@]}"; do
+        lib="$jnilibs/$abi/libreader.so"
+        [[ -f "$lib" ]] || continue
+        if "$strip_bin" --strip-unneeded "$lib" 2>/dev/null; then
+            write_color_output "stripped libreader.so ($abi)" "Green"
+        fi
+    done
+}
+
+# =========================================================
+# pdfium_arch_for_abi — map an Android ABI to bblanchon's asset arch suffix.
+# =========================================================
+pdfium_arch_for_abi() {
+    case "$1" in
+        arm64-v8a)   echo "arm64" ;;
+        armeabi-v7a) echo "arm" ;;
+        x86_64)      echo "x64" ;;
+        x86)         echo "x86" ;;
+        *)           echo "" ;;
+    esac
+}
+
+# =========================================================
+# stage_pdfium — ensure jniLibs/<abi>/libpdfium.so exists. If absent, download the
+# pinned bblanchon prebuilt (cached under build/), extract, sha256-verify (arm64),
+# and stage it. Keeps the 6 MB binary out of git while making the build
+# self-contained + reproducible (RR5-FR5 / RR29). (RR18: pdfium is BSD, not the
+# private research material — fine to vendor at build time.)
+# =========================================================
+stage_pdfium() {
+    local root="$1"
+    local jnilibs="$root/$APP_MODULE/src/main/jniLibs"
+    local cache="$root/build/pdfium-vendor/${PDFIUM_TAG//\//-}"
+    local abi dest arch tgz url tmp so got
+    IFS=',' read -ra _abis <<< "$ABIS"
+    for abi in "${_abis[@]}"; do
+        dest="$jnilibs/$abi/libpdfium.so"
+        if [[ -f "$dest" ]]; then
+            write_color_output "pdfium present: $dest" "Green"; continue
+        fi
+        arch="$(pdfium_arch_for_abi "$abi")"
+        [[ -n "$arch" ]] || die "No pdfium asset mapping for ABI '$abi'"
+        command -v curl >/dev/null 2>&1 || die "curl not found (needed to fetch pdfium $PDFIUM_TAG)"
+        mkdir -p "$cache" "$jnilibs/$abi"
+        tgz="$cache/pdfium-android-$arch.tgz"
+        if [[ ! -f "$tgz" ]]; then
+            url="https://github.com/bblanchon/pdfium-binaries/releases/download/${PDFIUM_TAG//\//%2F}/pdfium-android-$arch.tgz"
+            write_color_output "fetch pdfium $PDFIUM_TAG ($arch) → $tgz" "Blue"
+            curl -sSL -o "$tgz" "$url" || die "pdfium download failed: $url"
+        fi
+        tmp="$(mktemp -d)"
+        tar -xzf "$tgz" -C "$tmp" || { rm -rf "$tmp"; die "pdfium extract failed: $tgz"; }
+        so="$(find "$tmp" -name libpdfium.so -print -quit)"
+        [[ -n "$so" ]] || { rm -rf "$tmp"; die "libpdfium.so not found inside $tgz"; }
+        if [[ "$arch" == "arm64" && -n "$PDFIUM_SHA256_ARM64" ]]; then
+            got="$(shasum -a 256 "$so" | awk '{print $1}')"
+            [[ "$got" == "$PDFIUM_SHA256_ARM64" ]] || { rm -rf "$tmp"; \
+                die "pdfium sha256 mismatch ($arch): got $got, expected $PDFIUM_SHA256_ARM64"; }
+        fi
+        cp "$so" "$dest"; rm -rf "$tmp"
+        write_color_output "pdfium staged: $dest ($PDFIUM_TAG, $arch)" "Green"
+    done
 }
 
 # =========================================================
@@ -141,6 +251,7 @@ main() {
     fi
 
     build_rust "$root" "$profile_flag"
+    stage_pdfium "$root"
     # Capitalize the first letter portably (macOS ships bash 3.2, which lacks ${var^}).
     local task                              # assembleRelease / assembleDebug
     case "$variant" in
