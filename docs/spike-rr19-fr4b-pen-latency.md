@@ -1,8 +1,15 @@
 # Spike runbook — RR19-FR4b pen-latency (the product go/no-go)
 
-> **Status:** runbook only — to be executed by the owner on a physical Supernote.
+> **Status:** runbook + measurement APK built (`:spike` module) — to be executed by the owner
+> on a physical Supernote.
 > **Gates:** ADR Decision 3 (distribution model) and the Supernote-only thesis. Runs
 > **alongside M0**, independently of the M0 reader bring-up.
+>
+> **The APK that implements this runbook:** the `:spike` Gradle module
+> (`dev.jraghavan.inkread.penspike`). Build + install + how-to-read-the-verdict + the
+> high-speed-camera ground-truth procedure are in [`spike/README.md`](../spike/README.md).
+> Build: `./gradlew :spike:assembleDebug` →
+> `spike/build/outputs/apk/debug/spike-debug.apk`.
 
 ## Why this exists
 
