@@ -4,6 +4,16 @@ name: CI
 # (RR1-AC3), then the JNI bridge is cross-checked for the device target, and the license
 # manifest is verified (RR18-AC2). The full APK build is intentionally out of this gate for
 # M0 (it needs the NDK + a device to be meaningful); CI proves the core + the seams.
+#
+# The pdfium render tests (open/render/DRM/corrupt) SKIP unless PDFIUM_DYNAMIC_LIB_PATH is
+# set, so the `host` job fetches the BSD bblanchon libpdfium and re-runs them with the env
+# var SET — the render path actually EXECUTES in CI, not just on the maintainer's machine.
+#
+# Local toolchain caveat: a Homebrew `rust` on PATH (rustc 1.85) SHADOWS the rustup 1.90.0
+# pin in rust-toolchain.toml — Homebrew ships a real cargo, not a rustup shim, so `cargo`
+# resolves to it. Locally, prepend the rustup toolchain bin so 1.90.0 is used, e.g.:
+#   export PATH="$HOME/.rustup/toolchains/1.90.0-<triple>/bin:$PATH"
+# CI runners have no Homebrew rust, so `rustup show` honours the pin directly.
 
 on:
   push:
@@ -27,7 +37,22 @@ jobs:
       - name: Clippy (warnings = errors)
         run: cargo clippy --all -- -D warnings
       - name: Test (host, no Android SDK — RR1-AC3)
+        # Default run: proves the suite is green even when libpdfium is absent (pdf tests
+        # skip cleanly). The next step makes them actually execute.
         run: cargo test --workspace
+      - name: Fetch BSD libpdfium (bblanchon) for the render tests
+        run: |
+          set -euo pipefail
+          ver="chromium/7881"
+          url="https://github.com/bblanchon/pdfium-binaries/releases/download/${ver}/pdfium-linux-x64.tgz"
+          mkdir -p "$RUNNER_TEMP/pdfium"
+          curl -sSL "$url" -o "$RUNNER_TEMP/pdfium.tgz"
+          tar -xzf "$RUNNER_TEMP/pdfium.tgz" -C "$RUNNER_TEMP/pdfium"
+          echo "PDFIUM_DYNAMIC_LIB_PATH=$RUNNER_TEMP/pdfium/lib/libpdfium.so" >> "$GITHUB_ENV"
+      - name: Run pdfium render tests for real (RR5/RR7-FR5 — render path EXECUTES)
+        # With PDFIUM_DYNAMIC_LIB_PATH now set, the open/render/DRM/corrupt/concurrent tests
+        # run instead of skipping — proving the render + failure paths in CI.
+        run: cargo test -p reader-core document::fixed::pdf -- --nocapture
       - name: Assert jni absent from the host graph (IR-7 / RR1-AC3)
         run: |
           if cargo tree -p reader-core -e normal | grep -qw jni; then
