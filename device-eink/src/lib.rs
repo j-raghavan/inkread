@@ -12,9 +12,14 @@ mod command;
 mod geometry;
 mod mock_desktop;
 mod policy;
+mod wire;
 
 pub use capabilities::DeviceCapabilities;
 pub use command::{RefreshCommand, RefreshIntent};
 pub use geometry::Rect;
 pub use mock_desktop::MockDeviceRecorder;
 pub use policy::RefreshPolicy;
+pub use wire::{
+    decode_capabilities, decode_commands, encode_capabilities, encode_commands, WireError,
+    COMMAND_HEADER_LEN, COMMAND_RECORD_LEN, WIRE_VERSION,
+};
