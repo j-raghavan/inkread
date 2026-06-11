@@ -107,6 +107,13 @@ impl ReaderSession {
         self.page
     }
 
+    /// The session viewport's pixel dimensions `(width, height)` — used by the JNI bridge
+    /// to size the render buffer without reaching into private state.
+    #[must_use]
+    pub fn viewport_dims(&self) -> (u32, u32) {
+        (self.viewport.width, self.viewport.height)
+    }
+
     /// Document metadata.
     #[must_use]
     pub fn metadata(&self) -> DocumentMetadata {
