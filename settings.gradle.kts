@@ -17,3 +17,6 @@ dependencyResolutionManagement {
 
 rootProject.name = "inkread"
 include(":app")
+// RR19-FR4b pen-latency spike — a SEPARATE measurement APK (not the reader). Standalone
+// module so it builds/installs independently of the M0 reader bring-up.
+include(":spike")

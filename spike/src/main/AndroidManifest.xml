@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- inkread pen-latency spike (RR19-FR4b). A standalone full-screen measurement Activity.
+     No special permissions: the whole point is to measure what a PLAIN sideloaded app can
+     reach. /dev/ebc access (Route 3) and com.ratta.DrawService binding (Route 2) are NOT
+     permission-gated on this device per recon — they are SELinux/exported-component facts the
+     routes test empirically. We request nothing extra so the result is honest. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <application
+        android:allowBackup="false"
+        android:label="penspike"
+        android:supportsRtl="true"
+        android:theme="@android:style/Theme.NoTitleBar.Fullscreen">
+
+        <activity
+            android:name=".PenSpikeActivity"
+            android:exported="true"
+            android:configChanges="orientation|screenSize|keyboardHidden">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>
