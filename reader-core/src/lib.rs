@@ -7,6 +7,7 @@
 //!
 //! IR-7: no vendor name appears here; all device specifics live in the Kotlin adapters.
 
+pub mod document;
 pub mod error;
 pub mod policy;
 pub mod render;
