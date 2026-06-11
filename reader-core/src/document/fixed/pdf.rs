@@ -254,4 +254,70 @@ mod tests {
             Err(CoreError::PageOutOfRange { requested: 99, .. })
         ));
     }
+
+    // RR5 / RR7-FR5 / RR21-FR3: a garbage/corrupt file opens to a typed error, never a panic.
+    #[test]
+    fn corrupt_pdf_open_is_typed_error_not_panic() {
+        if !host_pdfium_available() {
+            eprintln!("SKIP corrupt_pdf_open: host libpdfium UNVERIFIED");
+            return;
+        }
+        // Looks like a PDF (has the header) but is not a valid one. `PdfBackend` is not
+        // `Debug`, so inspect the Result without `expect_err`.
+        let garbage = b"%PDF-1.7 not-a-real-pdf \x00\x01\x02 trailing junk".to_vec();
+        match PdfBackend::open(garbage) {
+            Err(CoreError::CorruptDocument(_)) => {}
+            Err(other) => panic!("expected CorruptDocument, got {other:?}"),
+            Ok(_) => panic!("garbage bytes must not open as a PDF"),
+        }
+
+        // Totally empty input is also corrupt/typed, not a panic.
+        match PdfBackend::open(Vec::new()) {
+            Err(CoreError::CorruptDocument(_)) => {}
+            Err(other) => panic!("expected CorruptDocument for empty input, got {other:?}"),
+            Ok(_) => panic!("empty input must not open as a PDF"),
+        }
+    }
+
+    // RR7-FR5: a password-protected (encrypted) PDF is rejected as DRM-protected, no decrypt.
+    #[test]
+    fn encrypted_pdf_open_is_drm_protected() {
+        if !host_pdfium_available() {
+            eprintln!("SKIP encrypted_pdf_open: host libpdfium UNVERIFIED");
+            return;
+        }
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/encrypted.pdf");
+        let bytes = std::fs::read(path).expect("encrypted fixture present");
+        match PdfBackend::open(bytes) {
+            Err(CoreError::DrmProtected) => {}
+            Err(other) => panic!("expected DrmProtected, got {other:?}"),
+            Ok(_) => panic!("encrypted file must not open without a password"),
+        }
+    }
+
+    // Deviation-2 defense: first-time binding is single-flighted by INIT_LOCK; opening from
+    // several threads at once must be race-free (no SIGTRAP, all succeed).
+    #[test]
+    fn concurrent_open_is_race_free() {
+        if !host_pdfium_available() {
+            eprintln!("SKIP concurrent_open: host libpdfium UNVERIFIED");
+            return;
+        }
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/minimal.pdf");
+        let bytes = std::fs::read(path).expect("fixture present");
+
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                let b = bytes.clone();
+                std::thread::spawn(move || {
+                    let doc = PdfBackend::open(b).expect("concurrent open");
+                    doc.page_count()
+                })
+            })
+            .collect();
+
+        for h in handles {
+            assert_eq!(h.join().expect("thread joined cleanly"), 1);
+        }
+    }
 }
