@@ -1,0 +1,161 @@
+//! Grayscale + dithering post-step (RR4-FR3).
+//!
+//! Converts the rendered RGBA buffer to the panel's gray depth in place. Channels are read
+//! in **R, G, B** order per [`CHANNEL_ORDER`](crate::render::pixel_buffer::CHANNEL_ORDER) —
+//! the explicit half of the BGRA(pdfium)↔RGBA decision (Amendment 3): pdfium is rendered
+//! with reverse-byte-order so it emits RGBA, and we read it as RGBA here. The channel-order
+//! golden test pins this so a regression (reading B,G,R) is caught on the host.
+
+use crate::render::pixel_buffer::{ChannelOrder, PixelBuffer, BYTES_PER_PIXEL, CHANNEL_ORDER};
+
+/// How to convert tones to the panel's gray depth (RR4-FR3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DitherMode {
+    /// Plain luminance quantization (no dithering).
+    None,
+    /// Ordered (Bayer 4×4) dithering — deterministic, cheap, good for e-ink.
+    Ordered,
+}
+
+/// The Supernote Carta panel is 16-level gray (RR4-FR3).
+pub const GRAY_LEVELS: u16 = 16;
+
+/// Rec. 601 luma of an (r,g,b) triple, rounded, 0..=255.
+#[must_use]
+pub fn luma(r: u8, g: u8, b: u8) -> u8 {
+    // 0.299 R + 0.587 G + 0.114 B in fixed point (sum of weights = 1000).
+    let y = 299 * u32::from(r) + 587 * u32::from(g) + 114 * u32::from(b);
+    ((y + 500) / 1000) as u8
+}
+
+/// Quantize `value` (0..=255) to one of `levels` evenly-spaced gray levels, returning the
+/// 0..=255 representative of the chosen level.
+#[must_use]
+fn quantize(value: u8, levels: u16) -> u8 {
+    debug_assert!(levels >= 2);
+    let levels = u32::from(levels);
+    let v = u32::from(value);
+    // Map to level index then back to the 0..255 representative.
+    let idx = (v * (levels - 1) + 127) / 255;
+    ((idx * 255) / (levels - 1)) as u8
+}
+
+/// The 4×4 Bayer ordered-dither threshold matrix, normalized to a signed offset in `-8..8`
+/// (scaled to the quantization step at use).
+const BAYER_4X4: [[i32; 4]; 4] = [[0, 8, 2, 10], [12, 4, 14, 6], [3, 11, 1, 9], [15, 7, 13, 5]];
+
+/// Convert `buf` to `levels`-step grayscale in place, writing the gray value into all of
+/// R,G,B (per [`CHANNEL_ORDER`]) and leaving α untouched. Reads channels in R,G,B order.
+pub fn to_grayscale(buf: &mut PixelBuffer<'_>, mode: DitherMode, levels: u16) {
+    let order: ChannelOrder = CHANNEL_ORDER;
+    let width = buf.width() as usize;
+    let bytes = buf.bytes_mut();
+
+    for (i, px) in bytes.chunks_exact_mut(BYTES_PER_PIXEL).enumerate() {
+        let r = px[order.r];
+        let g = px[order.g];
+        let b = px[order.b];
+        let y = luma(r, g, b);
+
+        let gray = match mode {
+            DitherMode::None => quantize(y, levels),
+            DitherMode::Ordered => {
+                let x = i % width;
+                let row = i / width;
+                // Bayer offset centered around 0, scaled to the quantization step.
+                let step = 255 / i32::from(levels - 1);
+                let threshold = BAYER_4X4[row % 4][x % 4] - 8; // -8..7
+                let nudged = (i32::from(y) + threshold * step / 16).clamp(0, 255) as u8;
+                quantize(nudged, levels)
+            }
+        };
+
+        px[order.r] = gray;
+        px[order.g] = gray;
+        px[order.b] = gray;
+        // α (px[order.a]) left as-is.
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::render::pixel_buffer::PixelBuffer;
+
+    #[test]
+    fn luma_pure_channels() {
+        assert_eq!(luma(255, 0, 0), 76); // 0.299*255
+        assert_eq!(luma(0, 255, 0), 150); // 0.587*255
+        assert_eq!(luma(0, 0, 255), 29); // 0.114*255
+        assert_eq!(luma(255, 255, 255), 255);
+        assert_eq!(luma(0, 0, 0), 0);
+    }
+
+    #[test]
+    fn quantize_endpoints_and_midpoint() {
+        assert_eq!(quantize(0, 16), 0);
+        assert_eq!(quantize(255, 16), 255);
+        // 16 levels => step 17; ~mid stays mid-ish.
+        assert!(quantize(128, 16) > 100 && quantize(128, 16) < 160);
+    }
+
+    // Amendment 3 — the channel-order golden test. A pixel that is pure RED in RGBA byte
+    // order (bytes [255,0,0,255]) MUST yield the red luma (76), proving gray.rs reads R from
+    // byte 0. If gray.rs erroneously read B,G,R, byte 0 would be treated as blue and give 29.
+    #[test]
+    fn channel_order_red_pixel_yields_red_luma() {
+        let mut buf = vec![255u8, 0, 0, 255]; // RGBA = opaque red
+        let mut pb = PixelBuffer::from_rgba(&mut buf, 1, 1).unwrap();
+        to_grayscale(&mut pb, DitherMode::None, GRAY_LEVELS);
+        let gray = pb.bytes()[CHANNEL_ORDER.r];
+        // quantize(76,16): 76 is luma of red. Assert it is NOT the blue luma (29).
+        assert_ne!(
+            gray,
+            quantize(29, GRAY_LEVELS),
+            "must not be reading blue as red"
+        );
+        assert_eq!(gray, quantize(76, GRAY_LEVELS));
+        // α preserved.
+        assert_eq!(pb.bytes()[CHANNEL_ORDER.a], 255);
+    }
+
+    #[test]
+    fn channel_order_blue_pixel_yields_blue_luma() {
+        let mut buf = vec![0u8, 0, 255, 255]; // RGBA = opaque blue
+        let mut pb = PixelBuffer::from_rgba(&mut buf, 1, 1).unwrap();
+        to_grayscale(&mut pb, DitherMode::None, GRAY_LEVELS);
+        assert_eq!(pb.bytes()[CHANNEL_ORDER.b], quantize(29, GRAY_LEVELS));
+    }
+
+    #[test]
+    fn grayscale_writes_equal_rgb() {
+        // A mid-gray-ish pixel: R,G,B should end up equal after conversion.
+        let mut buf = vec![120u8, 130, 140, 255];
+        let mut pb = PixelBuffer::from_rgba(&mut buf, 1, 1).unwrap();
+        to_grayscale(&mut pb, DitherMode::None, GRAY_LEVELS);
+        let b = pb.bytes();
+        assert_eq!(b[0], b[1]);
+        assert_eq!(b[1], b[2]);
+    }
+
+    #[test]
+    fn ordered_dither_outputs_valid_levels() {
+        // A flat 50% gray field dithered to 16 levels: every output must be a valid level.
+        let mut buf = vec![128u8; 8 * 8 * 4];
+        for px in buf.chunks_exact_mut(4) {
+            px[3] = 255;
+        }
+        let mut pb = PixelBuffer::from_rgba(&mut buf, 8, 8).unwrap();
+        to_grayscale(&mut pb, DitherMode::Ordered, GRAY_LEVELS);
+        let valid: Vec<u8> = (0..GRAY_LEVELS)
+            .map(|i| quantize((i * 17) as u8, 16))
+            .collect();
+        for px in pb.bytes().chunks_exact(4) {
+            assert!(
+                valid.contains(&px[0]),
+                "dithered value {} not a level",
+                px[0]
+            );
+        }
+    }
+}

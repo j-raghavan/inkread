@@ -7,7 +7,9 @@
 //!
 //! IR-7: no vendor name appears here; all device specifics live in the Kotlin adapters.
 
+pub mod error;
 pub mod policy;
+pub mod render;
 
 // The JNI bridge compiles ONLY under `--features jni-bridge`, so the host gate
 // (`cargo test -p reader-core`) never resolves the `jni` crate (Amendment 1 / RR1-AC3).
