@@ -289,7 +289,9 @@ main() {
         command -v adb >/dev/null 2>&1 || die "adb not found"
         local dev_flag=(); [[ -n "$device" ]] && dev_flag=(-s "$device")
         write_color_output "adb install -r $apk" "Blue"
-        adb "${dev_flag[@]}" install -r "$apk" \
+        # ${arr[@]+"${arr[@]}"} expands to nothing when the array is empty —
+        # bash 3.2 (macOS) errors on a bare "${arr[@]}" under `set -u`.
+        adb ${dev_flag[@]+"${dev_flag[@]}"} install -r "$apk" \
             && write_color_output "Installed $PKG_ID on the device" "Green" \
             || die "adb install failed (is the Supernote connected with USB debugging on?)"
     fi
