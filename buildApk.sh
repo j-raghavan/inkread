@@ -77,8 +77,11 @@ build_rust() {
     local targets=()
     IFS=',' read -ra _abis <<< "$ABIS"; for a in "${_abis[@]}"; do targets+=("-t" "$a"); done
 
-    write_color_output "cargo ndk ${targets[*]} build $profile_flag → $jnilibs" "Blue"
-    ( cd "$root" && cargo ndk "${targets[@]}" -o "$jnilibs" build $profile_flag ) \
+    # The Android build MUST enable the JNI bridge so libreader.so exports the
+    # Java_dev_jraghavan_inkread_NativeBridge_* symbols (feature-gated; the host gate
+    # builds WITHOUT it so jni stays out of the host graph — RR1-AC3 / IR-7).
+    write_color_output "cargo ndk ${targets[*]} build $profile_flag --features jni-bridge → $jnilibs" "Blue"
+    ( cd "$root" && cargo ndk "${targets[@]}" -o "$jnilibs" build $profile_flag -p reader-core --features jni-bridge ) \
         && write_color_output "Rust core built (libreader.so staged in jniLibs)" "Green" \
         || die "cargo-ndk build failed"
 }
