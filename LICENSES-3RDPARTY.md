@@ -7,7 +7,7 @@ the dependency set changes.
 
 ## Native binaries (vendored separately, not in the crate graph)
 
-- **pdfium** (`libpdfium.so`/`.dylib`, bblanchon prebuilt) — **BSD-3-Clause** (PDFium) — clean; bundled under `app/src/main/jniLibs/` on device and bound via `PDFIUM_DYNAMIC_LIB_PATH` on the host (RR5-FR1/FR5). Attribution: see the PDFium and bblanchon/pdfium-binaries notices.
+- **pdfium** (`libpdfium.so`/`.dylib`, bblanchon prebuilt, pinned `chromium/7881` = PDFium 151.0.7881.0) — **BSD-3-Clause** (PDFium) — clean; bundled under `app/src/main/jniLibs/` on device and bound via `PDFIUM_DYNAMIC_LIB_PATH` on the host (RR5-FR1/FR5). Attribution: see the PDFium and bblanchon/pdfium-binaries notices.
 
 ## Rust dependencies (87 crates, all features)
 
