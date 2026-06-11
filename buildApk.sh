@@ -141,7 +141,13 @@ main() {
     fi
 
     build_rust "$root" "$profile_flag"
-    local task="assemble${variant^}"        # assembleRelease / assembleDebug
+    # Capitalize the first letter portably (macOS ships bash 3.2, which lacks ${var^}).
+    local task                              # assembleRelease / assembleDebug
+    case "$variant" in
+        release) task="assembleRelease" ;;
+        debug)   task="assembleDebug" ;;
+        *)       die "Unknown variant: $variant" ;;
+    esac
     build_apk "$root" "$task"
 
     local apk; apk="$(find_apk "$root" "$variant")"
