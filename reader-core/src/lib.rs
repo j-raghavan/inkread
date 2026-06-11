@@ -7,9 +7,9 @@
 //!
 //! IR-7: no vendor name appears here; all device specifics live in the Kotlin adapters.
 
+pub mod policy;
+
 // The JNI bridge compiles ONLY under `--features jni-bridge`, so the host gate
 // (`cargo test -p reader-core`) never resolves the `jni` crate (Amendment 1 / RR1-AC3).
 #[cfg(feature = "jni-bridge")]
 mod jni;
-
-// Scaffold only at this commit; engine modules land per the M0 commit order.
