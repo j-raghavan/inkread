@@ -158,4 +158,59 @@ mod tests {
             );
         }
     }
+
+    // RR4-AC2: a smooth tone gradient dithered to the panel depth must show MULTIPLE distinct
+    // levels (tones reproduced, not collapsed) with NO all-black gap in a non-black region
+    // (catches banding / black-hole regressions in the gray/dither step).
+    #[test]
+    fn dither_gradient_has_no_banding_or_black_gaps() {
+        // A wide, 1-row horizontal gradient 0..=255 (use a tall band so column patterns mix).
+        let w = 256usize;
+        let h = 8usize;
+        let mut buf = vec![0u8; w * h * 4];
+        for y in 0..h {
+            for x in 0..w {
+                let v = x as u8; // luminance ramps 0..255 left→right
+                let i = (y * w + x) * 4;
+                buf[i] = v;
+                buf[i + 1] = v;
+                buf[i + 2] = v;
+                buf[i + 3] = 255;
+            }
+        }
+        let mut pb = PixelBuffer::from_rgba(&mut buf, w as u32, h as u32).unwrap();
+        to_grayscale(&mut pb, DitherMode::Ordered, GRAY_LEVELS);
+
+        // (a) The gradient reproduces many distinct gray levels — no banding collapse.
+        let mut distinct = std::collections::BTreeSet::new();
+        for px in pb.bytes().chunks_exact(4) {
+            distinct.insert(px[0]);
+        }
+        assert!(
+            distinct.len() >= GRAY_LEVELS as usize - 1,
+            "gradient collapsed to {} levels (banding); expected ~{}",
+            distinct.len(),
+            GRAY_LEVELS
+        );
+
+        // (b) No all-black gap in the bright region. The right half of the gradient (input
+        // luminance >= 128) must contain NO black (0) output pixel — a black-hole regression
+        // (e.g. reading the wrong channel / underflow) would drop bright pixels to 0.
+        let bytes = pb.bytes();
+        for y in 0..h {
+            for x in (w / 2)..w {
+                let i = (y * w + x) * 4;
+                assert_ne!(
+                    bytes[i], 0,
+                    "bright pixel at x={x} dithered to black (banding/black gap)"
+                );
+            }
+        }
+
+        // (c) The darkest input (x=0) stays black and the brightest (x=255) stays white —
+        // endpoints are not crushed/blown by the dither offset.
+        assert_eq!(bytes[0], 0, "black endpoint should remain black");
+        let last = (w - 1) * 4; // brightest pixel of the first row
+        assert_eq!(bytes[last], 255, "white endpoint should remain white");
+    }
 }
