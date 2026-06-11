@@ -7,4 +7,14 @@
 //! the Kotlin app, never here (RR1-FR1). No vendor name appears anywhere in this crate
 //! (IR-7); it builds and tests entirely on the host with no Android SDK (RR1-AC3).
 
-// Scaffold only at this commit; modules land per the M0 commit order.
+mod capabilities;
+mod command;
+mod geometry;
+mod mock_desktop;
+mod policy;
+
+pub use capabilities::DeviceCapabilities;
+pub use command::{RefreshCommand, RefreshIntent};
+pub use geometry::Rect;
+pub use mock_desktop::MockDeviceRecorder;
+pub use policy::RefreshPolicy;
