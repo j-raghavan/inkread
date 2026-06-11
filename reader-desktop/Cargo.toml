@@ -14,4 +14,8 @@ path = "src/main.rs"
 
 [dependencies]
 device-eink = { workspace = true }
-reader-core = { workspace = true }
+# The core's lib target is named `reader` (→ `libreader.so` for the Android
+# `System.loadLibrary("reader")` seam). Rename the extern crate back to `reader_core`
+# here so the host harness keeps importing it as `reader_core::…` (the package's
+# logical name). Renamed deps can't use workspace inheritance, so pin the path directly.
+reader_core = { path = "../reader-core", package = "reader-core" }
