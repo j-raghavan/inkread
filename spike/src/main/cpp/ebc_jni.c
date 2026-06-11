@@ -281,6 +281,30 @@ Java_dev_jraghavan_inkread_penspike_EbcNative_discoverAbi(JNIEnv *env, jclass cl
         }
     }
 
+    /* ---- Phase 5: the device's REAL driver is Ratta ht_eink (ht_ebc.px), NOT the stock
+       rockchip ebc-dev. It uses a private 'HT' (0x4854_xxxx, ASCII "HT") ioctl family with a
+       fixed 2132-byte arg struct; the handler returns -EINVAL for every unknown cmd (which is
+       why all of phases 1-4 above were uniformly EINVAL). Numbers derived clean-room from the
+       compositor's ioctl call sites + the GPL ht_ebc.px symbol table (no decompiled bodies).
+       0x48545201 ('R'/1) is the GETINFO probe the compositor issues right after open(). ---- */
+    {
+        /* SAFETY: probe ONLY the read-only GETINFO cmd. The write/refresh/setbuf 'HT' cmds
+           (W/2, X/1, B/*) are real panel operations — firing them blind with a garbage 2132B
+           arg rebooted the device once. Do NOT add them here without a known, validated arg
+           layout. GETINFO ('R'/1) is the compositor's probe-after-open; it only reads geometry. */
+        ROW("-- phase 5: Ratta 'HT' GETINFO probe 0x48545201 (READ-ONLY; arg=2132B zeroed) --\n");
+        memset(argbuf, 0, sizeof(argbuf)); /* 4096B static buf covers the 2132B arg */
+        int rc = ioctl(fd, 0x48545201u, argbuf);
+        int e = (rc < 0) ? errno : 0;
+        ROW("  cmd=0x48545201 HT 'R'/1 GETINFO  rc=%d errno=%d(%s)\n", rc, e, errno_name(e));
+        if (rc == 0) {
+            const int32_t *p = (const int32_t *) argbuf;
+            ROW("   GETINFO ok — first 16 ints: ");
+            for (int k = 0; k < 16; ++k) ROW("%d ", p[k]);
+            ROW("\n");
+        }
+    }
+
     ROW("=== end discovery ===\n");
     close(fd);
     LOGI("%s", rpt);
