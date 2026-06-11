@@ -31,6 +31,16 @@ object EbcNative {
     /** Cheap reachability check: open()+close(). 0 = OK, negative = -errno. */
     external fun canOpen(): Int
 
+    /**
+     * Empirical ioctl-ABI discovery (RR19-FR4b round 2). With /dev/ebc open, runs a curated
+     * clean-room candidate matrix (raw 0x7000..0x700d, GET_BUFFER_INFO across struct sizes,
+     * _IO* macro encodings) and returns a human-readable table classifying each result as
+     * ENOTTY (unrecognized) / EINVAL (recognized, bad arg) / EFAULT (recognized, bad ptr) /
+     * OK. The non-ENOTTY rows reveal the real ABI. On a GET_BUFFER_INFO success it dumps the
+     * returned struct ints + tries GET_BUFFER/mmap. Captured headlessly via the self-test.
+     */
+    external fun discoverAbi(): String
+
     /** Open a persistent /dev/ebc session (fd + mmap) for the per-stroke latency loop. */
     external fun openEbc(): Int
 

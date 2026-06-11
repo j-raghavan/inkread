@@ -94,6 +94,11 @@ class PenSpikeActivity : Activity(), SurfaceHolder.Callback {
         drawServiceProbe?.bind() // descriptor arrives async via onServiceConnected
         if (EbcNative.available) {
             Log.i(TAG, "SELFTEST R3 canOpen() rc=${EbcNative.canOpen()} (0=OK, negative=-errno)")
+            // ABI discovery FIRST: ioctl(0x7002,&buf44) gave EINVAL(22) not ENOTTY(25) on this
+            // 4.19.193 kernel — cmd recognized, struct size wrong (4.19 = 64B). The matrix below
+            // proves which cmds the driver recognizes and which struct size GET_BUFFER_INFO wants.
+            Log.i(TAG, "SELFTEST R3 discoverAbi:\n${EbcNative.discoverAbi()}")
+            // Then the 64B-struct probe (now the primary layout for the 4.19 driver).
             Log.i(TAG, "SELFTEST R3 probeA2:\n${EbcNative.probeA2(200, 400, 1000, 1200)}")
         } else {
             Log.e(TAG, "SELFTEST R3 native lib penspike_ebc not loaded")
