@@ -1,0 +1,12 @@
+[package]
+name = "device-eink"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Vendor-neutral e-ink refresh contracts (RefreshIntent/RefreshCommand/DeviceCapabilities/RefreshPolicy), the JNI wire codec, and the mock_desktop recorder. Host-only; names no vendor (IR-7)."
+
+[lib]
+crate-type = ["rlib"]

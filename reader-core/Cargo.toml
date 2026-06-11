@@ -1,0 +1,27 @@
+[package]
+name = "reader-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+# (dep floor: pdfium-render's transitive image/libloading need rustc >= 1.88)
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "The inkread engine cdylib (libreader.so): document parsing/render, the e-ink refresh policy, the reader session, and a feature-gated JNI bridge. Vendor-agnostic (IR-7); host-buildable without an Android SDK (RR1-AC3)."
+
+[lib]
+# rlib for host tests + reader-desktop; cdylib for libreader.so via cargo-ndk (RR1-FR1).
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+device-eink = { workspace = true }
+pdfium-render = { workspace = true }
+tiny-skia = { workspace = true }
+
+# Amendment 1: `jni` is OPTIONAL and pulled in ONLY by the `jni-bridge` feature, so a
+# bare `cargo test -p reader-core` leaves `jni` out of the resolved graph (RR1-AC3 / IR-7).
+jni = { workspace = true, optional = true }
+
+[features]
+default = []
+jni-bridge = ["dep:jni"]

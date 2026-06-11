@@ -1,0 +1,8 @@
+[toolchain]
+# Pinned for reproducible host + cargo-ndk builds (RR1-FR5 / RR29-FR1).
+# Stable channel; bump deliberately. Components: rustfmt + clippy for the
+# commit gate (CLAUDE.md), llvm-tools for coverage (RR17).
+channel = "1.90.0"
+components = ["rustfmt", "clippy", "llvm-tools-preview"]
+# arm64 Android is added by cargo-ndk; armv7 kept available per RR1-FR1.
+targets = ["aarch64-linux-android", "armv7-linux-androideabi"]

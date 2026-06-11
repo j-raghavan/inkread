@@ -1,0 +1,17 @@
+[package]
+name = "reader-desktop"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Host dev harness (RR1-FR1): opens a PDF, turns N pages, and prints the RefreshCommand stream the policy emits via the mock_desktop recorder. No Android SDK, no device."
+
+[[bin]]
+name = "reader-desktop"
+path = "src/main.rs"
+
+[dependencies]
+device-eink = { workspace = true }
+reader-core = { workspace = true }

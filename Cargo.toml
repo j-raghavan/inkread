@@ -1,0 +1,39 @@
+# inkread — Rust workspace (RR1-FR1).
+#   device-eink   : vendor-neutral refresh contracts + mock recorder + wire codec (host-only).
+#   reader-core   : the cdylib engine (document/render/policy/session) + feature-gated JNI bridge.
+#   reader-desktop: host dev harness driving the policy via mock_desktop.
+#
+# IR-7: reader-core never names a vendor and never compiles `jni`/panel code on the host.
+# RR1-AC3: bare `cargo test -p reader-core` builds with `jni` absent from the resolved graph.
+[workspace]
+resolver = "2"
+members = ["device-eink", "reader-core", "reader-desktop"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+license = "AGPL-3.0-only"
+authors = ["J-Raghavan"]
+repository = "https://github.com/jraghavan/inkread"
+
+[workspace.dependencies]
+# Internal crates.
+device-eink = { path = "device-eink" }
+reader-core = { path = "reader-core" }
+
+# External — versions verified against docs.rs at implementation time.
+# pdfium-render: latest is 0.9.1 (0.9.2 does not exist on crates.io).
+pdfium-render = "0.9.1"
+tiny-skia = "0.11"
+jni = "0.22.4"
+
+[profile.release]
+# A reader on a battery e-ink device: optimize for size + speed, strip symbols.
+# NOTE: keep `panic = "unwind"` (the default) — the JNI boundary catches panics
+# and converts them to Java exceptions (RR21-FR3); `panic = "abort"` would make
+# that catch_unwind impossible and crash the process across JNI.
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true
