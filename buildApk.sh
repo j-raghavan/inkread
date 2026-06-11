@@ -75,10 +75,30 @@ select_jdk() {
 }
 
 # =========================================================
+# use_pinned_rust — force the rust-toolchain.toml-pinned toolchain onto PATH.
+# A Homebrew `rust` (a standalone rustc/cargo, NOT a rustup shim) ignores
+# rust-toolchain.toml and, if earlier on PATH, shadows the pinned toolchain —
+# cargo-ndk then builds with it and fails ("rustc 1.85.0 is not supported").
+# `rustup which cargo`, run in the repo, honours rust-toolchain.toml and returns
+# the pinned toolchain's real cargo; prepend its bin dir so cargo-ndk's child
+# cargo/rustc resolve to the pinned compiler. No-op if rustup isn't installed.
+# =========================================================
+use_pinned_rust() {
+    local root="$1" cargo_path bindir
+    command -v rustup >/dev/null 2>&1 || return 0
+    cargo_path="$(cd "$root" && rustup which cargo 2>/dev/null || true)"
+    [[ -n "$cargo_path" && -x "$cargo_path" ]] || return 0
+    bindir="$(dirname "$cargo_path")"
+    export PATH="$bindir:$PATH"
+    write_color_output "rust: $("$cargo_path" --version 2>/dev/null) (pinned via rust-toolchain.toml)" "Blue"
+}
+
+# =========================================================
 # build_rust — compile the Rust core into jniLibs via cargo-ndk (RR29-FR1)
 # =========================================================
 build_rust() {
     local root="$1" profile_flag="$2"
+    use_pinned_rust "$root"
     command -v cargo >/dev/null 2>&1 || die "cargo not found — install Rust (https://rustup.rs)."
     cargo ndk --version >/dev/null 2>&1 || die "cargo-ndk not found — 'cargo install cargo-ndk' and install the Android NDK."
     [[ -f "$root/Cargo.toml" ]] || die "Cargo.toml not found at repo root — scaffold the Rust workspace first (spec RR1)."
