@@ -1,0 +1,59 @@
+name: CI
+
+# Host-first CI (RR29-FR3): the Rust core builds + tests on the host with NO Android SDK
+# (RR1-AC3), then the JNI bridge is cross-checked for the device target, and the license
+# manifest is verified (RR18-AC2). The full APK build is intentionally out of this gate for
+# M0 (it needs the NDK + a device to be meaningful); CI proves the core + the seams.
+
+on:
+  push:
+    branches: [master, "feat/**"]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  host:
+    name: host fmt + clippy + test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # rust-toolchain.toml pins the channel + components; the action honours it.
+      - name: Install toolchain (from rust-toolchain.toml)
+        run: rustup show
+      - name: Format
+        run: cargo fmt --all --check
+      - name: Clippy (warnings = errors)
+        run: cargo clippy --all -- -D warnings
+      - name: Test (host, no Android SDK — RR1-AC3)
+        run: cargo test --workspace
+      - name: Assert jni absent from the host graph (IR-7 / RR1-AC3)
+        run: |
+          if cargo tree -p reader-core -e normal | grep -qw jni; then
+            echo "::error::jni leaked into reader-core's default dependency graph"; exit 1
+          fi
+
+  jni-bridge-target:
+    name: cross-check JNI bridge (aarch64-linux-android)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain + android target
+        run: rustup target add aarch64-linux-android
+      # `cargo check` only type-checks/compiles (no link), so the NDK linker is not required
+      # to prove the feature-gated bridge compiles for the device target.
+      - name: Check reader-core with the JNI bridge for the device target
+        run: cargo check -p reader-core --features jni-bridge --target aarch64-linux-android
+
+  license-manifest:
+    name: license manifest (RR18-AC2)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain
+        run: rustup show
+      # Every resolved dependency's SPDX license must be on the AGPL-compatible allowlist
+      # (ADR Decision 2); a new dep with an unvetted license fails the build (RR18-AC2).
+      - name: Verify dependency licenses against the allowlist
+        run: ./scripts/check-licenses.sh
