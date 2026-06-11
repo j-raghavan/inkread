@@ -81,6 +81,24 @@ class PenSpikeActivity : Activity(), SurfaceHolder.Callback {
         surfaceView.setOnClickListener(null)
         setContentView(surfaceView)
         drawServiceProbe = DrawServiceProbe(this)
+
+        // One-shot reachability self-test (RR19-FR4b). The make-or-break facts — can a
+        // sideloaded untrusted_app open()+ioctl /dev/ebc, and does DrawService bind — need
+        // no stylus and no input injection (which this device blocks for adb). Drawing-based
+        // latency still needs the pen + a high-speed camera; this just settles reachability.
+        runReachabilitySelfTest()
+    }
+
+    private fun runReachabilitySelfTest() {
+        Log.i(TAG, "SELFTEST begin (R2 DrawService bind + R3 /dev/ebc) ==========")
+        drawServiceProbe?.bind() // descriptor arrives async via onServiceConnected
+        if (EbcNative.available) {
+            Log.i(TAG, "SELFTEST R3 canOpen() rc=${EbcNative.canOpen()} (0=OK, negative=-errno)")
+            Log.i(TAG, "SELFTEST R3 probeA2:\n${EbcNative.probeA2(200, 400, 1000, 1200)}")
+        } else {
+            Log.e(TAG, "SELFTEST R3 native lib penspike_ebc not loaded")
+        }
+        Log.i(TAG, "SELFTEST end ==========")
     }
 
     override fun surfaceCreated(h: SurfaceHolder) {
