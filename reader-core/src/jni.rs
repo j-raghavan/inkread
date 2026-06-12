@@ -29,7 +29,12 @@ use jni::{Env, EnvUnowned};
 
 use device_eink::{decode_capabilities, encode_commands, DeviceCapabilities};
 
+use std::path::Path;
+use std::sync::Arc;
+
 use crate::error::{CoreError, CoreResult};
+use crate::persistence::sqlite::SqliteStore;
+use crate::persistence::{BookId, ReaderStore};
 use crate::render::{PixelBuffer, Viewport};
 use crate::session::{Gesture, ReaderSession};
 
@@ -119,6 +124,50 @@ pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeOpenDocumen
             .map_err(|e| throw(env, &e))?;
 
         match ReaderSession::open_pdf(bytes, caps, viewport) {
+            Ok(session) => Ok(Box::into_raw(Box::new(session)) as jlong),
+            Err(e) => Err(throw(env, &e)),
+        }
+    })
+    .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
+}
+
+// =====================================================================================
+// nativeOpenDocumentWithStore(path, capsBytes, w, h, dpi, dbPath, bookId) : long
+// Opens a PDF AND attaches a SQLite-backed store (RR12 / RR27 session restore): the saved
+// reading position for `bookId` is resumed (clamped to the document range) and persisted
+// e-ink settings are applied to the policy (RR23 ↔ RR3). `dbPath` is a host filesystem path
+// the shell owns under app storage; `bookId` is the stable per-book identity (≤512 chars).
+// =====================================================================================
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeOpenDocumentWithStore<
+    'local,
+>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    path: JString<'local>,
+    caps_bytes: JByteArray<'local>,
+    width: jint,
+    height: jint,
+    dpi: jint,
+    db_path: JString<'local>,
+    book_id: JString<'local>,
+) -> jlong {
+    env.with_env(|env| -> jni::errors::Result<jlong> {
+        let path: String = path.try_to_string(env)?;
+        let db_path: String = db_path.try_to_string(env)?;
+        let book_id: String = book_id.try_to_string(env)?;
+        let caps = read_caps(env, &caps_bytes)?;
+        let viewport = read_viewport(env, width, height, dpi)?;
+
+        let bytes = std::fs::read(&path)
+            .map_err(|e| CoreError::InvalidArgument(format!("read {path}: {e}")))
+            .map_err(|e| throw(env, &e))?;
+
+        let book = BookId::new(book_id).map_err(|e| throw(env, &e))?;
+        let store = SqliteStore::open(Path::new(&db_path)).map_err(|e| throw(env, &e))?;
+        let store: Arc<dyn ReaderStore> = Arc::new(store);
+
+        match ReaderSession::open_pdf_with_store(bytes, caps, viewport, store, book) {
             Ok(session) => Ok(Box::into_raw(Box::new(session)) as jlong),
             Err(e) => Err(throw(env, &e)),
         }
@@ -226,6 +275,44 @@ pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeOnGesture<'
         let commands = session.on_gesture(gesture);
         let bytes = encode_commands(&commands);
         env.byte_array_from_slice(&bytes)
+    })
+    .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
+}
+
+// =====================================================================================
+// nativeSavePosition(handle) — persist the current reading position (RR12-FR3 / RR27).
+// A store-less session is a silent no-op; a persistence error throws so the shell can log
+// it without losing the in-memory position.
+// =====================================================================================
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeSavePosition<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+) {
+    env.with_env(|env| -> jni::errors::Result<()> {
+        // SAFETY: borrowed, not owned (Amendment 2).
+        let session = unsafe { session_mut(handle) }.map_err(|e| throw(env, &e))?;
+        session.save_position().map_err(|e| throw(env, &e))?;
+        Ok(())
+    })
+    .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
+}
+
+// =====================================================================================
+// nativeCurrentPage(handle) : int — the current 0-based page index (RR11). Drives the page
+// indicator and lets the shell verify a resumed position after open-with-store.
+// =====================================================================================
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeCurrentPage<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+) -> jint {
+    env.with_env(|env| -> jni::errors::Result<jint> {
+        // SAFETY: borrowed, not owned (Amendment 2).
+        let session = unsafe { session_mut(handle) }.map_err(|e| throw(env, &e))?;
+        Ok(session.current_page() as jint)
     })
     .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
 }

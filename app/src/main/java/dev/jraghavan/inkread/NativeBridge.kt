@@ -34,6 +34,27 @@ object NativeBridge {
         dpi: Int,
     ): Long
 
+    /**
+     * Open a PDF AND attach a SQLite store at [dbPath], resuming the saved reading position
+     * and persisted e-ink settings for [bookId] (RR12 / RR27). [dbPath] lives under app
+     * storage; [bookId] is the stable per-book identity (≤512 chars). Returns the handle.
+     */
+    external fun nativeOpenDocumentWithStore(
+        path: String,
+        capsBytes: ByteArray,
+        width: Int,
+        height: Int,
+        dpi: Int,
+        dbPath: String,
+        bookId: String,
+    ): Long
+
+    /** Persist the current reading position (RR12-FR3); store-less session = no-op. */
+    external fun nativeSavePosition(handle: Long)
+
+    /** The current 0-based page index (RR11) — page indicator + resume verification. */
+    external fun nativeCurrentPage(handle: Long): Int
+
     /** Free the session. Null-safe + double-close tolerant (Amendment 2). */
     external fun nativeCloseDocument(handle: Long)
 

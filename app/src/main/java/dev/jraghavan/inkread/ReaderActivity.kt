@@ -78,6 +78,12 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
 
     override fun surfaceDestroyed(holder: SurfaceHolder) { /* keep the doc open across resizes */ }
 
+    override fun onPause() {
+        super.onPause()
+        // Persist the reading position when backgrounded (RR27) — async on the engine thread.
+        engine.execute { savePosition() }
+    }
+
     override fun onDestroy() {
         engine.execute { closeDocument() }
         engine.shutdown() // lets the queued close run, then stops the worker
@@ -115,14 +121,24 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             Log.w(TAG, "no sample.pdf in external/internal files dir; nothing to open (M0 bring-up)")
             return
         }
+        // Open with a SQLite store so the reading position + e-ink settings persist and the
+        // saved page resumes on reopen (RR12 / RR27). The store lives under app storage; the
+        // book identity is the file name (the library will key by a real id in RR26).
+        val dbPath = File(filesDir, "reader.db").absolutePath
         docHandle = try {
-            NativeBridge.nativeOpenDocument(sample.absolutePath, capsBytes, viewW, viewH, DPI)
+            NativeBridge.nativeOpenDocumentWithStore(
+                sample.absolutePath, capsBytes, viewW, viewH, DPI, dbPath, sample.name,
+            )
         } catch (e: RuntimeException) {
             Log.e(TAG, "open failed: ${e.message}")
             0L
         }
         if (docHandle != 0L) {
-            Log.i(TAG, "opened ${sample.name}: ${NativeBridge.nativePageCount(docHandle)} pages")
+            Log.i(
+                TAG,
+                "opened ${sample.name}: ${NativeBridge.nativePageCount(docHandle)} pages, " +
+                    "resumed at page ${NativeBridge.nativeCurrentPage(docHandle)}",
+            )
         }
     }
 
@@ -193,10 +209,26 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         return true
     }
 
+    /** Persist the current reading position (RR12-FR3 / RR27); store-less / closed = no-op. */
+    private fun savePosition() {
+        if (docHandle == 0L) return
+        try {
+            NativeBridge.nativeSavePosition(docHandle)
+        } catch (e: RuntimeException) {
+            Log.e(TAG, "save position failed: ${e.message}")
+        }
+    }
+
     private fun closeDocument() {
         val h = docHandle
         docHandle = 0L // zero BEFORE the call so a re-entrant close is a no-op (Amendment 2)
-        if (h != 0L) NativeBridge.nativeCloseDocument(h)
+        if (h == 0L) return
+        try {
+            NativeBridge.nativeSavePosition(h) // last-chance save before teardown (RR27)
+        } catch (e: RuntimeException) {
+            Log.e(TAG, "save position failed: ${e.message}")
+        }
+        NativeBridge.nativeCloseDocument(h)
     }
 
     private companion object {
