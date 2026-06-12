@@ -19,6 +19,7 @@ use crate::error::{CoreError, CoreResult};
 use crate::persistence::{BookId, ReaderStore, ReadingPosition};
 use crate::policy::EinkRefreshPolicy;
 use crate::render::{PixelBuffer, Viewport};
+use crate::settings::SettingsSnapshot;
 
 /// A navigation gesture (Amendment 6). The int↔enum mapping is defined **once** here and
 /// documented at the JNI boundary; `nativeOnGesture` decodes an int into this.
@@ -103,8 +104,11 @@ impl ReaderSession {
         Ok(session)
     }
 
-    /// Resume the saved position for `book` (if any) and remember the store for saving.
+    /// Resume the saved position for `book` (if any), apply persisted e-ink settings to the
+    /// policy (RR23 ↔ RR3), and remember the store for saving.
     fn attach_store(&mut self, store: Arc<dyn ReaderStore>, book: BookId) -> CoreResult<()> {
+        let settings = store.load_settings()?;
+        self.apply_settings(&settings, Some(&book));
         if let Some(pos) = store.load_position(&book)? {
             let last = self.page_count().saturating_sub(1);
             self.page = pos.page_index.min(last);
@@ -112,6 +116,17 @@ impl ReaderSession {
         self.store = Some(store);
         self.book = Some(book);
         Ok(())
+    }
+
+    /// Rebuild the refresh policy from a settings snapshot for `book` — flash interval, night
+    /// interval, and avoid-flashing all come from settings (RR23 ↔ RR3-FR3/FR6/FR7). The shell
+    /// calls this on open and whenever a relevant setting changes.
+    pub fn apply_settings(&mut self, settings: &SettingsSnapshot, book: Option<&BookId>) {
+        let caps = self.policy.capabilities();
+        let screen = Rect::full(self.viewport.width, self.viewport.height);
+        self.policy = EinkRefreshPolicy::with_interval(caps, screen, settings.flash_interval(book))
+            .with_night_interval(settings.night_flash_interval(book))
+            .with_avoid_flashing(settings.avoid_flashing(book));
     }
 
     /// Persist the current reading position (RR12-FR3). A store-less session is a no-op.
@@ -259,6 +274,7 @@ mod tests {
     use super::*;
     use crate::persistence::sqlite::SqliteStore;
     use crate::render::PixelBuffer;
+    use crate::settings::{Scope, SettingKey, SettingValue};
     use device_eink::{MockDeviceRecorder, RefreshIntent};
 
     /// A stub document with `n` blank pages, for driving the session without pdfium.
@@ -457,6 +473,31 @@ mod tests {
     fn store_less_save_is_noop() {
         let s = session(3, DeviceCapabilities::supernote_full());
         assert!(s.save_position().is_ok());
+    }
+
+    // RR23 ↔ RR3: a persisted flash_interval drives the policy promotion through the session.
+    #[test]
+    fn settings_drive_the_policy_interval() {
+        let store: Arc<dyn ReaderStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        store
+            .put_setting(
+                Scope::Global,
+                SettingKey::FlashInterval,
+                SettingValue::Int(2),
+            )
+            .unwrap();
+        let mut s = store_session(10, store, BookId::new("b").unwrap());
+        // Interval 2: turn 1 Partial, turn 2 promotes to WaitForLast + Full.
+        assert!(matches!(
+            s.on_gesture(Gesture::NextPage).as_slice(),
+            [RefreshCommand::Update {
+                intent: RefreshIntent::Partial,
+                ..
+            }]
+        ));
+        let second = s.on_gesture(Gesture::NextPage);
+        assert_eq!(second.len(), 2);
+        assert_eq!(second[0], RefreshCommand::WaitForLast);
     }
 
     #[test]

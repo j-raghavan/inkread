@@ -330,6 +330,28 @@ impl SettingsSnapshot {
                 .to_string(),
         }
     }
+
+    // ---- Policy views (RR3 ↔ RR23): the refresh policy is built from these. ----
+
+    /// The day flash-promotion interval (RR3-FR3 / RR16), clamped to ≥ 1.
+    #[must_use]
+    pub fn flash_interval(&self, book: Option<&BookId>) -> u32 {
+        self.get_int(SettingKey::FlashInterval, book)
+            .clamp(1, i64::from(u32::MAX)) as u32
+    }
+
+    /// The night flash-promotion interval (RR3-FR6), clamped to ≥ 1.
+    #[must_use]
+    pub fn night_flash_interval(&self, book: Option<&BookId>) -> u32 {
+        self.get_int(SettingKey::NightFlashInterval, book)
+            .clamp(1, i64::from(u32::MAX)) as u32
+    }
+
+    /// Whether to trade ghosting for a flash-free experience (RR3-FR7).
+    #[must_use]
+    pub fn avoid_flashing(&self, book: Option<&BookId>) -> bool {
+        self.get_bool(SettingKey::AvoidFlashing, book)
+    }
 }
 
 #[cfg(test)]
@@ -418,6 +440,45 @@ mod tests {
         // Unknown kind / unparseable int → None (defaulted by the caller).
         assert!(SettingValue::from_storage(9, "x").is_none());
         assert!(SettingValue::from_storage(1, "notanint").is_none());
+    }
+
+    #[test]
+    fn policy_view_getters_resolve_and_clamp() {
+        let s = SettingsSnapshot::from_values(
+            1,
+            [
+                (
+                    Scope::Global,
+                    SettingKey::FlashInterval,
+                    SettingValue::Int(4),
+                ),
+                (
+                    Scope::Global,
+                    SettingKey::NightFlashInterval,
+                    SettingValue::Int(2),
+                ),
+                (
+                    Scope::Global,
+                    SettingKey::AvoidFlashing,
+                    SettingValue::Bool(true),
+                ),
+            ],
+        );
+        assert_eq!(s.flash_interval(None), 4);
+        assert_eq!(s.night_flash_interval(None), 2);
+        assert!(s.avoid_flashing(None));
+
+        // Defaults + clamp: a 0 interval clamps to 1; an unset interval is the default 6.
+        let z = SettingsSnapshot::from_values(
+            1,
+            [(
+                Scope::Global,
+                SettingKey::FlashInterval,
+                SettingValue::Int(0),
+            )],
+        );
+        assert_eq!(z.flash_interval(None), 1);
+        assert_eq!(SettingsSnapshot::defaults(1).flash_interval(None), 6);
     }
 
     #[test]
