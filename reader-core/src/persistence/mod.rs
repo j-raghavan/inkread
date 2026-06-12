@@ -10,6 +10,7 @@
 pub mod sqlite;
 
 use crate::error::{CoreError, CoreResult};
+use crate::settings::{Scope, SettingKey, SettingValue, SettingsSnapshot};
 
 /// A stable identity for a book (a content hash or path-derived id the shell supplies).
 ///
@@ -102,6 +103,13 @@ pub trait ReaderStore: Send + Sync {
 
     /// The on-disk schema version (`PRAGMA user_version`) — the migration discriminator.
     fn schema_version(&self) -> CoreResult<u32>;
+
+    /// Load all persisted settings into an immutable snapshot (RR23). Unknown/old keys are
+    /// skipped (defaulted on read), never an error.
+    fn load_settings(&self) -> CoreResult<SettingsSnapshot>;
+
+    /// Persist one setting value at `scope`, bumping the settings version (RR23-FR1).
+    fn put_setting(&self, scope: Scope, key: SettingKey, value: SettingValue) -> CoreResult<()>;
 }
 
 #[cfg(test)]

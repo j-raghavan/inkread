@@ -53,6 +53,38 @@ impl SettingValue {
             _ => None,
         }
     }
+
+    /// The storage type tag (`0` bool, `1` int, `2` text) — persisted alongside the value.
+    #[must_use]
+    pub fn kind_code(&self) -> i64 {
+        match self {
+            SettingValue::Bool(_) => 0,
+            SettingValue::Int(_) => 1,
+            SettingValue::Text(_) => 2,
+        }
+    }
+
+    /// Serialize the value to its storage string (paired with [`Self::kind_code`]).
+    #[must_use]
+    pub fn to_storage(&self) -> String {
+        match self {
+            SettingValue::Bool(b) => if *b { "1" } else { "0" }.to_string(),
+            SettingValue::Int(i) => i.to_string(),
+            SettingValue::Text(s) => s.clone(),
+        }
+    }
+
+    /// Reconstruct a value from a stored `(kind, value)` pair; `None` for an unknown kind or
+    /// unparseable int (the caller defaults it — RR23-FR3, never crash).
+    #[must_use]
+    pub fn from_storage(kind: i64, value: &str) -> Option<SettingValue> {
+        match kind {
+            0 => Some(SettingValue::Bool(value == "1")),
+            1 => value.parse::<i64>().ok().map(SettingValue::Int),
+            2 => Some(SettingValue::Text(value.to_string())),
+            _ => None,
+        }
+    }
 }
 
 /// The v1 setting catalog (RR23-FR2). Each maps to its feature (RR3/RR9/RR16/RR19/RR22).
@@ -83,6 +115,67 @@ pub enum SettingKey {
     // System (RR22)
     StorageRoots,
     LibrarySort,
+}
+
+impl SettingKey {
+    /// Every key — the iteration source for snapshot building and the round-trip test.
+    pub const ALL: [SettingKey; 20] = [
+        SettingKey::DefaultViewMode,
+        SettingKey::TapZones,
+        SettingKey::PageAnimation,
+        SettingKey::FlashInterval,
+        SettingKey::NightFlashInterval,
+        SettingKey::AvoidFlashing,
+        SettingKey::NightMode,
+        SettingKey::DitherMode,
+        SettingKey::FontSize,
+        SettingKey::FontFamily,
+        SettingKey::LineSpacing,
+        SettingKey::Margin,
+        SettingKey::Alignment,
+        SettingKey::Hyphenation,
+        SettingKey::DefaultTool,
+        SettingKey::PenColor,
+        SettingKey::PenWidth,
+        SettingKey::PalmRejection,
+        SettingKey::StorageRoots,
+        SettingKey::LibrarySort,
+    ];
+
+    /// The stable persisted name (the `settings.key` column). Exhaustive match — adding a key
+    /// forces a name here.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SettingKey::DefaultViewMode => "default_view_mode",
+            SettingKey::TapZones => "tap_zones",
+            SettingKey::PageAnimation => "page_animation",
+            SettingKey::FlashInterval => "flash_interval",
+            SettingKey::NightFlashInterval => "night_flash_interval",
+            SettingKey::AvoidFlashing => "avoid_flashing",
+            SettingKey::NightMode => "night_mode",
+            SettingKey::DitherMode => "dither_mode",
+            SettingKey::FontSize => "font_size",
+            SettingKey::FontFamily => "font_family",
+            SettingKey::LineSpacing => "line_spacing",
+            SettingKey::Margin => "margin",
+            SettingKey::Alignment => "alignment",
+            SettingKey::Hyphenation => "hyphenation",
+            SettingKey::DefaultTool => "default_tool",
+            SettingKey::PenColor => "pen_color",
+            SettingKey::PenWidth => "pen_width",
+            SettingKey::PalmRejection => "palm_rejection",
+            SettingKey::StorageRoots => "storage_roots",
+            SettingKey::LibrarySort => "library_sort",
+        }
+    }
+
+    /// Parse a persisted name back into a key; `None` for an unknown/old key (defaulted, not a
+    /// crash — RR23-FR3).
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<SettingKey> {
+        SettingKey::ALL.into_iter().find(|k| k.as_str() == name)
+    }
 }
 
 /// Per-key metadata: built-in default, scope class, and the schema version it appeared in.
@@ -298,6 +391,33 @@ mod tests {
             )],
         );
         assert!(!s.get_bool(SettingKey::AvoidFlashing, None));
+    }
+
+    #[test]
+    fn setting_key_names_round_trip_and_are_unique() {
+        use std::collections::HashSet;
+        let mut names = HashSet::new();
+        for k in SettingKey::ALL {
+            assert_eq!(SettingKey::from_name(k.as_str()), Some(k));
+            assert!(names.insert(k.as_str()), "duplicate name {}", k.as_str());
+        }
+        assert!(SettingKey::from_name("nope_unknown").is_none());
+    }
+
+    #[test]
+    fn setting_value_storage_round_trips() {
+        for v in [
+            SettingValue::Bool(true),
+            SettingValue::Bool(false),
+            SettingValue::Int(-7),
+            SettingValue::Text("hi".into()),
+        ] {
+            let round = SettingValue::from_storage(v.kind_code(), &v.to_storage()).unwrap();
+            assert_eq!(round, v);
+        }
+        // Unknown kind / unparseable int → None (defaulted by the caller).
+        assert!(SettingValue::from_storage(9, "x").is_none());
+        assert!(SettingValue::from_storage(1, "notanint").is_none());
     }
 
     #[test]

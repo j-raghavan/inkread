@@ -13,6 +13,7 @@ use rusqlite::{params, Connection};
 
 use super::{BookId, ReaderStore, ReadingPosition};
 use crate::error::{CoreError, CoreResult};
+use crate::settings::{Scope, SettingKey, SettingValue, SettingsSnapshot};
 
 /// Ordered schema migrations (ADR Decision 4 / RR23-FR3). Index `i` is schema version `i + 1`;
 /// each runs once, in order, and bumps `user_version`. Append-only — never edit a shipped one.
@@ -25,6 +26,16 @@ const MIGRATIONS: &[&str] = &[
         resume_blob BLOB,
         updated_at  INTEGER NOT NULL
      );",
+    // v2 — settings (RR23): one typed value per (scope, key), plus a version counter.
+    "CREATE TABLE settings (
+        scope TEXT NOT NULL,
+        key   TEXT NOT NULL,
+        value TEXT NOT NULL,
+        kind  INTEGER NOT NULL,
+        PRIMARY KEY (scope, key)
+     );
+     CREATE TABLE settings_meta (id INTEGER PRIMARY KEY CHECK (id = 0), version INTEGER NOT NULL);
+     INSERT INTO settings_meta (id, version) VALUES (0, 0);",
 ];
 
 /// The SQLite-backed reading store.
@@ -106,6 +117,81 @@ impl ReaderStore for SqliteStore {
             .map(|v| v as u32)
             .map_err(db_err)
     }
+
+    fn load_settings(&self) -> CoreResult<SettingsSnapshot> {
+        let conn = self.lock();
+        let version: i64 = conn
+            .query_row("SELECT version FROM settings_meta WHERE id = 0", [], |r| {
+                r.get(0)
+            })
+            .map_err(db_err)?;
+        let mut stmt = conn
+            .prepare("SELECT scope, key, value, kind FROM settings")
+            .map_err(db_err)?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, i64>(3)?,
+                ))
+            })
+            .map_err(db_err)?;
+        let mut values = Vec::new();
+        for row in rows {
+            let (scope_s, key_s, value_s, kind) = row.map_err(db_err)?;
+            // An unknown scope/key/value is skipped (defaulted on read) — RR23-FR3, never crash.
+            let (Some(scope), Some(key), Some(val)) = (
+                parse_scope(&scope_s),
+                SettingKey::from_name(&key_s),
+                SettingValue::from_storage(kind, &value_s),
+            ) else {
+                continue;
+            };
+            values.push((scope, key, val));
+        }
+        Ok(SettingsSnapshot::from_values(version as u32, values))
+    }
+
+    fn put_setting(&self, scope: Scope, key: SettingKey, value: SettingValue) -> CoreResult<()> {
+        let conn = self.lock();
+        conn.execute(
+            "INSERT INTO settings (scope, key, value, kind) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(scope, key) DO UPDATE SET value = ?3, kind = ?4",
+            params![
+                scope_to_str(&scope),
+                key.as_str(),
+                value.to_storage(),
+                value.kind_code(),
+            ],
+        )
+        .map_err(db_err)?;
+        conn.execute(
+            "UPDATE settings_meta SET version = version + 1 WHERE id = 0",
+            [],
+        )
+        .map_err(db_err)?;
+        Ok(())
+    }
+}
+
+/// `Scope` → storage string: `"global"` or `"book:<id>"`.
+fn scope_to_str(scope: &Scope) -> String {
+    match scope {
+        Scope::Global => "global".to_string(),
+        Scope::Book(b) => format!("book:{}", b.as_str()),
+    }
+}
+
+/// Parse a stored scope string; `None` for an unrecognized/invalid scope (skipped on read).
+fn parse_scope(s: &str) -> Option<Scope> {
+    if s == "global" {
+        return Some(Scope::Global);
+    }
+    s.strip_prefix("book:")
+        .and_then(|id| BookId::new(id).ok())
+        .map(Scope::Book)
 }
 
 /// Run any migrations past the connection's `user_version`, bumping it after each.
@@ -200,5 +286,63 @@ mod tests {
             store.load_position(&book).unwrap().unwrap().resume_blob,
             Some(vec![1, 2, 3, 4])
         );
+    }
+
+    // RR23-AC1/AC2: settings persist with per-book override and the version bumps on each write.
+    #[test]
+    fn settings_round_trip_and_version_bumps() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let snap0 = store.load_settings().unwrap();
+        assert_eq!(snap0.version(), 0);
+        assert_eq!(snap0.get_int(SettingKey::FlashInterval, None), 6); // built-in default
+
+        store
+            .put_setting(
+                Scope::Global,
+                SettingKey::FlashInterval,
+                SettingValue::Int(9),
+            )
+            .unwrap();
+        let book = BookId::new("b").unwrap();
+        store
+            .put_setting(
+                Scope::Book(book.clone()),
+                SettingKey::FlashInterval,
+                SettingValue::Int(3),
+            )
+            .unwrap();
+
+        let snap = store.load_settings().unwrap();
+        assert_eq!(snap.version(), 2);
+        assert_eq!(snap.get_int(SettingKey::FlashInterval, None), 9);
+        assert_eq!(snap.get_int(SettingKey::FlashInterval, Some(&book)), 3);
+
+        // Upsert replaces and bumps again.
+        store
+            .put_setting(
+                Scope::Global,
+                SettingKey::FlashInterval,
+                SettingValue::Int(5),
+            )
+            .unwrap();
+        let snap2 = store.load_settings().unwrap();
+        assert_eq!(snap2.get_int(SettingKey::FlashInterval, None), 5);
+        assert_eq!(snap2.version(), 3);
+    }
+
+    // RR23-FR3: an unknown key persisted by a newer build is skipped (defaulted), not a crash.
+    #[test]
+    fn unknown_setting_key_is_skipped_on_load() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        {
+            let conn = store.lock();
+            conn.execute(
+                "INSERT INTO settings (scope, key, value, kind) VALUES ('global', 'future_key', '1', 1)",
+                [],
+            )
+            .unwrap();
+        }
+        let snap = store.load_settings().unwrap();
+        assert_eq!(snap.get_int(SettingKey::FlashInterval, None), 6);
     }
 }
