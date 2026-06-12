@@ -6,23 +6,34 @@ import dev.jraghavan.inkread.RefreshCommand
 import dev.jraghavan.inkread.RefreshIntent
 
 /**
- * The Supernote (RK3566 EBC) refresh adapter (RR15) — **DEVICE-UNVERIFIED at M0**.
+ * The Supernote (RK3566 EBC) refresh adapter (RR15).
  *
- * Maps each vendor-neutral [RefreshIntent] to an EBC waveform mode and refreshes the panel.
- * This is the ONLY vendor-named code in the project (IR-7); the core stays agnostic.
+ * Maps each vendor-neutral [RefreshIntent] to an EBC waveform mode. This is the ONLY
+ * vendor-named code in the project (IR-7); the core stays agnostic.
+ *
+ * M0 STATUS (device-verified 2026-06-11): the reader **displays on the panel via the device's
+ * automatic refresh** — a PDF rendered on the Supernote with these methods as no-ops. So explicit
+ * waveform control is intentionally not exercised at M0 (see the execution-path note below).
  *
  * ## Rockchip full-screen quirk (RR2-FR4)
  * On the RK3566 EBC a FULL/Flash refresh refreshes the WHOLE screen regardless of the rect
  * (coordinates ignored). So [RefreshIntent.FULL]/`FLASH_*` are treated as full-screen here;
  * only PARTIAL/FAST honor the per-update rect.
  *
- * ## Execution path (RR15-FR3 fallback chain — to be confirmed by the RR19-FR4b spike)
- * The intended primary path is to cooperate with the EBC hwcomposer (render the region and
- * let einkhwc apply the waveform); a direct `/dev/ebc` ioctl is the last-resort fallback.
- * M0 advertises [DeviceCapabilities.supernoteBaseline] (`einkFull = false`) so the core
- * emits only full-screen FULL refreshes — the always-correct degraded stream — until the
- * spike upgrades the profile. The EBC-mode mapping below is therefore staged but exercised
- * minimally in M0.
+ * ## Execution path (RR15-FR3 — settled by the RR19-FR4b spike)
+ * The spike confirmed the **reader rides the device's automatic e-ink refresh**: a sideloaded
+ * app draws to its Surface and the Supernote firmware's system-level einkhwc refreshes the
+ * window — no app-side waveform call needed. (KOReader runs on the Supernote exactly this way:
+ * it detects the device as non-eink and issues *zero* e-ink calls.) Explicit waveform control
+ * from a sideload is **system/privilege-gated**: `android.os.EinkManager` is reachable but its
+ * `setMode`/refresh calls are no-ops for an untrusted window; `com.ratta.DrawService` returns a
+ * null binder; `/dev/ebc` opens (Ratta `ht_eink` 'HT' ioctl family — *not* stock ebc-dev) and
+ * the FB is mmap-readable, but the write/refresh path is unproven and reboot-risky. Therefore
+ * M0 advertises [DeviceCapabilities.supernoteBaseline] (`einkFull = false`) and the refresh
+ * methods below are intentional **no-ops** — the device drives the panel. The low-latency A2
+ * pen path (explicit refresh control) is deferred to **M1c handwriting**, where it needs the
+ * privileged HandWriteClient route (RR19-FR3b) or a best-effort auto-path fallback. The
+ * EBC-mode mapping below is staged for that future, vendor-named work.
  */
 class SupernoteEinkAdapter : EinkAdapter {
 

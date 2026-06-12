@@ -77,9 +77,14 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         NativeBridge.nativeInit(capsBytes)
 
         // M0 opens a fixed sample placed on-device; the SAF/library path is RR22 (M1a).
-        val sample = File(getExternalFilesDir(null), "sample.pdf")
-        if (!sample.exists()) {
-            Log.w(TAG, "no sample.pdf in ${sample.parent}; nothing to open (M0 bring-up)")
+        // External files dir first, then internal filesDir — the latter is adb/`run-as`-writable
+        // under Android 11 scoped storage, so a bring-up PDF can be placed without SAF.
+        val sample = listOf(
+            File(getExternalFilesDir(null), "sample.pdf"),
+            File(filesDir, "sample.pdf"),
+        ).firstOrNull(File::exists)
+        if (sample == null) {
+            Log.w(TAG, "no sample.pdf in external/internal files dir; nothing to open (M0 bring-up)")
             return
         }
         docHandle = try {
