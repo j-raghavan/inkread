@@ -13,6 +13,7 @@ use device_eink::{DeviceCapabilities, Rect, RefreshCommand, RefreshPolicy};
 
 use std::sync::Arc;
 
+use crate::budget::{Caches, ResourceBudget, TrimLevel};
 use crate::document::fixed::PdfBackend;
 use crate::document::{Document, DocumentMetadata, TocEntry};
 use crate::error::{CoreError, CoreResult};
@@ -65,6 +66,9 @@ pub struct ReaderSession {
     store: Option<Arc<dyn ReaderStore>>,
     /// The book identity this session persists under (set with the store).
     book: Option<BookId>,
+    /// Bounded render + cover caches under the resource budget (RR24); trimmed on memory
+    /// pressure. The render hot path consumes these in M1a.6 (with the threading rework).
+    caches: Caches,
 }
 
 impl ReaderSession {
@@ -86,6 +90,7 @@ impl ReaderSession {
             page: 0,
             store: None,
             book: None,
+            caches: Caches::new(&ResourceBudget::default_supernote()),
         })
     }
 
@@ -137,6 +142,18 @@ impl ReaderSession {
         Ok(())
     }
 
+    /// The bounded render + cover caches (RR24). The render hot path / shell inserts rendered
+    /// pages and covers here; M1a.6 wires the render path to consult them.
+    pub fn caches(&mut self) -> &mut Caches {
+        &mut self.caches
+    }
+
+    /// React to platform memory pressure (`onTrimMemory`, RR24-FR3): trims the caches by
+    /// severity. Always leaves the reader usable; never panics.
+    pub fn on_trim_memory(&mut self, level: TrimLevel) {
+        self.caches.trim(level);
+    }
+
     /// Build a session over an arbitrary [`Document`] (used by the host harness/tests to
     /// drive the policy without a PDF backend).
     pub fn with_document(
@@ -152,6 +169,7 @@ impl ReaderSession {
             page: 0,
             store: None,
             book: None,
+            caches: Caches::new(&ResourceBudget::default_supernote()),
         }
     }
 
@@ -498,6 +516,18 @@ mod tests {
         let second = s.on_gesture(Gesture::NextPage);
         assert_eq!(second.len(), 2);
         assert_eq!(second[0], RefreshCommand::WaitForLast);
+    }
+
+    // RR24-FR3: the session's onTrimMemory hook trims the caches.
+    #[test]
+    fn on_trim_memory_clears_caches() {
+        let mut s = session(3, DeviceCapabilities::supernote_full());
+        s.caches()
+            .cover()
+            .insert(BookId::new("a").unwrap(), vec![0; 100]);
+        assert!(s.caches().total_bytes() > 0);
+        s.on_trim_memory(TrimLevel::Critical);
+        assert_eq!(s.caches().total_bytes(), 0);
     }
 
     #[test]
