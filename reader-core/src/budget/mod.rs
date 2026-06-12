@@ -7,7 +7,7 @@
 //! are device-measured and out of scope here.
 
 use crate::persistence::BookId;
-use crate::render::ByteLru;
+use crate::render::{ByteLru, RenderCache};
 
 /// A bounded LRU of cover thumbnails keyed by [`BookId`] (RR13-FR2 / RR24-FR1) — a thin wrapper
 /// over [`ByteLru`], sized from the [`ResourceBudget`].
@@ -55,6 +55,61 @@ impl CoverCache {
     /// Drop all covers (back-pressure trim, RR24-FR3).
     pub fn clear(&mut self) {
         self.inner.clear();
+    }
+}
+
+/// Memory-pressure severity from the platform (`onTrimMemory`, RR24-FR3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrimLevel {
+    /// Moderate pressure — shed the least-critical caches (covers/prefetch).
+    Moderate,
+    /// Critical pressure — drop all caches before the platform kills the process.
+    Critical,
+}
+
+/// The session's cache governor (RR24): owns the render + cover caches, sized by a
+/// [`ResourceBudget`], and trims them on memory pressure.
+pub struct Caches {
+    render: RenderCache,
+    cover: CoverCache,
+}
+
+impl Caches {
+    /// Build caches sized from `budget`.
+    #[must_use]
+    pub fn new(budget: &ResourceBudget) -> Self {
+        Self {
+            render: RenderCache::with_capacity_bytes(budget.render_cache_bytes),
+            cover: CoverCache::with_capacity_bytes(budget.cover_cache_bytes),
+        }
+    }
+
+    /// The render cache.
+    pub fn render(&mut self) -> &mut RenderCache {
+        &mut self.render
+    }
+
+    /// The cover cache.
+    pub fn cover(&mut self) -> &mut CoverCache {
+        &mut self.cover
+    }
+
+    /// Total bytes held across both caches.
+    #[must_use]
+    pub fn total_bytes(&self) -> usize {
+        self.render.bytes() + self.cover.bytes()
+    }
+
+    /// React to memory pressure (RR24-FR3): `Moderate` drops the cover cache; `Critical` drops
+    /// everything. Deterministic and panic-free — always leaves the reader usable.
+    pub fn trim(&mut self, level: TrimLevel) {
+        match level {
+            TrimLevel::Moderate => self.cover.clear(),
+            TrimLevel::Critical => {
+                self.render.clear();
+                self.cover.clear();
+            }
+        }
     }
 }
 
@@ -160,5 +215,32 @@ mod tests {
         assert!(c.bytes() <= 8);
         c.clear();
         assert!(c.is_empty());
+    }
+
+    // RR24-FR3: trim sheds caches by severity — Moderate drops covers, Critical drops all.
+    #[test]
+    fn caches_trim_sheds_by_level() {
+        use crate::render::{DitherMode, PageHash};
+        let budget = ResourceBudget {
+            render_cache_bytes: 1 << 20,
+            cover_cache_bytes: 1 << 20,
+            max_page_pixels: 1_000_000,
+        };
+        let mut c = Caches::new(&budget);
+        c.render().insert(
+            PageHash::new(0, 1.0, 0, false, DitherMode::None, 1.0),
+            vec![0; 100],
+        );
+        c.cover().insert(BookId::new("a").unwrap(), vec![0; 100]);
+        assert!(c.total_bytes() > 0);
+
+        // Moderate: covers shed, render retained.
+        c.trim(TrimLevel::Moderate);
+        assert!(c.cover().is_empty());
+        assert!(!c.render().is_empty());
+
+        // Critical: everything dropped.
+        c.trim(TrimLevel::Critical);
+        assert_eq!(c.total_bytes(), 0);
     }
 }
