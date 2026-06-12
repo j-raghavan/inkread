@@ -13,6 +13,7 @@ pub mod persistence;
 pub mod policy;
 pub mod render;
 pub mod session;
+pub mod settings;
 
 // The JNI bridge compiles ONLY under `--features jni-bridge`, so the host gate
 // (`cargo test -p reader-core`) never resolves the `jni` crate (Amendment 1 / RR1-AC3).
