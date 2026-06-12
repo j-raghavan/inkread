@@ -306,6 +306,50 @@ mod tests {
         assert_eq!(pb.bytes()[0], 255 - gray);
     }
 
+    // A tiny dependency-free FNV-1a over the output bytes — the golden discriminator.
+    fn fnv1a(bytes: &[u8]) -> u64 {
+        let mut h = 0xcbf2_9ce4_8422_2325u64;
+        for &b in bytes {
+            h ^= u64::from(b);
+            h = h.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        h
+    }
+
+    fn gradient_rgba(w: usize, h: usize) -> Vec<u8> {
+        let mut buf = vec![0u8; w * h * 4];
+        for y in 0..h {
+            for x in 0..w {
+                let v = (x * 255 / (w - 1)) as u8;
+                let i = (y * w + x) * 4;
+                buf[i] = v;
+                buf[i + 1] = v;
+                buf[i + 2] = v;
+                buf[i + 3] = 255;
+            }
+        }
+        buf
+    }
+
+    // RR17-FR1: golden regression guard for the deterministic dither pipeline — a change to the
+    // gray/dither output flips the committed hash. (Full PDF-page PNG goldens are M1b, when the
+    // pdfium render path itself is golden-tested; the host suite here stays pdfium-free.)
+    #[test]
+    fn golden_floyd_steinberg_gradient() {
+        let mut buf = gradient_rgba(64, 8);
+        let mut pb = PixelBuffer::from_rgba(&mut buf, 64, 8).unwrap();
+        to_grayscale(&mut pb, DitherMode::FloydSteinberg, GRAY_LEVELS);
+        assert_eq!(fnv1a(pb.bytes()), 0xd156_cf02_0fe7_c9f7);
+    }
+
+    #[test]
+    fn golden_ordered_gradient() {
+        let mut buf = gradient_rgba(64, 8);
+        let mut pb = PixelBuffer::from_rgba(&mut buf, 64, 8).unwrap();
+        to_grayscale(&mut pb, DitherMode::Ordered, GRAY_LEVELS);
+        assert_eq!(fnv1a(pb.bytes()), 0x4bb3_6e08_3264_f915);
+    }
+
     // RR4-AC2: a smooth tone gradient dithered to the panel depth must show MULTIPLE distinct
     // levels (tones reproduced, not collapsed) with NO all-black gap in a non-black region
     // (catches banding / black-hole regressions in the gray/dither step).
