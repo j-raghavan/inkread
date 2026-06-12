@@ -402,3 +402,127 @@ fn night_mode_flip_emits_full_screen_full() {
         }]
     );
 }
+
+// RR3-FR6/FR7: avoid_flashing downgrades the night-flip flush to a Partial on a capable panel.
+#[test]
+fn avoid_flashing_downgrades_night_flip_on_capable_panel() {
+    let caps = DeviceCapabilities::supernote_full();
+    let mut policy = EinkRefreshPolicy::new(caps, screen()).with_avoid_flashing(true);
+    assert!(matches!(
+        policy.on_night_mode(true).as_slice(),
+        [RefreshCommand::Update {
+            intent: RefreshIntent::Partial,
+            ..
+        }]
+    ));
+}
+
+// RR3-FR10: a basic panel can only do a full-screen Full — avoid_flashing cannot downgrade it
+// (the `&& eink_full` guard).
+#[test]
+fn avoid_flashing_keeps_night_flip_full_on_basic_panel() {
+    let caps = DeviceCapabilities::supernote_baseline();
+    let mut policy = EinkRefreshPolicy::new(caps, screen()).with_avoid_flashing(true);
+    assert!(matches!(
+        policy.on_night_mode(true).as_slice(),
+        [RefreshCommand::Update {
+            intent: RefreshIntent::Full,
+            ..
+        }]
+    ));
+}
+
+// RR3-FR6: the flip Full clears ghosting, so exiting night mode restarts the day cadence; the
+// night counter is left untouched on exit.
+#[test]
+fn exiting_night_mode_resets_day_counter() {
+    let caps = DeviceCapabilities::supernote_full();
+    let mut policy = EinkRefreshPolicy::with_interval(caps, screen(), 6).with_night_interval(6);
+    for _ in 0..3 {
+        policy.on_page_turn(page());
+    }
+    assert_eq!(policy.partial_count(), 3);
+    policy.on_night_mode(true);
+    policy.on_page_turn(page());
+    policy.on_page_turn(page());
+    assert_eq!(policy.night_partial_count(), 2);
+
+    policy.on_night_mode(false);
+    assert_eq!(policy.partial_count(), 0);
+    assert_eq!(policy.night_partial_count(), 2);
+    assert!(!policy.is_night());
+}
+
+// RR3-FR6: the night interval is clamped to 1 (every night-mode turn flashes at interval 0).
+#[test]
+fn night_interval_zero_is_clamped_to_one() {
+    let caps = DeviceCapabilities::supernote_full();
+    let mut policy = EinkRefreshPolicy::new(caps, screen()).with_night_interval(0);
+    policy.on_night_mode(true);
+    let cmds = policy.on_page_turn(page());
+    assert_eq!(cmds.len(), 2);
+    assert_eq!(cmds[0], RefreshCommand::WaitForLast);
+}
+
+// RR3-FR4/FR10: the 1-bit Fast waveform forces dither=false even when dithering is requested,
+// while a degraded (no-fast-mode) scroll Partial honors the dither flag.
+#[test]
+fn fast_scroll_forces_no_dither_but_degraded_partial_honors_it() {
+    let dirty = Rect::new(0, 0, 700, 400);
+
+    let caps = DeviceCapabilities::supernote_full();
+    let mut fast = EinkRefreshPolicy::new(caps, screen()).with_dither(true);
+    fast.on_scroll_start();
+    assert_eq!(
+        fast.on_scroll_update(dirty),
+        vec![RefreshCommand::Update {
+            rect: dirty,
+            intent: RefreshIntent::Fast,
+            dither: false,
+        }]
+    );
+
+    let degraded_caps = DeviceCapabilities {
+        fast_mode: false,
+        ..DeviceCapabilities::supernote_full()
+    };
+    let mut degraded = EinkRefreshPolicy::new(degraded_caps, screen()).with_dither(true);
+    degraded.on_scroll_start();
+    assert_eq!(
+        degraded.on_scroll_update(dirty),
+        vec![RefreshCommand::Update {
+            rect: dirty,
+            intent: RefreshIntent::Partial,
+            dither: true,
+        }]
+    );
+}
+
+// RR3: the builder setters compose order-independently — identical interaction sequences yield
+// identical command streams regardless of the order with_* were called.
+#[test]
+fn builder_order_is_independent() {
+    let caps = DeviceCapabilities::supernote_full();
+    let mut a = EinkRefreshPolicy::with_interval(caps, screen(), 4)
+        .with_dither(true)
+        .with_night_interval(2)
+        .with_avoid_flashing(true);
+    let mut b = EinkRefreshPolicy::with_interval(caps, screen(), 4)
+        .with_avoid_flashing(true)
+        .with_night_interval(2)
+        .with_dither(true);
+
+    fn drive(p: &mut EinkRefreshPolicy) -> Vec<RefreshCommand> {
+        let r = Rect::new(0, 0, 700, 400);
+        let mut out = Vec::new();
+        out.extend(p.on_page_turn(Rect::new(0, 0, 1404, 1872)));
+        out.extend(p.on_night_mode(true));
+        out.extend(p.on_page_turn(Rect::new(0, 0, 1404, 1872)));
+        out.extend(p.on_page_turn(Rect::new(0, 0, 1404, 1872)));
+        out.extend(p.on_scroll_start());
+        out.extend(p.on_scroll_update(r));
+        out.extend(p.on_scroll_end(r));
+        out
+    }
+    assert_eq!(drive(&mut a), drive(&mut b));
+}
