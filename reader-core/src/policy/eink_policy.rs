@@ -26,6 +26,12 @@ pub struct EinkRefreshPolicy {
     /// A scroll/fling is in progress (RR3-FR4): while set, the flash counter does not advance
     /// and page-turn promotion is suppressed (a long scroll never mid-flashes).
     currently_scrolling: bool,
+    /// Whether night mode is active; selects the night counter/interval (RR3-FR6).
+    night_mode: bool,
+    /// Partial refreshes since the last flash in night mode — independent of the day counter.
+    night_partial_count: u32,
+    /// Night-mode flash promotion threshold, independent of the day interval (RR3-FR6).
+    night_ghost_clear_interval: u32,
 }
 
 impl EinkRefreshPolicy {
@@ -51,6 +57,9 @@ impl EinkRefreshPolicy {
             ghost_clear_interval: ghost_clear_interval.max(1),
             dither: false,
             currently_scrolling: false,
+            night_mode: false,
+            night_partial_count: 0,
+            night_ghost_clear_interval: ghost_clear_interval.max(1),
         }
     }
 
@@ -61,10 +70,31 @@ impl EinkRefreshPolicy {
         self
     }
 
+    /// Set the night-mode flash-promotion interval, independent of the day interval (RR3-FR6).
+    ///
+    /// An interval of 0 is clamped to 1 (every night-mode turn flashes).
+    #[must_use]
+    pub fn with_night_interval(mut self, night_ghost_clear_interval: u32) -> Self {
+        self.night_ghost_clear_interval = night_ghost_clear_interval.max(1);
+        self
+    }
+
     /// The current partial-refresh counter (test/diagnostic accessor).
     #[must_use]
     pub fn partial_count(&self) -> u32 {
         self.partial_count
+    }
+
+    /// The current night-mode partial-refresh counter (test/diagnostic accessor).
+    #[must_use]
+    pub fn night_partial_count(&self) -> u32 {
+        self.night_partial_count
+    }
+
+    /// Whether night mode is currently active (RR3-FR6).
+    #[must_use]
+    pub fn is_night(&self) -> bool {
+        self.night_mode
     }
 
     /// The capabilities this policy was built with.
@@ -87,11 +117,26 @@ impl RefreshPolicy for EinkRefreshPolicy {
         }
 
         // Full-control panel: Partial per turn, promoting to a flashing Full every
-        // `ghost_clear_interval` turns to clear ghosting (RR3-FR3). While a scroll is in
-        // progress the flash is suppressed so a fling never mid-flashes (RR3-FR4).
-        self.partial_count += 1;
-        if !self.currently_scrolling && self.partial_count >= self.ghost_clear_interval {
-            self.partial_count = 0;
+        // `ghost_clear_interval` turns to clear ghosting (RR3-FR3). Night mode keeps a SEPARATE
+        // counter + interval (RR3-FR6). While a scroll is in progress the flash is suppressed
+        // so a fling never mid-flashes (RR3-FR4).
+        let suppress = self.currently_scrolling;
+        let interval = if self.night_mode {
+            self.night_ghost_clear_interval
+        } else {
+            self.ghost_clear_interval
+        };
+        let count = if self.night_mode {
+            &mut self.night_partial_count
+        } else {
+            &mut self.partial_count
+        };
+        *count += 1;
+        let promote = !suppress && *count >= interval;
+        if promote {
+            *count = 0;
+        }
+        if promote {
             // WaitForLast guards the flash against an in-flight partial (RR3-FR8).
             vec![
                 RefreshCommand::WaitForLast,
@@ -197,9 +242,17 @@ impl RefreshPolicy for EinkRefreshPolicy {
         }]
     }
 
-    fn on_night_mode(&mut self, _on: bool) -> Vec<RefreshCommand> {
-        // A theme flip emits a Full to clear the inverted/non-inverted residue (RR3-FR6).
-        // On the Rockchip EBC a Full is full-screen regardless (RR2-FR4).
+    fn on_night_mode(&mut self, on: bool) -> Vec<RefreshCommand> {
+        // First-class night mode (RR3-FR6): switch the active theme and reset the counter of
+        // the mode being entered so its promotion cadence starts fresh. A theme flip emits a
+        // Full to clear the inverted/non-inverted residue; on the Rockchip EBC a Full is
+        // full-screen regardless (RR2-FR4).
+        self.night_mode = on;
+        if on {
+            self.night_partial_count = 0;
+        } else {
+            self.partial_count = 0;
+        }
         vec![RefreshCommand::Update {
             rect: self.screen,
             intent: RefreshIntent::Full,
@@ -454,6 +507,57 @@ mod tests {
                 dither: false,
             }]
         );
+    }
+
+    // RR3-FR6: night mode keeps an independent flash counter + interval; entering it flushes
+    // with a Full, resets the night counter, and leaves the day counter untouched.
+    #[test]
+    fn night_mode_uses_independent_counter() {
+        let caps = DeviceCapabilities::supernote_full();
+        let mut policy = EinkRefreshPolicy::with_interval(caps, screen(), 6).with_night_interval(3);
+
+        // Day mode: 5 turns, below the day interval (6) — no flash.
+        for _ in 0..5 {
+            policy.on_page_turn(page());
+        }
+        assert_eq!(policy.partial_count(), 5);
+        assert!(!policy.is_night());
+
+        // Enter night mode: a Full flush; night counter fresh; day counter preserved.
+        assert_eq!(
+            policy.on_night_mode(true),
+            vec![RefreshCommand::Update {
+                rect: screen(),
+                intent: RefreshIntent::Full,
+                dither: false,
+            }]
+        );
+        assert!(policy.is_night());
+        assert_eq!(policy.partial_count(), 5);
+        assert_eq!(policy.night_partial_count(), 0);
+
+        // Night mode: turns 1,2 Partial; turn 3 promotes on the night interval (3).
+        assert!(matches!(
+            policy.on_page_turn(page()).as_slice(),
+            [RefreshCommand::Update {
+                intent: RefreshIntent::Partial,
+                ..
+            }]
+        ));
+        policy.on_page_turn(page());
+        let third = policy.on_page_turn(page());
+        assert_eq!(third.len(), 2);
+        assert_eq!(third[0], RefreshCommand::WaitForLast);
+        assert!(matches!(
+            third[1],
+            RefreshCommand::Update {
+                intent: RefreshIntent::Full,
+                ..
+            }
+        ));
+        assert_eq!(policy.night_partial_count(), 0);
+        // The day counter was never disturbed by the night-mode cadence.
+        assert_eq!(policy.partial_count(), 5);
     }
 
     #[test]
