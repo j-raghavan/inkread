@@ -169,6 +169,15 @@ impl ReaderSession {
         let page_rect = Rect::full(self.viewport.width, self.viewport.height);
         self.policy.on_page_turn(page_rect)
     }
+
+    /// Jump to an absolute page index, clamped to `[0, page_count)`, then delegate to the
+    /// policy's `on_page_turn` for the refresh stream (RR11-FR1). Used by TOC/scrubber jumps.
+    pub fn jump_to_page(&mut self, page: usize) -> Vec<RefreshCommand> {
+        let last = self.page_count().saturating_sub(1);
+        self.page = page.min(last);
+        let page_rect = Rect::full(self.viewport.width, self.viewport.height);
+        self.policy.on_page_turn(page_rect)
+    }
 }
 
 #[cfg(test)]
@@ -255,6 +264,29 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    // RR11-FR1: jump_to_page lands on an absolute page, clamped to the document range, and
+    // drives the policy like a page turn.
+    #[test]
+    fn jump_to_page_clamps_and_drives_policy() {
+        let caps = DeviceCapabilities::supernote_full();
+        let mut s = session(5, caps);
+        let cmds = s.jump_to_page(3);
+        assert_eq!(s.current_page(), 3);
+        assert!(matches!(
+            cmds.as_slice(),
+            [RefreshCommand::Update {
+                intent: RefreshIntent::Partial,
+                ..
+            }]
+        ));
+        // Past the end clamps to the last page.
+        s.jump_to_page(99);
+        assert_eq!(s.current_page(), 4);
+        // Page 0 is reachable.
+        s.jump_to_page(0);
+        assert_eq!(s.current_page(), 0);
     }
 
     #[test]
