@@ -35,4 +35,62 @@ pub trait Document {
     /// Returns [`CoreError::PageOutOfRange`](crate::error::CoreError::PageOutOfRange) for a
     /// bad index and a typed backend error on render failure — never panics (RR21-FR3).
     fn render_page(&self, index: usize, buf: &mut PixelBuffer<'_>) -> CoreResult<()>;
+
+    /// Prefetch hint (RR4-FR7): the core may call this after rendering the current page so a
+    /// backend can warm an internal handle for the likely-next page, making a page turn blit a
+    /// ready buffer. Default: a no-op (backends opt in). Must never panic on a bad index.
+    fn hint_page(&self, _next: usize) {}
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct Plain;
+    impl Document for Plain {
+        fn page_count(&self) -> usize {
+            1
+        }
+        fn metadata(&self) -> DocumentMetadata {
+            DocumentMetadata::default()
+        }
+        fn render_page(&self, _index: usize, _buf: &mut PixelBuffer<'_>) -> CoreResult<()> {
+            Ok(())
+        }
+    }
+
+    // RR4-FR7: a backend that does not override hint_page gets the no-op default (no panic).
+    #[test]
+    fn hint_page_default_is_noop() {
+        Plain.hint_page(0);
+        Plain.hint_page(99); // out-of-range hint must not panic either
+    }
+
+    // RR4-FR7: a backend that overrides hint_page receives the requested page.
+    #[test]
+    fn hint_page_override_is_called() {
+        use std::cell::Cell;
+        struct Hinter {
+            last: Cell<Option<usize>>,
+        }
+        impl Document for Hinter {
+            fn page_count(&self) -> usize {
+                3
+            }
+            fn metadata(&self) -> DocumentMetadata {
+                DocumentMetadata::default()
+            }
+            fn render_page(&self, _index: usize, _buf: &mut PixelBuffer<'_>) -> CoreResult<()> {
+                Ok(())
+            }
+            fn hint_page(&self, next: usize) {
+                self.last.set(Some(next));
+            }
+        }
+        let h = Hinter {
+            last: Cell::new(None),
+        };
+        h.hint_page(2);
+        assert_eq!(h.last.get(), Some(2));
+    }
 }
