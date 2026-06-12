@@ -32,7 +32,7 @@ use device_eink::{decode_capabilities, encode_commands, DeviceCapabilities};
 use std::path::Path;
 use std::sync::Arc;
 
-use crate::document::encode_toc_wire;
+use crate::document::{encode_links_wire, encode_toc_wire};
 use crate::error::{CoreError, CoreResult};
 use crate::persistence::sqlite::SqliteStore;
 use crate::persistence::{BookId, ReaderStore};
@@ -333,6 +333,28 @@ pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeToc<'local>
         // SAFETY: borrowed, not owned (Amendment 2).
         let session = unsafe { session_mut(handle) }.map_err(|e| throw(env, &e))?;
         let bytes = encode_toc_wire(&session.toc());
+        env.byte_array_from_slice(&bytes)
+    })
+    .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
+}
+
+// =====================================================================================
+// nativePageLinks(handle, page) : ByteArray — the clickable links on `page`, normalized to
+// the rendered page (RR11-FR3). Decode with WireCodec.decodeLinks; the shell hit-tests a tap
+// against these and jumps (internal) or opens the URI (external). Empty header on no links.
+// =====================================================================================
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativePageLinks<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+    page: jint,
+) -> JByteArray<'local> {
+    env.with_env(|env| -> jni::errors::Result<JByteArray<'local>> {
+        // SAFETY: borrowed, not owned (Amendment 2).
+        let session = unsafe { session_mut(handle) }.map_err(|e| throw(env, &e))?;
+        let target = if page < 0 { 0usize } else { page as usize };
+        let bytes = encode_links_wire(&session.page_links(target));
         env.byte_array_from_slice(&bytes)
     })
     .resolve::<jni::errors::ThrowRuntimeExAndDefault>()

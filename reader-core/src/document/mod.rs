@@ -30,6 +30,70 @@ pub struct TocEntry {
     pub children: Vec<TocEntry>,
 }
 
+/// Where a [`PageLink`] navigates (RR11-FR3): an internal page jump or an external URI.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LinkTarget {
+    /// Jump to a 0-based page index within this document.
+    Page(usize),
+    /// Open an external URI (e.g. `https://…`).
+    Uri(String),
+}
+
+/// A clickable link region on a page (RR11-FR3).
+///
+/// The rect is **normalized to the rendered page**: `[0,1]` on both axes with a **top-left**
+/// origin, matching the stretched-to-viewport render (`set_target_size`). So the shell
+/// hit-tests a tap as `(tap_x / view_w, tap_y / view_h)` with no scale/DPI/letterbox math.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PageLink {
+    /// Left edge, normalized `[0,1]`.
+    pub x0: f32,
+    /// Top edge, normalized `[0,1]`.
+    pub y0: f32,
+    /// Right edge, normalized `[0,1]`.
+    pub x1: f32,
+    /// Bottom edge, normalized `[0,1]`.
+    pub y1: f32,
+    /// Where the link goes.
+    pub target: LinkTarget,
+}
+
+/// Wire-format version for the page-links the JNI bridge ships to the shell (RR11-FR3).
+const LINKS_WIRE_VERSION: u8 = 0x01;
+
+/// Encode a page's links for the shell to hit-test (RR11-FR3). Pure marshaling (no device/JNI
+/// types) so it is host-tested. Layout (little-endian):
+/// `[ver=1][count: u16]` then, per link, `[x0 f32][y0 f32][x1 f32][y1 f32][kind: u8]` followed
+/// by either `[page: u32]` (kind 0, internal) or `[uri_len: u16][uri: utf-8 × uri_len]`
+/// (kind 1, external). Counts/lengths saturate rather than panic (RR21-FR3).
+#[must_use]
+pub fn encode_links_wire(links: &[PageLink]) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.push(LINKS_WIRE_VERSION);
+    let count = u16::try_from(links.len()).unwrap_or(u16::MAX);
+    out.extend_from_slice(&count.to_le_bytes());
+    for link in links.iter().take(count as usize) {
+        out.extend_from_slice(&link.x0.to_le_bytes());
+        out.extend_from_slice(&link.y0.to_le_bytes());
+        out.extend_from_slice(&link.x1.to_le_bytes());
+        out.extend_from_slice(&link.y1.to_le_bytes());
+        match &link.target {
+            LinkTarget::Page(page) => {
+                out.push(0u8);
+                out.extend_from_slice(&u32::try_from(*page).unwrap_or(u32::MAX).to_le_bytes());
+            }
+            LinkTarget::Uri(uri) => {
+                out.push(1u8);
+                let bytes = uri.as_bytes();
+                let len = u16::try_from(bytes.len()).unwrap_or(u16::MAX);
+                out.extend_from_slice(&len.to_le_bytes());
+                out.extend_from_slice(&bytes[..len as usize]);
+            }
+        }
+    }
+    out
+}
+
 /// Wire-format version for the flattened TOC the JNI bridge ships to the shell (RR11-FR2).
 const TOC_WIRE_VERSION: u8 = 0x01;
 
@@ -97,6 +161,13 @@ pub trait Document {
     /// with no outline (or a backend that hasn't implemented it) returns no entries, never an
     /// error.
     fn toc(&self) -> Vec<TocEntry> {
+        Vec::new()
+    }
+
+    /// The clickable links on `page` (RR11-FR3), normalized to the rendered page (see
+    /// [`PageLink`]). Default: empty — a format without links (or an out-of-range page) returns
+    /// no links, never an error or panic (RR21-FR3).
+    fn page_links(&self, _page: usize) -> Vec<PageLink> {
         Vec::new()
     }
 }
@@ -203,6 +274,55 @@ mod tests {
     fn encode_toc_wire_empty_is_header_only() {
         let bytes = encode_toc_wire(&[]);
         assert_eq!(bytes, vec![TOC_WIRE_VERSION, 0, 0]);
+    }
+
+    // RR11-FR3: page links encode with the normalized rect + internal/external target, decoded
+    // here the same way the Kotlin shell does.
+    #[test]
+    fn encode_links_wire_roundtrips_internal_and_external() {
+        let links = vec![
+            PageLink {
+                x0: 0.1,
+                y0: 0.2,
+                x1: 0.3,
+                y1: 0.25,
+                target: LinkTarget::Page(7),
+            },
+            PageLink {
+                x0: 0.5,
+                y0: 0.6,
+                x1: 0.7,
+                y1: 0.65,
+                target: LinkTarget::Uri("https://example.com".into()),
+            },
+        ];
+        let b = encode_links_wire(&links);
+        assert_eq!(b[0], LINKS_WIRE_VERSION);
+        assert_eq!(u16::from_le_bytes([b[1], b[2]]), 2);
+
+        let mut off = 3usize;
+        let read_f32 = |b: &[u8], o: usize| f32::from_le_bytes(b[o..o + 4].try_into().unwrap());
+        // link 0: internal Page(7)
+        assert!((read_f32(&b, off) - 0.1).abs() < 1e-6);
+        assert!((read_f32(&b, off + 12) - 0.25).abs() < 1e-6);
+        assert_eq!(b[off + 16], 0, "kind internal");
+        assert_eq!(
+            u32::from_le_bytes(b[off + 17..off + 21].try_into().unwrap()),
+            7
+        );
+        off += 21;
+        // link 1: external URI
+        assert_eq!(b[off + 16], 1, "kind external");
+        let len = u16::from_le_bytes([b[off + 17], b[off + 18]]) as usize;
+        let uri = String::from_utf8(b[off + 19..off + 19 + len].to_vec()).unwrap();
+        assert_eq!(uri, "https://example.com");
+        assert_eq!(off + 19 + len, b.len(), "no trailing bytes");
+    }
+
+    // RR11-FR3: a page with no links encodes to just the header.
+    #[test]
+    fn encode_links_wire_empty_is_header_only() {
+        assert_eq!(encode_links_wire(&[]), vec![LINKS_WIRE_VERSION, 0, 0]);
     }
 
     // RR4-FR7: a backend that overrides hint_page receives the requested page.

@@ -18,7 +18,7 @@ use std::sync::{Mutex, OnceLock};
 
 use pdfium_render::prelude::*;
 
-use crate::document::{Document, DocumentMetadata, TocEntry};
+use crate::document::{Document, DocumentMetadata, LinkTarget, PageLink, TocEntry};
 use crate::error::{CoreError, CoreResult};
 use crate::render::PixelBuffer;
 
@@ -230,6 +230,75 @@ impl Document for PdfBackend {
             cur = bm.next_sibling();
         }
         out
+    }
+
+    fn page_links(&self, index: usize) -> Vec<PageLink> {
+        // Resolve the page; an out-of-range index yields no links (never panics, RR21-FR3).
+        let page = match i32::try_from(index)
+            .ok()
+            .and_then(|i| self.document.pages().get(i).ok())
+        {
+            Some(p) => p,
+            None => return Vec::new(),
+        };
+        // Page dimensions in points (pdfium origin = bottom-left); used to normalize + flip Y.
+        let pw = page.width().value;
+        let ph = page.height().value;
+        if pw <= 0.0 || ph <= 0.0 {
+            return Vec::new();
+        }
+        let mut out = Vec::new();
+        for link in page.links().iter() {
+            let target = match link_target(&link) {
+                Some(t) => t,
+                None => continue, // unresolvable / unsupported action → not navigable
+            };
+            let rect = match link.rect() {
+                Ok(r) => r,
+                Err(_) => continue,
+            };
+            // pdfium: bottom-left origin, points → normalized [0,1], top-left origin.
+            let nx0 = (rect.left().value / pw).clamp(0.0, 1.0);
+            let nx1 = (rect.right().value / pw).clamp(0.0, 1.0);
+            let ny_top = ((ph - rect.top().value) / ph).clamp(0.0, 1.0);
+            let ny_bottom = ((ph - rect.bottom().value) / ph).clamp(0.0, 1.0);
+            out.push(PageLink {
+                x0: nx0.min(nx1),
+                y0: ny_top.min(ny_bottom),
+                x1: nx0.max(nx1),
+                y1: ny_top.max(ny_bottom),
+                target,
+            });
+        }
+        out
+    }
+}
+
+/// Resolve a pdfium link's target (RR11-FR3): a direct destination or a GoTo/URI action.
+/// Returns `None` for label-only or unsupported actions (the link is then not navigable).
+fn link_target(link: &PdfLink<'_>) -> Option<LinkTarget> {
+    // A direct /Dest on the link annotation.
+    if let Some(page) = link
+        .destination()
+        .and_then(|d| d.page_index().ok())
+        .and_then(|i| usize::try_from(i).ok())
+    {
+        return Some(LinkTarget::Page(page));
+    }
+    // Otherwise an action: GoTo (internal) or URI (external).
+    match link.action()? {
+        PdfAction::LocalDestination(local) => local
+            .destination()
+            .ok()
+            .and_then(|d| d.page_index().ok())
+            .and_then(|i| usize::try_from(i).ok())
+            .map(LinkTarget::Page),
+        PdfAction::Uri(uri) => uri
+            .uri()
+            .ok()
+            .filter(|u| !u.is_empty())
+            .map(LinkTarget::Uri),
+        _ => None,
     }
 }
 

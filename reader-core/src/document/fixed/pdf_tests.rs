@@ -246,3 +246,66 @@ fn toc_from_outline_fixture() {
     assert_eq!(toc[1].target_page, Some(2));
     assert!(toc[1].children.is_empty());
 }
+
+// RR11-FR3: page links read with normalized top-left rects + internal/external targets.
+#[test]
+fn page_links_from_links_fixture() {
+    let _s = pdfium_serial();
+    if !host_pdfium_available() {
+        eprintln!("SKIP page_links: host libpdfium UNVERIFIED");
+        return;
+    }
+    let bytes = std::fs::read(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/links.pdf"
+    ))
+    .expect("links fixture present");
+    let doc = PdfBackend::open(bytes).unwrap();
+
+    let links = doc.page_links(0);
+    assert_eq!(links.len(), 2, "two links on page 1");
+
+    // Fixture page is 612x792. link1 [100 600 300 650] -> internal page index 1.
+    let internal = links
+        .iter()
+        .find(|l| matches!(l.target, LinkTarget::Page(_)))
+        .expect("an internal link");
+    assert_eq!(internal.target, LinkTarget::Page(1));
+    assert!(
+        (internal.x0 - 100.0 / 612.0).abs() < 1e-3,
+        "x0={}",
+        internal.x0
+    );
+    assert!(
+        (internal.x1 - 300.0 / 612.0).abs() < 1e-3,
+        "x1={}",
+        internal.x1
+    );
+    assert!(
+        (internal.y0 - 142.0 / 792.0).abs() < 1e-3,
+        "y0={}",
+        internal.y0
+    ); // (792-650)
+    assert!(
+        (internal.y1 - 192.0 / 792.0).abs() < 1e-3,
+        "y1={}",
+        internal.y1
+    ); // (792-600)
+    assert!(
+        internal.y0 < internal.y1 && internal.x0 < internal.x1,
+        "top-left normalized"
+    );
+
+    // link2 [100 400 300 450] -> external URI.
+    let external = links
+        .iter()
+        .find_map(|l| match &l.target {
+            LinkTarget::Uri(u) => Some(u.clone()),
+            LinkTarget::Page(_) => None,
+        })
+        .expect("an external link");
+    assert_eq!(external, "https://example.com");
+
+    // RR21-FR3: an out-of-range page never panics and yields no links.
+    assert!(doc.page_links(999).is_empty());
+}

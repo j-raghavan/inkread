@@ -15,7 +15,7 @@ use std::sync::Arc;
 
 use crate::budget::{Caches, ResourceBudget, TrimLevel};
 use crate::document::fixed::PdfBackend;
-use crate::document::{Document, DocumentMetadata, TocEntry};
+use crate::document::{Document, DocumentMetadata, PageLink, TocEntry};
 use crate::error::{CoreError, CoreResult};
 use crate::persistence::{BookId, ReaderStore, ReadingPosition};
 use crate::policy::EinkRefreshPolicy;
@@ -275,6 +275,13 @@ impl ReaderSession {
     #[must_use]
     pub fn toc(&self) -> Vec<TocEntry> {
         self.document.toc()
+    }
+
+    /// The clickable links on `page`, normalized to the rendered page (RR11-FR3) — a
+    /// pass-through to [`Document::page_links`]. The shell hit-tests a tap against these.
+    #[must_use]
+    pub fn page_links(&self, page: usize) -> Vec<PageLink> {
+        self.document.page_links(page)
     }
 
     /// Navigate to a TOC entry's target page (RR11-AC1). An unresolved entry (no

@@ -81,10 +81,32 @@ object NativeBridge {
      * RefreshCommand stream (RR11-FR1). Decode with [WireCodec.decodeCommands].
      */
     external fun nativeJumpToPage(handle: Long, page: Int): ByteArray
+
+    /**
+     * The clickable links on `page`, normalized to the rendered page (RR11-FR3); decode with
+     * [WireCodec.decodeLinks]. The shell hit-tests a tap and jumps (internal) or opens the URI.
+     */
+    external fun nativePageLinks(handle: Long, page: Int): ByteArray
 }
 
 /** One flattened table-of-contents entry (RR11-FR2). [targetPage] is null for a label-only entry. */
 data class TocItem(val depth: Int, val targetPage: Int?, val title: String)
+
+/**
+ * A clickable link region on a page (RR11-FR3), normalized to `[0,1]` with a top-left origin.
+ * Exactly one of [targetPage] (internal jump) / [uri] (external) is non-null.
+ */
+data class LinkRect(
+    val x0: Float,
+    val y0: Float,
+    val x1: Float,
+    val y1: Float,
+    val targetPage: Int?,
+    val uri: String?,
+) {
+    /** Whether the normalized tap point `(nx, ny)` falls inside this link. */
+    fun contains(nx: Float, ny: Float): Boolean = nx in x0..x1 && ny in y0..y1
+}
 
 /** Navigation gestures — the int code mapping mirrors `Gesture::from_code` in the core. */
 enum class Gesture(val code: Int) {
@@ -199,4 +221,45 @@ object WireCodec {
 
     private const val TOC_HEADER_LEN = 3
     private const val TOC_RECORD_FIXED = 8 // depth(1)+flags(1)+page(4)+len(2)
+
+    /**
+     * Decode the page-links wire from [NativeBridge.nativePageLinks] (RR11-FR3). Layout:
+     * `[ver][count: u16]` then per link `[x0 f32][y0 f32][x1 f32][y1 f32][kind: u8]` + either
+     * `[page: u32]` (kind 0) or `[len: u16][uri…]` (kind 1). Mirrors `encode_links_wire`.
+     */
+    fun decodeLinks(bytes: ByteArray): List<LinkRect> {
+        require(bytes.size >= LINKS_HEADER_LEN) { "links stream truncated" }
+        require(bytes[0] == WIRE_VERSION) { "bad links wire version ${bytes[0]}" }
+        val buf = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
+        val count = buf.getShort(1).toInt() and 0xFFFF
+        val out = ArrayList<LinkRect>(count)
+        var off = LINKS_HEADER_LEN
+        repeat(count) {
+            require(bytes.size >= off + LINKS_RECORD_FIXED) { "link record truncated" }
+            val x0 = buf.getFloat(off)
+            val y0 = buf.getFloat(off + 4)
+            val x1 = buf.getFloat(off + 8)
+            val y1 = buf.getFloat(off + 12)
+            val kind = bytes[off + 16].toInt() and 0xFF
+            off += LINKS_RECORD_FIXED
+            if (kind == 0) {
+                require(bytes.size >= off + 4) { "internal link target truncated" }
+                val page = buf.getInt(off)
+                off += 4
+                out.add(LinkRect(x0, y0, x1, y1, page, null))
+            } else {
+                require(bytes.size >= off + 2) { "external link length truncated" }
+                val len = buf.getShort(off).toInt() and 0xFFFF
+                off += 2
+                require(bytes.size >= off + len) { "external link uri truncated" }
+                val uri = String(bytes, off, len, Charsets.UTF_8)
+                off += len
+                out.add(LinkRect(x0, y0, x1, y1, null, uri))
+            }
+        }
+        return out
+    }
+
+    private const val LINKS_HEADER_LEN = 3
+    private const val LINKS_RECORD_FIXED = 17 // x0,y0,x1,y1 (4×4) + kind(1)
 }

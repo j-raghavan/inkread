@@ -53,6 +53,10 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
     private var viewW = 0
     private var viewH = 0
 
+    /** Current page's links (RR11-FR3); written on the engine thread after each render, read on
+     * the UI thread for tap hit-testing. */
+    @Volatile private var currentLinks: List<LinkRect> = emptyList()
+
     private val loadingBg = Paint().apply { color = Color.WHITE }
     private val loadingText = Paint().apply {
         color = Color.DKGRAY
@@ -68,7 +72,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
     private val gestures by lazy {
         GestureDetector(this, object : GestureDetector.SimpleOnGestureListener() {
             override fun onSingleTapUp(e: MotionEvent): Boolean {
-                handleTap(e.x)
+                handleTap(e.x, e.y)
                 return true
             }
 
@@ -258,6 +262,15 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         buf.rewind()
         bmp.copyPixelsFromBuffer(buf)
         blit { canvas -> canvas.drawBitmap(bmp, 0f, 0f, null) }
+        // Cache this page's links for tap hit-testing (RR11-FR3). Cheap; pdfium caches per page.
+        currentLinks = try {
+            WireCodec.decodeLinks(
+                NativeBridge.nativePageLinks(handle, NativeBridge.nativeCurrentPage(handle)),
+            )
+        } catch (e: RuntimeException) {
+            Log.e(TAG, "links fetch failed: ${e.message}")
+            emptyList()
+        }
     }
 
     /** Draw a centered "Loading…" frame so the open doesn't look like a freeze. */
@@ -287,13 +300,66 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
 
     // ---- input (UI thread) → engine ----
 
-    /** Route a tap by zone (RR25-FR3): left third = prev, right third = next, center = contents. */
-    private fun handleTap(x: Float) {
-        val third = surfaceView.width / 3f
+    /**
+     * Route a tap: a tapped link wins (RR11-FR3), else tap zones (RR25-FR3 — left third = prev,
+     * right third = next, center = contents). The page fills the viewport (stretched render), so
+     * the hit-test is the normalized tap `(x/w, y/h)` against the link rects.
+     */
+    private fun handleTap(x: Float, y: Float) {
+        val w = surfaceView.width.toFloat()
+        val h = surfaceView.height.toFloat()
+        if (w > 0f && h > 0f) {
+            val link = currentLinks.firstOrNull { it.contains(x / w, y / h) }
+            if (link != null) {
+                followLink(link)
+                return
+            }
+        }
+        val third = w / 3f
         when {
             x < third -> postGesture(Gesture.PREV_PAGE)
             x > 2 * third -> postGesture(Gesture.NEXT_PAGE)
             else -> openTocMenu()
+        }
+    }
+
+    /** Follow a tapped link (RR11-FR3): internal → jump+render+refresh; external → open URL. */
+    private fun followLink(link: LinkRect) {
+        val page = link.targetPage
+        if (page != null) {
+            postJump(page)
+            return
+        }
+        link.uri?.let { openExternalUri(it) }
+    }
+
+    /** Open an http(s) link in the system browser; refuse other schemes (safety). */
+    private fun openExternalUri(uri: String) {
+        val parsed = runCatching { Uri.parse(uri) }.getOrNull()
+        val scheme = parsed?.scheme?.lowercase()
+        if (parsed == null || (scheme != "http" && scheme != "https")) {
+            Toast.makeText(this, "Unsupported link", Toast.LENGTH_SHORT).show()
+            return
+        }
+        try {
+            startActivity(Intent(Intent.ACTION_VIEW, parsed))
+        } catch (e: android.content.ActivityNotFoundException) {
+            Toast.makeText(this, "No app to open this link", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    /** Jump to an absolute page on the engine thread, then render + refresh (RR11-FR1). */
+    private fun postJump(page: Int) {
+        engine.execute {
+            if (docHandle == 0L) return@execute
+            val commandBytes = try {
+                NativeBridge.nativeJumpToPage(docHandle, page)
+            } catch (e: RuntimeException) {
+                Log.e(TAG, "jump failed: ${e.message}")
+                return@execute
+            }
+            renderAndBlit()
+            adapter.executeAll(WireCodec.decodeCommands(commandBytes))
         }
     }
 
@@ -342,18 +408,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         AlertDialog.Builder(this)
             .setTitle("Contents")
             .setItems(labels) { _, which ->
-                val page = toc[which].targetPage ?: return@setItems // label-only: no jump
-                engine.execute {
-                    if (docHandle == 0L) return@execute
-                    val commandBytes = try {
-                        NativeBridge.nativeJumpToPage(docHandle, page)
-                    } catch (e: RuntimeException) {
-                        Log.e(TAG, "jump failed: ${e.message}")
-                        return@execute
-                    }
-                    renderAndBlit()
-                    adapter.executeAll(WireCodec.decodeCommands(commandBytes))
-                }
+                toc[which].targetPage?.let { postJump(it) } // label-only entries don't navigate
             }
             .show()
     }
