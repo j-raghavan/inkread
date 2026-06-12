@@ -8,6 +8,6 @@ pub mod pixel_buffer;
 pub mod viewport;
 
 pub use cache::{PageHash, RenderCache};
-pub use gray::{to_grayscale, DitherMode, GRAY_LEVELS};
+pub use gray::{invert_in_place, to_grayscale, DitherMode, GRAY_LEVELS};
 pub use pixel_buffer::{ChannelOrder, PixelBuffer, BYTES_PER_PIXEL, CHANNEL_ORDER};
 pub use viewport::Viewport;

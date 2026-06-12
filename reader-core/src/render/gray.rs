@@ -126,6 +126,22 @@ fn floyd_steinberg(buf: &mut PixelBuffer<'_>, levels: u16) {
     }
 }
 
+/// Invert luminance in place for night mode on a device without `hw_invert` (RR4-FR8).
+///
+/// Each gray channel becomes `255 - value`; α is left untouched. Applied as a separate pass
+/// after [`to_grayscale`] so the grayscale signature stays stable for M0 callers. Idempotent
+/// in pairs (inverting twice restores the original).
+pub fn invert_in_place(buf: &mut PixelBuffer<'_>) {
+    let order: ChannelOrder = CHANNEL_ORDER;
+    let bytes = buf.bytes_mut();
+    for px in bytes.chunks_exact_mut(BYTES_PER_PIXEL) {
+        px[order.r] = 255 - px[order.r];
+        px[order.g] = 255 - px[order.g];
+        px[order.b] = 255 - px[order.b];
+        // α (px[order.a]) left as-is.
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -259,6 +275,35 @@ mod tests {
         assert_eq!(b[0], b[1]);
         assert_eq!(b[1], b[2]);
         assert_eq!(b[3], 200);
+    }
+
+    // RR4-FR8: software night invert maps each gray channel to 255-value, leaves α, and is a
+    // self-inverse (inverting twice restores the original) — verified on dithered output.
+    #[test]
+    fn invert_round_trips_and_preserves_alpha() {
+        let mut buf = vec![40u8, 200, 0, 128];
+        let original = buf.clone();
+        let mut pb = PixelBuffer::from_rgba(&mut buf, 1, 1).unwrap();
+        invert_in_place(&mut pb);
+        assert_eq!(pb.bytes()[CHANNEL_ORDER.r], 215); // 255-40
+        assert_eq!(pb.bytes()[CHANNEL_ORDER.g], 55); // 255-200
+        assert_eq!(pb.bytes()[CHANNEL_ORDER.b], 255); // 255-0
+        assert_eq!(pb.bytes()[CHANNEL_ORDER.a], 128); // α untouched
+        invert_in_place(&mut pb);
+        assert_eq!(pb.bytes(), original.as_slice());
+    }
+
+    #[test]
+    fn invert_after_grayscale_inverts_a_quantized_field() {
+        let mut buf = vec![30u8; 4 * 4 * 4];
+        for px in buf.chunks_exact_mut(4) {
+            px[3] = 255;
+        }
+        let mut pb = PixelBuffer::from_rgba(&mut buf, 4, 4).unwrap();
+        to_grayscale(&mut pb, DitherMode::None, GRAY_LEVELS);
+        let gray = pb.bytes()[0];
+        invert_in_place(&mut pb);
+        assert_eq!(pb.bytes()[0], 255 - gray);
     }
 
     // RR4-AC2: a smooth tone gradient dithered to the panel depth must show MULTIPLE distinct
