@@ -129,9 +129,12 @@ impl RefreshPolicy for EinkRefreshPolicy {
 
         // Full-control panel: Partial per turn, promoting to a flashing Full every
         // `ghost_clear_interval` turns to clear ghosting (RR3-FR3). Night mode keeps a SEPARATE
-        // counter + interval (RR3-FR6). While a scroll is in progress the flash is suppressed
-        // so a fling never mid-flashes (RR3-FR4).
-        let suppress = self.currently_scrolling;
+        // counter + interval (RR3-FR6). A discrete page turn means any prior scroll/fling has
+        // ended, so clear the scrolling flag here — this also guards against a lost
+        // on_scroll_end leaving promotion suppressed (and the counter climbing) forever
+        // (RR3-FR4). A continuous fling never mid-flashes: it drives on_scroll_* only, which
+        // reset the counter at start and never advance it.
+        self.currently_scrolling = false;
         let interval = if self.night_mode {
             self.night_ghost_clear_interval
         } else {
@@ -143,7 +146,7 @@ impl RefreshPolicy for EinkRefreshPolicy {
             &mut self.partial_count
         };
         *count += 1;
-        let promote = !suppress && *count >= interval;
+        let promote = *count >= interval;
         if promote {
             *count = 0;
         }

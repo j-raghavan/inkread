@@ -147,10 +147,11 @@ fn scroll_emits_fast_and_brackets_with_fast_mode() {
     );
 }
 
-// RR3-FR4: starting a scroll resets the flash counter so a fling never mid-flashes, and a
-// page turn during the scroll does not promote to a Full.
+// RR3-FR4: starting a scroll resets the flash counter (so a fling never mid-flashes), and
+// scroll updates never advance it. A subsequent discrete page turn ends the scroll and
+// resumes normal promotion.
 #[test]
-fn scroll_resets_flash_counter_and_suppresses_promotion() {
+fn scroll_start_resets_counter_then_page_turn_resumes_promotion() {
     let caps = DeviceCapabilities::supernote_full();
     let mut policy = EinkRefreshPolicy::with_interval(caps, screen(), 3);
     // Advance the counter toward the flash threshold (2 of 3).
@@ -158,22 +159,44 @@ fn scroll_resets_flash_counter_and_suppresses_promotion() {
     policy.on_page_turn(page());
     assert_eq!(policy.partial_count(), 2);
 
-    // Scrolling resets the counter to 0.
+    // Scrolling resets the counter to 0; its updates never advance it.
     policy.on_scroll_start();
     assert_eq!(policy.partial_count(), 0);
-
-    // A page turn while still scrolling stays Partial (no flash), even at the threshold.
     policy.on_scroll_update(Rect::new(0, 0, 1404, 100));
-    for _ in 0..3 {
-        let cmds = policy.on_page_turn(page());
-        assert!(matches!(
-            cmds.as_slice(),
-            [RefreshCommand::Update {
-                intent: RefreshIntent::Partial,
-                ..
-            }]
-        ));
-    }
+    assert_eq!(policy.partial_count(), 0);
+
+    // A discrete page turn ends the scroll: turns 1,2 Partial; turn 3 promotes (interval 3).
+    assert!(matches!(
+        policy.on_page_turn(page()).as_slice(),
+        [RefreshCommand::Update {
+            intent: RefreshIntent::Partial,
+            ..
+        }]
+    ));
+    policy.on_page_turn(page());
+    let third = policy.on_page_turn(page());
+    assert_eq!(third.len(), 2);
+    assert_eq!(third[0], RefreshCommand::WaitForLast);
+}
+
+// RR3-FR4 robustness: if on_scroll_end is lost (currently_scrolling stuck true), a discrete
+// page turn must still un-stick promotion — never suppress ghost-clears forever.
+#[test]
+fn page_turn_unsticks_a_lost_scroll_end() {
+    let caps = DeviceCapabilities::supernote_full();
+    let mut policy = EinkRefreshPolicy::with_interval(caps, screen(), 2);
+    policy.on_scroll_start(); // ... and suppose on_scroll_end never arrives.
+                              // Page turns still promote normally: turn 1 Partial, turn 2 flashes.
+    assert!(matches!(
+        policy.on_page_turn(page()).as_slice(),
+        [RefreshCommand::Update {
+            intent: RefreshIntent::Partial,
+            ..
+        }]
+    ));
+    let second = policy.on_page_turn(page());
+    assert_eq!(second.len(), 2);
+    assert_eq!(second[0], RefreshCommand::WaitForLast);
 }
 
 // RR3-FR10: a panel with full control but no fast mode scrolls with Partial (not Fast),
