@@ -9,7 +9,7 @@
 use crate::render::pixel_buffer::{ChannelOrder, PixelBuffer, BYTES_PER_PIXEL, CHANNEL_ORDER};
 
 /// How to convert tones to the panel's gray depth (RR4-FR3).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DitherMode {
     /// Plain luminance quantization (no dithering).
     None,
