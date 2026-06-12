@@ -37,6 +37,8 @@ pub enum CoreError {
     RenderBackend(String),
     /// The pdfium library could not be bound (host: no libpdfium present).
     BackendUnavailable(String),
+    /// A persistence/storage operation failed (SQLite) (RR12, ADR Decision 4).
+    Persistence(String),
     /// A panic was caught at the boundary and converted (RR21-FR3).
     InternalPanic(String),
 }
@@ -55,6 +57,7 @@ impl CoreError {
             CoreError::RenderBackend(_) => 7,
             CoreError::BackendUnavailable(_) => 8,
             CoreError::InternalPanic(_) => 9,
+            CoreError::Persistence(_) => 10,
         }
     }
 }
@@ -73,6 +76,7 @@ impl fmt::Display for CoreError {
             CoreError::BufferMismatch(m) => write!(f, "pixel buffer mismatch: {m}"),
             CoreError::RenderBackend(m) => write!(f, "render failed: {m}"),
             CoreError::BackendUnavailable(m) => write!(f, "render backend unavailable: {m}"),
+            CoreError::Persistence(m) => write!(f, "storage error: {m}"),
             CoreError::InternalPanic(m) => write!(f, "internal error: {m}"),
         }
     }
@@ -101,6 +105,7 @@ mod tests {
             CoreError::BufferMismatch(String::new()),
             CoreError::RenderBackend(String::new()),
             CoreError::BackendUnavailable(String::new()),
+            CoreError::Persistence(String::new()),
             CoreError::InternalPanic(String::new()),
         ];
         let mut codes: Vec<StatusCode> = errs.iter().map(CoreError::status_code).collect();

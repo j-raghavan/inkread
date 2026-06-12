@@ -21,6 +21,7 @@ crate-type = ["cdylib", "rlib"]
 device-eink = { workspace = true }
 pdfium-render = { workspace = true }
 tiny-skia = { workspace = true }
+rusqlite = { workspace = true }
 
 # Amendment 1: `jni` is OPTIONAL and pulled in ONLY by the `jni-bridge` feature, so a
 # bare `cargo test -p reader-core` leaves `jni` out of the resolved graph (RR1-AC3 / IR-7).

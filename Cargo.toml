@@ -30,6 +30,9 @@ reader-core = { path = "reader-core" }
 pdfium-render = { version = "0.9.1", features = ["thread_safe"] }
 tiny-skia = "0.11"
 jni = "0.22.4"
+# rusqlite with `bundled` SQLite (compiled from source) so the host build is hermetic and the
+# Android cdylib cross-compiles the same engine — no system-library dependency (ADR Decision 4).
+rusqlite = { version = "0.32", features = ["bundled"] }
 
 [profile.release]
 # A reader on a battery e-ink device: optimize for size + speed, strip symbols.
