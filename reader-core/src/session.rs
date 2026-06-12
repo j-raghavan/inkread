@@ -11,9 +11,12 @@
 
 use device_eink::{DeviceCapabilities, Rect, RefreshCommand, RefreshPolicy};
 
+use std::sync::Arc;
+
 use crate::document::fixed::PdfBackend;
 use crate::document::{Document, DocumentMetadata, TocEntry};
 use crate::error::{CoreError, CoreResult};
+use crate::persistence::{BookId, ReaderStore, ReadingPosition};
 use crate::policy::EinkRefreshPolicy;
 use crate::render::{PixelBuffer, Viewport};
 
@@ -57,6 +60,10 @@ pub struct ReaderSession {
     policy: EinkRefreshPolicy,
     viewport: Viewport,
     page: usize,
+    /// Persistence store (RR12-FR3); `None` for a store-less session (M0 / tests).
+    store: Option<Arc<dyn ReaderStore>>,
+    /// The book identity this session persists under (set with the store).
+    book: Option<BookId>,
 }
 
 impl ReaderSession {
@@ -76,7 +83,43 @@ impl ReaderSession {
             policy: EinkRefreshPolicy::new(caps, screen),
             viewport,
             page: 0,
+            store: None,
+            book: None,
         })
+    }
+
+    /// Open a PDF and attach a persistence store, **resuming** the saved reading position for
+    /// `book` (clamped to the document range, RR12-AC3). Position is saved via
+    /// [`Self::save_position`] on close/background.
+    pub fn open_pdf_with_store(
+        bytes: Vec<u8>,
+        caps: DeviceCapabilities,
+        viewport: Viewport,
+        store: Arc<dyn ReaderStore>,
+        book: BookId,
+    ) -> CoreResult<Self> {
+        let mut session = Self::open_pdf(bytes, caps, viewport)?;
+        session.attach_store(store, book)?;
+        Ok(session)
+    }
+
+    /// Resume the saved position for `book` (if any) and remember the store for saving.
+    fn attach_store(&mut self, store: Arc<dyn ReaderStore>, book: BookId) -> CoreResult<()> {
+        if let Some(pos) = store.load_position(&book)? {
+            let last = self.page_count().saturating_sub(1);
+            self.page = pos.page_index.min(last);
+        }
+        self.store = Some(store);
+        self.book = Some(book);
+        Ok(())
+    }
+
+    /// Persist the current reading position (RR12-FR3). A store-less session is a no-op.
+    pub fn save_position(&self) -> CoreResult<()> {
+        if let (Some(store), Some(book)) = (&self.store, &self.book) {
+            store.save_position(book, &ReadingPosition::new(self.page, self.page_count()))?;
+        }
+        Ok(())
     }
 
     /// Build a session over an arbitrary [`Document`] (used by the host harness/tests to
@@ -92,7 +135,23 @@ impl ReaderSession {
             policy: EinkRefreshPolicy::new(caps, screen),
             viewport,
             page: 0,
+            store: None,
+            book: None,
         }
+    }
+
+    /// Build a session over an arbitrary [`Document`] with a persistence store, resuming the
+    /// saved position for `book` (host harness/tests — drives the store path without pdfium).
+    pub fn with_document_and_store(
+        document: Box<dyn Document>,
+        caps: DeviceCapabilities,
+        viewport: Viewport,
+        store: Arc<dyn ReaderStore>,
+        book: BookId,
+    ) -> CoreResult<Self> {
+        let mut session = Self::with_document(document, caps, viewport);
+        session.attach_store(store, book)?;
+        Ok(session)
     }
 
     /// Total page count.
@@ -198,6 +257,7 @@ impl ReaderSession {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::persistence::sqlite::SqliteStore;
     use crate::render::PixelBuffer;
     use device_eink::{MockDeviceRecorder, RefreshIntent};
 
@@ -341,6 +401,62 @@ mod tests {
         let cmds = s.jump_to_toc(&unresolved);
         assert_eq!(s.current_page(), 4, "unresolved entry does not move");
         assert!(cmds.is_empty(), "unresolved entry emits no refresh");
+    }
+
+    fn store_session(pages: usize, store: Arc<dyn ReaderStore>, book: BookId) -> ReaderSession {
+        ReaderSession::with_document_and_store(
+            Box::new(StubDoc { pages }),
+            DeviceCapabilities::supernote_full(),
+            Viewport::new(100, 120, 226),
+            store,
+            book,
+        )
+        .unwrap()
+    }
+
+    // RR12-AC3: a session resumes the saved reading position on open.
+    #[test]
+    fn resumes_saved_position_on_open() {
+        let store: Arc<dyn ReaderStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let book = BookId::new("b").unwrap();
+        store
+            .save_position(&book, &ReadingPosition::new(3, 10))
+            .unwrap();
+        let s = store_session(10, store, book);
+        assert_eq!(s.current_page(), 3);
+    }
+
+    // RR12-FR3: save_position persists the current page through the store.
+    #[test]
+    fn save_position_persists_current_page() {
+        let store: Arc<dyn ReaderStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let book = BookId::new("b").unwrap();
+        let mut s = store_session(10, store.clone(), book.clone());
+        s.on_gesture(Gesture::NextPage);
+        s.on_gesture(Gesture::NextPage); // page index 2
+        s.save_position().unwrap();
+        let loaded = store.load_position(&book).unwrap().unwrap();
+        assert_eq!(loaded.page_index, 2);
+        assert_eq!(loaded.total, 10);
+    }
+
+    // RR12-AC3: a saved position past the current document's end clamps to the last page.
+    #[test]
+    fn resume_clamps_to_document_range() {
+        let store: Arc<dyn ReaderStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let book = BookId::new("b").unwrap();
+        store
+            .save_position(&book, &ReadingPosition::new(99, 200))
+            .unwrap();
+        let s = store_session(5, store, book);
+        assert_eq!(s.current_page(), 4);
+    }
+
+    // A store-less session: saving is a no-op (M0 path stays green).
+    #[test]
+    fn store_less_save_is_noop() {
+        let s = session(3, DeviceCapabilities::supernote_full());
+        assert!(s.save_position().is_ok());
     }
 
     #[test]

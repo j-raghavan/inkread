@@ -88,11 +88,12 @@ impl ReadingPosition {
 }
 
 /// The persistence **port** (ADR Decision 4). Reading-state logic depends on this trait, not on
-/// rusqlite; `Send` so the store can move onto the single engine worker thread (RR21).
+/// rusqlite; `Send + Sync` so the store can be shared (`Arc`) across the session and the engine
+/// worker thread (RR21). The sole adapter, [`sqlite::SqliteStore`], is `Sync` via its `Mutex`.
 ///
 /// M1a exposes the reading-position + schema-version surface; the settings surface (RR23) is
 /// added in the settings module.
-pub trait ReaderStore: Send {
+pub trait ReaderStore: Send + Sync {
     /// Load the saved reading position for `book`, or `None` if none was stored.
     fn load_position(&self, book: &BookId) -> CoreResult<Option<ReadingPosition>>;
 
