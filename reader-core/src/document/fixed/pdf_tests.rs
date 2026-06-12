@@ -143,6 +143,49 @@ fn concurrent_open_is_race_free() {
     }
 }
 
+// RR5-FR3: a clipped/scaled region render succeeds and produces an opaque buffer.
+#[test]
+fn render_region_clips_and_scales() {
+    if !host_pdfium_available() {
+        eprintln!("SKIP render_region: host libpdfium UNVERIFIED");
+        return;
+    }
+    let bytes = std::fs::read(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/minimal.pdf"
+    ))
+    .expect("fixture present");
+    let doc = PdfBackend::open(bytes).unwrap();
+    let (w, h) = (100u32, 140u32);
+    let mut px = vec![0u8; (w * h * 4) as usize];
+    let mut pb = PixelBuffer::from_rgba(&mut px, w, h).unwrap();
+    // Zoom 2× window at the top-left — must render without error and stay opaque.
+    doc.render_region(0, &mut pb, 2.0, 0, 0)
+        .expect("render region");
+    assert!(pb.bytes().chunks_exact(4).all(|p| p[3] == 0xFF));
+}
+
+// RR5-FR3 / RR21-FR3: a region render of a bad page is a typed error, not a panic.
+#[test]
+fn render_region_out_of_range_is_typed_error() {
+    if !host_pdfium_available() {
+        eprintln!("SKIP render_region_oob: host libpdfium UNVERIFIED");
+        return;
+    }
+    let bytes = std::fs::read(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/minimal.pdf"
+    ))
+    .expect("fixture present");
+    let doc = PdfBackend::open(bytes).unwrap();
+    let mut px = vec![0u8; 4 * 4 * 4];
+    let mut pb = PixelBuffer::from_rgba(&mut px, 4, 4).unwrap();
+    assert!(matches!(
+        doc.render_region(99, &mut pb, 1.0, 0, 0),
+        Err(CoreError::PageOutOfRange { requested: 99, .. })
+    ));
+}
+
 // RR5-FR2 / RR11-FR2: a PDF with no outline yields an empty TOC, never an error.
 #[test]
 fn toc_of_outline_less_pdf_is_empty() {

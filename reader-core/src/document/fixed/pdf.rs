@@ -114,24 +114,17 @@ impl PdfBackend {
             .map_err(map_load_error)?;
         Ok(Self { document })
     }
-}
 
-impl Document for PdfBackend {
-    fn page_count(&self) -> usize {
-        self.document.pages().len() as usize
-    }
-
-    fn metadata(&self) -> DocumentMetadata {
-        use pdfium_render::prelude::PdfDocumentMetadataTagType as Tag;
-        let md = self.document.metadata();
-        let get = |tag| md.get(tag).map(|t| t.value().to_string());
-        DocumentMetadata {
-            title: get(Tag::Title),
-            author: get(Tag::Author),
-        }
-    }
-
-    fn render_page(&self, index: usize, buf: &mut PixelBuffer<'_>) -> CoreResult<()> {
+    /// Render page `index` into `buf` using a [`PdfRenderConfig`] built from the buffer's
+    /// `(w, h)`. Shared by full-page and clipped/scaled region render (DRY): validates the
+    /// index, white-fills, and does the single-copy bitmap wrap (Fork 4); never panics on a
+    /// bad index/oversize (RR21-FR3).
+    fn render_with_config(
+        &self,
+        index: usize,
+        buf: &mut PixelBuffer<'_>,
+        make_config: impl FnOnce(i32, i32) -> PdfRenderConfig,
+    ) -> CoreResult<()> {
         let available = self.page_count();
         let page_index = i32::try_from(index)
             .ok()
@@ -157,11 +150,7 @@ impl Document for PdfBackend {
             .get(page_index)
             .map_err(|e| CoreError::RenderBackend(format!("get page {index}: {e}")))?;
 
-        // Amendment 3: reverse byte order so pdfium emits RGBA into our RGBA buffer.
-        let config = PdfRenderConfig::new()
-            .set_target_size(w, h)
-            .set_format(PdfBitmapFormat::BGRA)
-            .set_reverse_byte_order(true);
+        let config = make_config(w, h);
 
         // Single-copy: wrap the borrowed buffer as the pdfium bitmap target (Fork 4).
         // SAFETY: `buf.bytes_mut()` is exactly `width*height*4` bytes (PixelBuffer invariant),
@@ -175,6 +164,59 @@ impl Document for PdfBackend {
             .map_err(|e| CoreError::RenderBackend(format!("render page {index}: {e}")))?;
 
         Ok(())
+    }
+
+    /// Render a clipped, scaled viewport window of a page for pan/zoom (RR5-FR3). The page is
+    /// scaled by `zoom`, then the `buf`-sized window whose top-left is `(offset_x, offset_y)`
+    /// (in scaled-page pixels) is rasterized into `buf`. A non-finite/non-positive `zoom`
+    /// falls back to 1.0.
+    pub fn render_region(
+        &self,
+        index: usize,
+        buf: &mut PixelBuffer<'_>,
+        zoom: f32,
+        offset_x: i32,
+        offset_y: i32,
+    ) -> CoreResult<()> {
+        let zoom = if zoom.is_finite() && zoom > 0.0 {
+            zoom
+        } else {
+            1.0
+        };
+        self.render_with_config(index, buf, move |w, h| {
+            PdfRenderConfig::new()
+                .scale_page_by_factor(zoom)
+                .clip(offset_x, offset_y, offset_x + w, offset_y + h)
+                .set_format(PdfBitmapFormat::BGRA)
+                .set_reverse_byte_order(true)
+        })
+    }
+}
+
+impl Document for PdfBackend {
+    fn page_count(&self) -> usize {
+        self.document.pages().len() as usize
+    }
+
+    fn metadata(&self) -> DocumentMetadata {
+        use pdfium_render::prelude::PdfDocumentMetadataTagType as Tag;
+        let md = self.document.metadata();
+        let get = |tag| md.get(tag).map(|t| t.value().to_string());
+        DocumentMetadata {
+            title: get(Tag::Title),
+            author: get(Tag::Author),
+        }
+    }
+
+    fn render_page(&self, index: usize, buf: &mut PixelBuffer<'_>) -> CoreResult<()> {
+        // Full-page render: scale the whole page to the buffer. Amendment 3: reverse byte
+        // order so pdfium emits RGBA into our RGBA buffer.
+        self.render_with_config(index, buf, |w, h| {
+            PdfRenderConfig::new()
+                .set_target_size(w, h)
+                .set_format(PdfBitmapFormat::BGRA)
+                .set_reverse_byte_order(true)
+        })
     }
 
     fn toc(&self) -> Vec<TocEntry> {
