@@ -18,6 +18,18 @@ pub struct DocumentMetadata {
     pub author: Option<String>,
 }
 
+/// One table-of-contents entry; nested `children` form the outline tree (RR11-FR2).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TocEntry {
+    /// Display title for the entry.
+    pub title: String,
+    /// Target page index for a fixed-layout document, or `None` for a label-only/unresolved
+    /// entry (the UI shows it but tapping it does not navigate).
+    pub target_page: Option<usize>,
+    /// Nested child entries (sub-sections).
+    pub children: Vec<TocEntry>,
+}
+
 /// The core trait every format implements (M0 subset).
 ///
 /// Render targets a borrowed [`PixelBuffer`] (Fork 4); the backend white-fills before
@@ -40,6 +52,13 @@ pub trait Document {
     /// backend can warm an internal handle for the likely-next page, making a page turn blit a
     /// ready buffer. Default: a no-op (backends opt in). Must never panic on a bad index.
     fn hint_page(&self, _next: usize) {}
+
+    /// The document outline as a nested tree (RR5-FR2 / RR11-FR2). Default: empty — a format
+    /// with no outline (or a backend that hasn't implemented it) returns no entries, never an
+    /// error.
+    fn toc(&self) -> Vec<TocEntry> {
+        Vec::new()
+    }
 }
 
 #[cfg(test)]
@@ -64,6 +83,36 @@ mod tests {
     fn hint_page_default_is_noop() {
         Plain.hint_page(0);
         Plain.hint_page(99); // out-of-range hint must not panic either
+    }
+
+    // RR11-FR2: the default toc is empty (a format with no outline), never an error.
+    #[test]
+    fn toc_default_is_empty() {
+        assert!(Plain.toc().is_empty());
+    }
+
+    // RR11-FR2: TocEntry nests into a tree; an unresolved entry carries target_page = None.
+    #[test]
+    fn toc_entry_tree_nests() {
+        let tree = TocEntry {
+            title: "Part I".into(),
+            target_page: Some(0),
+            children: vec![
+                TocEntry {
+                    title: "Chapter 1".into(),
+                    target_page: Some(3),
+                    children: vec![],
+                },
+                TocEntry {
+                    title: "(unresolved)".into(),
+                    target_page: None,
+                    children: vec![],
+                },
+            ],
+        };
+        assert_eq!(tree.children.len(), 2);
+        assert_eq!(tree.children[0].target_page, Some(3));
+        assert_eq!(tree.children[1].target_page, None);
     }
 
     // RR4-FR7: a backend that overrides hint_page receives the requested page.
