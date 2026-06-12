@@ -138,6 +138,22 @@ class SupernoteEinkAdapter : EinkAdapter {
         }
     }
 
+    override fun setSystemGesturesEnabled(enabled: Boolean) {
+        // The Supernote's system gesture service (GMX) otherwise intercepts touch-up events
+        // before the app's window sees them, breaking tap detection. Releasing global + stylus
+        // gestures hands full touch streams to the reader. Reflection; never throws (RR21-FR3).
+        val v = view ?: return
+        val mgr = v.context.getSystemService("eink") ?: return
+        val cls = Class.forName("android.os.EinkManager")
+        for (method in arrayOf("setGlobalGuestureEnabled", "setStylusGuestureEnabled")) {
+            runCatching {
+                cls.getDeclaredMethod(method, Boolean::class.javaPrimitiveType)
+                    .invoke(mgr, enabled)
+            }.onFailure { Log.w(TAG, "$method($enabled) failed: $it") }
+        }
+        Log.i(TAG, "system gestures enabled=$enabled")
+    }
+
     private companion object {
         const val TAG = "SupernoteEinkAdapter"
     }

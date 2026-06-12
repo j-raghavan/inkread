@@ -20,6 +20,13 @@ interface EinkAdapter {
      */
     fun attachView(view: android.view.View?) {}
 
+    /**
+     * Enable/disable the device's system gesture service. On the Supernote that service
+     * otherwise swallows the reader's touch-up events; disabling it gives the app full touch
+     * streams (page turns, link taps, future pen input). Default no-op.
+     */
+    fun setSystemGesturesEnabled(enabled: Boolean) {}
+
     /** Execute one vendor-neutral [RefreshCommand] against the panel. */
     fun execute(command: RefreshCommand)
 
