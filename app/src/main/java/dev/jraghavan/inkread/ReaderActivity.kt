@@ -2,12 +2,15 @@ package dev.jraghavan.inkread
 
 import android.app.Activity
 import android.app.AlertDialog
+import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
+import android.net.Uri
 import android.os.Bundle
 import android.util.Log
+import android.view.GestureDetector
 import android.view.MotionEvent
 import android.view.SurfaceHolder
 import android.view.SurfaceView
@@ -58,6 +61,21 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         textAlign = Paint.Align.CENTER
     }
 
+    /** Shell-side state: which book to reopen on launch (RR27); the page itself lives in the core. */
+    private val prefs by lazy { getSharedPreferences(PREFS, MODE_PRIVATE) }
+
+    /** Tap zones for page turns + long-press to open a PDF (RR22/RR25). */
+    private val gestures by lazy {
+        GestureDetector(this, object : GestureDetector.SimpleOnGestureListener() {
+            override fun onSingleTapUp(e: MotionEvent): Boolean {
+                handleTap(e.x)
+                return true
+            }
+
+            override fun onLongPress(e: MotionEvent) = openPicker()
+        })
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         // Prove the JNI boundary up front (RR1-AC2). Cheap; fine on the UI thread.
@@ -65,7 +83,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
 
         surfaceView = SurfaceView(this)
         surfaceView.holder.addCallback(this)
-        surfaceView.setOnTouchListener { _, event -> onSurfaceTouch(event) }
+        surfaceView.setOnTouchListener { _, event -> gestures.onTouchEvent(event) }
         setContentView(surfaceView)
     }
 
@@ -84,6 +102,34 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         super.onPause()
         // Persist the reading position when backgrounded (RR27) — async on the engine thread.
         engine.execute { savePosition() }
+    }
+
+    /** Launch the system file picker for a PDF (RR22). */
+    private fun openPicker() {
+        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            type = "application/pdf"
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        try {
+            startActivityForResult(intent, REQ_OPEN_DOC)
+        } catch (e: android.content.ActivityNotFoundException) {
+            Toast.makeText(this, "No file picker available", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    @Deprecated("startActivityForResult is fine for this single-Activity shell (no AndroidX).")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode != REQ_OPEN_DOC || resultCode != RESULT_OK) return
+        val uri = data?.data ?: return
+        // Best-effort: keep read access in case we re-import later (the open path copies bytes now).
+        try {
+            contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        } catch (e: SecurityException) {
+            Log.w(TAG, "no persistable permission for $uri: ${e.message}")
+        }
+        engine.execute { importAndOpen(uri) }
     }
 
     override fun onDestroy() {
@@ -108,29 +154,46 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
 
     private fun openDocumentIfNeeded() {
         if (docHandle != 0L) return
-        val caps = adapter.capabilities()
-        val capsBytes = WireCodec.encodeCapabilities(caps)
-        NativeBridge.nativeInit(capsBytes)
+        val book = resolveBook()
+        if (book == null) {
+            Log.w(TAG, "no book to open; long-press to pick a PDF (RR22)")
+            runOnUiThread {
+                Toast.makeText(this, "Long-press to open a PDF", Toast.LENGTH_LONG).show()
+            }
+            return
+        }
+        openBook(book.first, book.second)
+    }
 
-        // M0 opens a fixed sample placed on-device; the SAF/library path is RR22 (M1a.6).
+    /**
+     * Choose which book to open: the last-opened one (RR27 — reopen where you were), else the
+     * bring-up `sample.pdf` placed via adb. Returns `(filesystemPath, stableBookId)` or null.
+     */
+    private fun resolveBook(): Pair<String, String>? {
+        val savedPath = prefs.getString(KEY_BOOK_PATH, null)
+        val savedId = prefs.getString(KEY_BOOK_ID, null)
+        if (savedPath != null && savedId != null && File(savedPath).exists()) {
+            return savedPath to savedId
+        }
         // External files dir first, then internal filesDir — the latter is adb/`run-as`-writable
         // under Android 11 scoped storage, so a bring-up PDF can be placed without SAF.
         val sample = listOf(
             File(getExternalFilesDir(null), "sample.pdf"),
             File(filesDir, "sample.pdf"),
-        ).firstOrNull(File::exists)
-        if (sample == null) {
-            Log.w(TAG, "no sample.pdf in external/internal files dir; nothing to open (M0 bring-up)")
-            return
-        }
-        // Open with a SQLite store so the reading position + e-ink settings persist and the
-        // saved page resumes on reopen (RR12 / RR27). The store lives under app storage; the
-        // book identity is the file name (the library will key by a real id in RR26).
+        ).firstOrNull(File::exists) ?: return null
+        return sample.absolutePath to sample.name
+    }
+
+    /**
+     * Open `path` with a SQLite store keyed by `bookId` so the reading position + e-ink settings
+     * resume per document (RR12 / RR27). The store lives under app storage.
+     */
+    private fun openBook(path: String, bookId: String) {
+        val capsBytes = WireCodec.encodeCapabilities(adapter.capabilities())
+        NativeBridge.nativeInit(capsBytes)
         val dbPath = File(filesDir, "reader.db").absolutePath
         docHandle = try {
-            NativeBridge.nativeOpenDocumentWithStore(
-                sample.absolutePath, capsBytes, viewW, viewH, DPI, dbPath, sample.name,
-            )
+            NativeBridge.nativeOpenDocumentWithStore(path, capsBytes, viewW, viewH, DPI, dbPath, bookId)
         } catch (e: RuntimeException) {
             Log.e(TAG, "open failed: ${e.message}")
             0L
@@ -138,10 +201,41 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         if (docHandle != 0L) {
             Log.i(
                 TAG,
-                "opened ${sample.name}: ${NativeBridge.nativePageCount(docHandle)} pages, " +
+                "opened $bookId: ${NativeBridge.nativePageCount(docHandle)} pages, " +
                     "resumed at page ${NativeBridge.nativeCurrentPage(docHandle)}",
             )
         }
+    }
+
+    /**
+     * Import a SAF-picked PDF (RR22): copy its bytes into app storage, remember it as the current
+     * book, then swap the open document on the engine thread. Runs on the engine thread (IO +
+     * serialized engine access, RR21). The book id is the content URI (clamped) so the position
+     * resumes per document even though the bytes are re-copied to a fixed path.
+     */
+    private fun importAndOpen(uri: Uri) {
+        val dest = File(filesDir, "current.pdf")
+        try {
+            contentResolver.openInputStream(uri)?.use { input ->
+                dest.outputStream().use { out -> input.copyTo(out) }
+            } ?: run {
+                Log.e(TAG, "cannot open stream for $uri")
+                return
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "import failed: ${e.message}")
+            return
+        }
+        val bookId = uri.toString().take(BOOK_ID_MAX)
+        prefs.edit()
+            .putString(KEY_BOOK_PATH, dest.absolutePath)
+            .putString(KEY_BOOK_ID, bookId)
+            .apply()
+
+        closeDocument() // saves + closes the previous book before swapping
+        drawLoading()
+        openBook(dest.absolutePath, bookId)
+        renderAndBlit()
     }
 
     private fun renderAndBlit() {
@@ -189,16 +283,14 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
 
     // ---- input (UI thread) → engine ----
 
-    private fun onSurfaceTouch(event: MotionEvent): Boolean {
-        if (event.action != MotionEvent.ACTION_UP) return true
-        // Tap zones (RR25-FR3): left third = prev, right third = next, center third = contents.
+    /** Route a tap by zone (RR25-FR3): left third = prev, right third = next, center = contents. */
+    private fun handleTap(x: Float) {
         val third = surfaceView.width / 3f
         when {
-            event.x < third -> postGesture(Gesture.PREV_PAGE)
-            event.x > 2 * third -> postGesture(Gesture.NEXT_PAGE)
+            x < third -> postGesture(Gesture.PREV_PAGE)
+            x > 2 * third -> postGesture(Gesture.NEXT_PAGE)
             else -> openTocMenu()
         }
-        return true
     }
 
     /** Apply a page-turn gesture on the engine thread, then render + refresh (RR25). */
@@ -287,5 +379,10 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
     private companion object {
         const val TAG = "ReaderActivity"
         const val DPI = 226 // Supernote-class panel density (approx); refined per device.
+        const val REQ_OPEN_DOC = 1 // startActivityForResult request code for the PDF picker.
+        const val PREFS = "inkread"
+        const val KEY_BOOK_PATH = "book_path" // copied PDF under app storage (RR27).
+        const val KEY_BOOK_ID = "book_id" // stable per-book identity (content URI, clamped).
+        const val BOOK_ID_MAX = 512 // mirrors BookId::MAX_LEN in the core.
     }
 }
