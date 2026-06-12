@@ -1,6 +1,7 @@
 package dev.jraghavan.inkread
 
 import android.app.Activity
+import android.app.AlertDialog
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
@@ -10,6 +11,7 @@ import android.util.Log
 import android.view.MotionEvent
 import android.view.SurfaceHolder
 import android.view.SurfaceView
+import android.widget.Toast
 import dev.jraghavan.inkread.eink.EinkAdapter
 import dev.jraghavan.inkread.eink.SupernoteEinkAdapter
 import java.io.File
@@ -189,13 +191,20 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
 
     private fun onSurfaceTouch(event: MotionEvent): Boolean {
         if (event.action != MotionEvent.ACTION_UP) return true
-        // Decide the tap zone on the UI thread (view width is available here), then enqueue.
-        val x = event.x
-        val width = surfaceView.width
+        // Tap zones (RR25-FR3): left third = prev, right third = next, center third = contents.
+        val third = surfaceView.width / 3f
+        when {
+            event.x < third -> postGesture(Gesture.PREV_PAGE)
+            event.x > 2 * third -> postGesture(Gesture.NEXT_PAGE)
+            else -> openTocMenu()
+        }
+        return true
+    }
+
+    /** Apply a page-turn gesture on the engine thread, then render + refresh (RR25). */
+    private fun postGesture(gesture: Gesture) {
         engine.execute {
             if (docHandle == 0L) return@execute
-            // Left third = prev, right two-thirds = next (RR25-FR3 tap zones).
-            val gesture = if (x < width / 3f) Gesture.PREV_PAGE else Gesture.NEXT_PAGE
             val commandBytes = try {
                 NativeBridge.nativeOnGesture(docHandle, gesture.code)
             } catch (e: RuntimeException) {
@@ -206,7 +215,51 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             // Execute the policy's refresh stream on the panel (RR2-FR3).
             adapter.executeAll(WireCodec.decodeCommands(commandBytes))
         }
-        return true
+    }
+
+    /** Fetch the TOC on the engine thread, then show the chooser on the UI thread (RR11-FR2). */
+    private fun openTocMenu() {
+        engine.execute {
+            if (docHandle == 0L) return@execute
+            val toc = try {
+                WireCodec.decodeToc(NativeBridge.nativeToc(docHandle))
+            } catch (e: RuntimeException) {
+                Log.e(TAG, "toc failed: ${e.message}")
+                return@execute
+            }
+            runOnUiThread { showTocDialog(toc) }
+        }
+    }
+
+    private fun showTocDialog(toc: List<TocItem>) {
+        if (toc.isEmpty()) {
+            Toast.makeText(this, "No contents in this document", Toast.LENGTH_SHORT).show()
+            return
+        }
+        // Indent by depth; show the 1-based page for resolvable entries (RR11-FR2).
+        val labels = toc.map { item ->
+            val indent = "    ".repeat(item.depth)
+            val page = item.targetPage?.let { "  ·  p${it + 1}" } ?: ""
+            indent + item.title + page
+        }.toTypedArray()
+
+        AlertDialog.Builder(this)
+            .setTitle("Contents")
+            .setItems(labels) { _, which ->
+                val page = toc[which].targetPage ?: return@setItems // label-only: no jump
+                engine.execute {
+                    if (docHandle == 0L) return@execute
+                    val commandBytes = try {
+                        NativeBridge.nativeJumpToPage(docHandle, page)
+                    } catch (e: RuntimeException) {
+                        Log.e(TAG, "jump failed: ${e.message}")
+                        return@execute
+                    }
+                    renderAndBlit()
+                    adapter.executeAll(WireCodec.decodeCommands(commandBytes))
+                }
+            }
+            .show()
     }
 
     /** Persist the current reading position (RR12-FR3 / RR27); store-less / closed = no-op. */

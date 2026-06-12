@@ -72,7 +72,19 @@ object NativeBridge {
      * stream (Fork 2). Decode with [WireCodec.decodeCommands].
      */
     external fun nativeOnGesture(handle: Long, code: Int): ByteArray
+
+    /** The document outline as the flattened pre-order wire (RR11-FR2); decode with [WireCodec.decodeToc]. */
+    external fun nativeToc(handle: Long): ByteArray
+
+    /**
+     * Jump to an absolute page index (clamped to range in the core); returns the encoded
+     * RefreshCommand stream (RR11-FR1). Decode with [WireCodec.decodeCommands].
+     */
+    external fun nativeJumpToPage(handle: Long, page: Int): ByteArray
 }
+
+/** One flattened table-of-contents entry (RR11-FR2). [targetPage] is null for a label-only entry. */
+data class TocItem(val depth: Int, val targetPage: Int?, val title: String)
 
 /** Navigation gestures — the int code mapping mirrors `Gesture::from_code` in the core. */
 enum class Gesture(val code: Int) {
@@ -157,4 +169,34 @@ object WireCodec {
         }
         return out
     }
+
+    /**
+     * Decode the flattened pre-order TOC wire from [NativeBridge.nativeToc] (RR11-FR2). Layout:
+     * `[ver][count: u16]` then per entry `[depth: u8][flags: u8][page: u32][len: u16][title…]`,
+     * `flags` bit 0 = resolved target. Mirrors `encode_toc_wire` in `reader-core/document`.
+     */
+    fun decodeToc(bytes: ByteArray): List<TocItem> {
+        require(bytes.size >= TOC_HEADER_LEN) { "toc stream truncated" }
+        require(bytes[0] == WIRE_VERSION) { "bad toc wire version ${bytes[0]}" }
+        val buf = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
+        val count = buf.getShort(1).toInt() and 0xFFFF
+        val out = ArrayList<TocItem>(count)
+        var off = TOC_HEADER_LEN
+        repeat(count) {
+            require(bytes.size >= off + TOC_RECORD_FIXED) { "toc record truncated" }
+            val depth = bytes[off].toInt() and 0xFF
+            val hasTarget = (bytes[off + 1].toInt() and 1) == 1
+            val page = buf.getInt(off + 2)
+            val len = buf.getShort(off + 6).toInt() and 0xFFFF
+            val titleStart = off + TOC_RECORD_FIXED
+            require(bytes.size >= titleStart + len) { "toc title overruns stream" }
+            val title = String(bytes, titleStart, len, Charsets.UTF_8)
+            out.add(TocItem(depth, if (hasTarget) page else null, title))
+            off = titleStart + len
+        }
+        return out
+    }
+
+    private const val TOC_HEADER_LEN = 3
+    private const val TOC_RECORD_FIXED = 8 // depth(1)+flags(1)+page(4)+len(2)
 }

@@ -32,6 +32,7 @@ use device_eink::{decode_capabilities, encode_commands, DeviceCapabilities};
 use std::path::Path;
 use std::sync::Arc;
 
+use crate::document::encode_toc_wire;
 use crate::error::{CoreError, CoreResult};
 use crate::persistence::sqlite::SqliteStore;
 use crate::persistence::{BookId, ReaderStore};
@@ -313,6 +314,49 @@ pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeCurrentPage
         // SAFETY: borrowed, not owned (Amendment 2).
         let session = unsafe { session_mut(handle) }.map_err(|e| throw(env, &e))?;
         Ok(session.current_page() as jint)
+    })
+    .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
+}
+
+// =====================================================================================
+// nativeToc(handle) : ByteArray — the document outline as the flattened pre-order wire
+// (RR11-FR2). Decode with WireCodec.decodeToc. An outline-less document yields the header
+// with a zero count (an empty list), never an error.
+// =====================================================================================
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeToc<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+) -> JByteArray<'local> {
+    env.with_env(|env| -> jni::errors::Result<JByteArray<'local>> {
+        // SAFETY: borrowed, not owned (Amendment 2).
+        let session = unsafe { session_mut(handle) }.map_err(|e| throw(env, &e))?;
+        let bytes = encode_toc_wire(&session.toc());
+        env.byte_array_from_slice(&bytes)
+    })
+    .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
+}
+
+// =====================================================================================
+// nativeJumpToPage(handle, page) : ByteArray — jump to an absolute page index (clamped to
+// the document range in the core), returning the encoded RefreshCommand stream (RR11-FR1).
+// A negative index clamps to 0. Used by TOC/scrubber jumps.
+// =====================================================================================
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeJumpToPage<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+    page: jint,
+) -> JByteArray<'local> {
+    env.with_env(|env| -> jni::errors::Result<JByteArray<'local>> {
+        // SAFETY: borrowed, not owned (Amendment 2).
+        let session = unsafe { session_mut(handle) }.map_err(|e| throw(env, &e))?;
+        let target = if page < 0 { 0usize } else { page as usize };
+        let commands = session.jump_to_page(target);
+        let bytes = encode_commands(&commands);
+        env.byte_array_from_slice(&bytes)
     })
     .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
 }
