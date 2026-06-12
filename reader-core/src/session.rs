@@ -12,7 +12,7 @@
 use device_eink::{DeviceCapabilities, Rect, RefreshCommand, RefreshPolicy};
 
 use crate::document::fixed::PdfBackend;
-use crate::document::{Document, DocumentMetadata};
+use crate::document::{Document, DocumentMetadata, TocEntry};
 use crate::error::{CoreError, CoreResult};
 use crate::policy::EinkRefreshPolicy;
 use crate::render::{PixelBuffer, Viewport};
@@ -178,6 +178,21 @@ impl ReaderSession {
         let page_rect = Rect::full(self.viewport.width, self.viewport.height);
         self.policy.on_page_turn(page_rect)
     }
+
+    /// The document outline (RR11-FR2), a pass-through to [`Document::toc`].
+    #[must_use]
+    pub fn toc(&self) -> Vec<TocEntry> {
+        self.document.toc()
+    }
+
+    /// Navigate to a TOC entry's target page (RR11-AC1). An unresolved entry (no
+    /// `target_page`) does not move and returns no refresh commands.
+    pub fn jump_to_toc(&mut self, entry: &TocEntry) -> Vec<RefreshCommand> {
+        match entry.target_page {
+            Some(page) => self.jump_to_page(page),
+            None => Vec::new(),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -209,6 +224,13 @@ mod tests {
             }
             buf.fill_white();
             Ok(())
+        }
+        fn toc(&self) -> Vec<TocEntry> {
+            vec![TocEntry {
+                title: "Stub Chapter".into(),
+                target_page: Some(0),
+                children: vec![],
+            }]
         }
     }
 
@@ -287,6 +309,38 @@ mod tests {
         // Page 0 is reachable.
         s.jump_to_page(0);
         assert_eq!(s.current_page(), 0);
+    }
+
+    // RR11-FR2: toc() passes through to the document.
+    #[test]
+    fn toc_passthrough() {
+        let s = session(3, DeviceCapabilities::supernote_full());
+        let toc = s.toc();
+        assert_eq!(toc.len(), 1);
+        assert_eq!(toc[0].title, "Stub Chapter");
+    }
+
+    // RR11-AC1: jump_to_toc lands on a resolved target; an unresolved entry doesn't move.
+    #[test]
+    fn jump_to_toc_lands_on_target_or_stays() {
+        let caps = DeviceCapabilities::supernote_full();
+        let mut s = session(10, caps);
+        let entry = TocEntry {
+            title: "Ch".into(),
+            target_page: Some(4),
+            children: vec![],
+        };
+        s.jump_to_toc(&entry);
+        assert_eq!(s.current_page(), 4);
+
+        let unresolved = TocEntry {
+            title: "label".into(),
+            target_page: None,
+            children: vec![],
+        };
+        let cmds = s.jump_to_toc(&unresolved);
+        assert_eq!(s.current_page(), 4, "unresolved entry does not move");
+        assert!(cmds.is_empty(), "unresolved entry emits no refresh");
     }
 
     #[test]
