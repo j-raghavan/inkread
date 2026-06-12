@@ -126,17 +126,30 @@ impl RefreshPolicy for EinkRefreshPolicy {
     }
 
     fn on_scroll_update(&mut self, dirty: Rect) -> Vec<RefreshCommand> {
-        // A fast, regional panel repaints just the dirty rect with the 1-bit Fast waveform.
-        // The !regional coalesce and the !fast_mode path are RR3-FR10 (degradation).
-        if self.caps.fast_mode && self.caps.regional_update {
-            vec![RefreshCommand::Update {
-                rect: dirty,
-                intent: RefreshIntent::Fast,
-                dither: false,
-            }]
-        } else {
-            Vec::new()
+        // Capability-aware degradation (RR3-FR10), never branching on a vendor:
+        //   !eink_full     → no mid-scroll update; on_scroll_end settles with a Full.
+        //   !fast_mode     → scroll uses Partial instead of the 1-bit Fast waveform.
+        //   !regional_update → coalesce the dirty rect to a full-screen update (RR2-FR4).
+        if !self.caps.eink_full {
+            return Vec::new();
         }
+        let intent = if self.caps.fast_mode {
+            RefreshIntent::Fast
+        } else {
+            RefreshIntent::Partial
+        };
+        let rect = if self.caps.regional_update {
+            dirty
+        } else {
+            self.screen
+        };
+        // The Fast waveform is 1-bit; only a Partial honors the dither request.
+        let dither = intent == RefreshIntent::Partial && self.dither;
+        vec![RefreshCommand::Update {
+            rect,
+            intent,
+            dither,
+        }]
     }
 
     fn on_scroll_end(&mut self, settle_rect: Rect) -> Vec<RefreshCommand> {
@@ -370,6 +383,77 @@ mod tests {
                 }]
             ));
         }
+    }
+
+    // RR3-FR10: a panel with full control but no fast mode scrolls with Partial (not Fast),
+    // and emits no EnterFastMode advisory.
+    #[test]
+    fn no_fast_mode_scroll_uses_partial() {
+        let caps = DeviceCapabilities {
+            fast_mode: false,
+            ..DeviceCapabilities::supernote_full()
+        };
+        let mut policy = EinkRefreshPolicy::new(caps, screen());
+        assert_eq!(policy.on_scroll_start(), Vec::new());
+        let dirty = Rect::new(0, 100, 1404, 400);
+        assert_eq!(
+            policy.on_scroll_update(dirty),
+            vec![RefreshCommand::Update {
+                rect: dirty,
+                intent: RefreshIntent::Partial,
+                dither: false,
+            }]
+        );
+        let settle = Rect::new(0, 0, 1404, 1872);
+        // No fast region was entered, so no LeaveFastMode — just the Partial settle.
+        assert_eq!(
+            policy.on_scroll_end(settle),
+            vec![RefreshCommand::Update {
+                rect: settle,
+                intent: RefreshIntent::Partial,
+                dither: false,
+            }]
+        );
+    }
+
+    // RR3-FR10: a fast panel that can't do regional updates coalesces the dirty rect to a
+    // full-screen Fast update (the Rockchip full-screen quirk, RR2-FR4).
+    #[test]
+    fn no_regional_coalesces_scroll_to_screen() {
+        let caps = DeviceCapabilities {
+            regional_update: false,
+            ..DeviceCapabilities::supernote_full()
+        };
+        let mut policy = EinkRefreshPolicy::new(caps, screen());
+        policy.on_scroll_start();
+        assert_eq!(
+            policy.on_scroll_update(Rect::new(0, 100, 700, 400)),
+            vec![RefreshCommand::Update {
+                rect: screen(),
+                intent: RefreshIntent::Fast,
+                dither: false,
+            }]
+        );
+    }
+
+    // RR3-FR10 / RR3-AC3: on a basic panel, scroll emits nothing mid-motion and settles full.
+    #[test]
+    fn basic_panel_scroll_settles_full_screen() {
+        let caps = DeviceCapabilities::supernote_baseline();
+        let mut policy = EinkRefreshPolicy::new(caps, screen());
+        assert_eq!(policy.on_scroll_start(), Vec::new());
+        assert_eq!(
+            policy.on_scroll_update(Rect::new(0, 0, 700, 400)),
+            Vec::new()
+        );
+        assert_eq!(
+            policy.on_scroll_end(Rect::new(0, 0, 700, 400)),
+            vec![RefreshCommand::Update {
+                rect: screen(),
+                intent: RefreshIntent::Full,
+                dither: false,
+            }]
+        );
     }
 
     #[test]
