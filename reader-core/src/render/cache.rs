@@ -60,22 +60,25 @@ fn to_milli(value: f32) -> u32 {
     }
 }
 
-struct CacheEntry {
-    rgba: Vec<u8>,
+struct Entry {
+    bytes: Vec<u8>,
     last_used: u64,
 }
 
-/// A bounded LRU cache of rendered RGBA buffers, capped by total bytes (RR4-FR6 / RR24-FR1).
-pub struct RenderCache {
-    map: HashMap<PageHash, CacheEntry>,
+/// A byte-bounded LRU keyed by `K` — the shared core of the render and cover caches
+/// (RR24-FR1). Eviction is **deterministic**: each access stamps a unique monotonic tick, so
+/// the least-recently-used entry is unambiguous regardless of `HashMap` order. An item larger
+/// than the whole budget is not cached, so the `bytes() <= max_bytes` invariant always holds.
+pub struct ByteLru<K: Eq + std::hash::Hash + Clone> {
+    map: HashMap<K, Entry>,
     max_bytes: usize,
     cur_bytes: usize,
     tick: u64,
     evicted: u64,
 }
 
-impl RenderCache {
-    /// A cache holding at most `max_bytes` of rendered pixels.
+impl<K: Eq + std::hash::Hash + Clone> ByteLru<K> {
+    /// A cache holding at most `max_bytes`.
     #[must_use]
     pub fn with_capacity_bytes(max_bytes: usize) -> Self {
         Self {
@@ -87,25 +90,23 @@ impl RenderCache {
         }
     }
 
-    /// Fetch the buffer for `key`, marking it most-recently-used. `None` on a miss.
-    pub fn get(&mut self, key: &PageHash) -> Option<&[u8]> {
+    /// Fetch `key`'s bytes, marking it most-recently-used. `None` on a miss.
+    pub fn get(&mut self, key: &K) -> Option<&[u8]> {
         self.tick += 1;
         let tick = self.tick;
         let entry = self.map.get_mut(key)?;
         entry.last_used = tick;
-        Some(entry.rgba.as_slice())
+        Some(entry.bytes.as_slice())
     }
 
-    /// Insert (or replace) the buffer for `key`, evicting LRU entries until it fits the budget.
-    ///
-    /// A buffer larger than the whole budget is **not** cached (the budget invariant
-    /// `cur_bytes <= max_bytes` always holds) — the caller simply re-renders it next time.
-    pub fn insert(&mut self, key: PageHash, rgba: Vec<u8>) {
+    /// Insert (or replace) `key`'s bytes, evicting LRU entries until it fits the budget. An
+    /// item larger than the whole budget is not cached (the caller re-creates it next time).
+    pub fn insert(&mut self, key: K, bytes: Vec<u8>) {
         self.tick += 1;
-        let size = rgba.len();
+        let size = bytes.len();
         // Replacing an existing key: reclaim its bytes first.
         if let Some(old) = self.map.remove(&key) {
-            self.cur_bytes -= old.rgba.len();
+            self.cur_bytes -= old.bytes.len();
         }
         if size > self.max_bytes {
             return; // too big to ever fit; leave the budget intact.
@@ -116,11 +117,11 @@ impl RenderCache {
                 .map
                 .iter()
                 .min_by_key(|(_, e)| e.last_used)
-                .map(|(k, _)| *k);
+                .map(|(k, _)| k.clone());
             match victim {
                 Some(v) => {
                     if let Some(e) = self.map.remove(&v) {
-                        self.cur_bytes -= e.rgba.len();
+                        self.cur_bytes -= e.bytes.len();
                         self.evicted += 1;
                     }
                 }
@@ -130,8 +131,8 @@ impl RenderCache {
         self.cur_bytes += size;
         self.map.insert(
             key,
-            CacheEntry {
-                rgba,
+            Entry {
+                bytes,
                 last_used: self.tick,
             },
         );
@@ -165,6 +166,61 @@ impl RenderCache {
     pub fn clear(&mut self) {
         self.map.clear();
         self.cur_bytes = 0;
+    }
+}
+
+/// A bounded LRU of rendered RGBA buffers keyed by [`PageHash`] (RR4-FR6) — a thin wrapper over
+/// [`ByteLru`].
+pub struct RenderCache {
+    inner: ByteLru<PageHash>,
+}
+
+impl RenderCache {
+    /// A cache holding at most `max_bytes` of rendered pixels.
+    #[must_use]
+    pub fn with_capacity_bytes(max_bytes: usize) -> Self {
+        Self {
+            inner: ByteLru::with_capacity_bytes(max_bytes),
+        }
+    }
+
+    /// Fetch the buffer for `key`, marking it most-recently-used. `None` on a miss.
+    pub fn get(&mut self, key: &PageHash) -> Option<&[u8]> {
+        self.inner.get(key)
+    }
+
+    /// Insert (or replace) the buffer for `key`, evicting LRU entries until it fits the budget.
+    pub fn insert(&mut self, key: PageHash, rgba: Vec<u8>) {
+        self.inner.insert(key, rgba);
+    }
+
+    /// Number of cached entries.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.inner.len()
+    }
+
+    /// Whether the cache is empty.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.inner.is_empty()
+    }
+
+    /// Total bytes currently held.
+    #[must_use]
+    pub fn bytes(&self) -> usize {
+        self.inner.bytes()
+    }
+
+    /// Lifetime count of evicted entries.
+    #[must_use]
+    pub fn evicted_count(&self) -> u64 {
+        self.inner.evicted_count()
+    }
+
+    /// Drop all entries (the back-pressure trim hook, RR24-FR3).
+    pub fn clear(&mut self) {
+        self.inner.clear();
     }
 }
 

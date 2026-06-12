@@ -6,6 +6,58 @@
 //! on `onTrimMemory`. All pure logic, host-tested; the wall-clock latency targets (RR24-FR4)
 //! are device-measured and out of scope here.
 
+use crate::persistence::BookId;
+use crate::render::ByteLru;
+
+/// A bounded LRU of cover thumbnails keyed by [`BookId`] (RR13-FR2 / RR24-FR1) — a thin wrapper
+/// over [`ByteLru`], sized from the [`ResourceBudget`].
+pub struct CoverCache {
+    inner: ByteLru<BookId>,
+}
+
+impl CoverCache {
+    /// A cover cache holding at most `max_bytes` of thumbnails.
+    #[must_use]
+    pub fn with_capacity_bytes(max_bytes: usize) -> Self {
+        Self {
+            inner: ByteLru::with_capacity_bytes(max_bytes),
+        }
+    }
+
+    /// Fetch a book's cover bytes, marking it most-recently-used. `None` on a miss.
+    pub fn get(&mut self, book: &BookId) -> Option<&[u8]> {
+        self.inner.get(book)
+    }
+
+    /// Insert (or replace) a book's cover bytes, evicting LRU entries to fit the budget.
+    pub fn insert(&mut self, book: BookId, cover: Vec<u8>) {
+        self.inner.insert(book, cover);
+    }
+
+    /// Number of cached covers.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.inner.len()
+    }
+
+    /// Whether the cache is empty.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.inner.is_empty()
+    }
+
+    /// Total bytes currently held.
+    #[must_use]
+    pub fn bytes(&self) -> usize {
+        self.inner.bytes()
+    }
+
+    /// Drop all covers (back-pressure trim, RR24-FR3).
+    pub fn clear(&mut self) {
+        self.inner.clear();
+    }
+}
+
 /// Committed cache sizes + the page-pixel cap (RR24-FR1/FR2). Tunable; the defaults are the
 /// Supernote baseline.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -88,5 +140,25 @@ mod tests {
         // Non-finite / non-positive zoom → treated as 1.0, then capped.
         assert!(b.clamp_render_scale(1000, 1000, f32::NAN) > 0.0);
         assert!(b.clamp_render_scale(1000, 1000, -2.0) > 0.0);
+    }
+
+    // RR24-FR1 / RR13-FR2: the cover cache evicts the LRU book deterministically and clears.
+    #[test]
+    fn cover_cache_evicts_lru_book_and_clears() {
+        let mut c = CoverCache::with_capacity_bytes(8); // holds two 4-byte covers
+        let a = BookId::new("a").unwrap();
+        let b = BookId::new("b").unwrap();
+        let d = BookId::new("d").unwrap();
+        c.insert(a.clone(), vec![0; 4]);
+        c.insert(b.clone(), vec![0; 4]);
+        assert!(c.get(&a).is_some()); // touch a → b becomes LRU
+        c.insert(d.clone(), vec![0; 4]); // evicts b
+        assert_eq!(c.len(), 2);
+        assert!(c.get(&a).is_some(), "recently-used a retained");
+        assert!(c.get(&b).is_none(), "LRU b evicted");
+        assert!(c.get(&d).is_some());
+        assert!(c.bytes() <= 8);
+        c.clear();
+        assert!(c.is_empty());
     }
 }
