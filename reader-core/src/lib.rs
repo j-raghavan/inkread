@@ -9,6 +9,7 @@
 
 pub mod document;
 pub mod error;
+pub mod persistence;
 pub mod policy;
 pub mod render;
 pub mod session;
