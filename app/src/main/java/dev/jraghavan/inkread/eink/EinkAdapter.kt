@@ -13,6 +13,13 @@ interface EinkAdapter {
     /** The capabilities this adapter advertises to the core at init (RR2-FR2). */
     fun capabilities(): DeviceCapabilities
 
+    /**
+     * Give the adapter the panel-owning [View] (e.g. the reader SurfaceView). Some devices
+     * trigger an EPD refresh through the view's context (the Supernote routes via the system
+     * "eink" service). Default no-op for adapters that don't need a view.
+     */
+    fun attachView(view: android.view.View?) {}
+
     /** Execute one vendor-neutral [RefreshCommand] against the panel. */
     fun execute(command: RefreshCommand)
 
@@ -20,4 +27,11 @@ interface EinkAdapter {
     fun executeAll(commands: List<RefreshCommand>) {
         for (c in commands) execute(c)
     }
+
+    /**
+     * Force a full-screen panel refresh after a blit that carries no command stream (the
+     * initial open, a SAF import). On a full-only panel this is the same flash a page turn's
+     * `Update{Full}` produces. Default no-op.
+     */
+    fun refreshFull() {}
 }

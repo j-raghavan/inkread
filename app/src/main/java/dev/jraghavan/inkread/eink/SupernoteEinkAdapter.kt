@@ -1,6 +1,7 @@
 package dev.jraghavan.inkread.eink
 
 import android.util.Log
+import android.view.View
 import dev.jraghavan.inkread.DeviceCapabilities
 import dev.jraghavan.inkread.RefreshCommand
 import dev.jraghavan.inkread.RefreshIntent
@@ -40,7 +41,18 @@ class SupernoteEinkAdapter : EinkAdapter {
     /** EBC waveform modes (the vendor mechanism the core never names). */
     private enum class EbcMode { GC16, GL16, A2, DU, INIT }
 
+    /** The panel-owning view; its context resolves the system "eink" service. */
+    @Volatile private var view: View? = null
+
     override fun capabilities(): DeviceCapabilities = DeviceCapabilities.supernoteBaseline()
+
+    override fun attachView(view: View?) {
+        this.view = view
+    }
+
+    override fun refreshFull() {
+        sendOneFullFrame()
+    }
 
     override fun execute(command: RefreshCommand) {
         when (command) {
@@ -75,21 +87,55 @@ class SupernoteEinkAdapter : EinkAdapter {
         RefreshIntent.FLASH_PARTIAL -> EbcMode.GC16  // flashing partial clear
     }
 
-    // ---- panel mechanism (stubbed for M0; wired to einkhwc/`/dev/ebc` post-spike) ----
+    // ---- panel mechanism ----
+    //
+    // The Supernote (RK3566) is a **full-only** panel: a blit to our Surface does NOT refresh
+    // the EPD on its own — only the very first window draw is auto-refreshed by the firmware.
+    // Every subsequent page must explicitly ask the panel to repaint. The working mechanism
+    // (used by KOReader on this SoC) is `android.os.EinkManager.sendOneFullFrame()` reached
+    // via the system "eink" service on the view's context. There is no usable partial/region
+    // path from an untrusted window, so both full and region intents collapse to one full
+    // frame here (RR2-FR4 Rockchip quirk). This is the only vendor-specific call (IR-7).
 
     private fun refreshFullScreen(mode: EbcMode) {
-        Log.d(TAG, "EBC full-screen refresh: $mode (Rockchip quirk)")
-        // TODO(device): cooperate with einkhwc / ioctl `/dev/ebc` (RR15-FR3). DEVICE-UNVERIFIED.
+        Log.d(TAG, "panel full-screen refresh: $mode")
+        sendOneFullFrame()
     }
 
     private fun refreshRegion(mode: EbcMode, x: Int, y: Int, w: Int, h: Int) {
-        Log.d(TAG, "EBC region refresh: $mode @($x,$y) ${w}x$h")
-        // TODO(device): regional partial update (RR15-FR3). DEVICE-UNVERIFIED.
+        // Full-only panel: a region request still triggers a whole-screen frame.
+        Log.d(TAG, "panel region refresh -> full: $mode @($x,$y) ${w}x$h")
+        sendOneFullFrame()
     }
 
     private fun waitForLast() {
-        Log.d(TAG, "EBC wait-for-last (sync barrier before flash)")
-        // TODO(device): block on the prior update marker (RR3-FR8). DEVICE-UNVERIFIED.
+        // No exposed completion marker on this panel; the full-frame call is synchronous enough.
+        Log.d(TAG, "wait-for-last (no-op on full-only panel)")
+    }
+
+    /**
+     * Ask the panel to push one full frame from the current window contents to the EPD, via
+     * `android.os.EinkManager.sendOneFullFrame()` (system "eink" service). Reflection because
+     * the class is a hidden framework API; failures are logged, never thrown (RR21-FR3).
+     */
+    private fun sendOneFullFrame(): Boolean {
+        val v = view ?: run {
+            Log.w(TAG, "no view attached; cannot refresh panel")
+            return false
+        }
+        return try {
+            val einkManagerClass = Class.forName("android.os.EinkManager")
+            val einkManager = v.context.getSystemService("eink")
+                ?: run {
+                    Log.w(TAG, "no 'eink' system service on this device")
+                    return false
+                }
+            einkManagerClass.getDeclaredMethod("sendOneFullFrame").invoke(einkManager)
+            true
+        } catch (e: Exception) {
+            Log.e(TAG, "sendOneFullFrame failed: $e")
+            false
+        }
     }
 
     private companion object {

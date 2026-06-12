@@ -84,6 +84,8 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         surfaceView = SurfaceView(this)
         surfaceView.holder.addCallback(this)
         surfaceView.setOnTouchListener { _, event -> gestures.onTouchEvent(event) }
+        // The panel refresh is routed through the view's context (Supernote "eink" service).
+        adapter.attachView(surfaceView)
         setContentView(surfaceView)
     }
 
@@ -150,6 +152,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         drawLoading() // quick feedback while the (slow) open runs
         openDocumentIfNeeded()
         renderAndBlit()
+        adapter.refreshFull() // first page carries no command stream → refresh the panel (RR2-FR4)
     }
 
     private fun openDocumentIfNeeded() {
@@ -236,6 +239,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         drawLoading()
         openBook(dest.absolutePath, bookId)
         renderAndBlit()
+        adapter.refreshFull() // imported book's first page has no command stream → refresh
     }
 
     private fun renderAndBlit() {
