@@ -52,6 +52,12 @@ Each route logs to logcat tag `PenSpike` (the native helper logs `PenSpike-ebc`)
 | **R2** DrawService | `ROUTE 2 (DrawService): BINDS (onServiceConnected) descriptor='…'` | The exported service **binds** from a sideload. The logged `descriptor` is the AIDL to develop later. `onNullBinding` or `bindService()=false` = red. |
 | **R3** /dev/ebc | `ROUTE 3 (/dev/ebc): reachable=true (open+ioctl OK)` + per-stroke `SEND_BUFFER(A2)=OK` | The make-or-break: **open()+ioctl succeed under the untrusted_app SELinux domain**. `open(/dev/ebc)=FAILED errno=13(EACCES)` = red (SELinux blocks it) — that is a RESULT, not a bug. |
 | **R4** baseline | always | The `pen_low_latency=false` floor for comparison. |
+| **R5** service_myservice | `ROUTE 5 (service_myservice): reachable=true alive=true desc='…'` | **The make-or-break ink route.** The firmware HandWrite binder is reachable from a sideload, so the firmware paints ink under the nib at sub-frame latency (the app draws nothing — see it appear). `reachable=false … hidden-API blocked` = the Java-reflection lookup is blocked; production moves the `getService` lookup into the JNI native helper (not subject to hidden-API enforcement). |
+
+> **R5 is special:** it is the only route where the firmware renders the stroke, not the app. When
+> R5 is active the app draws nothing per sample — *whatever ink you see under the pen is the
+> firmware's*. If ink appears under the nib with no lag, R5 is GREEN and is the path inkread ships
+> (binder client in the Kotlin adapter, ink model in Rust). See `spec/adr/ADR-SUPERNOTE-INK.md`.
 
 The `latency …` line (median/p90/max ms) is the **software-observable** delta
 (`event.getEventTime()` → surface-post return). It is a **lower bound / relative comparison**

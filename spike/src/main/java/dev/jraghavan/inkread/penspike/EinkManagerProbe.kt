@@ -97,6 +97,23 @@ object EinkManagerProbe {
     }
 
     /**
+     * Best-effort full-screen EPD refresh via the proven `sendOneFullFrame()` — used to push the
+     * spike's own SurfaceView UI (legend/instructions) onto the panel, since a sideloaded
+     * SurfaceView's posts don't reliably trigger the einkhwc to refresh on their own.
+     */
+    fun fullRefresh(ctx: Context): Boolean {
+        return try {
+            val svc = ctx.getSystemService("eink") ?: return false
+            svc.javaClass.getMethod("sendOneFullFrame").invoke(svc)
+            Log.i(TAG, "fullRefresh: sendOneFullFrame invoked")
+            true
+        } catch (t: Throwable) {
+            Log.w(TAG, "fullRefresh failed: ${t.javaClass.simpleName}: ${t.message}")
+            false
+        }
+    }
+
+    /**
      * Disambiguate `getSeqNum(0)` and `setMode`/`getMode` semantics — rigorously, so we don't
      * mistake a read-incrementing counter for a refresh signal (the +1-per-read trap).
      *

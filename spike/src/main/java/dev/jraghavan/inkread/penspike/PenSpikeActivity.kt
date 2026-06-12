@@ -43,18 +43,23 @@ class PenSpikeActivity : Activity(), SurfaceHolder.Callback {
         R2("R2 DrawService bind"),
         R3("R3 /dev/ebc A2 ioctl"),
         R4("R4 standard baseline"),
+        R5("R5 service_myservice (firmware ink)"),
     }
 
     private lateinit var surfaceView: SurfaceView
     private var holder: SurfaceHolder? = null
     private var hasSurface = false
 
-    private var route = Route.R1
+    // Default to R5 (firmware ink): it is the only route whose output reaches the panel on a
+    // sideloaded app, and it needs no legend tap to activate. Tap the top band to cycle to R1–R4.
+    private var route = Route.R5
+    private var snAutoSetupDone = false
     private val stats = HashMap<Route, LatencyStats>().apply {
         Route.values().forEach { put(it, LatencyStats()) }
     }
     private lateinit var csv: CsvLogger
     private var drawServiceProbe: DrawServiceProbe? = null
+    private var supernoteInkProbe: SupernoteInkProbe? = null
     private var r3Open = false
     private var einkForegroundTested = false
 
@@ -87,6 +92,7 @@ class PenSpikeActivity : Activity(), SurfaceHolder.Callback {
         surfaceView.setOnClickListener(null)
         setContentView(surfaceView)
         drawServiceProbe = DrawServiceProbe(this)
+        supernoteInkProbe = SupernoteInkProbe(this)
 
         // One-shot reachability self-test (RR19-FR4b). The make-or-break facts — can a
         // sideloaded untrusted_app open()+ioctl /dev/ebc, and does DrawService bind — need
@@ -122,6 +128,10 @@ class PenSpikeActivity : Activity(), SurfaceHolder.Callback {
         // getSeqNum(0) frame counter advancing across sendOneFullFrame proves a refresh fired.
         val einkConfirm = EinkManagerProbe.confirmRefresh(this).also { Log.i(TAG, "SELFTEST R0b confirm:\n$it") }
 
+        // Route 5: the firmware HandWrite binder (service_myservice). This is the make-or-break
+        // sideload reachability test for low-latency ink — the route the other four never tried.
+        val snVerdict = supernoteInkProbe?.probe() ?: "ROUTE 5 (service_myservice): probe unavailable"
+
         // DrawService binds async — give onServiceConnected time to land, then print the single
         // consolidated VERDICT block the sideload paths turn on (grep for "SELFTEST VERDICT").
         Handler(Looper.getMainLooper()).postDelayed({
@@ -130,6 +140,7 @@ class PenSpikeActivity : Activity(), SurfaceHolder.Callback {
             Log.i(TAG, "SELFTEST VERDICT  route0b(EM): ${einkConfirm.substringBefore('\n')}")
             Log.i(TAG, "SELFTEST VERDICT  direct(HT) : ${htVerdict.substringBefore('\n')}")
             Log.i(TAG, "SELFTEST VERDICT  route2(DS) : ${drawServiceProbe?.report()}")
+            Log.i(TAG, "SELFTEST VERDICT  route5(SN) : ${snVerdict.substringBefore('\n')}")
             Log.i(TAG, "SELFTEST end ==========")
         }, DRAWSERVICE_SETTLE_MS)
     }
@@ -230,12 +241,16 @@ class PenSpikeActivity : Activity(), SurfaceHolder.Callback {
         val bottom = (maxOf(y0, y1) + 4).toInt()
         val dirty = Rect(left, top, right, bottom)
 
-        // Draw into the locked dirty rect (preserves the rest of the surface content).
-        val canvas: Canvas = h.lockCanvas(dirty) ?: return
-        try {
-            canvas.drawLine(x0, y0, x1, y1, strokePaint)
-        } finally {
-            h.unlockCanvasAndPost(canvas)
+        // R5: the firmware paints the live stroke onto the EPDC overlay itself — the app draws
+        // NOTHING per sample. What you see under the nib is pure firmware ink; that is the verdict.
+        if (route != Route.R5) {
+            // Draw into the locked dirty rect (preserves the rest of the surface content).
+            val canvas: Canvas = h.lockCanvas(dirty) ?: return
+            try {
+                canvas.drawLine(x0, y0, x1, y1, strokePaint)
+            } finally {
+                h.unlockCanvasAndPost(canvas)
+            }
         }
 
         // R3: direct /dev/ebc A2 update for the same bbox (after the surface post).
@@ -257,6 +272,7 @@ class PenSpikeActivity : Activity(), SurfaceHolder.Callback {
         // Tear down the route we're leaving.
         if (route == Route.R2) drawServiceProbe?.unbind()
         if (route == Route.R3 && r3Open) { EbcNative.closeEbc(); r3Open = false }
+        if (route == Route.R5) supernoteInkProbe?.teardown()
 
         route = Route.values()[(route.ordinal + 1) % Route.values().size]
         Log.i(TAG, "──── switched to ${route.label} ────")
@@ -287,6 +303,10 @@ class PenSpikeActivity : Activity(), SurfaceHolder.Callback {
                 }
             }
             Route.R4 -> Log.i(TAG, "ROUTE 4 (baseline): plain draw, no fast intent — the pen_low_latency=false floor.")
+            Route.R5 -> {
+                val ok = supernoteInkProbe?.setup() ?: false
+                Log.i(TAG, "ROUTE 5 setup: firmware ink claim=$ok — ${supernoteInkProbe?.report()}")
+            }
         }
         clearAndDrawLegend()
     }
@@ -317,6 +337,7 @@ class PenSpikeActivity : Activity(), SurfaceHolder.Callback {
             else if (r3Open) "/dev/ebc: OPEN ok — per-stroke A2 armed"
             else "/dev/ebc: not open (see logcat for errno)"
         Route.R4 -> "reachable: yes (standard refresh floor)"
+        Route.R5 -> supernoteInkProbe?.report() ?: "service_myservice: not attempted"
     }
 
     override fun onResume() {
@@ -326,6 +347,17 @@ class PenSpikeActivity : Activity(), SurfaceHolder.Callback {
         if (!einkForegroundTested) {
             einkForegroundTested = true
             Log.i(TAG, "SELFTEST R0c (foreground):\n${EinkManagerProbe.foregroundModeTest(this)}")
+        }
+
+        // Auto-activate R5 firmware ink while we're foreground — no legend tap required. The
+        // firmware then paints ink under the nib directly to the EPDC overlay; just draw.
+        if (route == Route.R5 && !snAutoSetupDone) {
+            snAutoSetupDone = true
+            val ok = supernoteInkProbe?.setup() ?: false
+            Log.i(TAG, "AUTO R5 setup (resume): firmware ink claim=$ok — ${supernoteInkProbe?.report()}")
+            // Push the legend/instructions onto the panel so the screen isn't blank.
+            clearAndDrawLegend()
+            EinkManagerProbe.fullRefresh(this)
         }
     }
 
@@ -337,5 +369,6 @@ class PenSpikeActivity : Activity(), SurfaceHolder.Callback {
         }
         if (route == Route.R3 && r3Open) { EbcNative.closeEbc(); r3Open = false }
         drawServiceProbe?.unbind()
+        supernoteInkProbe?.teardown()
     }
 }
