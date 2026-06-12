@@ -3,6 +3,16 @@
 //! libpdfium is bound (host-binary-UNVERIFIED), they are never deleted.
 
 use super::*;
+use std::sync::Mutex;
+
+// pdfium rendering is single-threaded in production (RR21: engine calls are serialized onto
+// one worker thread). cargo runs tests in parallel, so concurrent renders across these tests
+// can race the library and crash it; serialize them with one lock to match that contract.
+static PDFIUM_SERIAL: Mutex<()> = Mutex::new(());
+
+fn pdfium_serial() -> std::sync::MutexGuard<'static, ()> {
+    PDFIUM_SERIAL.lock().unwrap_or_else(|e| e.into_inner())
+}
 
 // Whether a host libpdfium is reachable in this environment. The render/open tests are
 // gated on it so a CI box without the binary skips rather than fails (recorded as
@@ -13,6 +23,7 @@ fn host_pdfium_available() -> bool {
 
 #[test]
 fn missing_library_is_typed_not_panic() {
+    let _s = pdfium_serial();
     // When neither the env path nor a system library resolves, binding yields a typed
     // BackendUnavailable error (never a panic) — RR21-FR3. If a library IS present in
     // this environment, the bind simply succeeds; either way, no panic.
@@ -25,6 +36,7 @@ fn missing_library_is_typed_not_panic() {
 
 #[test]
 fn open_and_render_minimal_pdf() {
+    let _s = pdfium_serial();
     if !host_pdfium_available() {
         eprintln!("SKIP open_and_render_minimal_pdf: host libpdfium UNVERIFIED (no binding)");
         return;
@@ -59,6 +71,7 @@ fn open_and_render_minimal_pdf() {
 
 #[test]
 fn render_out_of_range_is_typed_error() {
+    let _s = pdfium_serial();
     if !host_pdfium_available() {
         eprintln!("SKIP render_out_of_range: host libpdfium UNVERIFIED");
         return;
@@ -80,6 +93,7 @@ fn render_out_of_range_is_typed_error() {
 // RR5 / RR7-FR5 / RR21-FR3: a garbage/corrupt file opens to a typed error, never a panic.
 #[test]
 fn corrupt_pdf_open_is_typed_error_not_panic() {
+    let _s = pdfium_serial();
     if !host_pdfium_available() {
         eprintln!("SKIP corrupt_pdf_open: host libpdfium UNVERIFIED");
         return;
@@ -104,6 +118,7 @@ fn corrupt_pdf_open_is_typed_error_not_panic() {
 // RR7-FR5: a password-protected (encrypted) PDF is rejected as DRM-protected, no decrypt.
 #[test]
 fn encrypted_pdf_open_is_drm_protected() {
+    let _s = pdfium_serial();
     if !host_pdfium_available() {
         eprintln!("SKIP encrypted_pdf_open: host libpdfium UNVERIFIED");
         return;
@@ -121,6 +136,7 @@ fn encrypted_pdf_open_is_drm_protected() {
 // several threads at once must be race-free (no SIGTRAP, all succeed).
 #[test]
 fn concurrent_open_is_race_free() {
+    let _s = pdfium_serial();
     if !host_pdfium_available() {
         eprintln!("SKIP concurrent_open: host libpdfium UNVERIFIED");
         return;
@@ -146,6 +162,7 @@ fn concurrent_open_is_race_free() {
 // RR5-FR3: a clipped/scaled region render succeeds and produces an opaque buffer.
 #[test]
 fn render_region_clips_and_scales() {
+    let _s = pdfium_serial();
     if !host_pdfium_available() {
         eprintln!("SKIP render_region: host libpdfium UNVERIFIED");
         return;
@@ -168,6 +185,7 @@ fn render_region_clips_and_scales() {
 // RR5-FR3 / RR21-FR3: a region render of a bad page is a typed error, not a panic.
 #[test]
 fn render_region_out_of_range_is_typed_error() {
+    let _s = pdfium_serial();
     if !host_pdfium_available() {
         eprintln!("SKIP render_region_oob: host libpdfium UNVERIFIED");
         return;
@@ -189,6 +207,7 @@ fn render_region_out_of_range_is_typed_error() {
 // RR5-FR2 / RR11-FR2: a PDF with no outline yields an empty TOC, never an error.
 #[test]
 fn toc_of_outline_less_pdf_is_empty() {
+    let _s = pdfium_serial();
     if !host_pdfium_available() {
         eprintln!("SKIP toc_empty: host libpdfium UNVERIFIED");
         return;
@@ -205,6 +224,7 @@ fn toc_of_outline_less_pdf_is_empty() {
 // RR5-FR2 / RR11-FR2: a nested outline reads with titles + resolved page targets.
 #[test]
 fn toc_from_outline_fixture() {
+    let _s = pdfium_serial();
     if !host_pdfium_available() {
         eprintln!("SKIP toc_outline: host libpdfium UNVERIFIED");
         return;
