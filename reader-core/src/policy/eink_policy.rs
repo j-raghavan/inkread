@@ -23,6 +23,9 @@ pub struct EinkRefreshPolicy {
     ghost_clear_interval: u32,
     /// Whether to request dithering on page-turn updates (honored per `hw_dither`, RR2-FR5).
     dither: bool,
+    /// A scroll/fling is in progress (RR3-FR4): while set, the flash counter does not advance
+    /// and page-turn promotion is suppressed (a long scroll never mid-flashes).
+    currently_scrolling: bool,
 }
 
 impl EinkRefreshPolicy {
@@ -47,6 +50,7 @@ impl EinkRefreshPolicy {
             partial_count: 0,
             ghost_clear_interval: ghost_clear_interval.max(1),
             dither: false,
+            currently_scrolling: false,
         }
     }
 
@@ -83,9 +87,10 @@ impl RefreshPolicy for EinkRefreshPolicy {
         }
 
         // Full-control panel: Partial per turn, promoting to a flashing Full every
-        // `ghost_clear_interval` turns to clear ghosting (RR3-FR3).
+        // `ghost_clear_interval` turns to clear ghosting (RR3-FR3). While a scroll is in
+        // progress the flash is suppressed so a fling never mid-flashes (RR3-FR4).
         self.partial_count += 1;
-        if self.partial_count >= self.ghost_clear_interval {
+        if !self.currently_scrolling && self.partial_count >= self.ghost_clear_interval {
             self.partial_count = 0;
             // WaitForLast guards the flash against an in-flight partial (RR3-FR8).
             vec![
@@ -105,32 +110,56 @@ impl RefreshPolicy for EinkRefreshPolicy {
         }
     }
 
-    // ---- M0: minimal-correct streams only; the rich behaviour is M1 (scope fence). ----
+    // ---- Scroll/fling (RR3-FR4): Fast intents while moving, flash counter reset. ----
 
     fn on_scroll_start(&mut self) -> Vec<RefreshCommand> {
-        // M0 has no scroll mode; emit nothing rather than a speculative Fast stream.
-        Vec::new()
+        self.currently_scrolling = true;
+        // Reset the active flash counter so a long scroll never mid-flashes (RR3-FR4).
+        self.partial_count = 0;
+        // On a fast-mode panel, advise the adapter to pin a fast region; otherwise no
+        // advisory (the no-fast-mode degradation is refined in RR3-FR10).
+        if self.caps.fast_mode {
+            vec![RefreshCommand::EnterFastMode]
+        } else {
+            Vec::new()
+        }
     }
 
-    fn on_scroll_update(&mut self, _dirty: Rect) -> Vec<RefreshCommand> {
-        Vec::new()
+    fn on_scroll_update(&mut self, dirty: Rect) -> Vec<RefreshCommand> {
+        // A fast, regional panel repaints just the dirty rect with the 1-bit Fast waveform.
+        // The !regional coalesce and the !fast_mode path are RR3-FR10 (degradation).
+        if self.caps.fast_mode && self.caps.regional_update {
+            vec![RefreshCommand::Update {
+                rect: dirty,
+                intent: RefreshIntent::Fast,
+                dither: false,
+            }]
+        } else {
+            Vec::new()
+        }
     }
 
     fn on_scroll_end(&mut self, settle_rect: Rect) -> Vec<RefreshCommand> {
-        // Settle the region with a single Partial (or full-screen Full on a basic panel).
-        if self.caps.eink_full {
-            vec![RefreshCommand::Update {
-                rect: settle_rect,
-                intent: RefreshIntent::Partial,
-                dither: self.dither,
-            }]
-        } else {
-            vec![RefreshCommand::Update {
+        self.currently_scrolling = false;
+        // A basic panel can only do a full-screen Full (RR3-FR10 / RR2-FR4).
+        if !self.caps.eink_full {
+            return vec![RefreshCommand::Update {
                 rect: self.screen,
                 intent: RefreshIntent::Full,
                 dither: self.dither,
-            }]
+            }];
         }
+        // Leave the advisory fast region (if entered) and settle the page with a Partial.
+        let mut cmds = Vec::new();
+        if self.caps.fast_mode {
+            cmds.push(RefreshCommand::LeaveFastMode);
+        }
+        cmds.push(RefreshCommand::Update {
+            rect: settle_rect,
+            intent: RefreshIntent::Partial,
+            dither: self.dither,
+        });
+        cmds
     }
 
     fn on_menu(&mut self, open: bool, region: Rect) -> Vec<RefreshCommand> {
@@ -278,6 +307,69 @@ mod tests {
             policy.on_page_turn(page()).as_slice(),
             [RefreshCommand::Update { dither: true, .. }]
         ));
+    }
+
+    // RR3-FR4 / RR3-AC2: a fling on a fast_mode device uses Fast intents and resets the flash
+    // counter; settle restores a Partial. EnterFastMode/LeaveFastMode bracket the motion.
+    #[test]
+    fn scroll_emits_fast_and_brackets_with_fast_mode() {
+        let caps = DeviceCapabilities::supernote_full();
+        let mut policy = EinkRefreshPolicy::new(caps, screen());
+
+        assert_eq!(
+            policy.on_scroll_start(),
+            vec![RefreshCommand::EnterFastMode]
+        );
+        let dirty = Rect::new(0, 100, 1404, 400);
+        assert_eq!(
+            policy.on_scroll_update(dirty),
+            vec![RefreshCommand::Update {
+                rect: dirty,
+                intent: RefreshIntent::Fast,
+                dither: false,
+            }]
+        );
+        let settle = Rect::new(0, 0, 1404, 1872);
+        assert_eq!(
+            policy.on_scroll_end(settle),
+            vec![
+                RefreshCommand::LeaveFastMode,
+                RefreshCommand::Update {
+                    rect: settle,
+                    intent: RefreshIntent::Partial,
+                    dither: false,
+                },
+            ]
+        );
+    }
+
+    // RR3-FR4: starting a scroll resets the flash counter so a fling never mid-flashes, and a
+    // page turn during the scroll does not promote to a Full.
+    #[test]
+    fn scroll_resets_flash_counter_and_suppresses_promotion() {
+        let caps = DeviceCapabilities::supernote_full();
+        let mut policy = EinkRefreshPolicy::with_interval(caps, screen(), 3);
+        // Advance the counter toward the flash threshold (2 of 3).
+        policy.on_page_turn(page());
+        policy.on_page_turn(page());
+        assert_eq!(policy.partial_count(), 2);
+
+        // Scrolling resets the counter to 0.
+        policy.on_scroll_start();
+        assert_eq!(policy.partial_count(), 0);
+
+        // A page turn while still scrolling stays Partial (no flash), even at the threshold.
+        policy.on_scroll_update(Rect::new(0, 0, 1404, 100));
+        for _ in 0..3 {
+            let cmds = policy.on_page_turn(page());
+            assert!(matches!(
+                cmds.as_slice(),
+                [RefreshCommand::Update {
+                    intent: RefreshIntent::Partial,
+                    ..
+                }]
+            ));
+        }
     }
 
     #[test]
