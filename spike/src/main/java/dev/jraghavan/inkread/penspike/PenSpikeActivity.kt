@@ -7,6 +7,8 @@ import android.graphics.Paint
 import android.graphics.Rect
 import android.graphics.RectF
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.os.SystemClock
 import android.util.Log
 import android.view.MotionEvent
@@ -15,6 +17,9 @@ import android.view.SurfaceView
 import android.view.View
 
 const val TAG = "PenSpike"
+
+/** Let DrawService's async onServiceConnected land before the consolidated self-test verdict. */
+private const val DRAWSERVICE_SETTLE_MS = 1500L
 
 /**
  * RR19-FR4b pen-latency spike — the standalone measurement Activity.
@@ -51,6 +56,7 @@ class PenSpikeActivity : Activity(), SurfaceHolder.Callback {
     private lateinit var csv: CsvLogger
     private var drawServiceProbe: DrawServiceProbe? = null
     private var r3Open = false
+    private var einkForegroundTested = false
 
     // Stroke geometry for the inked path + the dirty bbox we hand to the panel.
     private var lastX = -1f
@@ -92,18 +98,40 @@ class PenSpikeActivity : Activity(), SurfaceHolder.Callback {
     private fun runReachabilitySelfTest() {
         Log.i(TAG, "SELFTEST begin (R2 DrawService bind + R3 /dev/ebc) ==========")
         drawServiceProbe?.bind() // descriptor arrives async via onServiceConnected
-        if (EbcNative.available) {
+
+        // The device's real driver is Ratta ht_eink (private 'HT' ioctl family), so the stock
+        // ebc-dev 0x70xx probes (discoverAbi/probeA2) return EINVAL and CANNOT put a pixel up.
+        // The decisive SAFE direct-path datum is the read-only HT GETINFO verdict; the blind 'HT'
+        // write cmds reboot the device, so we never fire them here.
+        val htVerdict = if (EbcNative.available) {
             Log.i(TAG, "SELFTEST R3 canOpen() rc=${EbcNative.canOpen()} (0=OK, negative=-errno)")
-            // ABI discovery FIRST: ioctl(0x7002,&buf44) gave EINVAL(22) not ENOTTY(25) on this
-            // 4.19.193 kernel — cmd recognized, struct size wrong (4.19 = 64B). The matrix below
-            // proves which cmds the driver recognizes and which struct size GET_BUFFER_INFO wants.
-            Log.i(TAG, "SELFTEST R3 discoverAbi:\n${EbcNative.discoverAbi()}")
-            // Then the 64B-struct probe (now the primary layout for the 4.19 driver).
-            Log.i(TAG, "SELFTEST R3 probeA2:\n${EbcNative.probeA2(200, 400, 1000, 1200)}")
+            EbcNative.htGetInfo().trim().also { Log.i(TAG, "SELFTEST R3 htGetInfo:\n$it") }
+                .also {
+                    // Read-only FB readback: is mmap offset 0 the live panel? (camera-free truth)
+                    Log.i(TAG, "SELFTEST R3 htDumpFb: ${EbcNative.htDumpFb()}")
+                }
         } else {
             Log.e(TAG, "SELFTEST R3 native lib penspike_ebc not loaded")
+            "HT-GETINFO: native lib penspike_ebc NOT loaded"
         }
-        Log.i(TAG, "SELFTEST end ==========")
+
+        // Route 0: the EinkManager reflection path (KOReader's RK3566 refresh; clean-room). Safe —
+        // dumps the real EinkManager API surface and invokes only the no-arg sendOneFullFrame().
+        val einkVerdict = EinkManagerProbe.run(this).also { Log.i(TAG, "SELFTEST R0 EinkManager:\n$it") }
+        // Route 0b: camera-free confirmation — getMode() round-trip proves setMode works; the
+        // getSeqNum(0) frame counter advancing across sendOneFullFrame proves a refresh fired.
+        val einkConfirm = EinkManagerProbe.confirmRefresh(this).also { Log.i(TAG, "SELFTEST R0b confirm:\n$it") }
+
+        // DrawService binds async — give onServiceConnected time to land, then print the single
+        // consolidated VERDICT block the sideload paths turn on (grep for "SELFTEST VERDICT").
+        Handler(Looper.getMainLooper()).postDelayed({
+            Log.i(TAG, "──── SELFTEST VERDICT (sideload refresh paths) ────")
+            Log.i(TAG, "SELFTEST VERDICT  route0(EM) : ${einkVerdict.substringBefore('\n')}")
+            Log.i(TAG, "SELFTEST VERDICT  route0b(EM): ${einkConfirm.substringBefore('\n')}")
+            Log.i(TAG, "SELFTEST VERDICT  direct(HT) : ${htVerdict.substringBefore('\n')}")
+            Log.i(TAG, "SELFTEST VERDICT  route2(DS) : ${drawServiceProbe?.report()}")
+            Log.i(TAG, "SELFTEST end ==========")
+        }, DRAWSERVICE_SETTLE_MS)
     }
 
     override fun surfaceCreated(h: SurfaceHolder) {
@@ -289,6 +317,16 @@ class PenSpikeActivity : Activity(), SurfaceHolder.Callback {
             else if (r3Open) "/dev/ebc: OPEN ok — per-stroke A2 armed"
             else "/dev/ebc: not open (see logcat for errno)"
         Route.R4 -> "reachable: yes (standard refresh floor)"
+    }
+
+    override fun onResume() {
+        super.onResume()
+        // Retry setMode("12") now that our window is FOREGROUND — the system likely honors a
+        // per-app eink mode only for the focused window (the onCreate attempt ran too early).
+        if (!einkForegroundTested) {
+            einkForegroundTested = true
+            Log.i(TAG, "SELFTEST R0c (foreground):\n${EinkManagerProbe.foregroundModeTest(this)}")
+        }
     }
 
     override fun onPause() {

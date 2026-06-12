@@ -32,6 +32,24 @@ object EbcNative {
     external fun canOpen(): Int
 
     /**
+     * READ-ONLY direct-path verdict for THIS device's real driver (Ratta `ht_eink`, the private
+     * 'HT' ioctl family — stock ebc-dev 0x70xx codes return EINVAL here). Fires only the safe
+     * GETINFO probe (0x48545201) and returns a greppable "HT-GETINFO: ..." verdict + candidate
+     * geometry. Never issues an 'HT' write (those reboot the device when fired blind). rc=0 in
+     * the verdict ⇒ two-way comms confirmed ⇒ the direct path is alive and the geometry for a
+     * future non-blind write is known.
+     */
+    external fun htGetInfo(): String
+
+    /**
+     * READ-ONLY framebuffer readback: mmap `/dev/ebc` PROT_READ and log an ASCII thumbnail of
+     * the live panel buffer (4bpp, white=0xF). If the thumbnail matches what's on screen, mmap
+     * offset 0 IS the live panel buffer ⇒ software readback works (camera-free verification) and
+     * the write path is "paint into the FB + HT refresh". Issues no write/refresh cmd.
+     */
+    external fun htDumpFb(): String
+
+    /**
      * Empirical ioctl-ABI discovery (RR19-FR4b round 2). With /dev/ebc open, runs a curated
      * clean-room candidate matrix (raw 0x7000..0x700d, GET_BUFFER_INFO across struct sizes,
      * _IO* macro encodings) and returns a human-readable table classifying each result as

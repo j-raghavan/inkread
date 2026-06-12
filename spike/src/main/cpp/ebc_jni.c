@@ -289,7 +289,7 @@ Java_dev_jraghavan_inkread_penspike_EbcNative_discoverAbi(JNIEnv *env, jclass cl
        0x48545201 ('R'/1) is the GETINFO probe the compositor issues right after open(). ---- */
     {
         /* SAFETY: probe ONLY the read-only GETINFO cmd. The write/refresh/setbuf 'HT' cmds
-           (W/2, X/1, B/*) are real panel operations — firing them blind with a garbage 2132B
+           (W/2, X/1, B/n) are real panel operations — firing them blind with a garbage 2132B
            arg rebooted the device once. Do NOT add them here without a known, validated arg
            layout. GETINFO ('R'/1) is the compositor's probe-after-open; it only reads geometry. */
         ROW("-- phase 5: Ratta 'HT' GETINFO probe 0x48545201 (READ-ONLY; arg=2132B zeroed) --\n");
@@ -403,6 +403,188 @@ Java_dev_jraghavan_inkread_penspike_EbcNative_probeA2(
     close(fd);
     return (*env)->NewStringUTF(env, buf);
 #undef APPEND
+}
+
+/* ============================ HT GETINFO (READ-ONLY) ============================ */
+/*
+ * EbcNative.htGetInfo(): the decisive, SAFE direct-path probe for THIS device's real driver.
+ *
+ * The panel is driven by Ratta `ht_eink` (ht_ebc.px), a private 'HT' (0x4854xxxx) ioctl family
+ * — NOT stock rockchip ebc-dev (so probeA2/sendA2's 0x70xx codes return EINVAL here, see banner
+ * phase-5 note). 0x48545201 ('HT','R'/1) is the GETINFO the compositor issues right after open();
+ * it ONLY reads geometry. This is the ONE direct-path call known to be safe to fire (the 'HT'
+ * WRITE/REFRESH cmds reboot the device when fired blind — DO NOT add them here without a
+ * validated arg layout).
+ *
+ * Verdict semantics (single greppable line, prefix "HT-GETINFO:"):
+ *   rc=0           => two-way comms with the real driver CONFIRMED; geometry dumped → the
+ *                     foundation a future NON-blind HT write needs. Direct path is alive.
+ *   EINVAL(22)     => 'HT' family present but THIS cmd/arg-size is wrong → direct path needs
+ *                     more recon than we have; tilt to DrawService / privileged install.
+ *   ENOTTY(25)     => not even the 'HT' family → driver assumption wrong.
+ *   open EACCES    => SELinux closed the door for untrusted_app → sideload direct path is dead.
+ *
+ * The 'HT' arg is a fixed 2132-byte struct; we pass a zeroed 4096B buffer (a valid, oversized
+ * pointer) so a bad pointer is never the cause, and surface candidate panel dims (1920x2560 /
+ * 1872x1404) found among the first ints so the layout can be pinned without a blind write.
+ */
+JNIEXPORT jstring JNICALL
+Java_dev_jraghavan_inkread_penspike_EbcNative_htGetInfo(JNIEnv *env, jclass clazz) {
+    (void) clazz;
+    static char rpt[2048];
+    int n = 0;
+#define ROW(...) do { n += snprintf(rpt + n, sizeof(rpt) - (size_t)n, __VA_ARGS__); } while (0)
+
+    int fd = open("/dev/ebc", O_RDWR | O_CLOEXEC);
+    if (fd < 0) {
+        int e = errno;
+        ROW("HT-GETINFO: open(/dev/ebc)=FAILED errno=%d(%s) => sideload direct path DEAD\n",
+            e, errno_name(e));
+        LOGE("%s", rpt);
+        return (*env)->NewStringUTF(env, rpt);
+    }
+
+    /* 2132-byte 'HT' arg; oversized zeroed buffer so the pointer is always valid. READ-ONLY cmd. */
+    static uint8_t arg[4096];
+    memset(arg, 0, sizeof(arg));
+    int rc = ioctl(fd, 0x48545201u /* 'HT','R'/1 GETINFO */, arg);
+    int e = (rc < 0) ? errno : 0;
+
+    if (rc != 0) {
+        ROW("HT-GETINFO: cmd=0x48545201 rc=%d errno=%d(%s) => direct path NOT confirmed "
+            "(EINVAL=arg/cmd wrong; pivot to DrawService/privileged install)\n",
+            rc, e, errno_name(e));
+        LOGI("%s", rpt);
+        close(fd);
+        return (*env)->NewStringUTF(env, rpt);
+    }
+
+    /* rc==0: real two-way comms. Surface the geometry the (future, non-blind) write needs. */
+    ROW("HT-GETINFO: cmd=0x48545201 rc=0 OK => two-way comms with ht_eink CONFIRMED (direct path ALIVE)\n");
+    const int32_t *p = (const int32_t *) arg;
+    ROW("  first 32 ints:");
+    for (int k = 0; k < 32; ++k) ROW(" %d", p[k]);
+    ROW("\n");
+    /* Flag any int pair that matches a known Supernote panel geometry (clean-room: 1920x2560
+     * per spec; 1872x1404 is the other common rk eink size) — pins width/height offsets. */
+    for (int k = 0; k < 32; ++k) {
+        int v = p[k];
+        if (v == 1920 || v == 2560 || v == 1872 || v == 1404) {
+            ROW("  candidate geometry: ints[%d]=%d\n", k, v);
+        }
+    }
+
+    /* Full READ-ONLY dump of the 2132-byte 'HT' GETINFO reply to logcat (PenSpike-ebc), so it
+     * can be mapped field-by-field against the private recon header — the raw material for
+     * building a STRUCTURED (non-blind) write arg later. Fires no write/refresh cmd. */
+    enum { HT_ARG_BYTES = 2132 };
+    LOGI("HT-GETINFO full dump (%d bytes, read-only):", HT_ARG_BYTES);
+    {
+        char line[80];
+        for (int off = 0; off < HT_ARG_BYTES; off += 16) {
+            int m = 0;
+            m += snprintf(line + m, sizeof(line) - (size_t) m, "  +%04x:", off);
+            for (int j = 0; j < 16 && off + j < HT_ARG_BYTES; ++j)
+                m += snprintf(line + m, sizeof(line) - (size_t) m, " %02x", arg[off + j]);
+            LOGI("%s", line);
+        }
+    }
+
+    /* READ-ONLY framebuffer reachability: can we mmap the EBC FB region? Prerequisite for the
+     * write path's draw buffer. PROT_READ only — mapping + reading never drives the panel. */
+    {
+        size_t len = EBC_FB_SIZE_GUESS;
+        uint8_t *map = (uint8_t *) mmap(NULL, len, PROT_READ, MAP_SHARED, fd, 0);
+        if (map == MAP_FAILED) {
+            LOGI("HT-GETINFO mmap(PROT_READ) FAILED errno=%d(%s)", errno, errno_name(errno));
+            ROW("  mmap(read)=FAILED errno=%d(%s)\n", errno, errno_name(errno));
+        } else {
+            LOGI("HT-GETINFO mmap(PROT_READ,%zuB)=OK first8=%02x %02x %02x %02x %02x %02x %02x %02x",
+                 len, map[0], map[1], map[2], map[3], map[4], map[5], map[6], map[7]);
+            ROW("  mmap(read)=OK %zuB\n", len);
+            munmap(map, len);
+        }
+    }
+
+    LOGI("%s", rpt);
+    close(fd);
+    return (*env)->NewStringUTF(env, rpt);
+#undef ROW
+}
+
+/* ============================ HT FB READBACK (READ-ONLY) ============================ */
+/*
+ * EbcNative.htDumpFb(): mmap the EBC framebuffer PROT_READ and render a small ASCII thumbnail
+ * of what's currently in it (4bpp packed grayscale, white=0xF, stride=W/2). The decisive,
+ * zero-risk question: is mmap offset 0 the LIVE panel buffer? If the thumbnail matches the
+ * on-screen content (the spike legend band at the top), then offset-0 = live buffer is proven
+ * → software readback works (camera-free latency/verification) and the write path is simply
+ * "paint into this FB + HT refresh". Read-only — issues NO write/refresh cmd (those reboot).
+ *
+ * Geometry comes from the safe HT GETINFO (0x48545201): width @ +0x04(u16), height @ +0x06(u16).
+ */
+JNIEXPORT jstring JNICALL
+Java_dev_jraghavan_inkread_penspike_EbcNative_htDumpFb(JNIEnv *env, jclass clazz) {
+    (void) clazz;
+    static char out[256];
+
+    int fd = open("/dev/ebc", O_RDWR | O_CLOEXEC);
+    if (fd < 0) {
+        snprintf(out, sizeof(out), "HT-FB: open FAILED errno=%d(%s)", errno, errno_name(errno));
+        return (*env)->NewStringUTF(env, out);
+    }
+
+    /* Geometry from GETINFO (width/height as u16 at +0x04/+0x06; see htinfo dump). */
+    static uint8_t info[4096];
+    memset(info, 0, sizeof(info));
+    int W = 1920, H = 2560;
+    if (ioctl(fd, 0x48545201u, info) == 0) {
+        int w = (int) (info[4] | (info[5] << 8));
+        int h = (int) (info[6] | (info[7] << 8));
+        if (w >= 320 && w <= 4096) W = w;
+        if (h >= 320 && h <= 4096) H = h;
+    }
+    size_t stride = (size_t) (W / 2); /* 4bpp packed: 2 px/byte */
+
+    uint8_t *map = (uint8_t *) mmap(NULL, EBC_FB_SIZE_GUESS, PROT_READ, MAP_SHARED, fd, 0);
+    if (map == MAP_FAILED) {
+        snprintf(out, sizeof(out), "HT-FB: mmap FAILED errno=%d(%s)", errno, errno_name(errno));
+        close(fd);
+        return (*env)->NewStringUTF(env, out);
+    }
+
+    /* Render a TWxTH ASCII thumbnail; ramp dark->light. Sample nibble per cell. */
+    enum { TW = 48, TH = 64 };
+    static const char ramp[] = "@%#*+=-:. "; /* idx0 = darkest(0x0), idx9 = white(0xF) */
+    LOGI("HT-FB thumbnail %dx%d of live FB (%dx%d, 4bpp, stride=%zu); recognizable => offset0=live panel:",
+         TW, TH, W, H, stride);
+    size_t visible = stride * (size_t) H;
+    if (visible > (size_t) EBC_FB_SIZE_GUESS) visible = (size_t) EBC_FB_SIZE_GUESS;
+    char line[TW + 8];
+    long nonwhite = 0;
+    for (int ty = 0; ty < TH; ++ty) {
+        int py = ty * H / TH;
+        int m = 0;
+        for (int tx = 0; tx < TW; ++tx) {
+            int px = tx * W / TW;
+            size_t bi = (size_t) py * stride + (size_t) (px / 2);
+            int nib = 0xF;
+            if (bi < visible) {
+                uint8_t b = map[bi];
+                nib = (px & 1) ? (b >> 4) : (b & 0x0F); /* low nibble = left px (assumption) */
+            }
+            if (nib != 0xF) ++nonwhite;
+            line[m++] = ramp[(nib * 9) / 15];
+        }
+        line[m] = '\0';
+        LOGI("  |%s|", line);
+    }
+    munmap(map, EBC_FB_SIZE_GUESS);
+    close(fd);
+    snprintf(out, sizeof(out), "HT-FB: read OK %dx%d 4bpp nonwhite_cells=%ld (thumbnail in logcat)",
+             W, H, nonwhite);
+    LOGI("%s", out);
+    return (*env)->NewStringUTF(env, out);
 }
 
 /* Cheap reachability-only check: open()+close(), report -errno. (Unchanged behaviour.) */
