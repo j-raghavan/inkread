@@ -32,6 +32,9 @@ pub struct EinkRefreshPolicy {
     night_partial_count: u32,
     /// Night-mode flash promotion threshold, independent of the day interval (RR3-FR6).
     night_ghost_clear_interval: u32,
+    /// When set, downgrade Full/Flash* promotions to Partial for a flash-free experience
+    /// (more ghosting, no flash) (RR3-FR7).
+    avoid_flashing: bool,
 }
 
 impl EinkRefreshPolicy {
@@ -60,6 +63,7 @@ impl EinkRefreshPolicy {
             night_mode: false,
             night_partial_count: 0,
             night_ghost_clear_interval: ghost_clear_interval.max(1),
+            avoid_flashing: false,
         }
     }
 
@@ -76,6 +80,13 @@ impl EinkRefreshPolicy {
     #[must_use]
     pub fn with_night_interval(mut self, night_ghost_clear_interval: u32) -> Self {
         self.night_ghost_clear_interval = night_ghost_clear_interval.max(1);
+        self
+    }
+
+    /// Enable the avoid-flashing downgrade: Full/Flash* promotions become Partial (RR3-FR7).
+    #[must_use]
+    pub fn with_avoid_flashing(mut self, avoid: bool) -> Self {
+        self.avoid_flashing = avoid;
         self
     }
 
@@ -136,7 +147,9 @@ impl RefreshPolicy for EinkRefreshPolicy {
         if promote {
             *count = 0;
         }
-        if promote {
+        // avoid_flashing keeps the cadence (counter still reset) but downgrades the flash to a
+        // Partial — more ghosting, no flash (RR3-FR7).
+        if promote && !self.avoid_flashing {
             // WaitForLast guards the flash against an in-flight partial (RR3-FR8).
             vec![
                 RefreshCommand::WaitForLast,
@@ -224,11 +237,17 @@ impl RefreshPolicy for EinkRefreshPolicy {
         // Light Ui on open; FlashUi on close so chrome leaves no ghost. Neither touches
         // the page-turn flash counter (RR3-FR5). On a basic panel both collapse to Full.
         let (intent, rect) = if self.caps.eink_full {
+            // avoid_flashing downgrades the closing FlashUi to a plain Ui (RR3-FR7).
+            let close_intent = if self.avoid_flashing {
+                RefreshIntent::Ui
+            } else {
+                RefreshIntent::FlashUi
+            };
             (
                 if open {
                     RefreshIntent::Ui
                 } else {
-                    RefreshIntent::FlashUi
+                    close_intent
                 },
                 region,
             )
@@ -253,9 +272,16 @@ impl RefreshPolicy for EinkRefreshPolicy {
         } else {
             self.partial_count = 0;
         }
+        // Honor avoid_flashing consistently: a capable panel downgrades the flip flush to a
+        // Partial (RR3-FR7); a basic panel can only do a full-screen Full.
+        let intent = if self.avoid_flashing && self.caps.eink_full {
+            RefreshIntent::Partial
+        } else {
+            RefreshIntent::Full
+        };
         vec![RefreshCommand::Update {
             rect: self.screen,
-            intent: RefreshIntent::Full,
+            intent,
             dither: self.dither,
         }]
     }
@@ -507,6 +533,43 @@ mod tests {
                 dither: false,
             }]
         );
+    }
+
+    // RR3-FR7 / RR3-AC4: with avoid_flashing on, the ghost-clear promotion is a Partial (no
+    // WaitForLast, no Full) but the cadence is preserved (the counter still resets).
+    #[test]
+    fn avoid_flashing_downgrades_promotion_to_partial() {
+        let caps = DeviceCapabilities::supernote_full();
+        let mut policy =
+            EinkRefreshPolicy::with_interval(caps, screen(), 3).with_avoid_flashing(true);
+        policy.on_page_turn(page());
+        policy.on_page_turn(page());
+        let third = policy.on_page_turn(page());
+        assert_eq!(
+            third,
+            vec![RefreshCommand::Update {
+                rect: page(),
+                intent: RefreshIntent::Partial,
+                dither: false,
+            }]
+        );
+        // Cadence preserved: the counter reset even though no flash was emitted.
+        assert_eq!(policy.partial_count(), 0);
+    }
+
+    // RR3-FR7: avoid_flashing also downgrades the menu-close FlashUi to a plain Ui.
+    #[test]
+    fn avoid_flashing_downgrades_menu_close_to_ui() {
+        let caps = DeviceCapabilities::supernote_full();
+        let mut policy = EinkRefreshPolicy::new(caps, screen()).with_avoid_flashing(true);
+        let region = Rect::new(0, 0, 1404, 200);
+        assert!(matches!(
+            policy.on_menu(false, region).as_slice(),
+            [RefreshCommand::Update {
+                intent: RefreshIntent::Ui,
+                ..
+            }]
+        ));
     }
 
     // RR3-FR6: night mode keeps an independent flash counter + interval; entering it flushes
