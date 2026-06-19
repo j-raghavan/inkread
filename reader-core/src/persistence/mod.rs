@@ -7,6 +7,7 @@
 //! M1a persists only the **integer-page reading position** (RR12-FR3) — fixed-layout PDF has no
 //! `PinPosition`; the [`ReadingPosition::resume_blob`] slot is reserved for the M2 reflow locator.
 
+pub mod identity;
 pub mod sqlite;
 
 use crate::error::{CoreError, CoreResult};
