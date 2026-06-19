@@ -291,6 +291,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "inkread-dict"
+version = "0.1.0"
+dependencies = [
+ "rusqlite",
+]
+
+[[package]]
 name = "inkread-ink"
 version = "0.1.0"
 

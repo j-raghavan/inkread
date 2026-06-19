@@ -1,0 +1,17 @@
+[package]
+name = "inkread-dict"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Offline-first dictionary + thesaurus lookup engine (RR12 / ADR-INKREAD-0009): layered resolution (exact → stem) over an indexed SQLite corpus, language routing, and a permission-gated online-fallback port. Host-testable; names no vendor (IR-7)."
+
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]
+# Bundled SQLite (compiled from source) — hermetic host build, same engine cross-compiles for the
+# device (mirrors reader-core's ADR Decision 4). The pre-built dict.db is opened read-only on device.
+rusqlite = { workspace = true }
