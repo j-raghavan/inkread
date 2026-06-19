@@ -84,6 +84,19 @@ impl fmt::Display for CoreError {
 
 impl std::error::Error for CoreError {}
 
+/// Map an ink-domain error onto the core surface at the persistence boundary (RR21-FR3): a
+/// malformed `.inkbin` is a corrupt document; everything else is a bad argument.
+impl From<inkread_ink::InkError> for CoreError {
+    fn from(e: inkread_ink::InkError) -> Self {
+        match e {
+            inkread_ink::InkError::BadEncoding(m) => {
+                CoreError::CorruptDocument(format!("ink: {m}"))
+            }
+            other => CoreError::InvalidArgument(other.to_string()),
+        }
+    }
+}
+
 /// The core's result alias.
 pub type CoreResult<T> = Result<T, CoreError>;
 
