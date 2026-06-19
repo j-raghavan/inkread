@@ -15,7 +15,7 @@ use std::sync::Arc;
 
 use crate::budget::{Caches, ResourceBudget, TrimLevel};
 use crate::document::fixed::PdfBackend;
-use crate::document::{Document, DocumentMetadata, PageLink, TocEntry};
+use crate::document::{Document, DocumentMetadata, NormRect, PageLink, TextSelection, TocEntry};
 use crate::error::{CoreError, CoreResult};
 use crate::persistence::identity::DocIdentity;
 use crate::persistence::ink_store::InkStore;
@@ -332,6 +332,20 @@ impl ReaderSession {
     #[must_use]
     pub fn page_links(&self, page: usize) -> Vec<PageLink> {
         self.document.page_links(page)
+    }
+
+    /// The word under the normalized point `(x, y)` on `page` (RR11 / dictionary tap) — a
+    /// pass-through to [`Document::word_at`].
+    #[must_use]
+    pub fn word_at(&self, page: usize, x: f32, y: f32) -> Option<TextSelection> {
+        self.document.word_at(page, x, y)
+    }
+
+    /// The text within the normalized `rect` on `page` (RR11 / drag-highlight) — a pass-through to
+    /// [`Document::text_in_rect`].
+    #[must_use]
+    pub fn text_in_rect(&self, page: usize, rect: NormRect) -> TextSelection {
+        self.document.text_in_rect(page, rect)
     }
 
     /// Navigate to a TOC entry's target page (RR11-AC1). An unresolved entry (no

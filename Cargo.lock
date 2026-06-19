@@ -60,6 +60,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b4388bee8683e3d04af747c73422af53102d2bd24d9eadb6cbc100baef4b43f8"
 
 [[package]]
+name = "build-dict"
+version = "0.1.0"
+dependencies = [
+ "flate2",
+ "inkread-dict",
+]
+
+[[package]]
 name = "bumpalo"
 version = "3.20.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -288,6 +296,13 @@ dependencies = [
  "num-traits",
  "zune-core",
  "zune-jpeg",
+]
+
+[[package]]
+name = "inkread-dict"
+version = "0.1.0"
+dependencies = [
+ "rusqlite",
 ]
 
 [[package]]
@@ -535,6 +550,7 @@ name = "reader-core"
 version = "0.1.0"
 dependencies = [
  "device-eink",
+ "inkread-dict",
  "inkread-ink",
  "jni",
  "pdfium-render",

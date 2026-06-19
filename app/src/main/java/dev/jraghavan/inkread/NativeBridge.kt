@@ -87,6 +87,30 @@ object NativeBridge {
      * [WireCodec.decodeLinks]. The shell hit-tests a tap and jumps (internal) or opens the URI.
      */
     external fun nativePageLinks(handle: Long, page: Int): ByteArray
+
+    // ---- text selection + dictionary (RR11/RR12 / ADR-INKREAD-0009 D3) ----
+
+    /** The word under normalized `(x, y)` on `page`; decode with [WireCodec.decodeSelection]. */
+    external fun nativeWordAt(handle: Long, page: Int, x: Float, y: Float): ByteArray
+
+    /** The text within the normalized rect on `page`; decode with [WireCodec.decodeSelection]. */
+    external fun nativeTextInRect(handle: Long, page: Int, x0: Float, y0: Float, x1: Float, y1: Float): ByteArray
+
+    /** Open the dictionary corpus at [path]; returns an opaque handle (0 on failure → throws). */
+    external fun nativeDictOpen(path: String): Long
+
+    /** Free a dictionary handle. Callers zero their field on close (double-close safe). */
+    external fun nativeDictClose(dictHandle: Long)
+
+    /**
+     * Look [word] up on-device, preferring the comma-separated [langsCsv] languages; decode with
+     * [WireCodec.decodeDefinition]. A miss (found == false) is the shell's cue to try its online
+     * source and cache the result with [nativeDictPut].
+     */
+    external fun nativeDefine(dictHandle: Long, word: String, langsCsv: String): ByteArray
+
+    /** Cache a definition (e.g. an online result) into the corpus so the next lookup is instant. */
+    external fun nativeDictPut(dictHandle: Long, lang: String, headword: String, defn: String)
 }
 
 /** One flattened table-of-contents entry (RR11-FR2). [targetPage] is null for a label-only entry. */
@@ -107,6 +131,23 @@ data class LinkRect(
     /** Whether the normalized tap point `(nx, ny)` falls inside this link. */
     fun contains(nx: Float, ny: Float): Boolean = nx in x0..x1 && ny in y0..y1
 }
+
+/** A normalized highlight box `[0,1]` of a [Selection] (RR11 / D3). */
+data class SelBox(val x0: Float, val y0: Float, val x1: Float, val y1: Float)
+
+/** A text selection: the selected string + the boxes to highlight (RR11 / D3). */
+data class Selection(val text: String, val boxes: List<SelBox>) {
+    val isEmpty: Boolean get() = text.isEmpty()
+}
+
+/** A dictionary lookup result (RR12 / D3); [found] is false on a miss (try online next). */
+data class WordDefinition(
+    val found: Boolean,
+    val headword: String,
+    val lang: String,
+    val senses: List<String>,
+    val synonyms: List<String>,
+)
 
 /** Navigation gestures — the int code mapping mirrors `Gesture::from_code` in the core. */
 enum class Gesture(val code: Int) {
@@ -262,4 +303,68 @@ object WireCodec {
 
     private const val LINKS_HEADER_LEN = 3
     private const val LINKS_RECORD_FIXED = 17 // x0,y0,x1,y1 (4×4) + kind(1)
+
+    /**
+     * Decode the selection wire from [NativeBridge.nativeWordAt]/[NativeBridge.nativeTextInRect]
+     * (RR11 / D3): `[ver][textLen u16][text][boxCount u16]` then per box `[x0,y0,x1,y1 f32]`.
+     * Mirrors `encode_selection_wire` in `reader-core/document`.
+     */
+    fun decodeSelection(bytes: ByteArray): Selection {
+        require(bytes.size >= 3) { "selection stream truncated" }
+        require(bytes[0] == WIRE_VERSION) { "bad selection wire version ${bytes[0]}" }
+        val buf = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
+        val tlen = buf.getShort(1).toInt() and 0xFFFF
+        var off = 3
+        require(bytes.size >= off + tlen) { "selection text overruns" }
+        val text = String(bytes, off, tlen, Charsets.UTF_8)
+        off += tlen
+        require(bytes.size >= off + 2) { "selection box count truncated" }
+        val count = buf.getShort(off).toInt() and 0xFFFF
+        off += 2
+        val boxes = ArrayList<SelBox>(count)
+        repeat(count) {
+            require(bytes.size >= off + 16) { "selection box truncated" }
+            boxes.add(SelBox(buf.getFloat(off), buf.getFloat(off + 4), buf.getFloat(off + 8), buf.getFloat(off + 12)))
+            off += 16
+        }
+        return Selection(text, boxes)
+    }
+
+    /**
+     * Decode the definition wire from [NativeBridge.nativeDefine] (RR12 / D3): `[ver][found u8]`;
+     * when found, `[hwLen u16][hw][langLen u8][lang][senseCount u16][senses…][synCount u16][syns…]`.
+     * Mirrors `encode_definition_wire` in `reader-core/dict`.
+     */
+    fun decodeDefinition(bytes: ByteArray): WordDefinition {
+        require(bytes.size >= 2) { "definition stream truncated" }
+        require(bytes[0] == WIRE_VERSION) { "bad definition wire version ${bytes[0]}" }
+        if (bytes[1].toInt() == 0) return WordDefinition(false, "", "", emptyList(), emptyList())
+        val buf = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
+        var off = 2
+        fun str16(): String {
+            require(bytes.size >= off + 2) { "string length truncated" }
+            val n = buf.getShort(off).toInt() and 0xFFFF
+            off += 2
+            require(bytes.size >= off + n) { "string overruns" }
+            val s = String(bytes, off, n, Charsets.UTF_8)
+            off += n
+            return s
+        }
+        fun list(): List<String> {
+            require(bytes.size >= off + 2) { "list count truncated" }
+            val c = buf.getShort(off).toInt() and 0xFFFF
+            off += 2
+            return ArrayList<String>(c).apply { repeat(c) { add(str16()) } }
+        }
+        val headword = str16()
+        require(bytes.size >= off + 1) { "lang length truncated" }
+        val llen = bytes[off].toInt() and 0xFF
+        off += 1
+        require(bytes.size >= off + llen) { "lang overruns" }
+        val lang = String(bytes, off, llen, Charsets.UTF_8)
+        off += llen
+        val senses = list()
+        val synonyms = list()
+        return WordDefinition(true, headword, lang, senses, synonyms)
+    }
 }

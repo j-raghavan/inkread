@@ -5,6 +5,9 @@
 //! ([`fixed::PdfBackend`]) is the one implementation in M0.
 
 pub mod fixed;
+pub mod text_select;
+
+pub use text_select::{CharBox, NormRect, TextSelection};
 
 use crate::error::CoreResult;
 use crate::render::PixelBuffer;
@@ -134,6 +137,32 @@ pub fn encode_toc_wire(entries: &[TocEntry]) -> Vec<u8> {
     out
 }
 
+/// Wire-format version for a [`TextSelection`] the JNI bridge ships to the shell (RR11 / D1).
+const SELECTION_WIRE_VERSION: u8 = 0x01;
+
+/// Encode a text selection (the selected string + its highlight boxes) for the shell — pure
+/// marshaling (no device/JNI types), so it is host-tested. Layout (little-endian):
+/// `[ver=1][text_len: u16][text: utf-8 × text_len][box_count: u16]` then per box
+/// `[x0 f32][y0 f32][x1 f32][y1 f32]`. Lengths saturate rather than panic (RR21-FR3).
+#[must_use]
+pub fn encode_selection_wire(sel: &TextSelection) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.push(SELECTION_WIRE_VERSION);
+    let bytes = sel.text.as_bytes();
+    let tlen = u16::try_from(bytes.len()).unwrap_or(u16::MAX);
+    out.extend_from_slice(&tlen.to_le_bytes());
+    out.extend_from_slice(&bytes[..tlen as usize]);
+    let bcount = u16::try_from(sel.boxes.len()).unwrap_or(u16::MAX);
+    out.extend_from_slice(&bcount.to_le_bytes());
+    for b in sel.boxes.iter().take(bcount as usize) {
+        out.extend_from_slice(&b.x0.to_le_bytes());
+        out.extend_from_slice(&b.y0.to_le_bytes());
+        out.extend_from_slice(&b.x1.to_le_bytes());
+        out.extend_from_slice(&b.y1.to_le_bytes());
+    }
+    out
+}
+
 /// The core trait every format implements (M0 subset).
 ///
 /// Render targets a borrowed [`PixelBuffer`] (Fork 4); the backend white-fills before
@@ -169,6 +198,18 @@ pub trait Document {
     /// no links, never an error or panic (RR21-FR3).
     fn page_links(&self, _page: usize) -> Vec<PageLink> {
         Vec::new()
+    }
+
+    /// The word under the normalized point `(x, y)` on `page` (RR11 / dictionary tap, D1).
+    /// Default: `None` — a format without a text layer has no selection (never panics).
+    fn word_at(&self, _page: usize, _x: f32, _y: f32) -> Option<TextSelection> {
+        None
+    }
+
+    /// The text whose glyphs fall within the normalized `rect` on `page` (RR11 / drag-highlight,
+    /// D1). Default: an empty selection.
+    fn text_in_rect(&self, _page: usize, _rect: NormRect) -> TextSelection {
+        TextSelection::default()
     }
 }
 
@@ -351,5 +392,31 @@ mod tests {
         };
         h.hint_page(2);
         assert_eq!(h.last.get(), Some(2));
+    }
+
+    #[test]
+    fn encode_selection_wire_carries_text_and_boxes() {
+        let sel = TextSelection {
+            text: "hello".into(),
+            boxes: vec![NormRect {
+                x0: 0.1,
+                y0: 0.2,
+                x1: 0.3,
+                y1: 0.25,
+            }],
+        };
+        let w = encode_selection_wire(&sel);
+        assert_eq!(w[0], SELECTION_WIRE_VERSION);
+        assert_eq!(u16::from_le_bytes([w[1], w[2]]), 5); // text len
+        assert_eq!(&w[3..8], b"hello");
+        assert_eq!(u16::from_le_bytes([w[8], w[9]]), 1); // box count
+        assert_eq!(f32::from_le_bytes([w[10], w[11], w[12], w[13]]), 0.1);
+    }
+
+    #[test]
+    fn encode_selection_wire_empty_is_header_only() {
+        let w = encode_selection_wire(&TextSelection::default());
+        // ver + text_len(0) + box_count(0)
+        assert_eq!(w, vec![SELECTION_WIRE_VERSION, 0, 0, 0, 0]);
     }
 }
