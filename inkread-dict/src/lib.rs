@@ -11,6 +11,7 @@
 //! in-memory fixture.
 
 mod engine;
+pub mod stardict;
 
 pub use engine::Dict;
 

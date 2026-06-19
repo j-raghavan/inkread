@@ -1,0 +1,18 @@
+[package]
+name = "build-dict"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Offline tool (host-only, NOT shipped to device): import StarDict dictionaries into the indexed dict.db corpus inkread-dict reads at runtime (ADR-INKREAD-0009 D2). Keeps the gzip dep out of the device cdylib."
+
+[[bin]]
+name = "build-dict"
+path = "src/main.rs"
+
+[dependencies]
+inkread-dict = { workspace = true }
+# .dict.dz is dictzip — gzip-compatible, so flate2's GzDecoder decompresses it. MIT/Apache.
+flate2 = "1"

@@ -7,7 +7,7 @@
 # RR1-AC3: bare `cargo test -p reader-core` builds with `jni` absent from the resolved graph.
 [workspace]
 resolver = "2"
-members = ["device-eink", "inkread-dict", "inkread-ink", "reader-core", "reader-desktop"]
+members = ["build-dict", "device-eink", "inkread-dict", "inkread-ink", "reader-core", "reader-desktop"]
 
 [workspace.package]
 version = "0.1.0"
