@@ -3,6 +3,9 @@
      not requested yet for the M0 bring-up; M0 opens a path the user places on-device. -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
+    <!-- Opt-in online dictionary fallback (Wiktionary) for non-bundled languages (RR12 / D4). -->
+    <uses-permission android:name="android.permission.INTERNET" />
+
     <application
         android:allowBackup="false"
         android:icon="@mipmap/ic_launcher"

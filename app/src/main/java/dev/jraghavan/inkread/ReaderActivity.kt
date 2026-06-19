@@ -8,6 +8,8 @@ import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.Path
+import android.graphics.Typeface
+import android.graphics.drawable.ColorDrawable
 import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
@@ -26,9 +28,15 @@ import android.view.ViewGroup
 import android.view.Window
 import android.widget.EditText
 import android.widget.LinearLayout
+import android.widget.ScrollView
 import android.widget.SeekBar
 import android.widget.TextView
 import dev.jraghavan.inkread.eink.EinkAdapter
+import java.net.HttpURLConnection
+import java.net.URL
+import kotlin.math.max
+import kotlin.math.min
+import org.json.JSONObject
 import dev.jraghavan.inkread.eink.SupernoteEinkAdapter
 import dev.jraghavan.inkread.eink.SupernoteInk
 import java.io.File
@@ -90,6 +98,16 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
     @Volatile private var pageCount = 0
     /** Stable id of the open book (its file name); keys thumbnails + the bookmarks file. */
     @Volatile private var currentBookId = ""
+
+    // ---- dictionary (RR12 / D4) ----
+    /** Open `Dict` handle (0 = not opened). Engine-thread only. */
+    private var dictHandle = 0L
+    /** When true, the stylus SELECTS text (for a lookup) instead of inking. */
+    @Volatile private var selectMode = false
+    /** In-progress selection stroke as interleaved view-px x,y; UI-thread only. */
+    private val selBuf = ArrayList<Float>()
+    /** Net for a swallowed stylus UP during selection (mirrors [strokeFinalize]). */
+    private val selectionFinalize = Runnable { finalizeSelection() }
     /** The in-progress stroke as interleaved view-px x,y; UI-thread only. */
     private val strokeBuf = ArrayList<Float>()
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -162,7 +180,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
                 // cancels any pending finger tap (that finger was a resting palm).
                 lastStylusMs = SystemClock.uptimeMillis()
                 mainHandler.removeCallbacks(pendingTap)
-                captureStylus(event)
+                if (selectMode) captureSelection(event) else captureStylus(event)
             } else if (event.actionMasked == MotionEvent.ACTION_DOWN &&
                 tool == MotionEvent.TOOL_TYPE_FINGER
             ) {
@@ -253,7 +271,10 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
     }
 
     override fun onDestroy() {
-        engine.execute { closeDocument() }
+        engine.execute {
+            closeDocument()
+            closeDict()
+        }
         engine.shutdown() // lets the queued close run, then stops the worker
         super.onDestroy()
     }
@@ -720,6 +741,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         control("📚\nLibrary") { showLibraryDialog() }
         control(if (marked) "🔖\nRemove" else "🔖\nBookmark") { toggleBookmark() }
         control("📑\nMarks") { showBookmarks() }
+        control("🔍\nDefine") { enterSelectMode() }
         control("📄\nContents") { showContentsLazy() }
         control("📂\nOpen") { openPicker() }
         container.addView(controls)
@@ -842,6 +864,266 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
                 .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP),
         )
         finish()
+    }
+
+    // ===== Dictionary (RR12 / ADR-INKREAD-0009 D4) =====
+
+    /**
+     * Enter "Define" mode: the firmware ink is released so the **stylus selects text** instead of
+     * drawing — a stylus tap looks up the word, a drag highlights a phrase (RR11/RR12). Reliable
+     * because stylus up/down is delivered (unlike the swallowed finger up that drives navigation).
+     */
+    private fun enterSelectMode() {
+        selectMode = true
+        ink.teardown() // stop firmware ink so the next stylus stroke is a selection, not ink
+        Toast.makeText(this, "Tap a word (or drag over text) to look it up", Toast.LENGTH_SHORT).show()
+    }
+
+    /** Accumulate the selection stroke; finalize on UP (or a debounced pause if UP is swallowed). */
+    private fun captureSelection(e: MotionEvent) {
+        when (e.actionMasked) {
+            MotionEvent.ACTION_DOWN -> {
+                selBuf.clear()
+                selBuf.add(e.x); selBuf.add(e.y)
+                armSelectionTimeout()
+            }
+            MotionEvent.ACTION_MOVE -> {
+                for (i in 0 until e.historySize) {
+                    selBuf.add(e.getHistoricalX(i)); selBuf.add(e.getHistoricalY(i))
+                }
+                selBuf.add(e.x); selBuf.add(e.y)
+                armSelectionTimeout()
+            }
+            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                selBuf.add(e.x); selBuf.add(e.y)
+                mainHandler.removeCallbacks(selectionFinalize)
+                finalizeSelection()
+            }
+        }
+    }
+
+    private fun armSelectionTimeout() {
+        mainHandler.removeCallbacks(selectionFinalize)
+        mainHandler.postDelayed(selectionFinalize, STROKE_PAUSE_MS)
+    }
+
+    /** Decide tap vs. drag, leave select mode, re-claim ink, and dispatch the lookup (UI thread). */
+    private fun finalizeSelection() {
+        if (selBuf.size < 2) { selBuf.clear(); return }
+        val pts = selBuf.toFloatArray()
+        selBuf.clear()
+        val w = surfaceView.width.toFloat()
+        val h = surfaceView.height.toFloat()
+        selectMode = false
+        ink.setup() // re-claim firmware ink for normal writing
+        if (w <= 0f || h <= 0f) return
+
+        var minX = pts[0]; var maxX = pts[0]; var minY = pts[1]; var maxY = pts[1]
+        var i = 0
+        while (i + 1 < pts.size) {
+            minX = min(minX, pts[i]); maxX = max(maxX, pts[i])
+            minY = min(minY, pts[i + 1]); maxY = max(maxY, pts[i + 1])
+            i += 2
+        }
+        val dragged = (maxX - minX) > w * 0.03f || (maxY - minY) > h * 0.02f
+        val page = currentPage
+        if (dragged) {
+            val r = floatArrayOf(minX / w, minY / h, maxX / w, maxY / h)
+            engine.execute { defineRect(page, r) }
+        } else {
+            val nx = pts[0] / w
+            val ny = pts[1] / h
+            engine.execute { defineWord(page, nx, ny) }
+        }
+    }
+
+    /** Resolve the word under a normalized point and look it up (engine thread). */
+    private fun defineWord(page: Int, nx: Float, ny: Float) {
+        if (docHandle == 0L) return
+        val sel = try {
+            WireCodec.decodeSelection(NativeBridge.nativeWordAt(docHandle, page, nx, ny))
+        } catch (e: RuntimeException) {
+            Log.e(TAG, "wordAt failed: ${e.message}"); return
+        }
+        if (sel.isEmpty) {
+            runOnUiThread { Toast.makeText(this, "No word there", Toast.LENGTH_SHORT).show() }
+            return
+        }
+        lookupAndShow(sel.text)
+    }
+
+    /** Resolve the text within a highlighted rect and look up its first word (engine thread). */
+    private fun defineRect(page: Int, r: FloatArray) {
+        if (docHandle == 0L) return
+        val sel = try {
+            WireCodec.decodeSelection(NativeBridge.nativeTextInRect(docHandle, page, r[0], r[1], r[2], r[3]))
+        } catch (e: RuntimeException) {
+            Log.e(TAG, "textInRect failed: ${e.message}"); return
+        }
+        val word = sel.text.split(Regex("\\s+")).firstOrNull().orEmpty()
+        if (word.isBlank()) {
+            runOnUiThread { Toast.makeText(this, "No text selected", Toast.LENGTH_SHORT).show() }
+            return
+        }
+        lookupAndShow(word)
+    }
+
+    /** On-device lookup → online fallback (cached) → show the popup (engine thread). */
+    private fun lookupAndShow(rawWord: String) {
+        val word = rawWord.trim().trim { !it.isLetter() && it != '\'' && it != '-' }
+        if (word.isEmpty()) return
+        if (!ensureDictOpen()) {
+            runOnUiThread { Toast.makeText(this, "Dictionary not available", Toast.LENGTH_SHORT).show() }
+            return
+        }
+        var def = try {
+            WireCodec.decodeDefinition(NativeBridge.nativeDefine(dictHandle, word, "en"))
+        } catch (e: RuntimeException) {
+            WordDefinition(false, "", "", emptyList(), emptyList())
+        }
+        if (!def.found) {
+            onlineLookup(word)?.let { online ->
+                try {
+                    NativeBridge.nativeDictPut(dictHandle, online.lang, online.headword, online.senses.joinToString("\n"))
+                } catch (e: RuntimeException) {
+                    Log.w(TAG, "dict cache failed: ${e.message}")
+                }
+                def = online
+            }
+        }
+        val result = def
+        runOnUiThread {
+            if (result.found) showDictPopup(word, result)
+            else Toast.makeText(this, "\"$word\" not found", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    /** Best-effort online lookup via Wiktionary's REST API (RR12; opt-in network). Engine thread. */
+    private fun onlineLookup(word: String): WordDefinition? {
+        return try {
+            val url = URL("https://en.wiktionary.org/api/rest_v1/page/definition/${Uri.encode(word)}")
+            val conn = (url.openConnection() as HttpURLConnection).apply {
+                connectTimeout = 4000
+                readTimeout = 6000
+                setRequestProperty("User-Agent", "InkRead/0.1 (offline e-ink reader)")
+            }
+            if (conn.responseCode != 200) return null
+            val body = conn.inputStream.bufferedReader().use { it.readText() }
+            val root = JSONObject(body)
+            val lang = if (root.has("en")) "en" else root.keys().asSequence().firstOrNull() ?: return null
+            val arr = root.getJSONArray(lang)
+            val senses = ArrayList<String>()
+            outer@ for (i in 0 until arr.length()) {
+                val group = arr.getJSONObject(i)
+                val pos = group.optString("partOfSpeech", "")
+                val defs = group.optJSONArray("definitions") ?: continue
+                for (j in 0 until defs.length()) {
+                    val d = stripHtmlTags(defs.getJSONObject(j).optString("definition", ""))
+                    if (d.isNotBlank()) senses.add(if (pos.isNotEmpty()) "($pos) $d" else d)
+                    if (senses.size >= 6) break@outer
+                }
+            }
+            if (senses.isEmpty()) null else WordDefinition(true, word, lang, senses, emptyList())
+        } catch (e: Exception) {
+            Log.w(TAG, "online lookup failed: ${e.message}")
+            null
+        }
+    }
+
+    private fun stripHtmlTags(s: String): String =
+        s.replace(Regex("<[^>]*>"), "").replace("&amp;", "&").replace("&#39;", "'").trim()
+
+    /** Copy the bundled corpus out of assets (once) and open it; returns true if usable. */
+    private fun ensureDictOpen(): Boolean {
+        if (dictHandle != 0L) return true
+        val dest = File(filesDir, "dict.db")
+        if (!dest.exists() || dest.length() == 0L) {
+            runOnUiThread { Toast.makeText(this, "Preparing dictionary…", Toast.LENGTH_SHORT).show() }
+            try {
+                assets.open("dict.db").use { input -> dest.outputStream().use { input.copyTo(it) } }
+            } catch (e: Exception) {
+                Log.e(TAG, "dict copy failed: ${e.message}")
+                return false
+            }
+        }
+        dictHandle = try {
+            NativeBridge.nativeDictOpen(dest.absolutePath)
+        } catch (e: RuntimeException) {
+            Log.e(TAG, "dict open failed: ${e.message}"); 0L
+        }
+        return dictHandle != 0L
+    }
+
+    private fun closeDict() {
+        val h = dictHandle
+        dictHandle = 0L
+        if (h != 0L) {
+            try { NativeBridge.nativeDictClose(h) } catch (e: RuntimeException) { /* ignore */ }
+        }
+    }
+
+    /** The Kindle-style definition card: headword + senses + thesaurus, anchored to the bottom. */
+    private fun showDictPopup(word: String, def: WordDefinition) {
+        val d = resources.displayMetrics.density
+        fun dp(v: Int) = (v * d).toInt()
+        val dialog = Dialog(this).apply { requestWindowFeature(Window.FEATURE_NO_TITLE) }
+        val col = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(Color.WHITE)
+            setPadding(dp(22), dp(16), dp(22), dp(18))
+        }
+        col.addView(
+            TextView(this).apply {
+                text = def.headword.ifEmpty { word }
+                setTextColor(Color.BLACK)
+                textSize = 24f
+                typeface = Typeface.DEFAULT_BOLD
+            },
+        )
+        if (def.lang.isNotEmpty() && def.lang != "en") {
+            col.addView(
+                TextView(this).apply {
+                    text = def.lang
+                    setTextColor(Color.DKGRAY)
+                    textSize = 12f
+                },
+            )
+        }
+        for ((i, s) in def.senses.take(6).withIndex()) {
+            col.addView(
+                TextView(this).apply {
+                    text = "${i + 1}.  $s"
+                    setTextColor(Color.BLACK)
+                    textSize = 15f
+                    setPadding(0, dp(6), 0, 0)
+                },
+            )
+        }
+        if (def.synonyms.isNotEmpty()) {
+            col.addView(
+                TextView(this).apply {
+                    text = "SYNONYMS"
+                    setTextColor(Color.DKGRAY)
+                    textSize = 11f
+                    typeface = Typeface.DEFAULT_BOLD
+                    setPadding(0, dp(14), 0, dp(2))
+                },
+            )
+            col.addView(
+                TextView(this).apply {
+                    text = def.synonyms.take(12).joinToString(", ")
+                    setTextColor(Color.BLACK)
+                    textSize = 15f
+                },
+            )
+        }
+        dialog.setContentView(ScrollView(this).apply { addView(col) })
+        dialog.window?.apply {
+            setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+            setGravity(Gravity.BOTTOM)
+            setBackgroundDrawable(ColorDrawable(Color.WHITE))
+        }
+        dialog.show()
     }
 
     /** Persist the current reading position (RR12-FR3 / RR27); store-less / closed = no-op. */
