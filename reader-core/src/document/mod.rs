@@ -173,6 +173,18 @@ pub trait Document {
     fn page_links(&self, _page: usize) -> Vec<PageLink> {
         Vec::new()
     }
+
+    /// The word under the normalized point `(x, y)` on `page` (RR11 / dictionary tap, D1).
+    /// Default: `None` — a format without a text layer has no selection (never panics).
+    fn word_at(&self, _page: usize, _x: f32, _y: f32) -> Option<TextSelection> {
+        None
+    }
+
+    /// The text whose glyphs fall within the normalized `rect` on `page` (RR11 / drag-highlight,
+    /// D1). Default: an empty selection.
+    fn text_in_rect(&self, _page: usize, _rect: NormRect) -> TextSelection {
+        TextSelection::default()
+    }
 }
 
 #[cfg(test)]

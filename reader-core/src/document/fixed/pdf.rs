@@ -18,6 +18,7 @@ use std::sync::{Mutex, OnceLock};
 
 use pdfium_render::prelude::*;
 
+use crate::document::text_select::{self, CharBox, NormRect, TextSelection};
 use crate::document::{Document, DocumentMetadata, LinkTarget, PageLink, TocEntry};
 use crate::error::{CoreError, CoreResult};
 use crate::render::PixelBuffer;
@@ -191,6 +192,52 @@ impl PdfBackend {
                 .set_reverse_byte_order(true)
         })
     }
+
+    /// The page's glyphs as normalized [`CharBox`]es (RR11 / D1b) — the input to the pure
+    /// selection logic. pdfium gives chars in reading order with point-space, bottom-left-origin
+    /// bounds; we normalize + flip Y exactly like [`Self::page_links`]. An out-of-range page, a
+    /// text-less page, or a glyph with no resolvable bounds simply contributes nothing (never
+    /// panics, RR21-FR3).
+    fn page_chars(&self, index: usize) -> Vec<CharBox> {
+        let page = match i32::try_from(index)
+            .ok()
+            .and_then(|i| self.document.pages().get(i).ok())
+        {
+            Some(p) => p,
+            None => return Vec::new(),
+        };
+        let pw = page.width().value;
+        let ph = page.height().value;
+        if pw <= 0.0 || ph <= 0.0 {
+            return Vec::new();
+        }
+        let text = match page.text() {
+            Ok(t) => t,
+            Err(_) => return Vec::new(),
+        };
+        let mut out = Vec::new();
+        for ch in text.chars().iter() {
+            let Some(c) = ch.unicode_char() else { continue };
+            let bounds = match ch.loose_bounds() {
+                Ok(b) => b,
+                Err(_) => continue,
+            };
+            let nx0 = (bounds.left().value / pw).clamp(0.0, 1.0);
+            let nx1 = (bounds.right().value / pw).clamp(0.0, 1.0);
+            let ny_top = ((ph - bounds.top().value) / ph).clamp(0.0, 1.0);
+            let ny_bottom = ((ph - bounds.bottom().value) / ph).clamp(0.0, 1.0);
+            out.push(CharBox {
+                ch: c,
+                rect: NormRect {
+                    x0: nx0.min(nx1),
+                    y0: ny_top.min(ny_bottom),
+                    x1: nx0.max(nx1),
+                    y1: ny_top.max(ny_bottom),
+                },
+            });
+        }
+        out
+    }
 }
 
 impl Document for PdfBackend {
@@ -271,6 +318,14 @@ impl Document for PdfBackend {
             });
         }
         out
+    }
+
+    fn word_at(&self, page: usize, x: f32, y: f32) -> Option<TextSelection> {
+        text_select::word_at(&self.page_chars(page), x, y)
+    }
+
+    fn text_in_rect(&self, page: usize, rect: NormRect) -> TextSelection {
+        text_select::text_in_rect(&self.page_chars(page), rect)
     }
 }
 
