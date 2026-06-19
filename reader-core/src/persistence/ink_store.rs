@@ -43,6 +43,20 @@ pub trait InkStore: Send + Sync {
 
     /// Persist the sidecar metadata atomically.
     fn save_metadata(&self, meta: &SidecarMetadata) -> CoreResult<()>;
+
+    /// Move a page's stored ink aside (rename to `*.corrupt`) when it fails to decode, so the
+    /// reader can continue with an empty page WITHOUT destroying the unreadable bytes — they stay
+    /// recoverable (RR20-FR1). Default: a no-op for stores without on-disk files.
+    fn quarantine_page(&self, _page: usize) -> CoreResult<()> {
+        Ok(())
+    }
+
+    /// Move the whole `annotations/` directory aside when the sidecar belongs to a *different*
+    /// document (identity mismatch, RR10-AC3), so the opened document starts with a clean sidecar
+    /// and the stale ink is preserved rather than adopted. Default: a no-op.
+    fn reset_stale_annotations(&self) -> CoreResult<()> {
+        Ok(())
+    }
 }
 
 /// Wrap an IO error as a persistence error (RR21-FR3).
@@ -50,8 +64,18 @@ fn io_err(e: io::Error) -> CoreError {
     CoreError::Persistence(e.to_string())
 }
 
-/// Atomically replace `path` with `bytes`: write a flushed `*.tmp` sibling, then rename. The
-/// parent directory must already exist.
+/// Best-effort directory fsync so a rename/unlink is itself durable across power loss (RR20-FR6):
+/// `sync_all` on a file flushes its *data*, but the **directory entry** created/removed by the
+/// rename/unlink is only guaranteed durable once the parent dir is fsync'd. A platform or
+/// filesystem that rejects opening/fsyncing a directory is tolerated — the rename still happened.
+fn sync_dir(dir: &Path) {
+    if let Ok(f) = fs::File::open(dir) {
+        let _ = f.sync_all();
+    }
+}
+
+/// Atomically replace `path` with `bytes`: write a flushed `*.tmp` sibling, rename over the target,
+/// then fsync the parent directory so the rename survives power loss. The parent must exist.
 fn atomic_write(path: &Path, bytes: &[u8]) -> CoreResult<()> {
     let mut tmp_name: OsString = path.as_os_str().to_owned();
     tmp_name.push(".tmp");
@@ -65,6 +89,9 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> CoreResult<()> {
     if let Err(e) = fs::rename(tmp, path) {
         let _ = fs::remove_file(tmp);
         return Err(io_err(e));
+    }
+    if let Some(parent) = path.parent() {
+        sync_dir(parent);
     }
     Ok(())
 }
@@ -95,9 +122,15 @@ impl InkStore for FsInkStore {
     fn save_page(&self, page: usize, layer: &InkLayer) -> CoreResult<()> {
         let file = self.paths.page_file(page);
         if layer.is_empty() {
-            // Erased to nothing → remove the file (absence == no ink). Missing is fine.
+            // Erased to nothing → remove the file (absence == no ink). Missing is fine; fsync the
+            // dir so the unlink is durable (RR20-FR6).
             return match fs::remove_file(&file) {
-                Ok(()) => Ok(()),
+                Ok(()) => {
+                    if let Some(parent) = file.parent() {
+                        sync_dir(parent);
+                    }
+                    Ok(())
+                }
                 Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
                 Err(e) => Err(io_err(e)),
             };
@@ -140,6 +173,40 @@ impl InkStore for FsInkStore {
             .map_err(|e| CoreError::Persistence(format!("metadata.json: {e}")))?;
         atomic_write(&self.paths.metadata_file(), &bytes)
     }
+
+    fn quarantine_page(&self, page: usize) -> CoreResult<()> {
+        let src = self.paths.page_file(page);
+        let mut dst: OsString = src.as_os_str().to_owned();
+        dst.push(".corrupt"); // ".inkbin.corrupt" no longer matches the page-scan suffix
+        match fs::rename(&src, Path::new(&dst)) {
+            Ok(()) => {
+                if let Some(parent) = src.parent() {
+                    sync_dir(parent);
+                }
+                Ok(())
+            }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(io_err(e)),
+        }
+    }
+
+    fn reset_stale_annotations(&self) -> CoreResult<()> {
+        let src = self.paths.annotations_dir();
+        let mut dst: OsString = src.as_os_str().to_owned();
+        dst.push(".stale");
+        let dst = Path::new(&dst);
+        let _ = fs::remove_dir_all(dst); // drop any prior quarantine so the rename can land
+        match fs::rename(&src, dst) {
+            Ok(()) => {
+                if let Some(parent) = src.parent() {
+                    sync_dir(parent);
+                }
+                Ok(())
+            }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(io_err(e)),
+        }
+    }
 }
 
 /// In-memory adapter — a store-less session's backing and the unit-test double. Holds encoded
@@ -160,7 +227,7 @@ impl MemInkStore {
 
 impl InkStore for MemInkStore {
     fn load_page(&self, page: usize) -> CoreResult<InkLayer> {
-        let pages = self.pages.lock().expect("ink store mutex");
+        let pages = self.pages.lock().unwrap_or_else(|e| e.into_inner());
         match pages.get(&page) {
             Some(bytes) => Ok(decode_layer(bytes)?),
             None => Ok(InkLayer::new()),
@@ -168,7 +235,7 @@ impl InkStore for MemInkStore {
     }
 
     fn save_page(&self, page: usize, layer: &InkLayer) -> CoreResult<()> {
-        let mut pages = self.pages.lock().expect("ink store mutex");
+        let mut pages = self.pages.lock().unwrap_or_else(|e| e.into_inner());
         if layer.is_empty() {
             pages.remove(&page);
         } else {
@@ -178,16 +245,16 @@ impl InkStore for MemInkStore {
     }
 
     fn pages_with_ink(&self) -> CoreResult<Vec<usize>> {
-        let pages = self.pages.lock().expect("ink store mutex");
+        let pages = self.pages.lock().unwrap_or_else(|e| e.into_inner());
         Ok(pages.keys().copied().collect())
     }
 
     fn load_metadata(&self) -> CoreResult<Option<SidecarMetadata>> {
-        Ok(self.meta.lock().expect("ink store mutex").clone())
+        Ok(self.meta.lock().unwrap_or_else(|e| e.into_inner()).clone())
     }
 
     fn save_metadata(&self, meta: &SidecarMetadata) -> CoreResult<()> {
-        *self.meta.lock().expect("ink store mutex") = Some(meta.clone());
+        *self.meta.lock().unwrap_or_else(|e| e.into_inner()) = Some(meta.clone());
         Ok(())
     }
 }
@@ -301,6 +368,44 @@ mod tests {
             store.load_page(0),
             Err(CoreError::CorruptDocument(_))
         ));
+    }
+
+    #[test]
+    fn quarantine_clears_the_page_but_preserves_the_bytes() {
+        let tmp = TempDir::new();
+        let store = fs_store(&tmp);
+        store.save_page(0, &one_stroke_layer()).unwrap();
+        fs::write(store.paths.page_file(0), b"NOTINKBIN").unwrap(); // corrupt it
+        store.quarantine_page(0).unwrap();
+        assert!(
+            store.load_page(0).unwrap().is_empty(),
+            "page now reads empty"
+        );
+        assert!(store.pages_with_ink().unwrap().is_empty(), "no live ink");
+        let mut q: OsString = store.paths.page_file(0).into_os_string();
+        q.push(".corrupt");
+        assert_eq!(
+            fs::read(&q).unwrap(),
+            b"NOTINKBIN",
+            "corrupt bytes preserved for recovery"
+        );
+    }
+
+    #[test]
+    fn reset_stale_annotations_moves_the_dir_aside() {
+        let tmp = TempDir::new();
+        let store = fs_store(&tmp);
+        store.save_page(0, &one_stroke_layer()).unwrap();
+        store.reset_stale_annotations().unwrap();
+        assert!(store.pages_with_ink().unwrap().is_empty(), "starts clean");
+        let mut stale: OsString = store.paths.annotations_dir().into_os_string();
+        stale.push(".stale");
+        assert!(
+            std::path::Path::new(&stale)
+                .join("page-0001.inkbin")
+                .exists(),
+            "old ink preserved in the .stale dir"
+        );
     }
 
     #[test]
