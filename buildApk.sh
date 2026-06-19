@@ -217,6 +217,21 @@ stage_pdfium() {
 }
 
 # =========================================================
+# stage_dict — ensure the on-device dictionary corpus (assets/dict.db) exists (ADR-INKREAD-0009).
+# A generated build artifact (gitignored, ~60 MB): delegates to scripts/stage-dict.sh, which
+# downloads free WordNet + imports it via build-dict. No-op if dict.db is already present.
+# =========================================================
+stage_dict() {
+    local root="$1"
+    if [[ -f "$root/$APP_MODULE/src/main/assets/dict.db" ]]; then
+        write_color_output "dict.db present: $APP_MODULE/src/main/assets/dict.db" "Green"
+        return 0
+    fi
+    write_color_output "staging dictionary corpus (scripts/stage-dict.sh)…" "Blue"
+    bash "$root/scripts/stage-dict.sh" || die "dictionary staging failed (scripts/stage-dict.sh)"
+}
+
+# =========================================================
 # build_apk — assemble + sign the APK via gradle (RR29-FR1/FR2)
 # =========================================================
 build_apk() {
@@ -272,6 +287,7 @@ main() {
 
     build_rust "$root" "$profile_flag"
     stage_pdfium "$root"
+    stage_dict "$root"
     # Capitalize the first letter portably (macOS ships bash 3.2, which lacks ${var^}).
     local task                              # assembleRelease / assembleDebug
     case "$variant" in

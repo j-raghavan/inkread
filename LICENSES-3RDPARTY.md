@@ -9,6 +9,10 @@ the dependency set changes.
 
 - **pdfium** (`libpdfium.so`/`.dylib`, bblanchon prebuilt, pinned `chromium/7881` = PDFium 151.0.7881.0) — **BSD-3-Clause** (PDFium) — clean; bundled under `app/src/main/jniLibs/` on device and bound via `PDFIUM_DYNAMIC_LIB_PATH` on the host (RR5-FR1/FR5). Attribution: see the PDFium and bblanchon/pdfium-binaries notices.
 
+## Bundled data (generated build artifacts, not committed to git)
+
+- **WordNet 3.0** (Princeton University) — the English dictionary corpus (definitions + synsets) imported into `app/src/main/assets/dict.db` by `scripts/stage-dict.sh`, sourced from the Hu Zheng StarDict packaging (`download.huzheng.org`). **WordNet License** — permissive: free use/redistribution provided the Princeton copyright + license notice is retained (ADR-INKREAD-0009 / RR22-FR5). The `dict.db` artifact is gitignored and regenerated at build time. Other languages are looked up online (opt-in) and cached, not bundled.
+
 ## Rust dependencies (106 crates, all features)
 
 | Crate | Version | License (SPDX) |

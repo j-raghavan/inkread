@@ -36,6 +36,8 @@ supernote/
 .gradle/
 build/
 app/build/
+# The dictionary corpus is a generated build artifact (scripts/stage-dict.sh / buildApk stage_dict).
+app/src/main/assets/dict.db
 local.properties
 *.iml
 .idea/

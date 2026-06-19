@@ -143,6 +143,54 @@ pub fn definition_text(block: &[u8], same_type: Option<char>) -> String {
     }
 }
 
+/// Parse a thesaurus entry's body into synonyms. Moby entries are a header line
+/// (`"N Moby Thesaurus words for "x":"`) followed by a comma-separated list; we take everything
+/// after the first colon and split on commas. Over-long tokens (junk) are dropped.
+#[must_use]
+pub fn parse_synonym_list(defn: &str) -> Vec<String> {
+    let body = defn.split_once(':').map_or(defn, |(_, tail)| tail);
+    let mut out: Vec<String> = body
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty() && s.chars().count() <= 60)
+        .map(str::to_string)
+        .collect();
+    out.dedup();
+    out
+}
+
+/// Extract tight synonyms from WordNet-style `[syn: {a}, {b}]` markup inside a definition: each
+/// `{token}` within a `[syn: …]` span is a synonym (true synset members, far sharper + smaller than
+/// a broad thesaurus). De-duplicated; the caller drops the headword itself. A no-op for dictionaries
+/// without that markup.
+#[must_use]
+pub fn extract_inline_synonyms(defn: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut search = defn;
+    while let Some(start) = search.find("[syn:") {
+        let after = &search[start + 5..];
+        let end = after.find(']').unwrap_or(after.len());
+        let mut rest = &after[..end];
+        while let Some(b) = rest.find('{') {
+            let tail = &rest[b + 1..];
+            match tail.find('}') {
+                Some(e) => {
+                    let tok = tail[..e].trim();
+                    if !tok.is_empty() {
+                        out.push(tok.to_string());
+                    }
+                    rest = &tail[e + 1..];
+                }
+                None => break,
+            }
+        }
+        search = &after[end..];
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
 fn read_be(b: &[u8]) -> u64 {
     b.iter().fold(0u64, |acc, &x| (acc << 8) | u64::from(x))
 }
@@ -237,6 +285,30 @@ mod tests {
         );
         // type-prefixed (no sametypesequence): first byte is the type
         assert_eq!(definition_text(b"mhello", None), "hello");
+    }
+
+    #[test]
+    fn parse_synonym_list_extracts_moby_synonyms() {
+        let body =
+            "12 Moby Thesaurus words for \"happy\":\n  cheerful, glad, joyful,\n  joyous, pleased";
+        let syns = parse_synonym_list(body);
+        assert_eq!(
+            syns,
+            vec!["cheerful", "glad", "joyful", "joyous", "pleased"]
+        );
+        // no header colon → split the whole thing
+        assert_eq!(parse_synonym_list("a, b, c"), vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn extract_inline_synonyms_from_wordnet_markup() {
+        let defn = "n 1: a score in baseball [syn: {run}, {tally}]\nn 2: foot race [syn: {run}, {running}]";
+        assert_eq!(
+            extract_inline_synonyms(defn),
+            vec!["run", "running", "tally"]
+        );
+        // no markup → empty
+        assert!(extract_inline_synonyms("plain definition").is_empty());
     }
 
     #[test]

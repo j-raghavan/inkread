@@ -75,6 +75,53 @@ impl Dict {
         Ok(())
     }
 
+    /// Bulk-import dictionary entries in one transaction — the offline importer's fast path
+    /// (150k autocommit inserts would be far too slow). Returns the count written.
+    pub fn import_entries(&self, lang: &str, items: &[(String, String)]) -> DictResult<usize> {
+        let conn = self.lock();
+        let tx = conn.unchecked_transaction().map_err(be)?;
+        let mut n = 0;
+        {
+            let mut stmt = tx
+                .prepare(
+                    "INSERT OR REPLACE INTO entries (lang, key, headword, defn) VALUES (?1, ?2, ?3, ?4)",
+                )
+                .map_err(be)?;
+            for (headword, defn) in items {
+                stmt.execute(params![lang, normalize(headword), headword, defn])
+                    .map_err(be)?;
+                n += 1;
+            }
+        }
+        tx.commit().map_err(be)?;
+        Ok(n)
+    }
+
+    /// Bulk-import thesaurus synonyms in one transaction. Returns the count written.
+    pub fn import_synonyms(
+        &self,
+        lang: &str,
+        items: &[(String, Vec<String>)],
+    ) -> DictResult<usize> {
+        let conn = self.lock();
+        let tx = conn.unchecked_transaction().map_err(be)?;
+        let mut n = 0;
+        {
+            let mut stmt = tx
+                .prepare("INSERT INTO synonyms (lang, key, syn) VALUES (?1, ?2, ?3)")
+                .map_err(be)?;
+            for (headword, syns) in items {
+                let key = normalize(headword);
+                for syn in syns {
+                    stmt.execute(params![lang, key, syn]).map_err(be)?;
+                    n += 1;
+                }
+            }
+        }
+        tx.commit().map_err(be)?;
+        Ok(n)
+    }
+
     /// Resolve `query` to a [`Definition`] (RR12): try `lang_hints` first then any language, then a
     /// stem fallback for inflected forms (`running`→`run`). On a full on-device miss, fall through
     /// to `online` (if supplied) and cache the result. `None` if nothing matches.
