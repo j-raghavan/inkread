@@ -18,6 +18,16 @@ import android.view.MotionEvent
 import android.view.SurfaceHolder
 import android.view.SurfaceView
 import android.widget.Toast
+import android.app.Dialog
+import android.text.InputType
+import android.view.Gravity
+import android.view.View
+import android.view.ViewGroup
+import android.view.Window
+import android.widget.EditText
+import android.widget.LinearLayout
+import android.widget.SeekBar
+import android.widget.TextView
 import dev.jraghavan.inkread.eink.EinkAdapter
 import dev.jraghavan.inkread.eink.SupernoteEinkAdapter
 import dev.jraghavan.inkread.eink.SupernoteInk
@@ -74,11 +84,35 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
     private var inkStore: InkStore? = null
     /** 0-based page the strokes are keyed to; set on the engine thread after each render. */
     private var currentPage = 0
+    /** Per-book bookmarks (RR16); engine-thread only. */
+    private var bookmarks: Bookmarks? = null
+    /** Total pages in the open doc; cached so the bottom-bar slider can read it on the UI thread. */
+    @Volatile private var pageCount = 0
+    /** Stable id of the open book (its file name); keys thumbnails + the bookmarks file. */
+    @Volatile private var currentBookId = ""
     /** The in-progress stroke as interleaved view-px x,y; UI-thread only. */
     private val strokeBuf = ArrayList<Float>()
     private val mainHandler = Handler(Looper.getMainLooper())
     /** Safety net for a swallowed stylus ACTION_UP: commit the stroke after a brief pen pause. */
     private val strokeFinalize = Runnable { finalizeStroke() }
+
+    /** A finger tap is acted on only after a short confirm window with NO stylus activity — a palm
+     *  resting before a pen stroke is cancelled the moment the stylus event (touch or hover)
+     *  arrives (forward-looking palm rejection, RR19/RR25). UI-thread only. */
+    private var pendingTapX = 0f
+    private var pendingTapY = 0f
+    private val pendingTap = Runnable {
+        if (SystemClock.uptimeMillis() - lastStylusMs > PALM_REJECT_MS && strokeBuf.isEmpty()) {
+            handleTap(pendingTapX, pendingTapY)
+        } else {
+            Log.i(TAG, "DIAG tap suppressed at fire (stylus active → palm)")
+        }
+    }
+
+    // ---- launch intent (from HomeActivity), read on the UI thread, consumed on the engine thread ----
+    @Volatile private var requestPick = false
+    @Volatile private var requestedPath: String? = null
+    @Volatile private var requestedId: String? = null
 
     private val inkPaint = Paint().apply {
         color = Color.BLACK
@@ -89,6 +123,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         isAntiAlias = true
     }
     private val inkDotPaint = Paint().apply { color = Color.BLACK; style = Paint.Style.FILL; isAntiAlias = true }
+    private val bookmarkPaint = Paint().apply { color = Color.BLACK; style = Paint.Style.FILL; isAntiAlias = true }
 
     private val loadingBg = Paint().apply { color = Color.WHITE }
     private val loadingText = Paint().apply {
@@ -106,6 +141,11 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         // Prove the JNI boundary up front (RR1-AC2). Cheap; fine on the UI thread.
         Log.i(TAG, "core: ${NativeBridge.nativeHello()}")
 
+        // What did HomeActivity ask us to open? (a specific book / the picker / else resume.)
+        requestPick = intent.getBooleanExtra(EXTRA_PICK, false)
+        requestedPath = intent.getStringExtra(EXTRA_BOOK_PATH)
+        requestedId = intent.getStringExtra(EXTRA_BOOK_ID)
+
         surfaceView = SurfaceView(this)
         surfaceView.holder.addCallback(this)
         // Input model (RR19/RR25): the STYLUS inks (the firmware paints it — the app never
@@ -118,16 +158,15 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             val tool = event.getToolType(0)
             if (tool == MotionEvent.TOOL_TYPE_STYLUS || tool == MotionEvent.TOOL_TYPE_ERASER) {
                 // The firmware paints the live ink; the app captures the same points to bake +
-                // persist them (RR19). The app never navigates on the pen.
+                // persist them (RR19). The app never navigates on the pen — and a stylus event
+                // cancels any pending finger tap (that finger was a resting palm).
                 lastStylusMs = SystemClock.uptimeMillis()
+                mainHandler.removeCallbacks(pendingTap)
                 captureStylus(event)
             } else if (event.actionMasked == MotionEvent.ACTION_DOWN &&
-                event.pointerCount == 1 &&
-                tool == MotionEvent.TOOL_TYPE_FINGER &&
-                SystemClock.uptimeMillis() - lastStylusMs > PALM_REJECT_MS
+                tool == MotionEvent.TOOL_TYPE_FINGER
             ) {
-                Log.i(TAG, "DIAG tap-down finger x=${event.x} y=${event.y}")
-                handleTap(event.x, event.y)
+                maybeScheduleTap(event)
             }
             true
         }
@@ -179,6 +218,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
 
     override fun onPause() {
         super.onPause()
+        mainHandler.removeCallbacks(pendingTap) // drop any deferred tap when we leave the foreground
         ink.teardown() // release the firmware ink claim + clear the overlay
         // Persist the reading position when backgrounded (RR27) — async on the engine thread.
         engine.execute { savePosition() }
@@ -235,14 +275,36 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
 
     private fun openDocumentIfNeeded() {
         if (docHandle != 0L) return
-        val book = resolveBook()
-        if (book == null) {
-            // Nothing to resume → open the file picker straight away (no dead "Loading…" screen).
-            Log.i(TAG, "no book to resume; opening the file picker (RR22)")
-            runOnUiThread { openPicker() }
-            return
+        val path = requestedPath
+        val id = requestedId
+        when {
+            // 1) An explicit book chosen on Home / in the Library.
+            path != null && id != null -> {
+                rememberBook(path, id)
+                openBook(path, id)
+            }
+            // 2) Home asked for the file picker.
+            requestPick -> {
+                requestPick = false
+                Log.i(TAG, "launch: opening the file picker (RR22)")
+                runOnUiThread { openPicker() }
+            }
+            // 3) Default: resume the last book (or the bring-up sample), else pick.
+            else -> {
+                val book = resolveBook()
+                if (book == null) {
+                    Log.i(TAG, "no book to resume; opening the file picker (RR22)")
+                    runOnUiThread { openPicker() }
+                } else {
+                    openBook(book.first, book.second)
+                }
+            }
         }
-        openBook(book.first, book.second)
+    }
+
+    /** Remember the current book so Home's "Continue" and a relaunch resume it (RR27). */
+    private fun rememberBook(path: String, id: String) {
+        prefs.edit().putString(KEY_BOOK_PATH, path).putString(KEY_BOOK_ID, id).apply()
     }
 
     /**
@@ -279,13 +341,15 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             0L
         }
         if (docHandle != 0L) {
-            // Per-book handwriting sidecar (RR19); the book id is a content URI, so hash it for a
-            // filesystem-safe name.
+            // Per-book sidecars (RR19/RR16): handwriting + bookmarks, keyed by the book id.
             inkStore = InkStore(File(filesDir, "ink/${bookId.hashCode()}.json")).also { it.load() }
+            bookmarks = Bookmarks(File(filesDir, "bookmarks/${bookId.hashCode()}.json")).also { it.load() }
+            currentBookId = bookId
+            pageCount = NativeBridge.nativePageCount(docHandle)
+            Books.pushRecent(this, bookId, path)
             Log.i(
                 TAG,
-                "opened $bookId: ${NativeBridge.nativePageCount(docHandle)} pages, " +
-                    "resumed at page ${NativeBridge.nativeCurrentPage(docHandle)}",
+                "opened $bookId: $pageCount pages, resumed at page ${NativeBridge.nativeCurrentPage(docHandle)}",
             )
         }
     }
@@ -297,29 +361,28 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
      * resumes per document even though the bytes are re-copied to a fixed path.
      */
     private fun importAndOpen(uri: Uri) {
-        val dest = File(filesDir, "current.pdf")
-        try {
-            contentResolver.openInputStream(uri)?.use { input ->
-                dest.outputStream().use { out -> input.copyTo(out) }
-            } ?: run {
-                Log.e(TAG, "cannot open stream for $uri")
-                return
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "import failed: ${e.message}")
+        val dest = Books.importFrom(this, uri)
+        if (dest == null) {
+            Log.e(TAG, "import failed for $uri")
+            runOnUiThread { Toast.makeText(this, "Couldn't open that PDF", Toast.LENGTH_SHORT).show() }
             return
         }
-        val bookId = uri.toString().take(BOOK_ID_MAX)
-        prefs.edit()
-            .putString(KEY_BOOK_PATH, dest.absolutePath)
-            .putString(KEY_BOOK_ID, bookId)
-            .apply()
+        openSwap(dest.absolutePath, dest.name)
+    }
 
+    /** Swap the open document to (`path`, `id`) on the engine thread: remember, close, open, render. */
+    private fun openSwap(path: String, id: String) {
+        rememberBook(path, id)
         closeDocument() // saves + closes the previous book before swapping
         drawLoading()
-        openBook(dest.absolutePath, bookId)
+        openBook(path, id)
         renderAndBlit()
-        adapter.refreshFull() // imported book's first page has no command stream → refresh
+        adapter.refreshFull() // the new book's first page has no command stream → refresh
+    }
+
+    /** Open a Library book in place (invoked from the reader popup; engine thread). */
+    private fun openFromLibrary(file: File) {
+        engine.execute { openSwap(file.absolutePath, file.name) }
     }
 
     private fun renderAndBlit() {
@@ -339,9 +402,13 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         bmp.copyPixelsFromBuffer(buf)
         currentPage = NativeBridge.nativeCurrentPage(handle)
         // Bake this page's saved handwriting onto the rendered page (RR19) before blitting.
-        inkStore?.let { store ->
-            val cv = Canvas(bmp)
-            for (s in store.strokesFor(currentPage)) drawStroke(cv, s)
+        val cv = Canvas(bmp)
+        inkStore?.let { store -> for (s in store.strokesFor(currentPage)) drawStroke(cv, s) }
+        // A small dog-ear marks a bookmarked page (RR16).
+        if (bookmarks?.has(currentPage) == true) drawBookmarkCorner(cv)
+        // Cache the first page as the book's thumbnail, once (RR17-FR5).
+        if (currentPage == 0 && currentBookId.isNotEmpty() && !Books.thumbFile(this, currentBookId).exists()) {
+            Books.saveThumbnail(this, currentBookId, bmp)
         }
         blit { canvas -> canvas.drawBitmap(bmp, 0f, 0f, null) }
         // Cache this page's links for tap hit-testing (RR11-FR3). Cheap; pdfium caches per page.
@@ -455,6 +522,45 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         canvas.drawPath(path, inkPaint)
     }
 
+    /** A small filled dog-ear in the top-right corner marking a bookmarked page (RR16). */
+    private fun drawBookmarkCorner(canvas: Canvas) {
+        val w = viewW.toFloat()
+        val s = viewW * 0.045f
+        val path = Path().apply {
+            moveTo(w - s, 0f)
+            lineTo(w, 0f)
+            lineTo(w, s)
+            close()
+        }
+        canvas.drawPath(path, bookmarkPaint)
+    }
+
+    /**
+     * Decide whether a finger ACTION_DOWN is a deliberate navigation tap or a resting palm
+     * (RR19/RR25). Reject obvious palms immediately — multi-touch, a large contact patch, a recent
+     * or in-progress stylus, or an active stroke — and otherwise **defer** the tap by
+     * [TAP_CONFIRM_MS]: any stylus event (incl. pen hover) inside that window cancels it, so the
+     * common "rest the hand, then write" sequence never registers as a tap.
+     */
+    private fun maybeScheduleTap(e: MotionEvent) {
+        val recentStylus = SystemClock.uptimeMillis() - lastStylusMs <= PALM_REJECT_MS
+        val major = e.getTouchMajor(0)
+        val vh = surfaceView.height
+        val largeContact = vh > 0 && major >= vh * PALM_TOUCH_MAJOR_FRAC
+        if (e.pointerCount != 1 || recentStylus || largeContact || strokeBuf.isNotEmpty()) {
+            Log.i(
+                TAG,
+                "DIAG palm-reject down pc=${e.pointerCount} recent=$recentStylus " +
+                    "major=$major large=$largeContact stroke=${strokeBuf.isNotEmpty()}",
+            )
+            return
+        }
+        pendingTapX = e.x
+        pendingTapY = e.y
+        mainHandler.removeCallbacks(pendingTap)
+        mainHandler.postDelayed(pendingTap, TAP_CONFIRM_MS)
+    }
+
     private fun handleTap(x: Float, y: Float) {
         val w = surfaceView.width.toFloat()
         val h = surfaceView.height.toFloat()
@@ -472,7 +578,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         when (zone) {
             "PREV" -> postGesture(Gesture.PREV_PAGE)
             "NEXT" -> postGesture(Gesture.NEXT_PAGE)
-            else -> openTocMenu()
+            else -> showBottomBar()
         }
     }
 
@@ -534,44 +640,208 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         }
     }
 
-    /** Fetch the TOC on the engine thread, then show the chooser on the UI thread (RR11-FR2). */
-    private fun openTocMenu() {
-        engine.execute {
-            // No document open yet → go straight to the picker.
-            if (docHandle == 0L) {
-                runOnUiThread { openPicker() }
-                return@execute
+    /**
+     * The reader's bottom control bar (RR16/RR25), KOReader-style: a thin panel **hugging the
+     * bottom edge** — a page slider with a tappable page indicator, above a flat row of controls
+     * (Home · Library · Bookmark · Marks · Contents · Open). Built programmatically, high-contrast
+     * for e-ink; uses the cached page state so showing it needs no engine round-trip.
+     */
+    private fun showBottomBar() {
+        if (docHandle == 0L) {
+            openPicker()
+            return
+        }
+        val total = pageCount.coerceAtLeast(1)
+        val cur = currentPage.coerceIn(0, total - 1)
+        val d = resources.displayMetrics.density
+        fun dp(v: Int) = (v * d).toInt()
+
+        val dialog = Dialog(this).apply { requestWindowFeature(Window.FEATURE_NO_TITLE) }
+        val container = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(Color.WHITE)
+        }
+        // Hairline top divider so the bar reads as a surface, not a floating box.
+        container.addView(
+            View(this).apply { setBackgroundColor(Color.parseColor("#33000000")) },
+            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(1).coerceAtLeast(1)),
+        )
+
+        // Page-slider row:  [N / Total]  ────────●────────
+        val pageLabel = TextView(this).apply {
+            text = "${cur + 1} / $total"
+            setTextColor(Color.BLACK)
+            textSize = 14f
+            setPadding(0, 0, dp(14), 0)
+            setOnClickListener { dialog.dismiss(); showPageEntry(total) }
+        }
+        val seek = SeekBar(this).apply {
+            max = total - 1
+            progress = cur
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(sb: SeekBar, p: Int, fromUser: Boolean) {
+                    if (fromUser) pageLabel.text = "${p + 1} / $total"
+                }
+                override fun onStartTrackingTouch(sb: SeekBar) {}
+                override fun onStopTrackingTouch(sb: SeekBar) { dialog.dismiss(); postJump(sb.progress) }
+            })
+        }
+        container.addView(
+            LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(dp(16), dp(10), dp(16), dp(4))
+                addView(pageLabel)
+                addView(seek, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+            },
+        )
+
+        // Control row: flat, evenly-weighted icon+label cells.
+        val controls = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(dp(2), dp(2), dp(2), dp(10))
+        }
+        fun control(label: String, onClick: () -> Unit) {
+            controls.addView(
+                TextView(this).apply {
+                    text = label
+                    setTextColor(Color.BLACK)
+                    textSize = 11f
+                    gravity = Gravity.CENTER
+                    setPadding(0, dp(8), 0, dp(8))
+                    isClickable = true
+                    setOnClickListener { dialog.dismiss(); onClick() }
+                },
+                LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f),
+            )
+        }
+        val marked = bookmarks?.has(cur) == true
+        control("🏠\nHome") { goHome() }
+        control("📚\nLibrary") { showLibraryDialog() }
+        control(if (marked) "🔖\nRemove" else "🔖\nBookmark") { toggleBookmark() }
+        control("📑\nMarks") { showBookmarks() }
+        control("📄\nContents") { showContentsLazy() }
+        control("📂\nOpen") { openPicker() }
+        container.addView(controls)
+
+        dialog.setContentView(container)
+        dialog.window?.apply {
+            setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+            setGravity(Gravity.BOTTOM)
+            setBackgroundDrawable(android.graphics.drawable.ColorDrawable(Color.WHITE))
+        }
+        dialog.show()
+    }
+
+    /** A "go to page" text-entry dialog (RR11-FR1): type a 1-based page number to jump. */
+    private fun showPageEntry(total: Int) {
+        val input = EditText(this).apply {
+            inputType = InputType.TYPE_CLASS_NUMBER
+            hint = "1 – $total"
+        }
+        AlertDialog.Builder(this)
+            .setTitle("Go to page")
+            .setView(input)
+            .setPositiveButton("Go") { _, _ ->
+                val n = input.text.toString().toIntOrNull()
+                if (n != null && n in 1..total) {
+                    postJump(n - 1)
+                } else {
+                    Toast.makeText(this, "Enter a page from 1 to $total", Toast.LENGTH_SHORT).show()
+                }
             }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    /** Toggle a bookmark on the current page (RR16); redraw so the dog-ear appears/disappears. */
+    private fun toggleBookmark() {
+        engine.execute {
+            val bm = bookmarks ?: return@execute
+            val page = currentPage
+            val now = bm.toggle(page)
+            runOnUiThread {
+                val msg = if (now) "Bookmarked page ${page + 1}" else "Bookmark removed"
+                Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
+            }
+            renderAndBlit()
+            adapter.refreshFull()
+        }
+    }
+
+    /** List the bookmarked pages (RR16); tap one to jump. */
+    private fun showBookmarks() {
+        engine.execute {
+            val marks = bookmarks?.pages() ?: emptyList()
+            runOnUiThread {
+                if (marks.isEmpty()) {
+                    Toast.makeText(this, "No bookmarks yet — tap Bookmark to add one", Toast.LENGTH_SHORT).show()
+                    return@runOnUiThread
+                }
+                val labels = marks.map { "Page ${it + 1}" }.toTypedArray()
+                AlertDialog.Builder(this)
+                    .setTitle("Bookmarks")
+                    .setItems(labels) { _, which -> postJump(marks[which]) }
+                    .show()
+            }
+        }
+    }
+
+    /** Fetch the TOC on the engine thread, then show it (RR11-FR2). */
+    private fun showContentsLazy() {
+        engine.execute {
+            if (docHandle == 0L) return@execute
             val toc = try {
                 WireCodec.decodeToc(NativeBridge.nativeToc(docHandle))
             } catch (e: RuntimeException) {
                 Log.e(TAG, "toc failed: ${e.message}")
                 emptyList()
             }
-            runOnUiThread { showReaderMenu(toc) }
+            runOnUiThread {
+                if (toc.isEmpty()) {
+                    Toast.makeText(this, "No contents in this document", Toast.LENGTH_SHORT).show()
+                } else {
+                    showContents(toc)
+                }
+            }
         }
     }
 
-    /**
-     * The center-tap reader menu: "Open another PDF…" first (this replaces the old long-press,
-     * which collided with slow stylus taps), then the document's contents (RR11-FR2).
-     */
-    private fun showReaderMenu(toc: List<TocItem>) {
-        // Indent TOC entries by depth; show the 1-based page for resolvable entries.
-        val tocLabels = toc.map { item ->
+    /** The document's table of contents (RR11-FR2), shown as a scrollable list from the popup. */
+    private fun showContents(toc: List<TocItem>) {
+        if (toc.isEmpty()) return
+        val labels = toc.map { item ->
             val indent = "    ".repeat(item.depth)
             val page = item.targetPage?.let { "  ·  p${it + 1}" } ?: ""
             indent + item.title + page
-        }
-        val labels = (listOf("📂  Open another PDF…") + tocLabels).toTypedArray()
-
+        }.toTypedArray()
         AlertDialog.Builder(this)
-            .setTitle(if (toc.isEmpty()) "Menu" else "Contents")
-            .setItems(labels) { _, which ->
-                if (which == 0) openPicker()
-                else toc[which - 1].targetPage?.let { postJump(it) } // label-only entries don't navigate
-            }
+            .setTitle("Contents")
+            .setItems(labels) { _, which -> toc[which].targetPage?.let { postJump(it) } }
             .show()
+    }
+
+    /** The on-device library (RR17): pick a stored book to open it in place. */
+    private fun showLibraryDialog() {
+        val books = Books.list(this)
+        if (books.isEmpty()) {
+            Toast.makeText(this, "No books yet — open a PDF first", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val labels = books.map { Books.title(it) }.toTypedArray()
+        AlertDialog.Builder(this)
+            .setTitle("Library")
+            .setItems(labels) { _, which -> openFromLibrary(books[which]) }
+            .show()
+    }
+
+    /** Return to the home screen (RR16), leaving the reader. */
+    private fun goHome() {
+        startActivity(
+            Intent(this, HomeActivity::class.java)
+                .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP),
+        )
+        finish()
     }
 
     /** Persist the current reading position (RR12-FR3 / RR27); store-less / closed = no-op. */
@@ -586,6 +856,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
 
     private fun closeDocument() {
         inkStore = null // strokes are already persisted per-stroke; drop the per-book store
+        bookmarks = null // bookmarks are persisted on toggle; drop the per-book store
         val h = docHandle
         docHandle = 0L // zero BEFORE the call so a re-entrant close is a no-op (Amendment 2)
         if (h == 0L) return
@@ -597,16 +868,22 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         NativeBridge.nativeCloseDocument(h)
     }
 
-    private companion object {
+    companion object {
         const val TAG = "ReaderActivity"
         const val DPI = 226 // Supernote-class panel density (approx); refined per device.
         const val REQ_OPEN_DOC = 1 // startActivityForResult request code for the PDF picker.
         const val PREFS = "inkread"
-        const val KEY_BOOK_PATH = "book_path" // copied PDF under app storage (RR27).
-        const val KEY_BOOK_ID = "book_id" // stable per-book identity (content URI, clamped).
-        const val BOOK_ID_MAX = 512 // mirrors BookId::MAX_LEN in the core.
-        const val PALM_REJECT_MS = 1000L // ignore a finger tap within this long of a stylus event.
+        const val KEY_BOOK_PATH = "book_path" // stored PDF under app storage (RR27).
+        const val KEY_BOOK_ID = "book_id" // stable per-book id (the stored file name).
+        const val PALM_REJECT_MS = 1000L // a finger tap within this long of a stylus event = palm.
         const val STROKE_PAUSE_MS = 600L // commit a stroke after this pen-pause (swallowed-UP net).
         const val INK_STROKE_WIDTH = 6f // baked-ink line width (px) tuned to match the firmware pen.
+        const val TAP_CONFIRM_MS = 300L // defer a finger tap; a stylus event in this window = palm.
+        const val PALM_TOUCH_MAJOR_FRAC = 0.12f // contact major ≥ 12% of view height ⇒ a palm.
+
+        // Launch extras from HomeActivity.
+        const val EXTRA_PICK = "inkread.pick" // open the file picker on launch.
+        const val EXTRA_BOOK_PATH = "inkread.book_path" // open this specific stored book…
+        const val EXTRA_BOOK_ID = "inkread.book_id" // …with this stable id.
     }
 }
