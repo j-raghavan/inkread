@@ -1,0 +1,12 @@
+[package]
+name = "inkread-ink"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "The vector-ink domain model (RR6): Stroke/InkPoint/Tool/InkColor, per-page InkLayer with undo/redo, eraser hit-testing, and the .inkbin codec. Pure, dependency-free, host-testable; names no vendor (IR-7)."
+
+[lib]
+crate-type = ["rlib"]
