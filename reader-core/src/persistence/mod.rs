@@ -8,6 +8,7 @@
 //! `PinPosition`; the [`ReadingPosition::resume_blob`] slot is reserved for the M2 reflow locator.
 
 pub mod identity;
+pub mod sidecar;
 pub mod sqlite;
 
 use crate::error::{CoreError, CoreResult};
