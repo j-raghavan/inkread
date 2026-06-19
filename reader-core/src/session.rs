@@ -422,6 +422,12 @@ impl ReaderSession {
         Ok(changed)
     }
 
+    /// Flush the current page's ink to the store (RR20-FR2) — an explicit save for pause/close,
+    /// complementing the automatic autosave on stroke-end/undo/redo.
+    pub fn save_ink(&self) -> CoreResult<()> {
+        self.autosave_ink()
+    }
+
     /// Persist the current page's layer to the store (RR20-FR2). No-op without a store.
     fn autosave_ink(&self) -> CoreResult<()> {
         if let Some(store) = &self.ink {

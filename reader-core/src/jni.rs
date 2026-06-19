@@ -24,7 +24,7 @@
 
 use jni::objects::{JByteArray, JByteBuffer, JClass, JString};
 use jni::strings::JNIString;
-use jni::sys::{jint, jlong};
+use jni::sys::{jboolean, jfloat, jint, jlong};
 use jni::{Env, EnvUnowned};
 
 use device_eink::{decode_capabilities, encode_commands, DeviceCapabilities};
@@ -32,8 +32,12 @@ use device_eink::{decode_capabilities, encode_commands, DeviceCapabilities};
 use std::path::Path;
 use std::sync::Arc;
 
+use inkread_ink::{InkColor, Tool};
+
 use crate::document::{encode_links_wire, encode_toc_wire};
 use crate::error::{CoreError, CoreResult};
+use crate::persistence::ink_store::{FsInkStore, InkStore};
+use crate::persistence::sidecar::SidecarPaths;
 use crate::persistence::sqlite::SqliteStore;
 use crate::persistence::{BookId, ReaderStore};
 use crate::render::{PixelBuffer, Viewport};
@@ -379,6 +383,171 @@ pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeJumpToPage<
         let commands = session.jump_to_page(target);
         let bytes = encode_commands(&commands);
         env.byte_array_from_slice(&bytes)
+    })
+    .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
+}
+
+// =====================================================================================
+// Ink annotation seam (RR6/RR7/RR10/RR20). The Kotlin shell feeds stylus geometry through
+// these; the Rust core owns the model + sidecar persistence. The live firmware-ink *render*
+// (ADR-SUPERNOTE-INK) is a separate device path and does NOT cross this seam.
+//
+//   nativeAttachInkStore(handle, docPath)        — bind the document's book.inkread/ sidecar
+//   nativeInkBeginStroke(handle, tool, rgba, width, createdAtMs)
+//   nativeInkAddPoint(handle, x, y, pressure, tiltX, tiltY, timestampMs)  (NaN tilt = absent)
+//   nativeInkEndStroke(handle)                   — commit + autosave
+//   nativeInkStrokesForPage(handle, page): bytes — .inkbin wire (decode with the ink codec)
+//   nativeInkUndo / nativeInkRedo(handle): bool  — autosaves on change
+//   nativeInkSave(handle)                        — explicit flush (onPause/close)
+//
+// `tool`: 0=Pen, 1=Highlighter, 2=Eraser. `rgba`: 0xRRGGBBAA packed into an int.
+// =====================================================================================
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeAttachInkStore<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+    doc_path: JString<'local>,
+) {
+    env.with_env(|env| -> jni::errors::Result<()> {
+        // SAFETY: borrowed, not owned (Amendment 2).
+        let session = unsafe { session_mut(handle) }.map_err(|e| throw(env, &e))?;
+        let doc_path: String = doc_path.try_to_string(env)?;
+        let paths = SidecarPaths::for_document(Path::new(&doc_path));
+        let store: Arc<dyn InkStore> = Arc::new(FsInkStore::new(paths));
+        session
+            .attach_ink_store(store)
+            .map_err(|e| throw(env, &e))?;
+        Ok(())
+    })
+    .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeInkBeginStroke<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+    tool: jint,
+    color_rgba: jint,
+    width: jfloat,
+    created_at_ms: jlong,
+) {
+    env.with_env(|env| -> jni::errors::Result<()> {
+        let session = unsafe { session_mut(handle) }.map_err(|e| throw(env, &e))?;
+        let tool = Tool::from_code(tool as u8).ok_or_else(|| {
+            throw(
+                env,
+                &CoreError::InvalidArgument(format!("unknown ink tool {tool}")),
+            )
+        })?;
+        let c = color_rgba as u32;
+        let color = InkColor::rgba((c >> 24) as u8, (c >> 16) as u8, (c >> 8) as u8, c as u8);
+        session
+            .ink_begin_stroke(tool, color, width, created_at_ms.max(0) as u64)
+            .map_err(|e| throw(env, &e))?;
+        Ok(())
+    })
+    .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
+}
+
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeInkAddPoint<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+    x: jfloat,
+    y: jfloat,
+    pressure: jfloat,
+    tilt_x: jfloat,
+    tilt_y: jfloat,
+    timestamp_ms: jint,
+) {
+    env.with_env(|env| -> jni::errors::Result<()> {
+        let session = unsafe { session_mut(handle) }.map_err(|e| throw(env, &e))?;
+        // NaN tilt means "not reported"; the model also drops any non-finite tilt to None.
+        let tx = if tilt_x.is_nan() { None } else { Some(tilt_x) };
+        let ty = if tilt_y.is_nan() { None } else { Some(tilt_y) };
+        session
+            .ink_add_point(x, y, pressure, tx, ty, timestamp_ms.max(0) as u32)
+            .map_err(|e| throw(env, &e))?;
+        Ok(())
+    })
+    .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeInkEndStroke<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+) {
+    env.with_env(|env| -> jni::errors::Result<()> {
+        let session = unsafe { session_mut(handle) }.map_err(|e| throw(env, &e))?;
+        session.ink_end_stroke().map_err(|e| throw(env, &e))?;
+        Ok(())
+    })
+    .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeInkStrokesForPage<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+    page: jint,
+) -> JByteArray<'local> {
+    env.with_env(|env| -> jni::errors::Result<JByteArray<'local>> {
+        let session = unsafe { session_mut(handle) }.map_err(|e| throw(env, &e))?;
+        let target = if page < 0 { 0usize } else { page as usize };
+        let bytes = session
+            .ink_strokes_wire(target)
+            .map_err(|e| throw(env, &e))?;
+        env.byte_array_from_slice(&bytes)
+    })
+    .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeInkUndo<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+) -> jboolean {
+    env.with_env(|env| -> jni::errors::Result<jboolean> {
+        let session = unsafe { session_mut(handle) }.map_err(|e| throw(env, &e))?;
+        let changed = session.ink_undo().map_err(|e| throw(env, &e))?;
+        Ok(jboolean::from(changed))
+    })
+    .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeInkRedo<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+) -> jboolean {
+    env.with_env(|env| -> jni::errors::Result<jboolean> {
+        let session = unsafe { session_mut(handle) }.map_err(|e| throw(env, &e))?;
+        let changed = session.ink_redo().map_err(|e| throw(env, &e))?;
+        Ok(jboolean::from(changed))
+    })
+    .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeInkSave<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+) {
+    env.with_env(|env| -> jni::errors::Result<()> {
+        let session = unsafe { session_mut(handle) }.map_err(|e| throw(env, &e))?;
+        session.save_ink().map_err(|e| throw(env, &e))?;
+        Ok(())
     })
     .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
 }
