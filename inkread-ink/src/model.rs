@@ -260,7 +260,11 @@ impl InkLayer {
     /// the largest existing id so new strokes never collide.
     #[must_use]
     pub fn from_strokes(strokes: Vec<Stroke>) -> Self {
-        let next_id = strokes.iter().map(|s| s.id.0).max().map_or(0, |m| m + 1);
+        let next_id = strokes
+            .iter()
+            .map(|s| s.id.0)
+            .max()
+            .map_or(0, |m| m.saturating_add(1));
         Self {
             strokes,
             next_id,
@@ -616,5 +620,81 @@ mod tests {
     fn pressure_to_width_scales() {
         assert!((pressure_to_width(0.02, 0.0) - 0.01).abs() < 1e-6);
         assert!((pressure_to_width(0.02, 1.0) - 0.02).abs() < 1e-6);
+    }
+
+    fn ids(l: &InkLayer) -> Vec<StrokeId> {
+        l.strokes().iter().map(|s| s.id).collect()
+    }
+
+    #[test]
+    fn redo_of_erase_re_removes() {
+        let mut l = InkLayer::new();
+        drawn(&mut l, &[(0.10, 0.10), (0.20, 0.10)]);
+        drawn(&mut l, &[(0.10, 0.80), (0.20, 0.80)]);
+        l.erase_at(0.15, 0.10, 0.02); // remove S0
+        assert_eq!(ids(&l), vec![StrokeId(1)]);
+        assert!(l.undo()); // restore S0
+        assert_eq!(ids(&l), vec![StrokeId(0), StrokeId(1)]);
+        assert!(l.redo()); // re-erase S0
+        assert_eq!(ids(&l), vec![StrokeId(1)]);
+    }
+
+    #[test]
+    fn erase_restores_middle_stroke_in_order() {
+        let mut l = InkLayer::new();
+        drawn(&mut l, &[(0.10, 0.10), (0.20, 0.10)]); // S0 @ y=0.10
+        drawn(&mut l, &[(0.10, 0.50), (0.20, 0.50)]); // S1 @ y=0.50 (middle)
+        drawn(&mut l, &[(0.10, 0.90), (0.20, 0.90)]); // S2 @ y=0.90
+        assert_eq!(l.erase_at(0.15, 0.50, 0.02), vec![StrokeId(1)]);
+        assert_eq!(ids(&l), vec![StrokeId(0), StrokeId(2)]);
+        assert!(l.undo());
+        assert_eq!(
+            ids(&l),
+            vec![StrokeId(0), StrokeId(1), StrokeId(2)],
+            "middle stroke restored at its original index"
+        );
+    }
+
+    #[test]
+    fn single_gesture_erasing_two_strokes_undoes_one_at_a_time() {
+        let mut l = InkLayer::new();
+        drawn(&mut l, &[(0.10, 0.10), (0.20, 0.10)]); // S0 horizontal
+        drawn(&mut l, &[(0.14, 0.05), (0.14, 0.15)]); // S1 vertical, crosses near (0.15,0.10)
+        let removed = l.erase_at(0.15, 0.10, 0.03);
+        assert_eq!(removed.len(), 2, "both strokes hit by one erase point");
+        assert!(l.is_empty());
+        assert!(l.undo()); // restore one
+        assert_eq!(l.strokes().len(), 1);
+        assert!(l.undo()); // restore the other
+        assert_eq!(
+            ids(&l),
+            vec![StrokeId(0), StrokeId(1)],
+            "paint order preserved"
+        );
+    }
+
+    #[test]
+    fn interleaved_add_erase_undo_redo_reconstructs_exactly() {
+        let mut l = InkLayer::new();
+        drawn(&mut l, &[(0.10, 0.10), (0.20, 0.10)]); // add S0
+        l.erase_at(0.15, 0.10, 0.02); // erase S0
+        drawn(&mut l, &[(0.50, 0.50), (0.60, 0.50)]); // add S1
+        assert_eq!(ids(&l), vec![StrokeId(1)]);
+        // undo all three edits in reverse
+        assert!(l.undo()); // remove S1
+        assert!(l.undo()); // restore S0
+        assert_eq!(ids(&l), vec![StrokeId(0)]);
+        assert!(l.undo()); // remove S0
+        assert!(l.is_empty());
+        assert!(!l.undo());
+        // redo all three forward
+        assert!(l.redo()); // add S0
+        assert!(l.redo()); // erase S0
+        assert!(l.redo()); // add S1
+        assert_eq!(
+            ids(&l),
+            vec![StrokeId(1)],
+            "redo reconstructs original state"
+        );
     }
 }

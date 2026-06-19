@@ -16,6 +16,8 @@
 //! `flags` bit 0 = a `tilt_x` field follows, bit 1 = a `tilt_y` field follows. Only the strokes
 //! persist — never the undo/redo history (RR20).
 
+use std::collections::HashSet;
+
 use crate::model::{InkColor, InkError, InkLayer, InkPoint, InkResult, Stroke, StrokeId, Tool};
 
 /// Magic prefix identifying an `.inkbin` blob.
@@ -67,8 +69,10 @@ pub fn encode_layer(layer: &InkLayer) -> Vec<u8> {
 }
 
 /// Decode `.inkbin` bytes into an [`InkLayer`] (RR10-FR4). Returns [`InkError::BadEncoding`] on a
-/// bad magic, unknown version, unknown tool code, a zero-point stroke, or truncation — never
-/// panics and never pre-allocates from an untrusted count.
+/// bad magic, unknown version, unknown tool code, a non-finite/non-positive width, a zero-point
+/// stroke, a duplicate stroke id, truncation, or trailing bytes — never panics and never
+/// pre-allocates from an untrusted count. Re-establishes every invariant the encoder enforced, so
+/// an untrusted blob can't smuggle in a value the in-memory model would reject (e.g. a NaN width).
 pub fn decode_layer(bytes: &[u8]) -> InkResult<InkLayer> {
     let mut c = Cursor::new(bytes);
     if c.take(4)? != MAGIC {
@@ -80,12 +84,22 @@ pub fn decode_layer(bytes: &[u8]) -> InkResult<InkLayer> {
     }
     let stroke_count = c.u32()?;
     let mut strokes = Vec::new();
+    let mut seen_ids = HashSet::new();
     for _ in 0..stroke_count {
         let id = StrokeId(c.u32()?);
+        if !seen_ids.insert(id.0) {
+            // Duplicate ids would make undo's `retain(|s| s.id != …)` remove both — reject.
+            return Err(InkError::BadEncoding("duplicate stroke id".into()));
+        }
         let tool = Tool::from_code(c.u8()?)
             .ok_or_else(|| InkError::BadEncoding("unknown tool code".into()))?;
         let color = InkColor::rgba(c.u8()?, c.u8()?, c.u8()?, c.u8()?);
         let width = c.f32()?;
+        if !width.is_finite() || width <= 0.0 {
+            return Err(InkError::BadEncoding(
+                "non-finite or non-positive width".into(),
+            ));
+        }
         let created_at_ms = c.u64()?;
         let point_count = c.u32()?;
         if point_count == 0 {
@@ -118,6 +132,11 @@ pub fn decode_layer(bytes: &[u8]) -> InkResult<InkLayer> {
             points,
             created_at_ms,
         });
+    }
+    if c.pos != bytes.len() {
+        return Err(InkError::BadEncoding(
+            "trailing bytes after last stroke".into(),
+        ));
     }
     Ok(InkLayer::from_strokes(strokes))
 }
@@ -258,6 +277,48 @@ mod tests {
         let mut bytes = encode_layer(&sample_layer());
         // first stroke's tool byte sits right after magic(4)+ver(1)+count(4)+id(4) = offset 13
         bytes[13] = 0x7F;
+        assert!(matches!(
+            decode_layer(&bytes),
+            Err(InkError::BadEncoding(_))
+        ));
+    }
+
+    #[test]
+    fn non_finite_width_is_rejected() {
+        // The model rejects a NaN width on the way in; the decoder must re-establish that on the
+        // way back so a hostile .inkbin can't smuggle a NaN that breaks bounds() / round-trip eq.
+        let mut bytes = encode_layer(&sample_layer());
+        // width f32 sits after magic(4)+ver(1)+count(4)+id(4)+tool(1)+rgba(4) = offset 18.
+        bytes[18..22].copy_from_slice(&f32::NAN.to_le_bytes());
+        assert!(matches!(
+            decode_layer(&bytes),
+            Err(InkError::BadEncoding(_))
+        ));
+    }
+
+    #[test]
+    fn trailing_bytes_are_rejected() {
+        let mut bytes = encode_layer(&sample_layer());
+        bytes.extend_from_slice(b"TRAILING-JUNK");
+        assert!(matches!(
+            decode_layer(&bytes),
+            Err(InkError::BadEncoding(_))
+        ));
+    }
+
+    #[test]
+    fn duplicate_stroke_id_is_rejected() {
+        // Two single-point, no-tilt pen strokes → fixed 42-byte records; the 2nd id starts at
+        // header(9)+record(42) = 51. Overwrite its low byte so both strokes share id 0.
+        let mut l = InkLayer::new();
+        for _ in 0..2 {
+            l.start_stroke(Tool::Pen, InkColor::BLACK, 0.01, 0).unwrap();
+            l.push_point(InkPoint::new(0.1, 0.1, 1.0, None, None, 0).unwrap())
+                .unwrap();
+            l.finish_stroke().unwrap();
+        }
+        let mut bytes = encode_layer(&l);
+        bytes[51] = 0;
         assert!(matches!(
             decode_layer(&bytes),
             Err(InkError::BadEncoding(_))
