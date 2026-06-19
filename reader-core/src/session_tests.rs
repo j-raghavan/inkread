@@ -274,3 +274,98 @@ fn basic_panel_session_collapses_to_full() {
         }]
     ));
 }
+
+// ===== Ink annotation lifecycle (RR6/RR7/RR10/RR20) =====
+
+use crate::persistence::ink_store::MemInkStore;
+
+/// Draw and commit one pen stroke through the public session API.
+fn draw(s: &mut ReaderSession, pts: &[(f32, f32)]) {
+    s.ink_begin_stroke(Tool::Pen, InkColor::BLACK, 0.01, 0)
+        .unwrap();
+    for &(x, y) in pts {
+        s.ink_add_point(x, y, 1.0, None, None, 0).unwrap();
+    }
+    s.ink_end_stroke().unwrap();
+}
+
+#[test]
+fn ink_saves_and_reloads_across_sessions() {
+    // RR7-AC1: a stroke written on a page reappears after reopen.
+    let store: Arc<dyn InkStore> = Arc::new(MemInkStore::new());
+    let mut s = session(2, DeviceCapabilities::supernote_full());
+    s.attach_ink_store(Arc::clone(&store)).unwrap();
+    draw(&mut s, &[(0.1, 0.1), (0.2, 0.2)]);
+    assert_eq!(s.ink_strokes().len(), 1);
+
+    // A fresh session over the same sidecar reloads the stroke.
+    let mut reopened = session(2, DeviceCapabilities::supernote_full());
+    reopened.attach_ink_store(store).unwrap();
+    assert_eq!(reopened.ink_strokes().len(), 1, "stroke reloaded on reopen");
+}
+
+#[test]
+fn ink_undo_redo_autosaves_to_store() {
+    let store: Arc<dyn InkStore> = Arc::new(MemInkStore::new());
+    let mut s = session(1, DeviceCapabilities::supernote_full());
+    s.attach_ink_store(Arc::clone(&store)).unwrap();
+    draw(&mut s, &[(0.1, 0.1), (0.2, 0.2)]);
+    assert_eq!(store.pages_with_ink().unwrap(), vec![0]);
+
+    assert!(s.ink_undo().unwrap());
+    assert!(
+        store.pages_with_ink().unwrap().is_empty(),
+        "undo autosaved the now-empty page (file removed)"
+    );
+    assert!(s.ink_redo().unwrap());
+    assert_eq!(
+        store.pages_with_ink().unwrap(),
+        vec![0],
+        "redo re-persisted"
+    );
+}
+
+#[test]
+fn page_turn_loads_each_pages_own_ink() {
+    let store: Arc<dyn InkStore> = Arc::new(MemInkStore::new());
+    let mut s = session(3, DeviceCapabilities::supernote_full());
+    s.attach_ink_store(store).unwrap();
+    draw(&mut s, &[(0.1, 0.1), (0.2, 0.2)]); // page 0
+
+    s.on_gesture(Gesture::NextPage); // → page 1
+    assert_eq!(s.ink_strokes().len(), 0, "page 1 starts empty");
+    draw(&mut s, &[(0.5, 0.5), (0.6, 0.6)]); // page 1
+
+    s.on_gesture(Gesture::PrevPage); // back to page 0
+    assert_eq!(s.ink_strokes().len(), 1, "page 0 ink reloaded on return");
+    s.on_gesture(Gesture::NextPage); // page 1 again
+    assert_eq!(s.ink_strokes().len(), 1, "page 1 ink intact");
+}
+
+#[test]
+fn eraser_removes_strokes_and_autosaves() {
+    let store: Arc<dyn InkStore> = Arc::new(MemInkStore::new());
+    let mut s = session(1, DeviceCapabilities::supernote_full());
+    s.attach_ink_store(Arc::clone(&store)).unwrap();
+    draw(&mut s, &[(0.10, 0.10), (0.20, 0.10)]);
+
+    s.ink_begin_stroke(Tool::Eraser, InkColor::BLACK, 0.03, 0)
+        .unwrap();
+    s.ink_add_point(0.15, 0.10, 1.0, None, None, 0).unwrap();
+    s.ink_end_stroke().unwrap();
+    assert_eq!(s.ink_strokes().len(), 0);
+    assert!(
+        store.pages_with_ink().unwrap().is_empty(),
+        "erase autosaved the empty page"
+    );
+}
+
+#[test]
+fn ink_works_in_memory_without_a_store() {
+    // A store-less session still captures and edits ink (just no persistence) — no panic.
+    let mut s = session(1, DeviceCapabilities::supernote_full());
+    draw(&mut s, &[(0.1, 0.1), (0.2, 0.2)]);
+    assert_eq!(s.ink_strokes().len(), 1);
+    assert!(s.ink_undo().unwrap());
+    assert_eq!(s.ink_strokes().len(), 0);
+}

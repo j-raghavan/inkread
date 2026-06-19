@@ -17,10 +17,15 @@ use crate::budget::{Caches, ResourceBudget, TrimLevel};
 use crate::document::fixed::PdfBackend;
 use crate::document::{Document, DocumentMetadata, PageLink, TocEntry};
 use crate::error::{CoreError, CoreResult};
+use crate::persistence::identity::DocIdentity;
+use crate::persistence::ink_store::InkStore;
+use crate::persistence::sidecar::SidecarMetadata;
 use crate::persistence::{BookId, ReaderStore, ReadingPosition};
 use crate::policy::EinkRefreshPolicy;
 use crate::render::{PixelBuffer, Viewport};
 use crate::settings::SettingsSnapshot;
+
+use inkread_ink::{encode_layer, InkColor, InkLayer, InkPoint, Stroke, Tool};
 
 /// A navigation gesture (Amendment 6). The int↔enum mapping is defined **once** here and
 /// documented at the JNI boundary; `nativeOnGesture` decodes an int into this.
@@ -69,6 +74,14 @@ pub struct ReaderSession {
     /// Bounded render + cover caches under the resource budget (RR24); trimmed on memory
     /// pressure. The render hot path consumes these in M1a.6 (with the threading rework).
     caches: Caches,
+    /// The annotation store for this document's sidecar (RR10); `None` = ink not persisted.
+    ink: Option<Arc<dyn InkStore>>,
+    /// The current page's ink layer (RR6). Reloaded on page change; empty without ink.
+    layer: InkLayer,
+    /// The tool of the in-progress stroke — routes [`Self::ink_add_point`] (ink vs. erase).
+    active_tool: Tool,
+    /// Width of the in-progress ink stroke, or the erase radius for the eraser (normalized).
+    active_width: f32,
 }
 
 impl ReaderSession {
@@ -91,6 +104,10 @@ impl ReaderSession {
             store: None,
             book: None,
             caches: Caches::new(&ResourceBudget::default_supernote()),
+            ink: None,
+            layer: InkLayer::new(),
+            active_tool: Tool::Pen,
+            active_width: 0.0,
         })
     }
 
@@ -170,6 +187,10 @@ impl ReaderSession {
             store: None,
             book: None,
             caches: Caches::new(&ResourceBudget::default_supernote()),
+            ink: None,
+            layer: InkLayer::new(),
+            active_tool: Tool::Pen,
+            active_width: 0.0,
         }
     }
 
@@ -248,6 +269,7 @@ impl ReaderSession {
     /// command stream for the shell to execute.
     pub fn on_gesture(&mut self, gesture: Gesture) -> Vec<RefreshCommand> {
         let last = self.page_count().saturating_sub(1);
+        let prev = self.page;
         match gesture {
             Gesture::NextPage => {
                 if self.page < last {
@@ -258,6 +280,9 @@ impl ReaderSession {
                 self.page = self.page.saturating_sub(1);
             }
         }
+        if self.page != prev {
+            self.load_ink_for_current_page();
+        }
         let page_rect = Rect::full(self.viewport.width, self.viewport.height);
         self.policy.on_page_turn(page_rect)
     }
@@ -266,7 +291,11 @@ impl ReaderSession {
     /// policy's `on_page_turn` for the refresh stream (RR11-FR1). Used by TOC/scrubber jumps.
     pub fn jump_to_page(&mut self, page: usize) -> Vec<RefreshCommand> {
         let last = self.page_count().saturating_sub(1);
+        let prev = self.page;
         self.page = page.min(last);
+        if self.page != prev {
+            self.load_ink_for_current_page();
+        }
         let page_rect = Rect::full(self.viewport.width, self.viewport.height);
         self.policy.on_page_turn(page_rect)
     }
@@ -291,6 +320,124 @@ impl ReaderSession {
             Some(page) => self.jump_to_page(page),
             None => Vec::new(),
         }
+    }
+
+    // ===== Ink annotation lifecycle (RR6/RR7/RR10/RR20) =====
+
+    /// Attach an annotation [`InkStore`] and load the current page's ink (RR7-FR7).
+    pub fn attach_ink_store(&mut self, store: Arc<dyn InkStore>) -> CoreResult<()> {
+        self.layer = store.load_page(self.page)?;
+        self.ink = Some(store);
+        Ok(())
+    }
+
+    /// Record the document's identity in the sidecar `metadata.json` (RR10-FR6/AC3) — call once
+    /// after open with the identity derived from the file bytes. No-op without a store.
+    pub fn write_sidecar_identity(&self, id: &DocIdentity) -> CoreResult<()> {
+        if let Some(store) = &self.ink {
+            store.save_metadata(&SidecarMetadata::from_identity(id, self.page_count()))?;
+        }
+        Ok(())
+    }
+
+    /// The current page's committed strokes (RR6).
+    #[must_use]
+    pub fn ink_strokes(&self) -> &[Stroke] {
+        self.layer.strokes()
+    }
+
+    /// `.inkbin` bytes for `page` — the open page's live layer, else loaded from the store
+    /// (RR7-AC1). The shell decodes these with the same `inkread-ink` codec.
+    pub fn ink_strokes_wire(&self, page: usize) -> CoreResult<Vec<u8>> {
+        if page == self.page {
+            Ok(encode_layer(&self.layer))
+        } else if let Some(store) = &self.ink {
+            Ok(encode_layer(&store.load_page(page)?))
+        } else {
+            Ok(encode_layer(&InkLayer::new()))
+        }
+    }
+
+    /// Begin a stroke (RR6). Pen/Highlighter accumulate points; Eraser removes strokes under each
+    /// subsequent point. `width` is the stroke width (ink) or the erase radius (eraser).
+    pub fn ink_begin_stroke(
+        &mut self,
+        tool: Tool,
+        color: InkColor,
+        width: f32,
+        created_at_ms: u64,
+    ) -> CoreResult<()> {
+        self.active_tool = tool;
+        self.active_width = width;
+        if tool.is_ink() {
+            self.layer.start_stroke(tool, color, width, created_at_ms)?;
+        } else {
+            self.layer.cancel_stroke();
+        }
+        Ok(())
+    }
+
+    /// Add a sample to the in-progress stroke (ink) or erase at the point (eraser) — RR6-FR5.
+    pub fn ink_add_point(
+        &mut self,
+        x: f32,
+        y: f32,
+        pressure: f32,
+        tilt_x: Option<f32>,
+        tilt_y: Option<f32>,
+        timestamp_ms: u32,
+    ) -> CoreResult<()> {
+        if self.active_tool.is_ink() {
+            self.layer
+                .push_point(InkPoint::new(x, y, pressure, tilt_x, tilt_y, timestamp_ms)?)?;
+        } else {
+            self.layer.erase_at(x, y, self.active_width);
+        }
+        Ok(())
+    }
+
+    /// Finish the in-progress stroke and **autosave** the page (RR7-FR6 / RR20-FR2).
+    pub fn ink_end_stroke(&mut self) -> CoreResult<()> {
+        if self.active_tool.is_ink() {
+            self.layer.finish_stroke();
+        }
+        self.autosave_ink()
+    }
+
+    /// Undo the last ink edit on the current page, autosaving if anything changed (RR6-FR3).
+    pub fn ink_undo(&mut self) -> CoreResult<bool> {
+        let changed = self.layer.undo();
+        if changed {
+            self.autosave_ink()?;
+        }
+        Ok(changed)
+    }
+
+    /// Redo the last undone ink edit, autosaving if anything changed (RR6-FR3).
+    pub fn ink_redo(&mut self) -> CoreResult<bool> {
+        let changed = self.layer.redo();
+        if changed {
+            self.autosave_ink()?;
+        }
+        Ok(changed)
+    }
+
+    /// Persist the current page's layer to the store (RR20-FR2). No-op without a store.
+    fn autosave_ink(&self) -> CoreResult<()> {
+        if let Some(store) = &self.ink {
+            store.save_page(self.page, &self.layer)?;
+        }
+        Ok(())
+    }
+
+    /// Swap the in-memory layer to the current page's stored ink on a page change. Any pending
+    /// stroke is dropped; a load failure degrades to an empty layer so navigation never fails.
+    fn load_ink_for_current_page(&mut self) {
+        self.layer.cancel_stroke();
+        self.layer = match &self.ink {
+            Some(store) => store.load_page(self.page).unwrap_or_default(),
+            None => InkLayer::new(),
+        };
     }
 }
 
