@@ -107,7 +107,9 @@ mod tests {
         // processed), and the function must be deterministic. If either breaks, persisted
         // identities would silently fail to re-associate.
         assert_eq!(fingerprint(b""), FNV_OFFSET_128);
-        assert_eq!(fingerprint(b"inkread"), fingerprint(b"inkread"));
+        // A pinned non-empty vector: a change here means a FNV prime/algorithm regression that
+        // would silently break re-association of every already-persisted sidecar.
+        assert_eq!(fingerprint(b"inkread"), 0x1e803fe25c4ff78d88226ddd13e0b86b);
         assert_eq!(DocIdentity::from_bytes(b"", &meta(None, None)).size, 0);
     }
 
