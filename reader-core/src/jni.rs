@@ -436,12 +436,16 @@ pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeInkBeginStr
 ) {
     env.with_env(|env| -> jni::errors::Result<()> {
         let session = unsafe { session_mut(handle) }.map_err(|e| throw(env, &e))?;
-        let tool = Tool::from_code(tool as u8).ok_or_else(|| {
-            throw(
-                env,
-                &CoreError::InvalidArgument(format!("unknown ink tool {tool}")),
-            )
-        })?;
+        // Validate, don't truncate: `tool as u8` would silently fold 256 → Pen, 258 → Eraser.
+        let tool = u8::try_from(tool)
+            .ok()
+            .and_then(Tool::from_code)
+            .ok_or_else(|| {
+                throw(
+                    env,
+                    &CoreError::InvalidArgument(format!("unknown ink tool {tool}")),
+                )
+            })?;
         let c = color_rgba as u32;
         let color = InkColor::rgba((c >> 24) as u8, (c >> 16) as u8, (c >> 8) as u8, c as u8);
         session

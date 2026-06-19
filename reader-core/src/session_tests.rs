@@ -277,7 +277,55 @@ fn basic_panel_session_collapses_to_full() {
 
 // ===== Ink annotation lifecycle (RR6/RR7/RR10/RR20) =====
 
-use crate::persistence::ink_store::MemInkStore;
+use crate::persistence::ink_store::{FsInkStore, MemInkStore};
+use crate::persistence::sidecar::SidecarPaths;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+/// A dependency-free RAII temp dir (mirrors the one in `ink_store`'s tests).
+struct TempDir {
+    path: PathBuf,
+}
+impl TempDir {
+    fn new() -> Self {
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let mut path = std::env::temp_dir();
+        path.push(format!("inkread-session-test-{}-{n}", std::process::id()));
+        std::fs::create_dir_all(&path).unwrap();
+        Self { path }
+    }
+}
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
+}
+
+/// An `InkStore` whose saves always fail — for the no-data-loss-on-failure test.
+struct FailingStore;
+impl InkStore for FailingStore {
+    fn load_page(&self, _page: usize) -> CoreResult<InkLayer> {
+        Ok(InkLayer::new())
+    }
+    fn save_page(&self, _page: usize, _layer: &InkLayer) -> CoreResult<()> {
+        Err(CoreError::Persistence("disk full".into()))
+    }
+    fn pages_with_ink(&self) -> CoreResult<Vec<usize>> {
+        Ok(Vec::new())
+    }
+    fn load_metadata(&self) -> CoreResult<Option<SidecarMetadata>> {
+        Ok(None)
+    }
+    fn save_metadata(&self, _meta: &SidecarMetadata) -> CoreResult<()> {
+        Err(CoreError::Persistence("disk full".into()))
+    }
+}
+
+/// An `FsInkStore` over `<tmp>/book.pdf`'s sidecar.
+fn fs_ink(doc: &std::path::Path) -> Arc<dyn InkStore> {
+    Arc::new(FsInkStore::new(SidecarPaths::for_document(doc)))
+}
 
 /// Draw and commit one pen stroke through the public session API.
 fn draw(s: &mut ReaderSession, pts: &[(f32, f32)]) {
@@ -368,4 +416,103 @@ fn ink_works_in_memory_without_a_store() {
     assert_eq!(s.ink_strokes().len(), 1);
     assert!(s.ink_undo().unwrap());
     assert_eq!(s.ink_strokes().len(), 0);
+}
+
+// RR7-AC1, on the REAL on-disk path (not the in-memory double): a stroke drawn on a virgin
+// path — no sidecar dir yet — round-trips through FsInkStore + the .inkbin codec + atomic write.
+#[test]
+fn ink_round_trips_through_fsinkstore_on_a_virgin_path() {
+    let tmp = TempDir::new();
+    let doc = tmp.path.join("book.pdf"); // nothing exists beside it
+    let mut s = session(2, DeviceCapabilities::supernote_full());
+    s.attach_ink_store(fs_ink(&doc)).unwrap();
+    draw(&mut s, &[(0.1, 0.1), (0.2, 0.2)]);
+
+    let mut reopened = session(2, DeviceCapabilities::supernote_full());
+    reopened.attach_ink_store(fs_ink(&doc)).unwrap();
+    assert_eq!(
+        reopened.ink_strokes().len(),
+        1,
+        "stroke persisted to disk and reloaded on reopen"
+    );
+}
+
+// Inconsistent-degradation fix: a corrupt landing-page .inkbin must NOT block open; the page
+// shows empty and the bad bytes are quarantined (not clobbered).
+#[test]
+fn corrupt_landing_page_still_opens_and_quarantines() {
+    let tmp = TempDir::new();
+    let doc = tmp.path.join("book.pdf");
+    let paths = SidecarPaths::for_document(&doc);
+    {
+        let mut s = session(2, DeviceCapabilities::supernote_full());
+        s.attach_ink_store(fs_ink(&doc)).unwrap();
+        draw(&mut s, &[(0.1, 0.1), (0.2, 0.2)]);
+    }
+    std::fs::write(paths.page_file(0), b"NOTINKBIN").unwrap(); // corrupt page 0
+
+    let mut reopened = session(2, DeviceCapabilities::supernote_full());
+    assert!(
+        reopened.attach_ink_store(fs_ink(&doc)).is_ok(),
+        "document still opens despite a corrupt page"
+    );
+    assert_eq!(reopened.ink_strokes().len(), 0, "corrupt page shows empty");
+}
+
+// RR20-FR1: a failed autosave surfaces an error but must NOT lose the in-memory stroke (retryable).
+#[test]
+fn autosave_failure_surfaces_but_keeps_strokes_in_memory() {
+    let mut s = session(1, DeviceCapabilities::supernote_full());
+    s.attach_ink_store(Arc::new(FailingStore)).unwrap();
+    s.ink_begin_stroke(Tool::Pen, InkColor::BLACK, 0.01, 0)
+        .unwrap();
+    s.ink_add_point(0.1, 0.1, 1.0, None, None, 0).unwrap();
+    assert!(s.ink_end_stroke().is_err(), "save failure is surfaced");
+    assert_eq!(
+        s.ink_strokes().len(),
+        1,
+        "stroke retained in memory for retry — no data loss"
+    );
+}
+
+// RR10-FR6/AC3 wiring: attach stamps the sidecar with the document's identity.
+#[test]
+fn attach_stamps_and_matches_document_identity() {
+    let mut s = session(3, DeviceCapabilities::supernote_full());
+    let id = DocIdentity::from_bytes(b"the-doc-bytes", &DocumentMetadata::default());
+    s.identity = Some(id.clone()); // (test reaches into the private field; open_pdf sets it for real)
+    let store: Arc<dyn InkStore> = Arc::new(MemInkStore::new());
+    s.attach_ink_store(Arc::clone(&store)).unwrap();
+    let meta = store
+        .load_metadata()
+        .unwrap()
+        .expect("identity stamped on attach");
+    assert!(meta.matches(&id));
+    assert_eq!(meta.page_count, 3);
+}
+
+#[test]
+fn empty_erase_does_not_rewrite_the_page() {
+    let store: Arc<dyn InkStore> = Arc::new(MemInkStore::new());
+    let mut s = session(1, DeviceCapabilities::supernote_full());
+    s.attach_ink_store(Arc::clone(&store)).unwrap();
+    draw(&mut s, &[(0.1, 0.1), (0.2, 0.1)]);
+    // an eraser gesture that hits nothing must not rewrite/remove the page
+    s.ink_begin_stroke(Tool::Eraser, InkColor::BLACK, 0.02, 0)
+        .unwrap();
+    s.ink_add_point(0.9, 0.9, 1.0, None, None, 0).unwrap();
+    s.ink_end_stroke().unwrap();
+    assert_eq!(s.ink_strokes().len(), 1);
+    assert_eq!(store.pages_with_ink().unwrap(), vec![0]);
+}
+
+#[test]
+fn eraser_rejects_non_positive_radius() {
+    let mut s = session(1, DeviceCapabilities::supernote_full());
+    assert!(s
+        .ink_begin_stroke(Tool::Eraser, InkColor::BLACK, 0.0, 0)
+        .is_err());
+    assert!(s
+        .ink_begin_stroke(Tool::Eraser, InkColor::BLACK, f32::NAN, 0)
+        .is_err());
 }

@@ -82,6 +82,12 @@ pub struct ReaderSession {
     active_tool: Tool,
     /// Width of the in-progress ink stroke, or the erase radius for the eraser (normalized).
     active_width: f32,
+    /// Whether the in-progress eraser gesture has removed anything yet — gates the autosave so a
+    /// no-op erase doesn't rewrite an unchanged page (needless e-ink flash / IO).
+    erase_changed: bool,
+    /// The opened document's content identity (RR10-FR6), computed from its bytes at open. `None`
+    /// for a byte-less test session ([`Self::with_document`]). Used to stamp/verify the sidecar.
+    identity: Option<DocIdentity>,
 }
 
 impl ReaderSession {
@@ -94,7 +100,18 @@ impl ReaderSession {
         caps: DeviceCapabilities,
         viewport: Viewport,
     ) -> CoreResult<Self> {
+        // Fingerprint the bytes before they move into the backend (RR10-FR6); fill title/author
+        // from the parsed metadata so the sidecar can be stamped + re-associated.
+        let fingerprint = crate::persistence::identity::fingerprint(&bytes);
+        let size = bytes.len() as u64;
         let document = PdfBackend::open(bytes)?;
+        let meta = document.metadata();
+        let identity = Some(DocIdentity {
+            fingerprint,
+            size,
+            title: meta.title,
+            author: meta.author,
+        });
         let screen = Rect::full(viewport.width, viewport.height);
         Ok(Self {
             document: Box::new(document),
@@ -108,6 +125,8 @@ impl ReaderSession {
             layer: InkLayer::new(),
             active_tool: Tool::Pen,
             active_width: 0.0,
+            erase_changed: false,
+            identity,
         })
     }
 
@@ -191,6 +210,8 @@ impl ReaderSession {
             layer: InkLayer::new(),
             active_tool: Tool::Pen,
             active_width: 0.0,
+            erase_changed: false,
+            identity: None,
         }
     }
 
@@ -324,20 +345,36 @@ impl ReaderSession {
 
     // ===== Ink annotation lifecycle (RR6/RR7/RR10/RR20) =====
 
-    /// Attach an annotation [`InkStore`] and load the current page's ink (RR7-FR7).
+    /// Attach an annotation [`InkStore`], **verify/stamp** the sidecar against the document's
+    /// identity (RR10-FR6/AC3), then load the current page's ink (RR7-FR7). A corrupt landing page
+    /// degrades to empty rather than blocking open — consistent with a page turn.
     pub fn attach_ink_store(&mut self, store: Arc<dyn InkStore>) -> CoreResult<()> {
-        self.layer = store.load_page(self.page)?;
         self.ink = Some(store);
+        self.verify_or_stamp_identity();
+        self.layer = self.load_layer_for_page(self.page);
         Ok(())
     }
 
-    /// Record the document's identity in the sidecar `metadata.json` (RR10-FR6/AC3) — call once
-    /// after open with the identity derived from the file bytes. No-op without a store.
-    pub fn write_sidecar_identity(&self, id: &DocIdentity) -> CoreResult<()> {
-        if let Some(store) = &self.ink {
-            store.save_metadata(&SidecarMetadata::from_identity(id, self.page_count()))?;
+    /// Reconcile the attached sidecar with the open document's identity (RR10-AC3): stamp a fresh
+    /// `metadata.json` if absent; if it belongs to a *different* document (same path, different
+    /// content) move the stale ink aside and re-stamp, so the open document never adopts foreign
+    /// strokes. Best-effort — a write failure here resurfaces on the first real autosave.
+    fn verify_or_stamp_identity(&self) {
+        let (Some(store), Some(id)) = (&self.ink, &self.identity) else {
+            return;
+        };
+        match store.load_metadata() {
+            Ok(Some(meta)) if meta.matches(id) => {} // ours — adopt the existing ink
+            Ok(Some(_)) => {
+                // Same path, different document: preserve the stale ink and start clean.
+                let _ = store.reset_stale_annotations();
+                let _ = store.save_metadata(&SidecarMetadata::from_identity(id, self.page_count()));
+            }
+            _ => {
+                // Fresh or unreadable metadata → (re)stamp this document's identity.
+                let _ = store.save_metadata(&SidecarMetadata::from_identity(id, self.page_count()));
+            }
         }
-        Ok(())
     }
 
     /// The current page's committed strokes (RR6).
@@ -367,8 +404,14 @@ impl ReaderSession {
         width: f32,
         created_at_ms: u64,
     ) -> CoreResult<()> {
+        if tool == Tool::Eraser && (!width.is_finite() || width <= 0.0) {
+            return Err(CoreError::InvalidArgument(format!(
+                "eraser radius must be finite and positive, got {width}"
+            )));
+        }
         self.active_tool = tool;
         self.active_width = width;
+        self.erase_changed = false;
         if tool.is_ink() {
             self.layer.start_stroke(tool, color, width, created_at_ms)?;
         } else {
@@ -390,18 +433,25 @@ impl ReaderSession {
         if self.active_tool.is_ink() {
             self.layer
                 .push_point(InkPoint::new(x, y, pressure, tilt_x, tilt_y, timestamp_ms)?)?;
-        } else {
-            self.layer.erase_at(x, y, self.active_width);
+        } else if !self.layer.erase_at(x, y, self.active_width).is_empty() {
+            self.erase_changed = true;
         }
         Ok(())
     }
 
-    /// Finish the in-progress stroke and **autosave** the page (RR7-FR6 / RR20-FR2).
+    /// Finish the in-progress stroke and autosave the page **only if it changed** (RR7-FR6 /
+    /// RR20-FR2): an ink stroke that committed at least one point, or an eraser gesture that
+    /// removed something. A no-op stroke/erase does not rewrite the page (saves e-ink flash + IO).
     pub fn ink_end_stroke(&mut self) -> CoreResult<()> {
-        if self.active_tool.is_ink() {
-            self.layer.finish_stroke();
+        let changed = if self.active_tool.is_ink() {
+            self.layer.finish_stroke().is_some()
+        } else {
+            self.erase_changed
+        };
+        if changed {
+            self.autosave_ink()?;
         }
-        self.autosave_ink()
+        Ok(())
     }
 
     /// Undo the last ink edit on the current page, autosaving if anything changed (RR6-FR3).
@@ -437,13 +487,27 @@ impl ReaderSession {
     }
 
     /// Swap the in-memory layer to the current page's stored ink on a page change. Any pending
-    /// stroke is dropped; a load failure degrades to an empty layer so navigation never fails.
+    /// stroke is dropped; the load degrades safely (see [`Self::load_layer_for_page`]).
     fn load_ink_for_current_page(&mut self) {
         self.layer.cancel_stroke();
-        self.layer = match &self.ink {
-            Some(store) => store.load_page(self.page).unwrap_or_default(),
-            None => InkLayer::new(),
+        self.layer = self.load_layer_for_page(self.page);
+    }
+
+    /// Load `page`'s ink, degrading safely so open/navigation never fails: a **corrupt** page is
+    /// quarantined (its bytes preserved aside, RR20-FR1) and returns empty; a transient IO error
+    /// also returns empty. The reader thus always opens and always turns.
+    fn load_layer_for_page(&self, page: usize) -> InkLayer {
+        let Some(store) = &self.ink else {
+            return InkLayer::new();
         };
+        match store.load_page(page) {
+            Ok(layer) => layer,
+            Err(CoreError::CorruptDocument(_)) => {
+                let _ = store.quarantine_page(page);
+                InkLayer::new()
+            }
+            Err(_) => InkLayer::new(),
+        }
     }
 }
 
