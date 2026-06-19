@@ -66,8 +66,21 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install toolchain + android target
         run: rustup target add aarch64-linux-android
-      # `cargo check` only type-checks/compiles (no link), so the NDK linker is not required
-      # to prove the feature-gated bridge compiles for the device target.
+      # rusqlite's `bundled` SQLite (reader-core + inkread-dict) compiles C for the target, so even
+      # `cargo check --target aarch64-linux-android` invokes `cc` for Android — it needs the NDK
+      # clang as the cross C compiler (no link still happens). Point cc-rs + cargo at the runner's
+      # pre-installed NDK — the same toolchain cargo-ndk uses for the real APK build. minSdk 24.
+      - name: Point cc/cargo at the runner's Android NDK
+        run: |
+          set -euo pipefail
+          ndk="${ANDROID_NDK_LATEST_HOME:-${ANDROID_NDK_HOME:-${ANDROID_NDK_ROOT:-}}}"
+          tc="$ndk/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          test -x "$tc/aarch64-linux-android24-clang" || { echo "::error::NDK clang not found under $tc"; exit 1; }
+          {
+            echo "CC_aarch64_linux_android=$tc/aarch64-linux-android24-clang"
+            echo "AR_aarch64_linux_android=$tc/llvm-ar"
+            echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=$tc/aarch64-linux-android24-clang"
+          } >> "$GITHUB_ENV"
       - name: Check reader-core with the JNI bridge for the device target
         run: cargo check -p reader-core --features jni-bridge --target aarch64-linux-android
 
