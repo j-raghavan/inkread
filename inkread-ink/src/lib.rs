@@ -14,9 +14,11 @@
 //! stroke's `created_at_ms` is supplied by the caller so the model stays deterministic and
 //! host-testable.
 //!
-//! The on-disk `.inkbin` encoding will live in a `codec` module (added next), mirroring
-//! `reader-core`'s versioned, little-endian, saturating wire codecs.
+//! The on-disk `.inkbin` encoding lives in [`codec`]; it mirrors `reader-core`'s versioned,
+//! little-endian, saturating wire codecs.
 
+pub mod codec;
 pub mod model;
 
+pub use codec::{decode_layer, encode_layer, INKBIN_VERSION};
 pub use model::{BBox, InkColor, InkError, InkLayer, InkPoint, Stroke, StrokeId, Tool};
