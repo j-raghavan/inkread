@@ -34,7 +34,8 @@ use std::sync::Arc;
 
 use inkread_ink::{InkColor, Tool};
 
-use crate::document::{encode_links_wire, encode_toc_wire};
+use crate::dict::{encode_definition_wire, Dict};
+use crate::document::{encode_links_wire, encode_selection_wire, encode_toc_wire, NormRect};
 use crate::error::{CoreError, CoreResult};
 use crate::persistence::ink_store::{FsInkStore, InkStore};
 use crate::persistence::sidecar::SidecarPaths;
@@ -64,6 +65,18 @@ unsafe fn session_mut<'a>(handle: jlong) -> CoreResult<&'a mut ReaderSession> {
         return Err(CoreError::InvalidArgument("null document handle".into()));
     }
     Ok(&mut *(handle as *mut ReaderSession))
+}
+
+/// Reconstruct a borrowed `&Dict` from a non-null dictionary handle (RR12 / D3). Lookup is `&self`,
+/// so a shared reference suffices; the handle is a `Box<Dict>` from `nativeDictOpen`.
+///
+/// # Safety
+/// `handle` must be a value previously returned by `nativeDictOpen` and not yet closed.
+unsafe fn dict_ref<'a>(handle: jlong) -> CoreResult<&'a Dict> {
+    if handle == 0 {
+        return Err(CoreError::InvalidArgument("null dictionary handle".into()));
+    }
+    Ok(&*(handle as *const Dict))
 }
 
 // =====================================================================================
@@ -551,6 +564,143 @@ pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeInkSave<'lo
     env.with_env(|env| -> jni::errors::Result<()> {
         let session = unsafe { session_mut(handle) }.map_err(|e| throw(env, &e))?;
         session.save_ink().map_err(|e| throw(env, &e))?;
+        Ok(())
+    })
+    .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
+}
+
+// =====================================================================================
+// Text selection + dictionary seam (RR11/RR12 / ADR-INKREAD-0009 D3). The shell turns a
+// tap/drag into a selection, then looks the word up in the on-device corpus; an on-device miss
+// is the shell's cue to try its (opt-in) online source and cache via nativeDictPut.
+//
+//   nativeWordAt(handle, page, x, y) : bytes        — selection wire (decode: WireCodec.decodeSelection)
+//   nativeTextInRect(handle, page, x0,y0,x1,y1) : bytes
+//   nativeDictOpen(path) : long                     — open the dict.db corpus; long handle
+//   nativeDictClose(handle)                         — free it
+//   nativeDefine(dictHandle, word, langsCsv) : bytes — definition wire (on-device only)
+//   nativeDictPut(dictHandle, lang, headword, defn) — cache an online result for next time
+//
+// Coordinates are normalized [0,1], top-left origin (matching the render + links).
+// =====================================================================================
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeWordAt<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+    page: jint,
+    x: jfloat,
+    y: jfloat,
+) -> JByteArray<'local> {
+    env.with_env(|env| -> jni::errors::Result<JByteArray<'local>> {
+        let session = unsafe { session_mut(handle) }.map_err(|e| throw(env, &e))?;
+        let target = if page < 0 { 0usize } else { page as usize };
+        let sel = session.word_at(target, x, y).unwrap_or_default();
+        env.byte_array_from_slice(&encode_selection_wire(&sel))
+    })
+    .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
+}
+
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeTextInRect<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+    page: jint,
+    x0: jfloat,
+    y0: jfloat,
+    x1: jfloat,
+    y1: jfloat,
+) -> JByteArray<'local> {
+    env.with_env(|env| -> jni::errors::Result<JByteArray<'local>> {
+        let session = unsafe { session_mut(handle) }.map_err(|e| throw(env, &e))?;
+        let target = if page < 0 { 0usize } else { page as usize };
+        let sel = session.text_in_rect(target, NormRect { x0, y0, x1, y1 });
+        env.byte_array_from_slice(&encode_selection_wire(&sel))
+    })
+    .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeDictOpen<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    path: JString<'local>,
+) -> jlong {
+    env.with_env(|env| -> jni::errors::Result<jlong> {
+        let path: String = path.try_to_string(env)?;
+        match Dict::open(&path) {
+            Ok(d) => Ok(Box::into_raw(Box::new(d)) as jlong),
+            Err(e) => Err(throw(
+                env,
+                &CoreError::Persistence(format!("dict open {path}: {e}")),
+            )),
+        }
+    })
+    .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeDictClose<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+) {
+    env.with_env(|_env| -> jni::errors::Result<()> {
+        if handle != 0 {
+            // SAFETY: a non-zero handle is a Box<Dict> from nativeDictOpen; reclaim + drop it. The
+            // shell zeroes its field on close, so a double-close never reaches here with the same value.
+            unsafe {
+                drop(Box::from_raw(handle as *mut Dict));
+            }
+        }
+        Ok(())
+    })
+    .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeDefine<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    dict_handle: jlong,
+    word: JString<'local>,
+    langs_csv: JString<'local>,
+) -> JByteArray<'local> {
+    env.with_env(|env| -> jni::errors::Result<JByteArray<'local>> {
+        let dict = unsafe { dict_ref(dict_handle) }.map_err(|e| throw(env, &e))?;
+        let word: String = word.try_to_string(env)?;
+        let langs_csv: String = langs_csv.try_to_string(env)?;
+        let langs: Vec<&str> = langs_csv
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .collect();
+        // On-device only (online = None); a miss is the shell's cue to try its online source.
+        let def = dict.lookup(&word, &langs, None);
+        env.byte_array_from_slice(&encode_definition_wire(def.as_ref()))
+    })
+    .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeDictPut<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    dict_handle: jlong,
+    lang: JString<'local>,
+    headword: JString<'local>,
+    defn: JString<'local>,
+) {
+    env.with_env(|env| -> jni::errors::Result<()> {
+        let dict = unsafe { dict_ref(dict_handle) }.map_err(|e| throw(env, &e))?;
+        let lang: String = lang.try_to_string(env)?;
+        let headword: String = headword.try_to_string(env)?;
+        let defn: String = defn.try_to_string(env)?;
+        dict.put_entry(&lang, &headword, &defn)
+            .map_err(|e| throw(env, &CoreError::Persistence(format!("dict put: {e}"))))?;
         Ok(())
     })
     .resolve::<jni::errors::ThrowRuntimeExAndDefault>()

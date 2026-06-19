@@ -550,6 +550,7 @@ name = "reader-core"
 version = "0.1.0"
 dependencies = [
  "device-eink",
+ "inkread-dict",
  "inkread-ink",
  "jni",
  "pdfium-render",
