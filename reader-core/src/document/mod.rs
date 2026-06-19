@@ -5,6 +5,9 @@
 //! ([`fixed::PdfBackend`]) is the one implementation in M0.
 
 pub mod fixed;
+pub mod text_select;
+
+pub use text_select::{CharBox, NormRect, TextSelection};
 
 use crate::error::CoreResult;
 use crate::render::PixelBuffer;
