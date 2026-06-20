@@ -309,3 +309,64 @@ fn page_links_from_links_fixture() {
     // RR21-FR3: an out-of-range page never panics and yields no links.
     assert!(doc.page_links(999).is_empty());
 }
+
+#[test]
+fn export_writes_ink_annotation_and_flatten_into_pdf() {
+    let _s = pdfium_serial();
+    if !host_pdfium_available() {
+        eprintln!("SKIP export_writes_*: host libpdfium UNVERIFIED (no binding)");
+        return;
+    }
+    use crate::document::{ExportMode, ExportStroke, PageInk};
+    let fixture = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/minimal.pdf");
+
+    // One red diagonal stroke on page 0 (normalized coords).
+    let page_ink = vec![PageInk {
+        page: 0,
+        strokes: vec![ExportStroke {
+            points: vec![(0.2, 0.2), (0.8, 0.8)],
+            r: 255,
+            g: 0,
+            b: 0,
+            a: 255,
+            width: 0.01,
+        }],
+    }];
+
+    // --- Annotations mode: the reopened PDF has an annotation on page 0. ---
+    let out_a = std::env::temp_dir().join("inkread_export_annot.pdf");
+    let mut doc = PdfBackend::open(std::fs::read(fixture).unwrap()).unwrap();
+    doc.export_pdf(out_a.to_str().unwrap(), &page_ink, ExportMode::Annotations)
+        .expect("export annotations");
+    drop(doc);
+    let reopened = PdfBackend::open(std::fs::read(&out_a).unwrap()).expect("reopen annotated");
+    let annots = reopened
+        .document
+        .pages()
+        .get(0)
+        .unwrap()
+        .annotations()
+        .len();
+    assert!(annots >= 1, "expected >=1 annotation, got {annots}");
+    drop(reopened);
+
+    // --- Flatten mode: reopens, renders, and the page now has non-white ink baked in. ---
+    let out_f = std::env::temp_dir().join("inkread_export_flat.pdf");
+    let mut doc = PdfBackend::open(std::fs::read(fixture).unwrap()).unwrap();
+    doc.export_pdf(out_f.to_str().unwrap(), &page_ink, ExportMode::Flatten)
+        .expect("export flatten");
+    drop(doc);
+    let flat = PdfBackend::open(std::fs::read(&out_f).unwrap()).expect("reopen flattened");
+    let (w, h) = (120u32, 160u32);
+    let mut px = vec![0u8; (w * h * 4) as usize];
+    let mut pb = PixelBuffer::from_rgba(&mut px, w, h).unwrap();
+    flat.render_page(0, &mut pb).expect("render flattened");
+    let any_ink = pb
+        .bytes()
+        .chunks_exact(4)
+        .any(|p| p[0] < 200 || p[1] < 200 || p[2] < 200);
+    assert!(any_ink, "flattened page should contain baked ink");
+
+    let _ = std::fs::remove_file(&out_a);
+    let _ = std::fs::remove_file(&out_f);
+}

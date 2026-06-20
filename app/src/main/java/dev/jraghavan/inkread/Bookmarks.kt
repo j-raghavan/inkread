@@ -6,8 +6,8 @@ import java.io.File
 
 /**
  * Per-book bookmarks (RR16/RR12): a sorted set of 0-based page indices persisted to a small JSON
- * sidecar so they survive page turns and restarts. Mirrors [InkStore]'s interim Kotlin-side
- * persistence; the canonical model is destined for `reader-core`. Engine-thread only (RR21).
+ * sidecar so they survive page turns and restarts. A small Kotlin-side sidecar; the canonical
+ * model is destined for `reader-core` (ink already lives there). Engine-thread only (RR21).
  */
 class Bookmarks(private val file: File) {
 

@@ -19,7 +19,9 @@ use std::sync::{Mutex, OnceLock};
 use pdfium_render::prelude::*;
 
 use crate::document::text_select::{self, CharBox, NormRect, TextSelection};
-use crate::document::{Document, DocumentMetadata, LinkTarget, PageLink, TocEntry};
+use crate::document::{
+    Document, DocumentMetadata, ExportMode, LinkTarget, PageInk, PageLink, TocEntry,
+};
 use crate::error::{CoreError, CoreResult};
 use crate::render::PixelBuffer;
 
@@ -98,6 +100,46 @@ fn map_load_error(e: PdfiumError) -> CoreError {
         }
         other => CoreError::RenderBackend(format!("pdfium load: {other}")),
     }
+}
+
+/// Drop points closer than `min_dist` (normalized) to the last kept one — removes the dense
+/// capture jitter that makes an exported freehand stroke look lumpy. Endpoints are always kept.
+fn simplify(points: &[(f32, f32)], min_dist: f32) -> Vec<(f32, f32)> {
+    if points.len() <= 2 {
+        return points.to_vec();
+    }
+    let md2 = min_dist * min_dist;
+    let mut out = vec![points[0]];
+    for &p in &points[1..points.len() - 1] {
+        let last = *out.last().unwrap();
+        let (dx, dy) = (p.0 - last.0, p.1 - last.1);
+        if dx * dx + dy * dy >= md2 {
+            out.push(p);
+        }
+    }
+    out.push(points[points.len() - 1]);
+    out
+}
+
+/// Chaikin corner-cutting: smooths a polyline into a rounded curve, keeping the endpoints. Run on
+/// the simplified points so the exported ink reads as a smooth line, not a jagged polygon.
+fn chaikin(points: &[(f32, f32)], iterations: u8) -> Vec<(f32, f32)> {
+    let mut pts = simplify(points, 0.004);
+    if pts.len() < 3 {
+        return pts;
+    }
+    for _ in 0..iterations {
+        let mut out = Vec::with_capacity(pts.len() * 2);
+        out.push(pts[0]);
+        for w in pts.windows(2) {
+            let (p, q) = (w[0], w[1]);
+            out.push((0.75 * p.0 + 0.25 * q.0, 0.75 * p.1 + 0.25 * q.1));
+            out.push((0.25 * p.0 + 0.75 * q.0, 0.25 * p.1 + 0.75 * q.1));
+        }
+        out.push(*pts.last().unwrap());
+        pts = out;
+    }
+    pts
 }
 
 /// A loaded PDF, rendered directly into the shell's buffer (RR5, Amendment 4).
@@ -253,6 +295,83 @@ impl Document for PdfBackend {
             title: get(Tag::Title),
             author: get(Tag::Author),
         }
+    }
+
+    fn export_pdf(
+        &mut self,
+        out_path: &str,
+        page_ink: &[PageInk],
+        mode: ExportMode,
+    ) -> CoreResult<()> {
+        let n = self.page_count();
+        for pi in page_ink {
+            if pi.page >= n || pi.strokes.is_empty() {
+                continue;
+            }
+            let mut page = self.document.pages().get(pi.page as i32).map_err(|e| {
+                CoreError::RenderBackend(format!("export get page {}: {e}", pi.page))
+            })?;
+            let pw = page.width().value; // page size in PDF points
+            let ph = page.height().value;
+
+            // Build a stroke as a PDF path object (normalized [0,1] top-left → PDF points bottom-left).
+            let build_path = |s: &crate::document::ExportStroke| -> CoreResult<PdfPagePathObject> {
+                let color = PdfColor::new(s.r, s.g, s.b, s.a);
+                let px = |nx: f32| PdfPoints::new(nx * pw);
+                let py = |ny: f32| PdfPoints::new((1.0 - ny) * ph);
+                let stroke_w = PdfPoints::new((s.width * pw).max(0.5));
+                // Smooth the raw freehand polyline (Chaikin corner-cutting) so the exported line
+                // isn't jagged — and round the caps/joins to match the on-screen ink.
+                let pts = chaikin(&s.points, 2);
+                let (x0, y0) = pts[0];
+                let mut path = PdfPagePathObject::new(
+                    &self.document,
+                    px(x0),
+                    py(y0),
+                    Some(color),
+                    Some(stroke_w),
+                    None,
+                )
+                .map_err(|e| CoreError::RenderBackend(format!("path obj: {e}")))?;
+                for &(nx, ny) in &pts[1..] {
+                    path.line_to(px(nx), py(ny))
+                        .map_err(|e| CoreError::RenderBackend(format!("line_to: {e}")))?;
+                }
+                path.set_line_cap(PdfPageObjectLineCap::Round)
+                    .map_err(|e| CoreError::RenderBackend(format!("line cap: {e}")))?;
+                path.set_line_join(PdfPageObjectLineJoin::Round)
+                    .map_err(|e| CoreError::RenderBackend(format!("line join: {e}")))?;
+                Ok(path)
+            };
+
+            match mode {
+                // Editable Ink annotation holding the page's strokes (selectable in PDF viewers).
+                ExportMode::Annotations => {
+                    let mut annot = page
+                        .annotations_mut()
+                        .create_ink_annotation()
+                        .map_err(|e| CoreError::RenderBackend(format!("create ink annot: {e}")))?;
+                    for s in pi.strokes.iter().filter(|s| s.points.len() >= 2) {
+                        annot
+                            .objects_mut()
+                            .add_path_object(build_path(s)?)
+                            .map_err(|e| CoreError::RenderBackend(format!("add path: {e}")))?;
+                    }
+                }
+                // Flatten = bake the strokes straight into the page content (shows in every viewer;
+                // pdfium-render 0.9.1's `flatten` feature is broken, so we add page objects instead).
+                ExportMode::Flatten => {
+                    for s in pi.strokes.iter().filter(|s| s.points.len() >= 2) {
+                        page.objects_mut()
+                            .add_path_object(build_path(s)?)
+                            .map_err(|e| CoreError::RenderBackend(format!("add path: {e}")))?;
+                    }
+                }
+            }
+        }
+        self.document
+            .save_to_file(out_path)
+            .map_err(|e| CoreError::RenderBackend(format!("save {out_path}: {e}")))
     }
 
     fn render_page(&self, index: usize, buf: &mut PixelBuffer<'_>) -> CoreResult<()> {

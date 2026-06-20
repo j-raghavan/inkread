@@ -6,6 +6,11 @@
     <!-- Opt-in online dictionary fallback (Wiktionary) for non-bundled languages (RR12 / D4). -->
     <uses-permission android:name="android.permission.INTERNET" />
 
+    <!-- All-files access (ADR-INKREAD-0005): the PDF export writes the annotated copy into a
+         public, Partner-synced folder (e.g. /storage/emulated/0/EXPORT) so it reaches the desktop.
+         Granted via Settings → All files access (Android 11+); sideloaded-app scope. -->
+    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
+
     <application
         android:allowBackup="false"
         android:icon="@mipmap/ic_launcher"

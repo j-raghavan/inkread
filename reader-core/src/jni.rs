@@ -22,7 +22,7 @@
 //! ## Gesture mapping (Amendment 6)
 //! The gesture int code is decoded by [`Gesture::from_code`] (the single source of truth).
 
-use jni::objects::{JByteArray, JByteBuffer, JClass, JString};
+use jni::objects::{JByteArray, JByteBuffer, JClass, JFloatArray, JIntArray, JString};
 use jni::strings::JNIString;
 use jni::sys::{jboolean, jfloat, jint, jlong};
 use jni::{Env, EnvUnowned};
@@ -437,6 +437,28 @@ pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeAttachInkSt
     .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
 }
 
+// nativeExportPdf(handle, outPath, flatten) — write every page's ink into the PDF at `outPath`
+// (ADR-INKREAD-0005). flatten=true bakes the ink into the page content (shows in every viewer);
+// false writes editable Ink annotations. Colours are preserved. Throws on failure.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeExportPdf<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+    out_path: JString<'local>,
+    flatten: jboolean,
+) {
+    env.with_env(|env| -> jni::errors::Result<()> {
+        let session = unsafe { session_mut(handle) }.map_err(|e| throw(env, &e))?;
+        let out_path: String = out_path.try_to_string(env)?;
+        session
+            .export_pdf(&out_path, flatten)
+            .map_err(|e| throw(env, &e))?;
+        Ok(())
+    })
+    .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
+}
+
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeInkBeginStroke<'local>(
     mut env: EnvUnowned<'local>,
@@ -528,6 +550,22 @@ pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeInkStrokesF
 }
 
 #[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeInkStrokesForDraw<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+    page: jint,
+) -> JByteArray<'local> {
+    env.with_env(|env| -> jni::errors::Result<JByteArray<'local>> {
+        let session = unsafe { session_mut(handle) }.map_err(|e| throw(env, &e))?;
+        let target = if page < 0 { 0usize } else { page as usize };
+        let bytes = session.ink_draw_wire(target).map_err(|e| throw(env, &e))?;
+        env.byte_array_from_slice(&bytes)
+    })
+    .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
+}
+
+#[unsafe(no_mangle)]
 pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeInkUndo<'local>(
     mut env: EnvUnowned<'local>,
     _class: JClass<'local>,
@@ -565,6 +603,227 @@ pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeInkSave<'lo
         let session = unsafe { session_mut(handle) }.map_err(|e| throw(env, &e))?;
         session.save_ink().map_err(|e| throw(env, &e))?;
         Ok(())
+    })
+    .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
+}
+
+// =====================================================================================
+// Lasso selection (ADR-INKREAD-0010). Stroke ids cross as `int[]` (u32 reinterpreted), the
+// polygon + selection bounds as `float[]`. All mutating ops autosave in the session.
+//   nativeInkSelectInPolygon(handle, float[] xyPairs, int mode): int[]  (0=Smart, 1=Freehand)
+//   nativeInkSelectAll(handle): int[]
+//   nativeInkSelectionBounds(handle, int[] ids): float[]  (len 4 [x0,y0,x1,y1] or 0)
+//   nativeInkMoveSelection(handle, int[] ids, float dx, float dy): boolean
+//   nativeInkDeleteSelection / nativeInkCutSelection(handle, int[] ids): int[]  (removed ids)
+//   nativeInkRecolorSelection(handle, int[] ids, int rgba): boolean
+//   nativeInkCopySelection(handle, int[] ids): int   (clipboard count)
+//   nativeInkPaste(handle, float dx, float dy): int[]  (new ids)
+//   nativeInkHasClipboard(handle): boolean
+// =====================================================================================
+
+/// Read a Java `int[]` of stroke ids into `Vec<u32>` (jint bits reinterpreted as u32).
+fn read_u32_array(env: &mut Env<'_>, arr: &JIntArray<'_>) -> jni::errors::Result<Vec<u32>> {
+    let len = arr.len(env)?;
+    let mut buf = vec![0i32; len];
+    if len > 0 {
+        arr.get_region(env, 0, &mut buf)?;
+    }
+    Ok(buf.into_iter().map(|i| i as u32).collect())
+}
+
+/// Read a Java `float[]` into `Vec<f32>`.
+fn read_f32_array(env: &mut Env<'_>, arr: &JFloatArray<'_>) -> jni::errors::Result<Vec<f32>> {
+    let len = arr.len(env)?;
+    let mut buf = vec![0f32; len];
+    if len > 0 {
+        arr.get_region(env, 0, &mut buf)?;
+    }
+    Ok(buf)
+}
+
+/// Build a Java `int[]` from stroke ids.
+fn new_u32_array<'l>(env: &mut Env<'l>, ids: &[u32]) -> jni::errors::Result<JIntArray<'l>> {
+    let arr = JIntArray::new(env, ids.len())?;
+    let buf: Vec<i32> = ids.iter().map(|&i| i as i32).collect();
+    arr.set_region(env, 0, &buf)?;
+    Ok(arr)
+}
+
+/// Build a Java `float[]` from a slice.
+fn new_f32_array<'l>(env: &mut Env<'l>, v: &[f32]) -> jni::errors::Result<JFloatArray<'l>> {
+    let arr = JFloatArray::new(env, v.len())?;
+    arr.set_region(env, 0, v)?;
+    Ok(arr)
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeInkSelectInPolygon<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+    polygon: JFloatArray<'local>,
+    mode: jint,
+) -> JIntArray<'local> {
+    env.with_env(|env| -> jni::errors::Result<JIntArray<'local>> {
+        let flat = read_f32_array(env, &polygon)?;
+        let poly: Vec<(f32, f32)> = flat.chunks_exact(2).map(|c| (c[0], c[1])).collect();
+        let mode_code = u8::try_from(mode).unwrap_or(u8::MAX);
+        let session = unsafe { session_mut(handle) }.map_err(|e| throw(env, &e))?;
+        let ids = session
+            .ink_select_in_polygon(&poly, mode_code)
+            .map_err(|e| throw(env, &e))?;
+        new_u32_array(env, &ids)
+    })
+    .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeInkSelectAll<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+) -> JIntArray<'local> {
+    env.with_env(|env| -> jni::errors::Result<JIntArray<'local>> {
+        let session = unsafe { session_mut(handle) }.map_err(|e| throw(env, &e))?;
+        let ids = session.ink_select_all();
+        new_u32_array(env, &ids)
+    })
+    .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeInkSelectionBounds<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+    ids: JIntArray<'local>,
+) -> JFloatArray<'local> {
+    env.with_env(|env| -> jni::errors::Result<JFloatArray<'local>> {
+        let ids = read_u32_array(env, &ids)?;
+        let session = unsafe { session_mut(handle) }.map_err(|e| throw(env, &e))?;
+        let bounds = session.ink_selection_bounds(&ids);
+        new_f32_array(env, &bounds)
+    })
+    .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeInkMoveSelection<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+    ids: JIntArray<'local>,
+    dx: jfloat,
+    dy: jfloat,
+) -> jboolean {
+    env.with_env(|env| -> jni::errors::Result<jboolean> {
+        let ids = read_u32_array(env, &ids)?;
+        let session = unsafe { session_mut(handle) }.map_err(|e| throw(env, &e))?;
+        let changed = session
+            .ink_move_selection(&ids, dx, dy)
+            .map_err(|e| throw(env, &e))?;
+        Ok(jboolean::from(changed))
+    })
+    .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeInkDeleteSelection<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+    ids: JIntArray<'local>,
+) -> JIntArray<'local> {
+    env.with_env(|env| -> jni::errors::Result<JIntArray<'local>> {
+        let ids = read_u32_array(env, &ids)?;
+        let session = unsafe { session_mut(handle) }.map_err(|e| throw(env, &e))?;
+        let removed = session
+            .ink_delete_selection(&ids)
+            .map_err(|e| throw(env, &e))?;
+        new_u32_array(env, &removed)
+    })
+    .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeInkRecolorSelection<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+    ids: JIntArray<'local>,
+    color_rgba: jint,
+) -> jboolean {
+    env.with_env(|env| -> jni::errors::Result<jboolean> {
+        let ids = read_u32_array(env, &ids)?;
+        let c = color_rgba as u32;
+        let color = InkColor::rgba((c >> 24) as u8, (c >> 16) as u8, (c >> 8) as u8, c as u8);
+        let session = unsafe { session_mut(handle) }.map_err(|e| throw(env, &e))?;
+        let changed = session
+            .ink_recolor_selection(&ids, color)
+            .map_err(|e| throw(env, &e))?;
+        Ok(jboolean::from(changed))
+    })
+    .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeInkCopySelection<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+    ids: JIntArray<'local>,
+) -> jint {
+    env.with_env(|env| -> jni::errors::Result<jint> {
+        let ids = read_u32_array(env, &ids)?;
+        let session = unsafe { session_mut(handle) }.map_err(|e| throw(env, &e))?;
+        Ok(session.ink_copy_selection(&ids) as jint)
+    })
+    .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeInkCutSelection<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+    ids: JIntArray<'local>,
+) -> JIntArray<'local> {
+    env.with_env(|env| -> jni::errors::Result<JIntArray<'local>> {
+        let ids = read_u32_array(env, &ids)?;
+        let session = unsafe { session_mut(handle) }.map_err(|e| throw(env, &e))?;
+        let removed = session
+            .ink_cut_selection(&ids)
+            .map_err(|e| throw(env, &e))?;
+        new_u32_array(env, &removed)
+    })
+    .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeInkPaste<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+    dx: jfloat,
+    dy: jfloat,
+) -> JIntArray<'local> {
+    env.with_env(|env| -> jni::errors::Result<JIntArray<'local>> {
+        let session = unsafe { session_mut(handle) }.map_err(|e| throw(env, &e))?;
+        let new_ids = session.ink_paste(dx, dy).map_err(|e| throw(env, &e))?;
+        new_u32_array(env, &new_ids)
+    })
+    .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeInkHasClipboard<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+) -> jboolean {
+    env.with_env(|env| -> jni::errors::Result<jboolean> {
+        let session = unsafe { session_mut(handle) }.map_err(|e| throw(env, &e))?;
+        Ok(jboolean::from(session.ink_has_clipboard()))
     })
     .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
 }

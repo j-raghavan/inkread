@@ -111,7 +111,84 @@ object NativeBridge {
 
     /** Cache a definition (e.g. an online result) into the corpus so the next lookup is instant. */
     external fun nativeDictPut(dictHandle: Long, lang: String, headword: String, defn: String)
+
+    // ---- ink annotation, persisted by the core to a sidecar (RR6/RR10 / ADR-INKREAD-0010) ----
+
+    /** Attach a `.inkread` sidecar store for the open document so strokes persist (RR10). */
+    external fun nativeAttachInkStore(handle: Long, docPath: String)
+
+    /** Export every page's ink into the PDF at [outPath] (ADR-INKREAD-0005). [flatten] bakes the
+     *  ink into the page content (visible in any viewer); false writes editable Ink annotations.
+     *  Throws on failure. */
+    external fun nativeExportPdf(handle: Long, outPath: String, flatten: Boolean)
+
+    /** Begin a stroke. [tool] is the CORE tool code (0=Pen, 1=Highlighter, 2=Eraser); for the
+     *  eraser [width] is the erase radius. [colorRgba] packs `(r<<24|g<<16|b<<8|a)`. */
+    external fun nativeInkBeginStroke(handle: Long, tool: Int, colorRgba: Int, width: Float, createdAtMs: Long)
+
+    /** Add a sample to the in-progress stroke (ink) or erase at the point (eraser). NaN tilt = absent. */
+    external fun nativeInkAddPoint(handle: Long, x: Float, y: Float, pressure: Float, tiltX: Float, tiltY: Float, timestampMs: Int)
+
+    /** Commit the in-progress stroke / eraser gesture; autosaves the page only if it changed. */
+    external fun nativeInkEndStroke(handle: Long)
+
+    /** Strokes on [page] in the draw-wire (decode with [WireCodec.decodeStrokes]) — for baking. */
+    external fun nativeInkStrokesForDraw(handle: Long, page: Int): ByteArray
+
+    /** Undo / redo the last ink edit on the current page (autosaves). Returns whether it changed. */
+    external fun nativeInkUndo(handle: Long): Boolean
+    external fun nativeInkRedo(handle: Long): Boolean
+
+    /** Explicit flush for pause/close (complements the per-edit autosave). */
+    external fun nativeInkSave(handle: Long)
+
+    // ---- lasso selection over the current page's strokes (ADR-INKREAD-0010) ----
+
+    /** Select strokes a lasso [polygon] (flat normalized [x0,y0,x1,y1,…]) encloses/crosses under
+     *  [mode] (0=Smart, 1=Freehand). Returns the selected stroke ids. */
+    external fun nativeInkSelectInPolygon(handle: Long, polygon: FloatArray, mode: Int): IntArray
+
+    /** Every stroke id on the current page ("Select All"). */
+    external fun nativeInkSelectAll(handle: Long): IntArray
+
+    /** Selection bounds `[x0,y0,x1,y1]` (normalized), or empty if the selection is empty. */
+    external fun nativeInkSelectionBounds(handle: Long, ids: IntArray): FloatArray
+
+    /** Move the selection by normalized (dx,dy) (clamped on-page); autosaves. Returns changed. */
+    external fun nativeInkMoveSelection(handle: Long, ids: IntArray, dx: Float, dy: Float): Boolean
+
+    /** Delete / cut the selection (cut also copies to the clipboard). Returns the removed ids. */
+    external fun nativeInkDeleteSelection(handle: Long, ids: IntArray): IntArray
+    external fun nativeInkCutSelection(handle: Long, ids: IntArray): IntArray
+
+    /** Recolor the selection to [colorRgba]. Returns whether anything changed. */
+    external fun nativeInkRecolorSelection(handle: Long, ids: IntArray, colorRgba: Int): Boolean
+
+    /** Copy the selection into the cross-page clipboard; returns the count. */
+    external fun nativeInkCopySelection(handle: Long, ids: IntArray): Int
+
+    /** Paste the clipboard onto the current page offset by normalized (dx,dy). Returns new ids. */
+    external fun nativeInkPaste(handle: Long, dx: Float, dy: Float): IntArray
+
+    /** Whether the clipboard holds strokes to paste (gates the Paste control). */
+    external fun nativeInkHasClipboard(handle: Long): Boolean
 }
+
+/**
+ * One stroke decoded from the draw-wire (ADR-INKREAD-0010) for baking onto the page. [points] is
+ * interleaved **normalized** `[x0,y0,x1,y1,…]` in `[0,1]`; color channels are 0–255; [coreTool] is
+ * the core tool code (0=Pen, 1=Highlighter).
+ */
+data class InkStrokeDraw(
+    val id: Int,
+    val coreTool: Int,
+    val r: Int,
+    val g: Int,
+    val b: Int,
+    val a: Int,
+    val width: Float,
+    val points: FloatArray,
+)
 
 /** One flattened table-of-contents entry (RR11-FR2). [targetPage] is null for a label-only entry. */
 data class TocItem(val depth: Int, val targetPage: Int?, val title: String)
@@ -366,5 +443,39 @@ object WireCodec {
         val senses = list()
         val synonyms = list()
         return WordDefinition(true, headword, lang, senses, synonyms)
+    }
+
+    /**
+     * Decode the ink draw-wire from [NativeBridge.nativeInkStrokesForDraw] (ADR-INKREAD-0010):
+     * `[ver][count u16]` then per stroke `[id u32][tool u8][rgba u32][width f32][nPoints u16]` and
+     * `nPoints × [x f32][y f32]`. Mirrors `encode_strokes_draw_wire` in `reader-core/ink_wire`.
+     */
+    fun decodeStrokes(bytes: ByteArray): List<InkStrokeDraw> {
+        if (bytes.size < 3 || bytes[0] != WIRE_VERSION) return emptyList()
+        val buf = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
+        val count = buf.getShort(1).toInt() and 0xFFFF
+        val out = ArrayList<InkStrokeDraw>(count)
+        var off = 3
+        repeat(count) {
+            if (bytes.size < off + 11) return out // [id4][tool1][rgba4][width4][n2] = 15; guard below
+            val id = buf.getInt(off); off += 4
+            val tool = bytes[off].toInt() and 0xFF; off += 1
+            val rgba = buf.getInt(off); off += 4
+            val width = buf.getFloat(off); off += 4
+            if (bytes.size < off + 2) return out
+            val n = buf.getShort(off).toInt() and 0xFFFF; off += 2
+            if (bytes.size < off + n * 8) return out
+            val pts = FloatArray(n * 2)
+            for (i in 0 until n) {
+                pts[i * 2] = buf.getFloat(off); off += 4
+                pts[i * 2 + 1] = buf.getFloat(off); off += 4
+            }
+            val r = (rgba ushr 24) and 0xFF
+            val g = (rgba ushr 16) and 0xFF
+            val b = (rgba ushr 8) and 0xFF
+            val a = rgba and 0xFF
+            out.add(InkStrokeDraw(id, tool, r, g, b, a, width, pts))
+        }
+        return out
     }
 }

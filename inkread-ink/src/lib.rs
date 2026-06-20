@@ -19,6 +19,8 @@
 
 pub mod codec;
 pub mod model;
+pub mod select;
 
 pub use codec::{decode_layer, encode_layer, INKBIN_VERSION};
 pub use model::{BBox, InkColor, InkError, InkLayer, InkPoint, Stroke, StrokeId, Tool};
+pub use select::{select_all, select_in_polygon, selection_bounds, SelectMode};

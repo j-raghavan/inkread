@@ -233,6 +233,24 @@ enum Edit {
     Add(Stroke),
     /// A stroke was erased from position `index`.
     Erase { index: usize, stroke: Stroke },
+    /// A lasso selection was translated by `(dx, dy)` (ADR-INKREAD-0010). The delta is already
+    /// clamped so the selection stays in `[0,1]`, making the inverse `(-dx, -dy)` exact.
+    Move {
+        ids: Vec<StrokeId>,
+        dx: f32,
+        dy: f32,
+    },
+    /// A lasso selection was deleted; `removed` holds `(original_index, stroke)` in **ascending**
+    /// index order so undo can reinsert each at its original position.
+    DeleteMany { removed: Vec<(usize, Stroke)> },
+    /// A lasso selection was recolored to `new`; `old[k]` is `ids[k]`'s previous color (for undo).
+    Recolor {
+        ids: Vec<StrokeId>,
+        old: Vec<InkColor>,
+        new: InkColor,
+    },
+    /// A clipboard paste appended these (already re-id'd, offset) strokes; undo removes them by id.
+    AddMany { strokes: Vec<Stroke> },
 }
 
 /// All ink on one page, with an undo/redo history (RR6-FR3).
@@ -370,6 +388,145 @@ impl InkLayer {
         removed
     }
 
+    // ---- lasso selection mutations (ADR-INKREAD-0010) — all reversible, all clear redo ----
+
+    /// Translate the strokes in `ids` by `(dx, dy)` (normalized), as one undoable edit. The delta
+    /// is clamped so the whole selection stays within `[0,1]`; returns the clamped delta actually
+    /// applied, or `None` if nothing moved (empty/unknown ids, non-finite delta, or a zero move).
+    pub fn move_strokes(&mut self, ids: &[StrokeId], dx: f32, dy: f32) -> Option<(f32, f32)> {
+        if !dx.is_finite() || !dy.is_finite() {
+            return None;
+        }
+        let (x0, y0, x1, y1) = self.raw_point_bounds(ids)?;
+        let cdx = dx.clamp(-x0, 1.0 - x1);
+        let cdy = dy.clamp(-y0, 1.0 - y1);
+        if cdx == 0.0 && cdy == 0.0 {
+            return None;
+        }
+        self.translate(ids, cdx, cdy);
+        self.undo.push(Edit::Move {
+            ids: ids.to_vec(),
+            dx: cdx,
+            dy: cdy,
+        });
+        self.redo.clear();
+        Some((cdx, cdy))
+    }
+
+    /// Delete every stroke in `ids` as one undoable edit (NeoReader lasso "Delete"/"Cut"). Returns
+    /// the removed ids (top-most first); a no-op if none match.
+    pub fn delete_strokes(&mut self, ids: &[StrokeId]) -> Vec<StrokeId> {
+        let mut removed_ids = Vec::new();
+        let mut removed = Vec::new(); // (original_index, stroke), gathered top-down
+        let mut i = self.strokes.len();
+        while i > 0 {
+            i -= 1;
+            if ids.contains(&self.strokes[i].id) {
+                let stroke = self.strokes.remove(i);
+                removed_ids.push(stroke.id);
+                removed.push((i, stroke));
+            }
+        }
+        if !removed.is_empty() {
+            removed.reverse(); // store ascending so undo reinserts at valid positions
+            self.undo.push(Edit::DeleteMany { removed });
+            self.redo.clear();
+        }
+        removed_ids
+    }
+
+    /// Recolor every stroke in `ids` to `color` as one undoable edit. Returns `true` if any matched.
+    pub fn recolor_strokes(&mut self, ids: &[StrokeId], color: InkColor) -> bool {
+        let mut affected = Vec::new();
+        let mut old = Vec::new();
+        for s in &mut self.strokes {
+            if ids.contains(&s.id) {
+                affected.push(s.id);
+                old.push(s.color);
+                s.color = color;
+            }
+        }
+        if affected.is_empty() {
+            return false;
+        }
+        self.undo.push(Edit::Recolor {
+            ids: affected,
+            old,
+            new: color,
+        });
+        self.redo.clear();
+        true
+    }
+
+    /// Detached clones of the strokes in `ids`, in paint order — the clipboard payload for
+    /// copy/cut (the caller, not the layer, holds the clipboard so it can paste across pages).
+    /// Non-destructive: records no edit.
+    #[must_use]
+    pub fn copy_strokes(&self, ids: &[StrokeId]) -> Vec<Stroke> {
+        self.strokes
+            .iter()
+            .filter(|s| ids.contains(&s.id))
+            .cloned()
+            .collect()
+    }
+
+    /// Paste `strokes` (e.g. from the clipboard) offset by `(dx, dy)`, as one undoable edit. Each
+    /// gets a fresh id; points are clamped into `[0,1]`. Returns the new ids; a no-op on empty input
+    /// or a non-finite offset.
+    pub fn paste_strokes(&mut self, strokes: &[Stroke], dx: f32, dy: f32) -> Vec<StrokeId> {
+        if strokes.is_empty() || !dx.is_finite() || !dy.is_finite() {
+            return Vec::new();
+        }
+        let mut added = Vec::new();
+        let mut new_ids = Vec::new();
+        for s in strokes {
+            let id = StrokeId(self.next_id);
+            self.next_id = self.next_id.saturating_add(1);
+            let mut clone = s.clone();
+            clone.id = id;
+            for p in &mut clone.points {
+                p.x = (p.x + dx).clamp(0.0, 1.0);
+                p.y = (p.y + dy).clamp(0.0, 1.0);
+            }
+            self.strokes.push(clone.clone());
+            added.push(clone);
+            new_ids.push(id);
+        }
+        self.undo.push(Edit::AddMany { strokes: added });
+        self.redo.clear();
+        new_ids
+    }
+
+    /// Raw (unexpanded, unclamped) bounds of the points of the strokes in `ids`, or `None` if none
+    /// match — used to clamp a move delta to keep the selection on-page.
+    fn raw_point_bounds(&self, ids: &[StrokeId]) -> Option<(f32, f32, f32, f32)> {
+        let mut b: Option<(f32, f32, f32, f32)> = None;
+        for s in &self.strokes {
+            if !ids.contains(&s.id) {
+                continue;
+            }
+            for p in &s.points {
+                b = Some(match b {
+                    None => (p.x, p.y, p.x, p.y),
+                    Some((x0, y0, x1, y1)) => (x0.min(p.x), y0.min(p.y), x1.max(p.x), y1.max(p.y)),
+                });
+            }
+        }
+        b
+    }
+
+    /// Translate the points of the strokes in `ids` by `(dx, dy)` (no clamp — the caller bounds it).
+    fn translate(&mut self, ids: &[StrokeId], dx: f32, dy: f32) {
+        for s in &mut self.strokes {
+            if ids.contains(&s.id) {
+                for p in &mut s.points {
+                    p.x += dx;
+                    p.y += dy;
+                }
+            }
+        }
+    }
+
     /// Whether an undo is available.
     #[must_use]
     pub fn can_undo(&self) -> bool {
@@ -395,6 +552,26 @@ impl InkLayer {
                 let at = (*index).min(self.strokes.len());
                 self.strokes.insert(at, stroke.clone());
             }
+            Edit::Move { ids, dx, dy } => {
+                self.translate(ids, -*dx, -*dy);
+            }
+            Edit::DeleteMany { removed } => {
+                for (index, stroke) in removed.iter() {
+                    let at = (*index).min(self.strokes.len());
+                    self.strokes.insert(at, stroke.clone());
+                }
+            }
+            Edit::Recolor { ids, old, .. } => {
+                for (id, color) in ids.iter().zip(old.iter()) {
+                    if let Some(s) = self.strokes.iter_mut().find(|s| s.id == *id) {
+                        s.color = *color;
+                    }
+                }
+            }
+            Edit::AddMany { strokes } => {
+                self.strokes
+                    .retain(|s| !strokes.iter().any(|a| a.id == s.id));
+            }
         }
         self.redo.push(edit);
         true
@@ -414,6 +591,25 @@ impl InkLayer {
                     self.strokes.remove(pos);
                 } else {
                     let _ = index;
+                }
+            }
+            Edit::Move { ids, dx, dy } => {
+                self.translate(ids, *dx, *dy);
+            }
+            Edit::DeleteMany { removed } => {
+                let ids: Vec<StrokeId> = removed.iter().map(|(_, s)| s.id).collect();
+                self.strokes.retain(|s| !ids.contains(&s.id));
+            }
+            Edit::Recolor { ids, new, .. } => {
+                for id in ids.iter() {
+                    if let Some(s) = self.strokes.iter_mut().find(|s| s.id == *id) {
+                        s.color = *new;
+                    }
+                }
+            }
+            Edit::AddMany { strokes } => {
+                for s in strokes.iter() {
+                    self.strokes.push(s.clone());
                 }
             }
         }

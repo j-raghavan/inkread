@@ -11,6 +11,8 @@ import android.graphics.Path
 import android.graphics.Typeface
 import android.graphics.drawable.ColorDrawable
 import android.net.Uri
+import android.os.Environment
+import android.provider.Settings
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -27,6 +29,7 @@ import android.view.View
 import android.view.ViewGroup
 import android.view.Window
 import android.widget.EditText
+import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.SeekBar
@@ -87,9 +90,11 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
      * the UI thread for tap hit-testing. */
     @Volatile private var currentLinks: List<LinkRect> = emptyList()
 
-    // ---- handwriting (RR19) ----
-    /** Per-book stroke store; engine-thread only. Null until a book is open. */
-    private var inkStore: InkStore? = null
+    // ---- handwriting (RR6 / ADR-INKREAD-0010) ----
+    // Strokes live in the Rust core now (persisted to a `.inkread` sidecar); the shell captures
+    // input, feeds the native ink seam, and bakes the core's strokes onto each rendered page.
+    /** This page's strokes, decoded from the core's draw-wire for baking; engine-thread only. */
+    private var pageStrokes: List<InkStrokeDraw> = emptyList()
     /** 0-based page the strokes are keyed to; set on the engine thread after each render. */
     private var currentPage = 0
     /** Per-book bookmarks (RR16); engine-thread only. */
@@ -102,34 +107,100 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
     // ---- dictionary (RR12 / D4) ----
     /** Open `Dict` handle (0 = not opened). Engine-thread only. */
     private var dictHandle = 0L
-    /** When true, the stylus SELECTS text (for a lookup) instead of inking. */
-    @Volatile private var selectMode = false
+
+    // ---- tool model (ADR-INKREAD-0010) ----
+    /** The active annotation tool. [Tool.PEN] inks via firmware; the rest capture the stylus. */
+    @Volatile private var tool: Tool = Tool.PEN
+    /** The floating tool puck/palette overlay; created in onCreate. */
+    private lateinit var toolPalette: ToolPalette
     /** In-progress selection stroke as interleaved view-px x,y; UI-thread only. */
     private val selBuf = ArrayList<Float>()
     /** Net for a swallowed stylus UP during selection (mirrors [strokeFinalize]). */
     private val selectionFinalize = Runnable { finalizeSelection() }
+    /** In-progress eraser path as interleaved view-px x,y; UI-thread only. */
+    private val eraseBuf = ArrayList<Float>()
+    /** Net for a swallowed stylus UP during erasing (mirrors [strokeFinalize]). */
+    private val eraseFinalize = Runnable { finalizeErase() }
+
+    // ---- lasso (ADR-INKREAD-0010) ----
+    /** The floating selection toolbar; created in onCreate. */
+    private lateinit var selectionToolbar: SelectionToolbar
+    private lateinit var colorPalette: ColorPalette
+    /** Persistent Lasso discoverability banner (shown while Lasso is active with no selection). */
+    private var lassoHint: TextView? = null
+    /** In-progress lasso loop as interleaved view-px x,y; UI-thread only. */
+    private val lassoBuf = ArrayList<Float>()
+    /** Net for a swallowed stylus UP during the lasso loop. */
+    private val lassoFinalize = Runnable { finalizeLasso() }
+    /** 0=Smart, 1=Freehand lasso (NeoReader's two modes). */
+    @Volatile private var lassoMode = 0
+    /** The current selection's stroke ids (empty = no selection); read on both threads. */
+    @Volatile private var selectedIds = IntArray(0)
+    /** The selection's normalized bounds [x0,y0,x1,y1] for the box + toolbar anchor; empty = none. */
+    @Volatile private var selectionBounds = FloatArray(0)
+    /** When dragging the selection to move it: the down point (view px) and whether a move began. */
+    private var moveStartX = 0f
+    private var moveStartY = 0f
+    private var movingSelection = false
     /** The in-progress stroke as interleaved view-px x,y; UI-thread only. */
     private val strokeBuf = ArrayList<Float>()
     private val mainHandler = Handler(Looper.getMainLooper())
     /** Safety net for a swallowed stylus ACTION_UP: commit the stroke after a brief pen pause. */
     private val strokeFinalize = Runnable { finalizeStroke() }
 
-    /** A finger tap is acted on only after a short confirm window with NO stylus activity — a palm
-     *  resting before a pen stroke is cancelled the moment the stylus event (touch or hover)
-     *  arrives (forward-looking palm rejection, RR19/RR25). UI-thread only. */
-    private var pendingTapX = 0f
-    private var pendingTapY = 0f
-    private val pendingTap = Runnable {
-        if (SystemClock.uptimeMillis() - lastStylusMs > PALM_REJECT_MS && strokeBuf.isEmpty()) {
-            handleTap(pendingTapX, pendingTapY)
-        } else {
-            Log.i(TAG, "DIAG tap suppressed at fire (stylus active → palm)")
+    // ---- stylus long-press → instant word lookup (natural "hold a word to define it") ----
+    private var lpDownX = 0f
+    private var lpDownY = 0f
+    private var lpMoved = false
+    /** Fires when the pen has been held ~still on a word: look it up, cancelling the nascent stroke. */
+    private val longPress = Runnable {
+        mainHandler.removeCallbacks(strokeFinalize) // this hold is a lookup, not a stroke
+        strokeBuf.clear()
+        val w = surfaceView.width.toFloat(); val h = surfaceView.height.toFloat()
+        if (w <= 0f || h <= 0f) return@Runnable
+        val nx = lpDownX / w; val ny = lpDownY / h
+        val page = currentPage
+        Log.i(TAG, "DIAG long-press lookup @($nx,$ny) page=$page")
+        engine.execute {
+            clearFirmwareInk(); renderAndBlit(); adapter.refreshFull() // wipe the pen dot the hold left
+            defineWord(page, nx, ny)
         }
+    }
+
+    // ---- finger gestures: the panel DOES deliver finger UP (action=1) and a continuous stationary
+    //      MOVE stream while held, so a tap (quick DOWN→UP) and a long-press (MOVEs past the
+    //      threshold) are distinguishable. Tap → page nav fires on UP; a 500ms hold → word lookup.
+    //      Palm rejection (forward-looking: a stylus event cancels) is preserved. UI-thread only. ----
+    private var fingerDownX = 0f
+    private var fingerDownY = 0f
+    private var fingerMoved = false
+    private var fingerLookupFired = false
+    private var lastFingerMoveMs = 0L
+    private val fingerLongPress = Runnable {
+        // A genuine 500ms hold (UP cancels this for a tap; a beyond-slop MOVE cancels it for a
+        // swipe). Mark it a long-press FIRST so the eventual UP never falls through to a page flip —
+        // even if the lookup finds no word. (No "recent MOVE" gate: the held-finger MOVE stream has
+        // gaps, and finger UP is reliable here, so the gate only caused false page flips.)
+        if (fingerMoved) return@Runnable
+        fingerLookupFired = true // suppresses the tap/page-flip on the upcoming UP
+        if (SystemClock.uptimeMillis() - lastStylusMs <= PALM_REJECT_MS || strokeBuf.isNotEmpty()) return@Runnable
+        lookupWordAtView(fingerDownX, fingerDownY)
+    }
+
+    /** Look up the word under a view-pixel point (shared by stylus + finger long-press). */
+    private fun lookupWordAtView(vx: Float, vy: Float) {
+        val w = surfaceView.width.toFloat(); val h = surfaceView.height.toFloat()
+        if (w <= 0f || h <= 0f) return
+        val nx = vx / w; val ny = vy / h; val page = currentPage
+        Log.i(TAG, "DIAG long-press lookup @($nx,$ny) page=$page")
+        engine.execute { defineWord(page, nx, ny) }
     }
 
     // ---- launch intent (from HomeActivity), read on the UI thread, consumed on the engine thread ----
     @Volatile private var requestPick = false
     @Volatile private var requestedPath: String? = null
+    /** Filesystem path of the open document, for PDF export (ADR-INKREAD-0005). */
+    @Volatile private var currentDocPath: String? = null
     @Volatile private var requestedId: String? = null
 
     private val inkPaint = Paint().apply {
@@ -142,6 +213,40 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
     }
     private val inkDotPaint = Paint().apply { color = Color.BLACK; style = Paint.Style.FILL; isAntiAlias = true }
     private val bookmarkPaint = Paint().apply { color = Color.BLACK; style = Paint.Style.FILL; isAntiAlias = true }
+    /** Dashed box around the active lasso selection (ADR-INKREAD-0010). */
+    private val selectionPaint = Paint().apply {
+        color = Color.BLACK
+        style = Paint.Style.STROKE
+        strokeWidth = 2f
+        isAntiAlias = true
+        pathEffect = android.graphics.DashPathEffect(floatArrayOf(12f, 8f), 0f)
+    }
+    /** Filled square handles at the selection box corners (NeoReader frame 132). */
+    private val selectionHandlePaint = Paint().apply { color = Color.BLACK; style = Paint.Style.FILL; isAntiAlias = true }
+    /** Current pen / highlighter colour (index into the palettes); re-tapping a tool cycles it. */
+    private var penColorIdx = 0
+    private var hlColorIdx = 0
+    private fun penColor() = PEN_COLORS[penColorIdx]
+    private fun highlightColor() = HIGHLIGHT_COLORS[hlColorIdx]
+    private val hlLivePaint = Paint().apply {
+        style = Paint.Style.STROKE; strokeCap = Paint.Cap.ROUND; strokeJoin = Paint.Join.ROUND; isAntiAlias = true
+    }
+    /** Live highlighter band paint, coloured + sized to the current shade. */
+    private fun highlighterLivePaint(): Paint {
+        val c = highlightColor()
+        hlLivePaint.color = Color.argb(c and 0xFF, (c ushr 24) and 0xFF, (c ushr 16) and 0xFF, (c ushr 8) and 0xFF)
+        hlLivePaint.strokeWidth = HIGHLIGHT_WIDTH_PX
+        return hlLivePaint
+    }
+    /** Dashed marching-ants line for the in-progress lasso loop (mirrors the firmware's own
+     *  AreaSelectionView dashPaint — DashPathEffect{6,6} on a normal canvas). */
+    private val lassoPaint = Paint().apply {
+        color = Color.BLACK
+        style = Paint.Style.STROKE
+        strokeWidth = 2f
+        isAntiAlias = true
+        pathEffect = android.graphics.DashPathEffect(floatArrayOf(8f, 6f), 0f)
+    }
 
     private val loadingBg = Paint().apply { color = Color.WHITE }
     private val loadingText = Paint().apply {
@@ -173,24 +278,75 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         //     touch within PALM_REJECT_MS of a stylus event (touch or hover; see
         //     dispatchGenericMotionEvent).
         surfaceView.setOnTouchListener { _, event ->
-            val tool = event.getToolType(0)
-            if (tool == MotionEvent.TOOL_TYPE_STYLUS || tool == MotionEvent.TOOL_TYPE_ERASER) {
-                // The firmware paints the live ink; the app captures the same points to bake +
+            val toolType = event.getToolType(0)
+            if (toolType == MotionEvent.TOOL_TYPE_STYLUS || toolType == MotionEvent.TOOL_TYPE_ERASER) {
+                // The firmware paints the live ink (PEN); the app captures the same points to bake +
                 // persist them (RR19). The app never navigates on the pen — and a stylus event
-                // cancels any pending finger tap (that finger was a resting palm).
+                // cancels any pending finger tap (that finger was a resting palm). The active tool
+                // decides what the stylus does (ADR-INKREAD-0010).
                 lastStylusMs = SystemClock.uptimeMillis()
-                mainHandler.removeCallbacks(pendingTap)
-                if (selectMode) captureSelection(event) else captureStylus(event)
-            } else if (event.actionMasked == MotionEvent.ACTION_DOWN &&
-                tool == MotionEvent.TOOL_TYPE_FINGER
-            ) {
-                maybeScheduleTap(event)
+                mainHandler.removeCallbacks(fingerLongPress) // a stylus event ⇒ that finger was a palm
+                val a = event.actionMasked
+                if (a == MotionEvent.ACTION_DOWN || a == MotionEvent.ACTION_UP) {
+                    Log.i(TAG, "DIAG stylus action=$a tool=$tool type=$toolType hist=${event.historySize}")
+                }
+                when (tool) {
+                    Tool.DEFINE -> captureSelection(event)
+                    Tool.ERASER -> captureErase(event)
+                    Tool.LASSO -> captureLasso(event)
+                    else -> captureStylus(event) // PEN (Highlighter is still P2)
+                }
+            } else if (toolType == MotionEvent.TOOL_TYPE_FINGER) {
+                when (event.actionMasked) {
+                    MotionEvent.ACTION_DOWN -> onFingerDown(event)
+                    MotionEvent.ACTION_MOVE -> onFingerMove(event)
+                    MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> onFingerUp(event)
+                }
             }
             true
         }
         // The panel refresh is routed through the view's context (Supernote "eink" service).
         adapter.attachView(surfaceView)
-        setContentView(surfaceView)
+        // Host the surface + the docked tool toolbar (ADR-INKREAD-0010) in a FrameLayout overlay.
+        val root = FrameLayout(this)
+        root.addView(
+            surfaceView,
+            FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT,
+            ),
+        )
+        toolPalette = ToolPalette(
+            this,
+            root,
+            onToolSelected = { chosen -> onToolChosen(chosen) },
+            // After the pill is moved/collapsed, repaint the page + force a panel refresh so the
+            // EPD reflects its new position (the earlier puck "vanished" for lack of this refresh).
+            onChrome = { engine.execute { renderAndBlit(); adapter.refreshFull() } },
+            onUndo = { inkUndo() },
+            onRedo = { inkRedo() },
+        )
+        selectionToolbar = SelectionToolbar(this, root) { action -> onSelectionAction(action) }
+        colorPalette = ColorPalette(this, root)
+        // Persistent affordance for Lasso (discoverability): a slim top banner shown while the
+        // Lasso tool is active and nothing is selected. Tells the user the loop gesture; hidden
+        // once a selection exists or another tool is chosen.
+        lassoHint = TextView(this).apply {
+            text = "Lasso — draw a loop around your writing to select"
+            textSize = 14f
+            setTextColor(Color.WHITE)
+            setBackgroundColor(Color.BLACK)
+            setPadding(dpInt(16), dpInt(8), dpInt(16), dpInt(8))
+            visibility = View.GONE
+        }
+        root.addView(
+            lassoHint,
+            FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL; topMargin = dpInt(8) },
+        )
+        setContentView(root)
     }
 
     // ---- SurfaceHolder lifecycle → core (RR21-FR4) ----
@@ -217,29 +373,35 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
-        // Re-claim the firmware ink path on every focus gain — the firmware releases pen ownership
-        // when another window (e.g. the picker) takes focus. After this the stylus inks (RR19).
-        if (hasFocus) {
-            val ok = ink.setup()
-            Log.i(TAG, "ink setup on focus: available=$ok")
-        }
+        // Re-apply the firmware-ink state for the active tool on every focus gain — the firmware
+        // releases pen ownership when another window (e.g. the picker) takes focus (RR19). PEN
+        // re-claims ink; a non-pen tool keeps it released so the stylus still selects/erases.
+        if (hasFocus) applyToolInkState("focus")
     }
 
     override fun onResume() {
         super.onResume()
-        // Claim the firmware ink path as soon as we're foreground. Belt-and-suspenders with
+        // Re-apply ink state as soon as we're foreground. Belt-and-suspenders with
         // onWindowFocusChanged: the Supernote's window-focus events are flaky (the window can go
         // "Gone" right after launch), so onResume is the reliable foreground signal.
-        val ok = ink.setup()
-        Log.i(TAG, "ink setup on resume: available=$ok")
+        applyToolInkState("resume")
     }
 
     override fun onPause() {
         super.onPause()
-        mainHandler.removeCallbacks(pendingTap) // drop any deferred tap when we leave the foreground
+        if (::toolPalette.isInitialized) toolPalette.dismiss() // close any open palette popup
+        if (::selectionToolbar.isInitialized) selectionToolbar.dismiss()
+        if (::colorPalette.isInitialized) colorPalette.dismiss()
+        mainHandler.removeCallbacks(fingerLongPress) // drop any pending finger gesture on leaving
+        mainHandler.removeCallbacks(longPress)
         ink.teardown() // release the firmware ink claim + clear the overlay
-        // Persist the reading position when backgrounded (RR27) — async on the engine thread.
-        engine.execute { savePosition() }
+        // Persist the reading position + flush ink when backgrounded (RR27/RR20) — engine thread.
+        engine.execute {
+            if (docHandle != 0L) {
+                try { NativeBridge.nativeInkSave(docHandle) } catch (e: RuntimeException) { Log.e(TAG, "ink flush failed: ${e.message}") }
+            }
+            savePosition()
+        }
     }
 
     /** Launch the system file picker for a PDF (RR22). */
@@ -362,8 +524,16 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             0L
         }
         if (docHandle != 0L) {
-            // Per-book sidecars (RR19/RR16): handwriting + bookmarks, keyed by the book id.
-            inkStore = InkStore(File(filesDir, "ink/${bookId.hashCode()}.json")).also { it.load() }
+            currentDocPath = path // remember for PDF export (ADR-INKREAD-0005)
+            // Ink now lives in the Rust core, persisted to a `.inkread` sidecar next to the doc
+            // (RR6/RR10 / ADR-INKREAD-0010). Attach the store so strokes save + reload.
+            try {
+                NativeBridge.nativeAttachInkStore(docHandle, path)
+                Log.i(TAG, "DIAG ink store attached for $path")
+            } catch (e: RuntimeException) {
+                Log.e(TAG, "attach ink store failed: ${e.message}")
+            }
+            // Bookmarks remain a Kotlin sidecar (RR16), keyed by the book id.
             bookmarks = Bookmarks(File(filesDir, "bookmarks/${bookId.hashCode()}.json")).also { it.load() }
             currentBookId = bookId
             pageCount = NativeBridge.nativePageCount(docHandle)
@@ -422,9 +592,17 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         buf.rewind()
         bmp.copyPixelsFromBuffer(buf)
         currentPage = NativeBridge.nativeCurrentPage(handle)
-        // Bake this page's saved handwriting onto the rendered page (RR19) before blitting.
+        // Bake the CORE's strokes for this page onto the rendered page (RR6) before blitting.
+        pageStrokes = try {
+            WireCodec.decodeStrokes(NativeBridge.nativeInkStrokesForDraw(handle, currentPage))
+        } catch (e: RuntimeException) {
+            Log.e(TAG, "ink fetch failed: ${e.message}"); emptyList()
+        }
+        Log.i(TAG, "DIAG baked ${pageStrokes.size} core strokes on page $currentPage")
         val cv = Canvas(bmp)
-        inkStore?.let { store -> for (s in store.strokesFor(currentPage)) drawStroke(cv, s) }
+        for (s in pageStrokes) drawStroke(cv, s)
+        // The active lasso selection's bounding box (ADR-INKREAD-0010).
+        if (selectedIds.isNotEmpty() && selectionBounds.size == 4) drawSelectionBox(cv)
         // A small dog-ear marks a bookmarked page (RR16).
         if (bookmarks?.has(currentPage) == true) drawBookmarkCorner(cv)
         // Cache the first page as the book's thumbnail, once (RR17-FR5).
@@ -483,6 +661,12 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
                 strokeBuf.clear()
                 strokeBuf.add(e.x); strokeBuf.add(e.y)
                 armStrokeTimeout()
+                // Arm long-press → word lookup in Pen (reading) mode: hold the pen on a word to
+                // define it, no tool switch needed. (Other tools have their own hold semantics.)
+                if (tool == Tool.PEN) {
+                    lpDownX = e.x; lpDownY = e.y; lpMoved = false
+                    mainHandler.postDelayed(longPress, LONG_PRESS_MS)
+                }
             }
             MotionEvent.ACTION_MOVE -> {
                 for (i in 0 until e.historySize) {
@@ -490,8 +674,15 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
                 }
                 strokeBuf.add(e.x); strokeBuf.add(e.y)
                 armStrokeTimeout()
+                // Any real movement means this is a stroke, not a hold → cancel the pending lookup.
+                if (!lpMoved && kotlin.math.hypot(e.x - lpDownX, e.y - lpDownY) > LONG_PRESS_SLOP_PX) {
+                    lpMoved = true; mainHandler.removeCallbacks(longPress)
+                }
+                // Pen rides the fast firmware overlay; Highlighter's is suppressed, so draw its band.
+                if (tool == Tool.HIGHLIGHTER) drawLivePath(strokeBuf, highlighterLivePaint())
             }
             MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                mainHandler.removeCallbacks(longPress) // lifted before the hold fired → normal stroke
                 strokeBuf.add(e.x); strokeBuf.add(e.y)
                 mainHandler.removeCallbacks(strokeFinalize)
                 finalizeStroke()
@@ -506,33 +697,52 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
 
     /** Hand the captured stroke to the engine thread for persistence (UI thread). */
     private fun finalizeStroke() {
+        Log.i(TAG, "DIAG finalizeStroke buf=${strokeBuf.size / 2} pts")
         if (strokeBuf.size < 2) { strokeBuf.clear(); return }
         val raw = strokeBuf.toFloatArray()
         strokeBuf.clear()
         engine.execute { commitStroke(raw) }
     }
 
-    /** Normalize + store the stroke; it bakes into the page on the next render (engine thread). */
+    /** Feed the captured pen stroke to the core (begin→points→end → autosave). Engine thread. */
     private fun commitStroke(raw: FloatArray) {
         val w = viewW; val h = viewH
-        val store = inkStore
-        if (store == null || w == 0 || h == 0) return
-        val norm = FloatArray(raw.size)
-        var i = 0
-        while (i + 1 < raw.size) {
-            norm[i] = (raw[i] / w).coerceIn(0f, 1f)
-            norm[i + 1] = (raw[i + 1] / h).coerceIn(0f, 1f)
-            i += 2
+        if (docHandle == 0L || w == 0 || h == 0) return
+        // Highlighter = a wide, translucent band (its own core tool + colour); Pen = thin black.
+        val isHl = tool == Tool.HIGHLIGHTER
+        val coreTool = if (isHl) CORE_TOOL_HIGHLIGHTER else CORE_TOOL_PEN
+        val widthNorm = (if (isHl) HIGHLIGHT_WIDTH_PX else INK_STROKE_WIDTH) / w
+        val color = if (isHl) highlightColor() else penColor()
+        try {
+            NativeBridge.nativeInkBeginStroke(docHandle, coreTool, color, widthNorm, System.currentTimeMillis())
+            var i = 0
+            while (i + 1 < raw.size) {
+                val nx = (raw[i] / w).coerceIn(0f, 1f)
+                val ny = (raw[i + 1] / h).coerceIn(0f, 1f)
+                NativeBridge.nativeInkAddPoint(docHandle, nx, ny, 1.0f, Float.NaN, Float.NaN, 0)
+                i += 2
+            }
+            NativeBridge.nativeInkEndStroke(docHandle)
+            Log.i(TAG, "DIAG commitStroke OK ${raw.size / 2} pts tool=$tool → core page $currentPage")
+        } catch (e: RuntimeException) {
+            Log.e(TAG, "ink commit failed: ${e.message}")
         }
-        store.addStroke(currentPage, norm)
-        // The firmware overlay already shows this stroke live; it is baked from storage on the next
+        // Highlighter's firmware EMR ink is suppressed (we drew the live band ourselves), so bake it
+        // from the core now. Pen rides the firmware overlay and bakes on the next full render.
+        if (isHl) { clearFirmwareInk(); renderAndBlit(); adapter.refreshFull(); return }
+        // The firmware overlay already shows this stroke live; it bakes from the core on the next
         // full render (page turn / revisit), so no immediate re-blit is needed here.
     }
 
-    /** Draw one normalized stroke onto [canvas] at the current view size. */
-    private fun drawStroke(canvas: Canvas, norm: FloatArray) {
+    /** Draw one core stroke (normalized points + tool/color/width) onto [canvas]. */
+    private fun drawStroke(canvas: Canvas, s: InkStrokeDraw) {
         val w = viewW.toFloat(); val h = viewH.toFloat()
+        val norm = s.points
+        if (norm.isEmpty()) return
+        inkPaint.color = Color.argb(s.a, s.r, s.g, s.b)
+        inkPaint.strokeWidth = (s.width * w).coerceAtLeast(1f)
         if (norm.size == 2) {
+            inkDotPaint.color = inkPaint.color
             canvas.drawCircle(norm[0] * w, norm[1] * h, inkPaint.strokeWidth / 2f, inkDotPaint)
             return
         }
@@ -541,6 +751,18 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         var i = 2
         while (i + 1 < norm.size) { path.lineTo(norm[i] * w, norm[i + 1] * h); i += 2 }
         canvas.drawPath(path, inkPaint)
+    }
+
+    /** Draw the active lasso selection's dashed bounding box + square corner handles (frame 132). */
+    private fun drawSelectionBox(canvas: Canvas) {
+        val b = selectionBounds
+        val w = viewW.toFloat(); val h = viewH.toFloat()
+        val l = b[0] * w; val t = b[1] * h; val r = b[2] * w; val btm = b[3] * h
+        canvas.drawRect(l, t, r, btm, selectionPaint)
+        val hs = SELECTION_HANDLE_PX
+        for (cx in floatArrayOf(l, r)) for (cy in floatArrayOf(t, btm)) {
+            canvas.drawRect(cx - hs, cy - hs, cx + hs, cy + hs, selectionHandlePaint)
+        }
     }
 
     /** A small filled dog-ear in the top-right corner marking a bookmarked page (RR16). */
@@ -557,13 +779,11 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
     }
 
     /**
-     * Decide whether a finger ACTION_DOWN is a deliberate navigation tap or a resting palm
-     * (RR19/RR25). Reject obvious palms immediately — multi-touch, a large contact patch, a recent
-     * or in-progress stylus, or an active stroke — and otherwise **defer** the tap by
-     * [TAP_CONFIRM_MS]: any stylus event (incl. pen hover) inside that window cancels it, so the
-     * common "rest the hand, then write" sequence never registers as a tap.
+     * Finger DOWN: reject obvious palms (multi-touch, large contact, a recent/in-progress stylus, an
+     * active stroke); otherwise arm the long-press → lookup timer. The tap itself is decided on UP
+     * (the panel delivers finger UP reliably), so "rest the hand, then write" never turns a page.
      */
-    private fun maybeScheduleTap(e: MotionEvent) {
+    private fun onFingerDown(e: MotionEvent) {
         val recentStylus = SystemClock.uptimeMillis() - lastStylusMs <= PALM_REJECT_MS
         val major = e.getTouchMajor(0)
         val vh = surfaceView.height
@@ -574,12 +794,35 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
                 "DIAG palm-reject down pc=${e.pointerCount} recent=$recentStylus " +
                     "major=$major large=$largeContact stroke=${strokeBuf.isNotEmpty()}",
             )
+            fingerMoved = true // neutralise any later MOVE/UP from this rejected touch
             return
         }
-        pendingTapX = e.x
-        pendingTapY = e.y
-        mainHandler.removeCallbacks(pendingTap)
-        mainHandler.postDelayed(pendingTap, TAP_CONFIRM_MS)
+        fingerDownX = e.x; fingerDownY = e.y
+        fingerMoved = false; fingerLookupFired = false
+        lastFingerMoveMs = SystemClock.uptimeMillis()
+        mainHandler.removeCallbacks(fingerLongPress)
+        mainHandler.postDelayed(fingerLongPress, FINGER_LONG_PRESS_MS)
+    }
+
+    /** Finger MOVE: track liveness; beyond the slop it's a swipe/scroll, not a tap or hold. */
+    private fun onFingerMove(e: MotionEvent) {
+        lastFingerMoveMs = SystemClock.uptimeMillis()
+        if (!fingerMoved && kotlin.math.hypot(e.x - fingerDownX, e.y - fingerDownY) > FINGER_MOVE_SLOP_PX) {
+            fingerMoved = true
+            mainHandler.removeCallbacks(fingerLongPress)
+        }
+    }
+
+    /** Finger UP: a quick, still press is a navigation tap (page zones / link / TOC). */
+    private fun onFingerUp(e: MotionEvent) {
+        mainHandler.removeCallbacks(fingerLongPress)
+        if (fingerLookupFired) { fingerLookupFired = false; return } // the hold already looked up
+        if (fingerMoved) return // a swipe or rejected palm — not a tap
+        if (SystemClock.uptimeMillis() - lastStylusMs > PALM_REJECT_MS && strokeBuf.isEmpty()) {
+            handleTap(fingerDownX, fingerDownY)
+        } else {
+            Log.i(TAG, "DIAG tap suppressed (stylus active → palm)")
+        }
     }
 
     private fun handleTap(x: Float, y: Float) {
@@ -639,9 +882,19 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
                 return@execute
             }
             ink.clearAll() // wipe the firmware ink overlay so it doesn't bleed onto the new page
+            dropSelectionForPageChange()
             renderAndBlit()
+            savePosition() // persist position per jump so an abrupt kill still reopens here (RR27)
             adapter.executeAll(WireCodec.decodeCommands(commandBytes))
         }
+    }
+
+    /** Drop any lasso selection when the page changes — the ids belong to the old page (engine). */
+    private fun dropSelectionForPageChange() {
+        if (selectedIds.isEmpty()) return
+        selectedIds = IntArray(0)
+        selectionBounds = FloatArray(0)
+        runOnUiThread { selectionToolbar.dismiss() }
     }
 
     /** Apply a page-turn gesture on the engine thread, then render + refresh (RR25). */
@@ -655,7 +908,9 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
                 return@execute
             }
             ink.clearAll() // wipe the firmware ink overlay so it doesn't bleed onto the new page
+            dropSelectionForPageChange()
             renderAndBlit()
+            savePosition() // persist position per turn so an abrupt kill still reopens here (RR27)
             // Execute the policy's refresh stream on the panel (RR2-FR3).
             adapter.executeAll(WireCodec.decodeCommands(commandBytes))
         }
@@ -741,8 +996,8 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         control("📚\nLibrary") { showLibraryDialog() }
         control(if (marked) "🔖\nRemove" else "🔖\nBookmark") { toggleBookmark() }
         control("📑\nMarks") { showBookmarks() }
-        control("🔍\nDefine") { enterSelectMode() }
         control("📄\nContents") { showContentsLazy() }
+        control("💾\nExport") { showExportDialog() }
         control("📂\nOpen") { openPicker() }
         container.addView(controls)
 
@@ -753,6 +1008,97 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             setBackgroundDrawable(android.graphics.drawable.ColorDrawable(Color.WHITE))
         }
         dialog.show()
+    }
+
+    /**
+     * Export the annotations into the PDF (ADR-INKREAD-0005). Lets the user pick editable PDF
+     * annotations vs. flattened (baked-in) content, then writes it back in place. Writing modifies
+     * the original file, so confirm first; the heavy lifting is on the engine thread.
+     */
+    private fun showExportDialog() {
+        val path = currentDocPath
+        if (path == null || docHandle == 0L) {
+            Toast.makeText(this, "No open document to export", Toast.LENGTH_SHORT).show()
+            return
+        }
+        // inkread reads a PRIVATE copy of the PDF; to make the export visible on the desktop it must
+        // land in a Partner-synced PUBLIC folder, which needs all-files access (Android 11+).
+        if (!Environment.isExternalStorageManager()) {
+            AlertDialog.Builder(this)
+                .setTitle("Allow file access to export")
+                .setMessage("To save annotated PDFs into your synced $EXPORT_DIR_NAME folder (so they appear on your computer), inkread needs \"All files access\". Grant it on the next screen, then export again.")
+                .setPositiveButton("Open settings") { _, _ ->
+                    val uri = Uri.parse("package:$packageName")
+                    runCatching {
+                        startActivity(Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION, uri))
+                    }.onFailure {
+                        startActivity(Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION))
+                    }
+                }
+                .setNegativeButton("Cancel", null)
+                .show()
+            return
+        }
+        // NOTE: AlertDialog shows EITHER a message OR an items list, not both — choices go in labels.
+        AlertDialog.Builder(this)
+            .setTitle("Export annotated PDF to $EXPORT_DIR_NAME")
+            .setItems(
+                arrayOf(
+                    "Editable annotations (Adobe / Preview)",
+                    "Flatten — shows everywhere (incl. Partner app)",
+                ),
+            ) { _, which ->
+                val flatten = which == 1
+                Toast.makeText(this, "Exporting…", Toast.LENGTH_SHORT).show()
+                engine.execute { runExport(path, flatten) }
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    /**
+     * Write the annotated PDF to public storage (engine thread). inkread only holds a private copy
+     * of the source (opened via the picker), so it can't overwrite the original in place — instead
+     * it saves a `-annotated.pdf` **beside the original** if that file can be found in the synced
+     * folders, else into [EXPORT_DIR_NAME]. Either way it lands in a Partner-synced location.
+     */
+    private fun runExport(srcPath: String, flatten: Boolean) {
+        val srcName = File(srcPath).name
+        val baseName = srcName.removeSuffix(".pdf").removeSuffix(".PDF")
+        val outDir = findOriginalParent(srcName)
+            ?: File(Environment.getExternalStorageDirectory(), EXPORT_DIR_NAME)
+        outDir.mkdirs()
+        val outFile = File(outDir, "$baseName-annotated.pdf")
+        val ok = try {
+            NativeBridge.nativeExportPdf(docHandle, outFile.absolutePath, flatten)
+            Log.i(TAG, "DIAG export OK → ${outFile.absolutePath} (flatten=$flatten)")
+            true
+        } catch (e: RuntimeException) {
+            Log.e(TAG, "export failed: ${e.message}"); false
+        }
+        val rel = outFile.absolutePath
+            .removePrefix(Environment.getExternalStorageDirectory().absolutePath + "/")
+        runOnUiThread {
+            Toast.makeText(
+                this,
+                if (ok) "Saved to $rel — sync to see it" else "Export failed",
+                Toast.LENGTH_LONG,
+            ).show()
+        }
+    }
+
+    /** Find the folder holding the original PDF (so the export lands beside it). Searches the
+     *  Supernote-synced roots a few levels deep; null if not found (then the caller uses a default). */
+    private fun findOriginalParent(fileName: String): File? {
+        val root = Environment.getExternalStorageDirectory()
+        for (dir in SYNCED_DIRS) {
+            val r = File(root, dir)
+            if (!r.isDirectory) continue
+            val hit = r.walkTopDown().maxDepth(5)
+                .firstOrNull { it.isFile && it.name == fileName }
+            if (hit != null) return hit.parentFile
+        }
+        return null
     }
 
     /** A "go to page" text-entry dialog (RR11-FR1): type a 1-based page number to jump. */
@@ -866,18 +1212,381 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         finish()
     }
 
-    // ===== Dictionary (RR12 / ADR-INKREAD-0009 D4) =====
+    // ===== Tool model (ADR-INKREAD-0010) =====
 
     /**
-     * Enter "Define" mode: the firmware ink is released so the **stylus selects text** instead of
-     * drawing — a stylus tap looks up the word, a drag highlights a phrase (RR11/RR12). Reliable
-     * because stylus up/down is delivered (unlike the swallowed finger up that drives navigation).
+     * Switch the active annotation tool (from the floating palette). [Tool.PEN] re-claims firmware
+     * ink; every other tool releases it so the stylus selects/erases instead (the firmware-ink
+     * toggle IS the mode). Highlighter/Lasso are P2 — not yet wired, so they're vetoed (return
+     * false) and the active tool is unchanged. Returns true when the switch is committed.
      */
-    private fun enterSelectMode() {
-        selectMode = true
-        ink.teardown() // stop firmware ink so the next stylus stroke is a selection, not ink
-        Toast.makeText(this, "Tap a word (or drag over text) to look it up", Toast.LENGTH_SHORT).show()
+    private fun onToolChosen(chosen: Tool): Boolean {
+        if (chosen.phase2) {
+            Toast.makeText(this, "${chosen.label} is coming soon", Toast.LENGTH_SHORT).show()
+            return false
+        }
+        // Re-tapping the active Lasso toggles its sub-mode (NeoReader: Smart ↔ Freehand).
+        if (chosen == Tool.LASSO && tool == Tool.LASSO) {
+            lassoMode = if (lassoMode == 0) 1 else 0
+            val name = if (lassoMode == 0) "Smart lasso" else "Freehand lasso"
+            Toast.makeText(this, "$name (tap Lasso again to switch)", Toast.LENGTH_SHORT).show()
+            return true
+        }
+        // Re-tapping the active Highlighter / Pen opens its colour palette (stored true; grey on mono).
+        if (chosen == Tool.HIGHLIGHTER && tool == Tool.HIGHLIGHTER) {
+            colorPalette.show("Highlighter colour", HIGHLIGHT_COLORS, HIGHLIGHT_COLOR_NAMES, hlColorIdx) { idx ->
+                hlColorIdx = idx
+                Toast.makeText(this, "Highlighter: ${HIGHLIGHT_COLOR_NAMES[idx]}", Toast.LENGTH_SHORT).show()
+            }
+            return true
+        }
+        if (chosen == Tool.PEN && tool == Tool.PEN) {
+            colorPalette.show("Pen colour", PEN_COLORS, PEN_COLOR_NAMES, penColorIdx) { idx ->
+                penColorIdx = idx
+                Toast.makeText(this, "Pen: ${PEN_COLOR_NAMES[idx]}", Toast.LENGTH_SHORT).show()
+            }
+            return true
+        }
+        if (chosen == tool) return true
+        tool = chosen
+        applyToolInkState("tool")
+        // A tool switch ends any lasso selection (it's page- and tool-specific).
+        selectedIds = IntArray(0)
+        selectionBounds = FloatArray(0)
+        selectionToolbar.dismiss()
+        // Switching to a non-pen tool: wipe the firmware pen overlay so it doesn't sit on top of
+        // the page while you lasso/erase/define (the real strokes are baked from the core).
+        engine.execute {
+            if (chosen != Tool.PEN) clearFirmwareInk()
+            renderAndBlit()
+            adapter.refreshFull()
+        }
+        val hint = when (chosen) {
+            Tool.PEN -> "Pen — write with the stylus"
+            Tool.HIGHLIGHTER -> "Highlighter — drag over text; tap again to change shade"
+            Tool.ERASER -> "Eraser — drag the stylus over ink to remove it"
+            Tool.DEFINE -> "Define — tap a word (or drag over text) to look it up"
+            Tool.LASSO -> "Lasso — circle strokes to select; tap Lasso again for Freehand"
+            else -> chosen.label
+        }
+        Toast.makeText(this, hint, Toast.LENGTH_SHORT).show()
+        updateLassoHint()
+        return true
     }
+
+    /**
+     * Keep the firmware ink **claimed in every mode** (ADR-INKREAD-0010). On this firmware the EMR
+     * pen paints regardless of our claim, and `clearAll()` only works while claimed — so to wipe the
+     * transient ink a non-pen gesture leaves behind, we must stay claimed and clear it afterwards
+     * (see [clearFirmwareInk]). Pen keeps its live ink; non-pen tools clear theirs post-gesture.
+     */
+    private fun dpInt(v: Int) = (v * resources.displayMetrics.density).toInt()
+
+    /** Show the Lasso hint banner only while Lasso is active and nothing is selected (UI thread). */
+    private fun updateLassoHint() {
+        val show = tool == Tool.LASSO && selectedIds.isEmpty()
+        runOnUiThread { lassoHint?.visibility = if (show) View.VISIBLE else View.GONE }
+    }
+
+    private fun applyToolInkState(reason: String) {
+        val ok = ink.setup()
+        // Only the Pen (and Eraser) want the firmware EMR pen painting the live stroke. Lasso,
+        // Define and Highlighter draw their OWN overlay (dashed loop / dashed select line / wide
+        // band), so suppress the firmware ink for them — else it paints a solid black stroke on top.
+        // setup() re-enables the writable area each call (incl. on focus regain), so re-assert here
+        // for every reason. setWritable rides the service_myservice binder (works for a sideloaded
+        // app); enableFullUiAuto is SELinux-blocked.
+        val inkWritable = tool == Tool.PEN || tool == Tool.ERASER
+        ink.setWritable(inkWritable)
+        Log.i(TAG, "ink claimed ($reason) for $tool: available=$ok writable=$inkWritable")
+    }
+
+    /** Wipe the firmware ink overlay (engine thread) — used after a non-pen gesture so its transient
+     *  ink doesn't linger over the page. Safe: real strokes are baked from the core on re-render. */
+    private fun clearFirmwareInk() {
+        ink.clearAll()
+    }
+
+    /** Accumulate the eraser path; finalize on UP (or a debounced pause if UP is swallowed). */
+    private fun captureErase(e: MotionEvent) {
+        when (e.actionMasked) {
+            MotionEvent.ACTION_DOWN -> {
+                eraseBuf.clear()
+                eraseBuf.add(e.x); eraseBuf.add(e.y)
+                armEraseTimeout()
+            }
+            MotionEvent.ACTION_MOVE -> {
+                for (i in 0 until e.historySize) {
+                    eraseBuf.add(e.getHistoricalX(i)); eraseBuf.add(e.getHistoricalY(i))
+                }
+                eraseBuf.add(e.x); eraseBuf.add(e.y)
+                armEraseTimeout()
+            }
+            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                eraseBuf.add(e.x); eraseBuf.add(e.y)
+                mainHandler.removeCallbacks(eraseFinalize)
+                finalizeErase()
+            }
+        }
+    }
+
+    private fun armEraseTimeout() {
+        mainHandler.removeCallbacks(eraseFinalize)
+        mainHandler.postDelayed(eraseFinalize, STROKE_PAUSE_MS)
+    }
+
+    /** Hand the eraser path to the engine thread to remove crossed strokes (UI thread). */
+    private fun finalizeErase() {
+        if (eraseBuf.size < 2) { eraseBuf.clear(); return }
+        val pts = eraseBuf.toFloatArray()
+        eraseBuf.clear()
+        engine.execute { commitErase(pts) }
+    }
+
+    /** Feed the eraser path to the core (Eraser stroke removes crossed strokes); re-render (engine). */
+    private fun commitErase(viewPts: FloatArray) {
+        val w = viewW; val h = viewH
+        if (docHandle == 0L || w == 0 || h == 0) return
+        val radiusNorm = ERASE_RADIUS_PX / w
+        try {
+            NativeBridge.nativeInkBeginStroke(docHandle, CORE_TOOL_ERASER, INK_COLOR_BLACK, radiusNorm, System.currentTimeMillis())
+            var i = 0
+            while (i + 1 < viewPts.size) {
+                val nx = (viewPts[i] / w).coerceIn(0f, 1f)
+                val ny = (viewPts[i + 1] / h).coerceIn(0f, 1f)
+                NativeBridge.nativeInkAddPoint(docHandle, nx, ny, 1.0f, Float.NaN, Float.NaN, 0)
+                i += 2
+            }
+            NativeBridge.nativeInkEndStroke(docHandle)
+        } catch (e: RuntimeException) {
+            Log.e(TAG, "erase failed: ${e.message}"); return
+        }
+        clearFirmwareInk() // wipe the firmware ink left by the eraser drag
+        renderAndBlit()
+        adapter.refreshFull()
+    }
+
+    // ===== Lasso selection (ADR-INKREAD-0010) =====
+
+    /**
+     * Capture the lasso stylus gesture. If the down lands **inside** an active selection, the gesture
+     * MOVES that selection (NeoReader: drag the selection); otherwise it draws a new lasso loop.
+     */
+    private fun captureLasso(e: MotionEvent) {
+        when (e.actionMasked) {
+            MotionEvent.ACTION_DOWN -> {
+                if (selectedIds.isNotEmpty() && pointInSelection(e.x, e.y)) {
+                    movingSelection = true
+                    moveStartX = e.x; moveStartY = e.y
+                } else {
+                    movingSelection = false
+                    lassoBuf.clear()
+                    lassoBuf.add(e.x); lassoBuf.add(e.y)
+                    armLassoTimeout()
+                }
+            }
+            MotionEvent.ACTION_MOVE -> {
+                if (movingSelection) return // the move is applied once, on UP (one e-ink refresh)
+                for (i in 0 until e.historySize) {
+                    lassoBuf.add(e.getHistoricalX(i)); lassoBuf.add(e.getHistoricalY(i))
+                }
+                lassoBuf.add(e.x); lassoBuf.add(e.y)
+                armLassoTimeout()
+                drawLassoLoopLive() // we own the loop pixels now (firmware EMR ink suppressed)
+            }
+            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                if (movingSelection) {
+                    movingSelection = false
+                    applySelectionMove(e.x - moveStartX, e.y - moveStartY)
+                } else {
+                    lassoBuf.add(e.x); lassoBuf.add(e.y)
+                    mainHandler.removeCallbacks(lassoFinalize)
+                    finalizeLasso()
+                }
+            }
+        }
+    }
+
+    private fun armLassoTimeout() {
+        mainHandler.removeCallbacks(lassoFinalize)
+        mainHandler.postDelayed(lassoFinalize, STROKE_PAUSE_MS)
+    }
+
+    /**
+     * Draw the in-progress lasso loop as a dashed line over the cached page (UI thread). The
+     * firmware EMR pen is suppressed in lasso mode ([applyToolInkState]), so WE render the loop —
+     * a dashed marching-ants path, like Ratta's own AreaSelectionView. Reuses the cached page
+     * [bitmap] (no core re-render); the active-stylus touch lets the firmware's auto fast-refresh
+     * show it. lassoBuf holds view-px coords, matching the view-sized bitmap.
+     */
+    private fun drawLassoLoopLive() = drawLivePath(lassoBuf, lassoPaint)
+
+    /**
+     * Draw an in-progress gesture path (view-px [buf]) over the cached page (UI thread), for the
+     * tools whose firmware EMR ink is suppressed: Lasso (dashed loop), Define (dashed select line),
+     * Highlighter (wide translucent band). Reuses the cached page [bitmap] (no core re-render); the
+     * active-stylus touch lets the firmware's auto fast-refresh show it.
+     */
+    private fun drawLivePath(buf: ArrayList<Float>, paint: Paint) {
+        val bmp = bitmap ?: return
+        if (buf.size < 4) return
+        blit { canvas ->
+            canvas.drawBitmap(bmp, 0f, 0f, null)
+            val path = Path()
+            path.moveTo(buf[0], buf[1])
+            var i = 2
+            while (i + 1 < buf.size) { path.lineTo(buf[i], buf[i + 1]); i += 2 }
+            canvas.drawPath(path, paint)
+        }
+    }
+
+    /** Whether a view-px point falls inside the current selection's bounds. */
+    private fun pointInSelection(x: Float, y: Float): Boolean {
+        val b = selectionBounds
+        if (b.size != 4 || viewW == 0 || viewH == 0) return false
+        val nx = x / viewW; val ny = y / viewH
+        return nx in b[0]..b[2] && ny in b[1]..b[3]
+    }
+
+    /** Close the loop and ask the core which strokes it selects (engine thread). */
+    private fun finalizeLasso() {
+        Log.i(TAG, "DIAG finalizeLasso buf=${lassoBuf.size / 2} pts mode=$lassoMode")
+        if (lassoBuf.size < 6) { // need ≥3 points for a polygon
+            lassoBuf.clear()
+            engine.execute { clearFirmwareInk(); renderAndBlit(); adapter.refreshFull() }
+            return
+        }
+        val raw = lassoBuf.toFloatArray()
+        lassoBuf.clear()
+        val w = viewW; val h = viewH
+        if (w == 0 || h == 0) return
+        val poly = FloatArray(raw.size)
+        var i = 0
+        while (i + 1 < raw.size) {
+            poly[i] = (raw[i] / w).coerceIn(0f, 1f)
+            poly[i + 1] = (raw[i + 1] / h).coerceIn(0f, 1f)
+            i += 2
+        }
+        engine.execute {
+            if (docHandle == 0L) return@execute
+            val ids = try {
+                NativeBridge.nativeInkSelectInPolygon(docHandle, poly, lassoMode)
+            } catch (e: RuntimeException) {
+                Log.e(TAG, "lasso select failed: ${e.message}"); return@execute
+            }
+            Log.i(TAG, "DIAG lasso selected ${ids.size} strokes from ${poly.size / 2}-pt loop")
+            setSelection(ids)
+        }
+    }
+
+    /** Adopt `ids` as the selection, refresh the box, and show/update the selection toolbar (engine). */
+    private fun setSelection(ids: IntArray) {
+        selectedIds = ids
+        selectionBounds = if (ids.isEmpty()) FloatArray(0) else try {
+            NativeBridge.nativeInkSelectionBounds(docHandle, ids)
+        } catch (e: RuntimeException) {
+            FloatArray(0)
+        }
+        clearFirmwareInk() // wipe the firmware ink left by drawing the lasso loop
+        renderAndBlit()
+        adapter.refreshFull()
+        updateLassoHint() // hide the hint once something is selected; re-show if selection emptied
+        runOnUiThread {
+            if (selectedIds.isEmpty()) {
+                selectionToolbar.dismiss()
+                if (tool == Tool.LASSO) Toast.makeText(this, "Nothing selected — circle around your writing", Toast.LENGTH_SHORT).show()
+            } else {
+                showSelectionToolbar()
+            }
+        }
+    }
+
+    /** Position the selection toolbar over the selection's pixel bounds (UI thread). */
+    private fun showSelectionToolbar() {
+        val b = selectionBounds
+        if (b.size != 4) return
+        val rect = android.graphics.RectF(b[0] * viewW, b[1] * viewH, b[2] * viewW, b[3] * viewH)
+        val canPaste = try { NativeBridge.nativeInkHasClipboard(docHandle) } catch (e: RuntimeException) { false }
+        selectionToolbar.show(rect, canPaste)
+    }
+
+    /** Apply a drag-move of the selection by a view-px delta (engine thread + autosave). */
+    private fun applySelectionMove(dxPx: Float, dyPx: Float) {
+        val ids = selectedIds
+        if (ids.isEmpty() || viewW == 0 || viewH == 0) return
+        val dx = dxPx / viewW; val dy = dyPx / viewH
+        engine.execute {
+            val changed = try {
+                NativeBridge.nativeInkMoveSelection(docHandle, ids, dx, dy)
+            } catch (e: RuntimeException) {
+                Log.e(TAG, "move failed: ${e.message}"); false
+            }
+            if (changed) setSelection(ids) // recompute bounds + re-show toolbar at the new spot
+        }
+    }
+
+    /** Handle a tap on the floating selection toolbar (UI thread → engine). */
+    private fun onSelectionAction(action: SelAction) {
+        val ids = selectedIds
+        when (action) {
+            SelAction.DONE -> clearSelection()
+            SelAction.SELECT_ALL -> engine.execute {
+                val all = try { NativeBridge.nativeInkSelectAll(docHandle) } catch (e: RuntimeException) { IntArray(0) }
+                setSelection(all)
+            }
+            SelAction.DELETE -> if (ids.isNotEmpty()) engine.execute {
+                try { NativeBridge.nativeInkDeleteSelection(docHandle, ids) } catch (e: RuntimeException) {}
+                clearSelectionAndRender()
+            }
+            SelAction.CUT -> if (ids.isNotEmpty()) engine.execute {
+                try { NativeBridge.nativeInkCutSelection(docHandle, ids) } catch (e: RuntimeException) {}
+                clearSelectionAndRender()
+            }
+            SelAction.COPY -> if (ids.isNotEmpty()) engine.execute {
+                try { NativeBridge.nativeInkCopySelection(docHandle, ids) } catch (e: RuntimeException) {}
+                runOnUiThread { showSelectionToolbar() } // refresh Paste-enabled state
+            }
+            SelAction.PASTE -> engine.execute {
+                val newIds = try { NativeBridge.nativeInkPaste(docHandle, PASTE_OFFSET, PASTE_OFFSET) } catch (e: RuntimeException) { IntArray(0) }
+                if (newIds.isNotEmpty()) setSelection(newIds) else runOnUiThread { showSelectionToolbar() }
+            }
+        }
+    }
+
+    /** Undo the last ink edit (from the tool pill). Global — refreshes any active selection too. */
+    private fun inkUndo() = engine.execute {
+        try { NativeBridge.nativeInkUndo(docHandle) } catch (e: RuntimeException) {}
+        refreshSelectionAfterHistory()
+    }
+
+    /** Redo the last undone ink edit (from the tool pill). */
+    private fun inkRedo() = engine.execute {
+        try { NativeBridge.nativeInkRedo(docHandle) } catch (e: RuntimeException) {}
+        refreshSelectionAfterHistory()
+    }
+
+    /** After undo/redo, the selected strokes may have changed; re-render and re-anchor the toolbar. */
+    private fun refreshSelectionAfterHistory() {
+        if (selectedIds.isEmpty()) { clearSelectionAndRender(); return }
+        setSelection(selectedIds)
+    }
+
+    /** Clear the selection (UI-triggered), then re-render to drop the box (engine). */
+    private fun clearSelection() {
+        engine.execute { clearSelectionAndRender() }
+    }
+
+    /** Drop the selection + toolbar and re-render the page (engine thread). */
+    private fun clearSelectionAndRender() {
+        selectedIds = IntArray(0)
+        selectionBounds = FloatArray(0)
+        renderAndBlit()
+        adapter.refreshFull()
+        updateLassoHint() // re-show the hint if still on the Lasso tool with nothing selected
+        runOnUiThread { selectionToolbar.dismiss() }
+    }
+
+    // ===== Dictionary (RR12 / ADR-INKREAD-0009 D4) =====
 
     /** Accumulate the selection stroke; finalize on UP (or a debounced pause if UP is swallowed). */
     private fun captureSelection(e: MotionEvent) {
@@ -893,6 +1602,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
                 }
                 selBuf.add(e.x); selBuf.add(e.y)
                 armSelectionTimeout()
+                drawLivePath(selBuf, lassoPaint) // dashed select line (firmware EMR ink suppressed)
             }
             MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
                 selBuf.add(e.x); selBuf.add(e.y)
@@ -907,15 +1617,15 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         mainHandler.postDelayed(selectionFinalize, STROKE_PAUSE_MS)
     }
 
-    /** Decide tap vs. drag, leave select mode, re-claim ink, and dispatch the lookup (UI thread). */
+    /** Decide tap vs. drag and dispatch the lookup; stays in the (sticky) Define tool (UI thread). */
     private fun finalizeSelection() {
         if (selBuf.size < 2) { selBuf.clear(); return }
         val pts = selBuf.toFloatArray()
         selBuf.clear()
         val w = surfaceView.width.toFloat()
         val h = surfaceView.height.toFloat()
-        selectMode = false
-        ink.setup() // re-claim firmware ink for normal writing
+        // Define is a sticky tool (ADR-INKREAD-0010): stay in select mode + keep firmware ink
+        // released until the user picks another tool from the palette.
         if (w <= 0f || h <= 0f) return
 
         var minX = pts[0]; var maxX = pts[0]; var minY = pts[1]; var maxY = pts[1]
@@ -935,6 +1645,8 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             val ny = pts[1] / h
             engine.execute { defineWord(page, nx, ny) }
         }
+        // Wipe the firmware ink the define gesture left behind (it never becomes an annotation).
+        engine.execute { clearFirmwareInk(); renderAndBlit(); adapter.refreshFull() }
     }
 
     /** Resolve the word under a normalized point and look it up (engine thread). */
@@ -1137,15 +1849,17 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
     }
 
     private fun closeDocument() {
-        inkStore = null // strokes are already persisted per-stroke; drop the per-book store
         bookmarks = null // bookmarks are persisted on toggle; drop the per-book store
+        selectedIds = IntArray(0) // ink is persisted by the core to its sidecar
+        selectionBounds = FloatArray(0)
         val h = docHandle
         docHandle = 0L // zero BEFORE the call so a re-entrant close is a no-op (Amendment 2)
         if (h == 0L) return
         try {
+            NativeBridge.nativeInkSave(h) // flush any pending ink before teardown (RR20)
             NativeBridge.nativeSavePosition(h) // last-chance save before teardown (RR27)
         } catch (e: RuntimeException) {
-            Log.e(TAG, "save position failed: ${e.message}")
+            Log.e(TAG, "save on close failed: ${e.message}")
         }
         NativeBridge.nativeCloseDocument(h)
     }
@@ -1158,9 +1872,46 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         const val KEY_BOOK_PATH = "book_path" // stored PDF under app storage (RR27).
         const val KEY_BOOK_ID = "book_id" // stable per-book id (the stored file name).
         const val PALM_REJECT_MS = 1000L // a finger tap within this long of a stylus event = palm.
+        // Public, Partner-synced folder the annotated PDF export is written to (Android external
+        // storage root + this) so it reaches the desktop. "Document" is in the Supernote sync set.
+        const val EXPORT_DIR_NAME = "Document"
+        // Supernote folders the Partner app syncs — searched to place the export beside the original.
+        val SYNCED_DIRS = arrayOf("Document", "EXPORT", "Note", "INBOX", "MyStyle", "Download")
+        const val SELECTION_HANDLE_PX = 8f // half-size of the square corner handles on the selection box.
         const val STROKE_PAUSE_MS = 600L // commit a stroke after this pen-pause (swallowed-UP net).
+        const val LONG_PRESS_MS = 500L // hold the pen this long (≈still) on a word → look it up.
+        const val LONG_PRESS_SLOP_PX = 16f // movement beyond this cancels the long-press (it's a stroke).
         const val INK_STROKE_WIDTH = 6f // baked-ink line width (px) tuned to match the firmware pen.
-        const val TAP_CONFIRM_MS = 300L // defer a finger tap; a stylus event in this window = palm.
+        const val ERASE_RADIUS_PX = 22f // eraser hit radius (px): a stroke within this of the path goes.
+
+        // Core ink seam constants (ADR-INKREAD-0010). Tool codes mirror `inkread_ink::Tool::code`.
+        const val CORE_TOOL_PEN = 0
+        const val CORE_TOOL_HIGHLIGHTER = 1
+        const val CORE_TOOL_ERASER = 2
+        const val INK_COLOR_BLACK = 0x000000FF // packed (r<<24|g<<16|b<<8|a): opaque black.
+        const val HIGHLIGHT_WIDTH_PX = 30f // wide marker band (vs INK_STROKE_WIDTH for the pen).
+        // REAL colours are stored per stroke (packed r<<24|g<<16|b<<8|a) and persisted in the
+        // .inkbin sidecar, so a colour device / a future PDF-annotation export shows true colour.
+        // On the MONOCHROME Supernote they just render as greys. Re-tap a tool to cycle its colour.
+        val HIGHLIGHT_COLORS = intArrayOf(
+            0xFFEB3B80.toInt(), // Yellow (translucent — keeps text readable)
+            0x9CCC6580.toInt(), // Green
+            0xF0629280.toInt(), // Pink
+            0x4FC3F780.toInt(), // Blue
+            0xFFB74D80.toInt(), // Orange
+        )
+        val HIGHLIGHT_COLOR_NAMES = arrayOf("Yellow", "Green", "Pink", "Blue", "Orange")
+        val PEN_COLORS = intArrayOf(
+            0x000000FF.toInt(), // Black
+            0x1565C0FF.toInt(), // Blue
+            0xC62828FF.toInt(), // Red
+            0x2E7D32FF.toInt(), // Green
+        )
+        val PEN_COLOR_NAMES = arrayOf("Black", "Blue", "Red", "Green")
+        val INK_COLOR_GRAY = 0x808080FF.toInt() // opaque mid-gray (visible on the 16-level panel).
+        const val PASTE_OFFSET = 0.03f // normalized offset so a paste lands just beside the source.
+        const val FINGER_LONG_PRESS_MS = 500L // finger held ~still this long on a word → look it up.
+        const val FINGER_MOVE_SLOP_PX = 24f // finger travel beyond this = a swipe, not a tap/hold.
         const val PALM_TOUCH_MAJOR_FRAC = 0.12f // contact major ≥ 12% of view height ⇒ a palm.
 
         // Launch extras from HomeActivity.

@@ -15,7 +15,10 @@ use std::sync::Arc;
 
 use crate::budget::{Caches, ResourceBudget, TrimLevel};
 use crate::document::fixed::PdfBackend;
-use crate::document::{Document, DocumentMetadata, NormRect, PageLink, TextSelection, TocEntry};
+use crate::document::{
+    Document, DocumentMetadata, ExportMode, ExportStroke, NormRect, PageInk, PageLink,
+    TextSelection, TocEntry,
+};
 use crate::error::{CoreError, CoreResult};
 use crate::persistence::identity::DocIdentity;
 use crate::persistence::ink_store::InkStore;
@@ -25,7 +28,10 @@ use crate::policy::EinkRefreshPolicy;
 use crate::render::{PixelBuffer, Viewport};
 use crate::settings::SettingsSnapshot;
 
-use inkread_ink::{encode_layer, InkColor, InkLayer, InkPoint, Stroke, Tool};
+use inkread_ink::{
+    encode_layer, select_all, select_in_polygon, selection_bounds, InkColor, InkLayer, InkPoint,
+    SelectMode, Stroke, StrokeId, Tool,
+};
 
 /// A navigation gesture (Amendment 6). The int↔enum mapping is defined **once** here and
 /// documented at the JNI boundary; `nativeOnGesture` decodes an int into this.
@@ -85,6 +91,9 @@ pub struct ReaderSession {
     /// Whether the in-progress eraser gesture has removed anything yet — gates the autosave so a
     /// no-op erase doesn't rewrite an unchanged page (needless e-ink flash / IO).
     erase_changed: bool,
+    /// The lasso clipboard (ADR-INKREAD-0010): strokes copied/cut from any page, held on the
+    /// session so a paste can land on a **different** page (NeoReader's cross-page clipboard).
+    clipboard: Vec<Stroke>,
     /// The opened document's content identity (RR10-FR6), computed from its bytes at open. `None`
     /// for a byte-less test session ([`Self::with_document`]). Used to stamp/verify the sidecar.
     identity: Option<DocIdentity>,
@@ -126,6 +135,7 @@ impl ReaderSession {
             active_tool: Tool::Pen,
             active_width: 0.0,
             erase_changed: false,
+            clipboard: Vec::new(),
             identity,
         })
     }
@@ -211,6 +221,7 @@ impl ReaderSession {
             active_tool: Tool::Pen,
             active_width: 0.0,
             erase_changed: false,
+            clipboard: Vec::new(),
             identity: None,
         }
     }
@@ -409,6 +420,21 @@ impl ReaderSession {
         }
     }
 
+    /// Draw-wire bytes for `page` (ADR-INKREAD-0010): the open page's live layer, else loaded from
+    /// the store. Carries per-stroke id + tool/color/width/path so the shell can bake the strokes
+    /// **and** pass selected ids back to the lasso ops. Decode with `WireCodec.decodeStrokes`.
+    pub fn ink_draw_wire(&self, page: usize) -> CoreResult<Vec<u8>> {
+        if page == self.page {
+            Ok(crate::ink_wire::encode_strokes_draw_wire(&self.layer))
+        } else if let Some(store) = &self.ink {
+            Ok(crate::ink_wire::encode_strokes_draw_wire(
+                &store.load_page(page)?,
+            ))
+        } else {
+            Ok(crate::ink_wire::encode_strokes_draw_wire(&InkLayer::new()))
+        }
+    }
+
     /// Begin a stroke (RR6). Pen/Highlighter accumulate points; Eraser removes strokes under each
     /// subsequent point. `width` is the stroke width (ink) or the erase radius (eraser).
     pub fn ink_begin_stroke(
@@ -500,6 +526,133 @@ impl ReaderSession {
         Ok(())
     }
 
+    // ===== Lasso selection over the current page's ink (ADR-INKREAD-0010) =====
+
+    /// Select the strokes a lasso `polygon` encloses/crosses under `mode_code` (`0`=Smart,
+    /// `1`=Freehand). Returns the selected stroke ids. Non-destructive (records no edit).
+    pub fn ink_select_in_polygon(
+        &self,
+        polygon: &[(f32, f32)],
+        mode_code: u8,
+    ) -> CoreResult<Vec<u32>> {
+        let mode = SelectMode::from_code(mode_code)
+            .ok_or_else(|| CoreError::InvalidArgument(format!("unknown lasso mode {mode_code}")))?;
+        Ok(ids_to_u32(&select_in_polygon(&self.layer, polygon, mode)))
+    }
+
+    /// Every stroke id on the current page (NeoReader "Select All").
+    #[must_use]
+    pub fn ink_select_all(&self) -> Vec<u32> {
+        ids_to_u32(&select_all(&self.layer))
+    }
+
+    /// Selection bounds as `[x0, y0, x1, y1]` (normalized), or empty if the selection is empty —
+    /// the anchor/dirty-rect for the floating selection toolbar.
+    #[must_use]
+    pub fn ink_selection_bounds(&self, ids: &[u32]) -> Vec<f32> {
+        match selection_bounds(&self.layer, &u32_to_ids(ids)) {
+            Some(b) => vec![b.x0, b.y0, b.x1, b.y1],
+            None => Vec::new(),
+        }
+    }
+
+    /// Move the selection by `(dx, dy)` (clamped on-page), autosaving if anything moved (RR20-FR2).
+    pub fn ink_move_selection(&mut self, ids: &[u32], dx: f32, dy: f32) -> CoreResult<bool> {
+        let changed = self.layer.move_strokes(&u32_to_ids(ids), dx, dy).is_some();
+        if changed {
+            self.autosave_ink()?;
+        }
+        Ok(changed)
+    }
+
+    /// Delete the selection, autosaving if anything was removed. Returns the removed ids.
+    pub fn ink_delete_selection(&mut self, ids: &[u32]) -> CoreResult<Vec<u32>> {
+        let removed = self.layer.delete_strokes(&u32_to_ids(ids));
+        if !removed.is_empty() {
+            self.autosave_ink()?;
+        }
+        Ok(ids_to_u32(&removed))
+    }
+
+    /// Recolor the selection, autosaving if anything changed.
+    pub fn ink_recolor_selection(&mut self, ids: &[u32], color: InkColor) -> CoreResult<bool> {
+        let changed = self.layer.recolor_strokes(&u32_to_ids(ids), color);
+        if changed {
+            self.autosave_ink()?;
+        }
+        Ok(changed)
+    }
+
+    /// Copy the selection into the cross-page clipboard (non-destructive). Returns the count.
+    pub fn ink_copy_selection(&mut self, ids: &[u32]) -> usize {
+        self.clipboard = self.layer.copy_strokes(&u32_to_ids(ids));
+        self.clipboard.len()
+    }
+
+    /// Cut = copy to the clipboard, then delete as one undoable edit. Returns the removed ids.
+    pub fn ink_cut_selection(&mut self, ids: &[u32]) -> CoreResult<Vec<u32>> {
+        self.clipboard = self.layer.copy_strokes(&u32_to_ids(ids));
+        self.ink_delete_selection(ids)
+    }
+
+    /// Paste the clipboard onto the **current** page offset by `(dx, dy)` (NeoReader's cross-page
+    /// paste), autosaving the new strokes. Returns the new ids; empty clipboard → no-op.
+    pub fn ink_paste(&mut self, dx: f32, dy: f32) -> CoreResult<Vec<u32>> {
+        if self.clipboard.is_empty() {
+            return Ok(Vec::new());
+        }
+        let new_ids = self.layer.paste_strokes(&self.clipboard, dx, dy);
+        if !new_ids.is_empty() {
+            self.autosave_ink()?;
+        }
+        Ok(ids_to_u32(&new_ids))
+    }
+
+    /// Whether the clipboard holds strokes available to paste (gates the Paste control).
+    #[must_use]
+    pub fn ink_has_clipboard(&self) -> bool {
+        !self.clipboard.is_empty()
+    }
+
+    /// Export every page's ink into the PDF at `out_path` (ADR-INKREAD-0005). `flatten` burns the
+    /// ink into the page content (visible in every viewer); otherwise editable Ink annotations are
+    /// written. Colours are preserved (true RGBA). Gathers all pages from the sidecar after first
+    /// flushing the current page, so unsaved edits are included.
+    pub fn export_pdf(&mut self, out_path: &str, flatten: bool) -> CoreResult<()> {
+        self.autosave_ink()?; // flush the current page's edits to the sidecar first
+        let mode = if flatten {
+            ExportMode::Flatten
+        } else {
+            ExportMode::Annotations
+        };
+        let mut pages = Vec::new();
+        for page in 0..self.page_count() {
+            let layer = self.load_layer_for_page(page);
+            if layer.strokes().is_empty() {
+                continue;
+            }
+            let strokes = layer
+                .strokes()
+                .iter()
+                .map(|s| ExportStroke {
+                    points: s.points.iter().map(|p| (p.x, p.y)).collect(),
+                    r: s.color.r,
+                    g: s.color.g,
+                    b: s.color.b,
+                    a: s.color.a,
+                    width: s.width,
+                })
+                .collect();
+            pages.push(PageInk { page, strokes });
+        }
+        if pages.is_empty() {
+            return Err(CoreError::RenderBackend(
+                "no annotations to export".to_string(),
+            ));
+        }
+        self.document.export_pdf(out_path, &pages, mode)
+    }
+
     /// Swap the in-memory layer to the current page's stored ink on a page change. Any pending
     /// stroke is dropped; the load degrades safely (see [`Self::load_layer_for_page`]).
     fn load_ink_for_current_page(&mut self) {
@@ -523,6 +676,15 @@ impl ReaderSession {
             Err(_) => InkLayer::new(),
         }
     }
+}
+
+/// Stroke ids cross the JNI boundary as plain `u32`; these convert to/from the typed [`StrokeId`].
+fn ids_to_u32(ids: &[StrokeId]) -> Vec<u32> {
+    ids.iter().map(|s| s.0).collect()
+}
+
+fn u32_to_ids(ids: &[u32]) -> Vec<StrokeId> {
+    ids.iter().map(|&i| StrokeId(i)).collect()
 }
 
 #[cfg(test)]

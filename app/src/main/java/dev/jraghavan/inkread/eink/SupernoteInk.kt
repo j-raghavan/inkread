@@ -90,6 +90,26 @@ class SupernoteInk(private val context: Context) {
         send(TX_DRAW_BUFFER) { it.writeInt(255); it.writeInt(0) }
     }
 
+    /**
+     * Enable/disable firmware EMR ink painting over the whole window (RR19 / lasso UX). This is the
+     * control Ratta's own lasso uses (`HandWriteClient.sendWritable`) to stop the EMR pen so it can
+     * draw a dashed marquee itself — and it works for a sideloaded app because it rides the
+     * reachable `service_myservice` binder, NOT the SELinux-gated `EinkManager.enableFullUiAuto`
+     * (which is a silent no-op for an untrusted app — the reason toggling it never suppressed ink).
+     *
+     * It sends the "disable-area" transaction (same code as [TX_DISABLE_AREA]) with ONE sentinel
+     * rect: `(0,0,18888,18888)` re-enables ink everywhere, `(0,0,19999,19999)` disables it
+     * everywhere. Each rect is 5 ints `[left, top, width, height, 0]`.
+     */
+    fun setWritable(enable: Boolean) {
+        if (!active) return
+        val edge = if (enable) WRITABLE_ON_EDGE else WRITABLE_OFF_EDGE
+        send(TX_DISABLE_AREA) {
+            it.writeInt(1) // one rect
+            it.writeInt(0); it.writeInt(0); it.writeInt(edge); it.writeInt(edge); it.writeInt(0)
+        }
+    }
+
     /** Release the firmware ink claim and clear the overlay. */
     fun teardown() {
         if (!active) return
@@ -113,5 +133,9 @@ class SupernoteInk(private val context: Context) {
         const val PEN_NEEDLE = 10
         const val COLOR_BLACK = 0
         const val SIZE_EMR = 1000
+
+        // sendWritable sentinel rects (HandWriteClient): 18888 = ink on, 19999 = ink off.
+        const val WRITABLE_ON_EDGE = 18888
+        const val WRITABLE_OFF_EDGE = 19999
     }
 }
