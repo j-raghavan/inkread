@@ -21,6 +21,7 @@ repository = "https://github.com/jraghavan/inkread"
 # Internal crates.
 device-eink = { path = "device-eink" }
 inkread-dict = { path = "inkread-dict" }
+inkread-epub = { path = "inkread-epub" }
 inkread-ink = { path = "inkread-ink" }
 reader-core = { path = "reader-core" }
 

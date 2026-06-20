@@ -423,11 +423,15 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
 
     /** Launch the system file picker for a PDF (RR22). */
     private fun openPicker() {
-        // PDF-only for now (the engine renders fixed-layout PDF). When EPUB/MOBI/image rendering
-        // lands, broaden these MIME types so "Open Document" accepts the full supported gamut.
+        // PDF (fixed-layout) + EPUB (reflowable). The core dispatches by file extension; some
+        // pickers tag .epub as octet-stream, so accept that too and let the core validate.
         val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
             addCategory(Intent.CATEGORY_OPENABLE)
-            type = "application/pdf"
+            type = "*/*"
+            putExtra(
+                Intent.EXTRA_MIME_TYPES,
+                arrayOf("application/pdf", "application/epub+zip", "application/octet-stream"),
+            )
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }
         try {

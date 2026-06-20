@@ -129,9 +129,53 @@ impl ReaderSession {
             title: meta.title,
             author: meta.author,
         });
+        Ok(Self::assemble(Box::new(document), caps, viewport, identity))
+    }
+
+    /// Open an EPUB from bytes and build a session for `caps` on `viewport` (RR2-FR5). Reflowable:
+    /// the backend paginates to the viewport on open and repaginates if it changes.
+    pub fn open_epub(
+        bytes: Vec<u8>,
+        caps: DeviceCapabilities,
+        viewport: Viewport,
+    ) -> CoreResult<Self> {
+        let fingerprint = crate::persistence::identity::fingerprint(&bytes);
+        let size = bytes.len() as u64;
+        let document = crate::document::reflow::EpubBackend::open(bytes, viewport)?;
+        let meta = document.metadata();
+        let identity = Some(DocIdentity {
+            fingerprint,
+            size,
+            title: meta.title,
+            author: meta.author,
+        });
+        Ok(Self::assemble(Box::new(document), caps, viewport, identity))
+    }
+
+    /// Open an EPUB and attach a persistence store, resuming the saved position for `book`.
+    pub fn open_epub_with_store(
+        bytes: Vec<u8>,
+        caps: DeviceCapabilities,
+        viewport: Viewport,
+        store: Arc<dyn ReaderStore>,
+        book: BookId,
+    ) -> CoreResult<Self> {
+        let mut session = Self::open_epub(bytes, caps, viewport)?;
+        session.attach_store(store, book)?;
+        Ok(session)
+    }
+
+    /// The single session constructor — every `open_*`/`with_document` path routes through this so
+    /// the field initialization lives in one place (initial page 0; policy sized to the viewport).
+    fn assemble(
+        document: Box<dyn Document>,
+        caps: DeviceCapabilities,
+        viewport: Viewport,
+        identity: Option<DocIdentity>,
+    ) -> Self {
         let screen = Rect::full(viewport.width, viewport.height);
-        Ok(Self {
-            document: Box::new(document),
+        Self {
+            document,
             policy: EinkRefreshPolicy::new(caps, screen),
             viewport,
             page: 0,
@@ -148,7 +192,7 @@ impl ReaderSession {
             erase_changed: false,
             clipboard: Vec::new(),
             identity,
-        })
+        }
     }
 
     /// Open a PDF and attach a persistence store, **resuming** the saved reading position for
@@ -218,26 +262,7 @@ impl ReaderSession {
         caps: DeviceCapabilities,
         viewport: Viewport,
     ) -> Self {
-        let screen = Rect::full(viewport.width, viewport.height);
-        Self {
-            document,
-            policy: EinkRefreshPolicy::new(caps, screen),
-            viewport,
-            page: 0,
-            store: None,
-            book: None,
-            caches: Caches::new(&ResourceBudget::default_supernote()),
-            ink: None,
-            layer: InkLayer::new(),
-            zoom: 1.0,
-            pan_x: 0.0,
-            pan_y: 0.0,
-            active_tool: Tool::Pen,
-            active_width: 0.0,
-            erase_changed: false,
-            clipboard: Vec::new(),
-            identity: None,
-        }
+        Self::assemble(document, caps, viewport, None)
     }
 
     /// Build a session over an arbitrary [`Document`] with a persistence store, resuming the

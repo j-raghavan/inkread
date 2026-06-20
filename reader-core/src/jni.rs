@@ -142,12 +142,24 @@ pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeOpenDocumen
             .map_err(|e| CoreError::InvalidArgument(format!("read {path}: {e}")))
             .map_err(|e| throw(env, &e))?;
 
-        match ReaderSession::open_pdf(bytes, caps, viewport) {
+        let opened = if is_epub(&path) {
+            ReaderSession::open_epub(bytes, caps, viewport)
+        } else {
+            ReaderSession::open_pdf(bytes, caps, viewport)
+        };
+        match opened {
             Ok(session) => Ok(Box::into_raw(Box::new(session)) as jlong),
             Err(e) => Err(throw(env, &e)),
         }
     })
     .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
+}
+
+/// Pick the backend by file extension: `.epub` (case-insensitive) → reflowable EPUB, else PDF.
+fn is_epub(path: &str) -> bool {
+    std::path::Path::new(path)
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("epub"))
 }
 
 // =====================================================================================
@@ -186,7 +198,12 @@ pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeOpenDocumen
         let store = SqliteStore::open(Path::new(&db_path)).map_err(|e| throw(env, &e))?;
         let store: Arc<dyn ReaderStore> = Arc::new(store);
 
-        match ReaderSession::open_pdf_with_store(bytes, caps, viewport, store, book) {
+        let opened = if is_epub(&path) {
+            ReaderSession::open_epub_with_store(bytes, caps, viewport, store, book)
+        } else {
+            ReaderSession::open_pdf_with_store(bytes, caps, viewport, store, book)
+        };
+        match opened {
             Ok(session) => Ok(Box::into_raw(Box::new(session)) as jlong),
             Err(e) => Err(throw(env, &e)),
         }
