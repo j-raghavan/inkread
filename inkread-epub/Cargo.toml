@@ -15,3 +15,6 @@ rbook = "0.7.9"
 # is named directly so the recursive walker can take a `NodeRef`.
 scraper = { version = "0.27", default-features = false }
 ego-tree = "0.11"
+# ab_glyph (Apache-2.0/MIT, pure Rust) — glyph advances (Metrics) + outline rasterization for the
+# reflow renderer; cross-compiles to aarch64-android with no native font lib.
+ab_glyph = "0.2"
