@@ -17,7 +17,9 @@ use rbook::ebook::toc::TocEntry as RbookTocEntry;
 use rbook::Epub;
 
 pub mod content;
+pub mod layout;
 pub use content::{parse_blocks, Block, Inline, TextRun};
+pub use layout::{paginate, LayoutLine, LayoutOpts, Metrics, Page, PlacedRun};
 
 /// The error surface for EPUB parsing — mirrors `inkread-dict`'s shape so the `reader-core` adapter
 /// maps it uniformly. Never panics across the boundary (RR21-FR3).
