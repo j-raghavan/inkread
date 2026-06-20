@@ -19,7 +19,9 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 device-eink = { workspace = true }
-inkread-dict = { workspace = true }
+# `import` enables on-device StarDict install (nativeDictImport): the cdylib gains flate2 so the user
+# can add their own dictionaries (KOReader-style). Pure-Rust gzip backend; cross-compiles clean.
+inkread-dict = { workspace = true, features = ["import"] }
 inkread-ink = { workspace = true }
 pdfium-render = { workspace = true }
 tiny-skia = { workspace = true }

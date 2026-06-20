@@ -6,6 +6,7 @@ import android.graphics.drawable.GradientDrawable
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.ViewConfiguration
+import android.view.View
 import android.view.ViewGroup
 import android.widget.FrameLayout
 import android.widget.ImageView
@@ -78,13 +79,24 @@ class ToolPalette(
 
     private fun render() {
         container.background = pill()
-        container.setPadding(dp(4), dp(6), dp(4), dp(6))
+        container.setPadding(dp(5), dp(7), dp(5), dp(7))
         container.removeAllViews()
         container.addView(handle())
         if (expanded) {
+            container.addView(divider())
             for (tool in Tool.values()) container.addView(iconButton(tool))
+            container.addView(divider())
             container.addView(actionButton(R.drawable.ic_sel_undo, "Undo", onUndo))
             container.addView(actionButton(R.drawable.ic_sel_redo, "Redo", onRedo))
+        }
+    }
+
+    /** A hairline separator between the handle, the tools, and the undo/redo actions. */
+    private fun divider(): View = View(activity).apply {
+        setBackgroundColor(Color.parseColor("#E0E0E0"))
+        layoutParams = LinearLayout.LayoutParams(dp(28), maxOf(1, dp(1))).apply {
+            gravity = Gravity.CENTER_HORIZONTAL
+            val v = dp(4); setMargins(0, v, 0, v)
         }
     }
 

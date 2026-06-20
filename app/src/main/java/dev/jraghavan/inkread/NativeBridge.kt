@@ -112,6 +112,17 @@ object NativeBridge {
     /** Cache a definition (e.g. an online result) into the corpus so the next lookup is instant. */
     external fun nativeDictPut(dictHandle: Long, lang: String, headword: String, defn: String)
 
+    /**
+     * Install a user StarDict folder (KOReader-style) into the open corpus [dictHandle], tagging
+     * every entry with [lang] (also used as the source id). [syn] = true imports a Moby-style
+     * thesaurus bundle (synonym lists) instead of definitions. Returns the record count; throws on a
+     * malformed/unreadable bundle. Runs IO + gzip — call off the UI thread.
+     */
+    external fun nativeDictImport(dictHandle: Long, stardictDir: String, lang: String, syn: Boolean): Int
+
+    /** Uninstall a user dictionary: drop every entry + synonym tagged [lang]. Returns rows removed. */
+    external fun nativeDictForget(dictHandle: Long, lang: String): Int
+
     /** Set pinch-zoom factor ([zoom] >= 1; 1 = fit) and normalized pan [0,1] (RR5-FR3). The next
      *  [nativeRenderPage] renders the magnified/panned view. */
     external fun nativeSetZoom(handle: Long, zoom: Float, panX: Float, panY: Float)

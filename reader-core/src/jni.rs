@@ -43,6 +43,7 @@ use crate::persistence::sqlite::SqliteStore;
 use crate::persistence::{BookId, ReaderStore};
 use crate::render::{PixelBuffer, Viewport};
 use crate::session::{Gesture, ReaderSession};
+use inkread_dict::import::import_stardict;
 
 /// Throw a Java `RuntimeException` for a [`CoreError`] (status code prefixed) so the shell
 /// surfaces it; returns `jni::errors::Error` so the `with_env` closure short-circuits.
@@ -858,6 +859,8 @@ pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeInkHasClipb
 //   nativeDictClose(handle)                         — free it
 //   nativeDefine(dictHandle, word, langsCsv) : bytes — definition wire (on-device only)
 //   nativeDictPut(dictHandle, lang, headword, defn) — cache an online result for next time
+//   nativeDictImport(dictHandle, stardictDir, lang, syn) : int — install a user StarDict folder
+//                                                          (KOReader-style); returns record count
 //
 // Coordinates are normalized [0,1], top-left origin (matching the render + links).
 // =====================================================================================
@@ -959,6 +962,59 @@ pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeDefine<'loc
         // On-device only (online = None); a miss is the shell's cue to try its online source.
         let def = dict.lookup(&word, &langs, None);
         env.byte_array_from_slice(&encode_definition_wire(def.as_ref()))
+    })
+    .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeDictImport<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    dict_handle: jlong,
+    stardict_dir: JString<'local>,
+    lang: JString<'local>,
+    syn: jboolean,
+) -> jint {
+    env.with_env(|env| -> jni::errors::Result<jint> {
+        let dict = unsafe { dict_ref(dict_handle) }.map_err(|e| throw(env, &e))?;
+        let dir: String = stardict_dir.try_to_string(env)?;
+        let lang: String = lang.try_to_string(env)?;
+        if lang.trim().is_empty() {
+            return Err(throw(
+                env,
+                &CoreError::InvalidArgument("dict import: empty lang/source tag".into()),
+            ));
+        }
+        // KOReader-style on-device install: import a StarDict folder into the writable dict.db the
+        // shell already opened. `syn` marks a Moby-style thesaurus bundle (bodies are synonym lists).
+        match import_stardict(std::path::Path::new(&dir), dict, &lang, syn) {
+            Ok(n) => Ok(n as jint),
+            Err(e) => Err(throw(
+                env,
+                &CoreError::Persistence(format!("dict import {dir}: {e}")),
+            )),
+        }
+    })
+    .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeDictForget<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    dict_handle: jlong,
+    lang: JString<'local>,
+) -> jint {
+    env.with_env(|env| -> jni::errors::Result<jint> {
+        let dict = unsafe { dict_ref(dict_handle) }.map_err(|e| throw(env, &e))?;
+        let lang: String = lang.try_to_string(env)?;
+        match dict.forget(&lang) {
+            Ok(n) => Ok(n as jint),
+            Err(e) => Err(throw(
+                env,
+                &CoreError::Persistence(format!("dict forget {lang}: {e}")),
+            )),
+        }
     })
     .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
 }

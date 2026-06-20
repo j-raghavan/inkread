@@ -111,6 +111,16 @@ object Books {
         }
     }
 
+    /** Per-book read progress (0–100), written by the reader on save; shown on the home shelf. */
+    fun setProgress(context: Context, id: String, percent: Int) {
+        if (id.isEmpty()) return
+        context.getSharedPreferences("progress", Context.MODE_PRIVATE)
+            .edit().putInt(id, percent.coerceIn(0, 100)).apply()
+    }
+
+    fun progress(context: Context, id: String): Int =
+        context.getSharedPreferences("progress", Context.MODE_PRIVATE).getInt(id, 0)
+
     private const val THUMB_W = 360
     private const val RECENTS_MAX = 12
 

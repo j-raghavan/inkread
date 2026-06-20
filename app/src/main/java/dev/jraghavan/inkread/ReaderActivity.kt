@@ -6,6 +6,7 @@ import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.drawable.GradientDrawable
 import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.Typeface
@@ -30,6 +31,7 @@ import android.view.ViewGroup
 import android.view.Window
 import android.widget.EditText
 import android.widget.FrameLayout
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.SeekBar
@@ -211,6 +213,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
     }
     private val inkDotPaint = Paint().apply { color = Color.BLACK; style = Paint.Style.FILL; isAntiAlias = true }
     private val bookmarkPaint = Paint().apply { color = Color.BLACK; style = Paint.Style.FILL; isAntiAlias = true }
+    private val bookmarkOutlinePaint = Paint().apply { color = Color.parseColor("#9E9E9E"); style = Paint.Style.STROKE; strokeWidth = 2f; isAntiAlias = true }
     /** Dashed box around the active lasso selection (ADR-INKREAD-0010). */
     private val selectionPaint = Paint().apply {
         color = Color.BLACK
@@ -225,9 +228,12 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
     private var fitThumb: Bitmap? = null
     private var minimapActive = false
     private var minimapThumbDrag = false
-    private val minimapBgPaint = Paint().apply { color = Color.WHITE; style = Paint.Style.FILL }
-    private val minimapBorderPaint = Paint().apply { color = Color.BLACK; style = Paint.Style.STROKE; strokeWidth = 2f }
-    private val minimapViewportPaint = Paint().apply { color = Color.BLACK; style = Paint.Style.STROKE; strokeWidth = 4f }
+    private val minimapBgPaint = Paint().apply { color = Color.WHITE; style = Paint.Style.FILL; isAntiAlias = true }
+    private val minimapCardStroke = Paint().apply { color = Color.parseColor("#BDBDBD"); style = Paint.Style.STROKE; strokeWidth = 1.5f; isAntiAlias = true }
+    private val minimapThumbStroke = Paint().apply { color = Color.parseColor("#E0E0E0"); style = Paint.Style.STROKE; strokeWidth = 1f; isAntiAlias = true }
+    private val minimapViewportFill = Paint().apply { color = Color.parseColor("#22000000"); style = Paint.Style.FILL; isAntiAlias = true }
+    private val minimapViewportPaint = Paint().apply { color = Color.BLACK; style = Paint.Style.STROKE; strokeWidth = 3f; isAntiAlias = true }
+    private val minimapGlyphPaint = Paint().apply { color = Color.BLACK; style = Paint.Style.STROKE; strokeWidth = 3f; strokeCap = Paint.Cap.ROUND; isAntiAlias = true }
     /** Current pen / highlighter colour (index into the palettes); re-tapping a tool cycles it. */
     private var penColorIdx = 0
     private var hlColorIdx = 0
@@ -417,6 +423,8 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
 
     /** Launch the system file picker for a PDF (RR22). */
     private fun openPicker() {
+        // PDF-only for now (the engine renders fixed-layout PDF). When EPUB/MOBI/image rendering
+        // lands, broaden these MIME types so "Open Document" accepts the full supported gamut.
         val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
             addCategory(Intent.CATEGORY_OPENABLE)
             type = "application/pdf"
@@ -618,8 +626,8 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         if (zoom <= 1f) updateFitThumb(bmp)
         // Zoom minimap (top-right): full page + the current viewport window (RR5-FR3).
         if (zoom > 1f) drawZoomMinimap(cv)
-        // A small dog-ear marks a bookmarked page (RR16).
-        if (bookmarks?.has(currentPage) == true) drawBookmarkCorner(cv)
+        // A top-right dog-ear: faint outline (tap-to-bookmark affordance) / solid when bookmarked.
+        drawBookmarkCorner(cv)
         // Cache the first page as the book's thumbnail, once (RR17-FR5).
         if (currentPage == 0 && currentBookId.isNotEmpty() && !Books.thumbFile(this, currentBookId).exists()) {
             Books.saveThumbnail(this, currentBookId, bmp)
@@ -792,24 +800,35 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         return MmGeom(left, top, tw, th, minus, plus)
     }
 
-    /** Draw the zoom minimap (top-right): full-page thumb + visible-window rectangle + −/+ buttons. */
+    /** Draw the zoom minimap (top-right): a rounded card with the full-page thumb, the visible
+     *  window highlighted, and clean −/+ zoom buttons below a divider. */
     private fun drawZoomMinimap(canvas: Canvas) {
         val thumb = fitThumb ?: return
         val g = minimapGeometry() ?: return
-        // Backing + thumbnail + border.
-        canvas.drawRect(g.left - 3, g.top - 3, g.left + g.tw + 3, g.plus.bottom + 3, minimapBgPaint)
+        val pad = dpInt(6).toFloat(); val rad = dpInt(10).toFloat()
+        val cardL = g.left - pad; val cardT = g.top - pad
+        val cardR = g.left + g.tw + pad; val cardB = g.plus.bottom + pad
+        // Rounded white card + subtle border.
+        canvas.drawRoundRect(cardL, cardT, cardR, cardB, rad, rad, minimapBgPaint)
+        canvas.drawRoundRect(cardL, cardT, cardR, cardB, rad, rad, minimapCardStroke)
+        // Thumbnail with a light frame.
         canvas.drawBitmap(thumb, g.left, g.top, null)
-        canvas.drawRect(g.left, g.top, g.left + g.tw, g.top + g.th, minimapBorderPaint)
-        // Visible window rectangle: origin = pan*(z-1)/z, size = 1/z.
+        canvas.drawRect(g.left, g.top, g.left + g.tw, g.top + g.th, minimapThumbStroke)
+        // Visible-window rectangle: translucent fill + solid border = clear "you are here".
         val z = zoom
         val vx0 = panX * (z - 1f) / z; val vy0 = panY * (z - 1f) / z; val v = 1f / z
-        canvas.drawRect(g.left + vx0 * g.tw, g.top + vy0 * g.th, g.left + (vx0 + v) * g.tw, g.top + (vy0 + v) * g.th, minimapViewportPaint)
-        // −/+ zoom buttons drawn as glyphs (crisp on e-ink), boxed.
-        canvas.drawRect(g.minus, minimapBorderPaint); canvas.drawRect(g.plus, minimapBorderPaint)
-        val cyMinus = g.minus.centerY(); val r = dpInt(9).toFloat()
-        canvas.drawLine(g.minus.centerX() - r, cyMinus, g.minus.centerX() + r, cyMinus, minimapViewportPaint)
-        canvas.drawLine(g.plus.centerX() - r, g.plus.centerY(), g.plus.centerX() + r, g.plus.centerY(), minimapViewportPaint)
-        canvas.drawLine(g.plus.centerX(), g.plus.centerY() - r, g.plus.centerX(), g.plus.centerY() + r, minimapViewportPaint)
+        val vl = g.left + vx0 * g.tw; val vt = g.top + vy0 * g.th
+        val vr = g.left + (vx0 + v) * g.tw; val vb = g.top + (vy0 + v) * g.th
+        canvas.drawRect(vl, vt, vr, vb, minimapViewportFill)
+        canvas.drawRect(vl, vt, vr, vb, minimapViewportPaint)
+        // Divider above the button row, then a vertical split between − and +.
+        canvas.drawLine(cardL + pad, g.minus.top, cardR - pad, g.minus.top, minimapThumbStroke)
+        canvas.drawLine(g.plus.left, g.minus.top + dpInt(4), g.plus.left, g.minus.bottom - dpInt(4), minimapThumbStroke)
+        // − / + glyphs.
+        val r = dpInt(8).toFloat()
+        canvas.drawLine(g.minus.centerX() - r, g.minus.centerY(), g.minus.centerX() + r, g.minus.centerY(), minimapGlyphPaint)
+        canvas.drawLine(g.plus.centerX() - r, g.plus.centerY(), g.plus.centerX() + r, g.plus.centerY(), minimapGlyphPaint)
+        canvas.drawLine(g.plus.centerX(), g.plus.centerY() - r, g.plus.centerX(), g.plus.centerY() + r, minimapGlyphPaint)
     }
 
     /** Center the zoom viewport on a point tapped/dragged inside the minimap thumbnail. */
@@ -860,16 +879,28 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
     }
 
     /** A small filled dog-ear in the top-right corner marking a bookmarked page (RR16). */
+    /** Top-right **ribbon bookmark** (swallowtail): a faint outline always (the tappable affordance)
+     *  that fills solid when the page is bookmarked. Tapping the top-right corner toggles it. */
     private fun drawBookmarkCorner(canvas: Canvas) {
         val w = viewW.toFloat()
-        val s = viewW * 0.045f
+        val rw = viewW * 0.035f                 // ribbon width
+        val len = rw * 2.1f                      // ribbon length
+        val notch = rw * 0.45f                   // depth of the swallowtail notch
+        val right = w - rw * 1.4f                // inset from the right edge
+        val left = right - rw
         val path = Path().apply {
-            moveTo(w - s, 0f)
-            lineTo(w, 0f)
-            lineTo(w, s)
+            moveTo(left, 0f)
+            lineTo(right, 0f)
+            lineTo(right, len)
+            lineTo((left + right) / 2f, len - notch) // swallowtail
+            lineTo(left, len)
             close()
         }
-        canvas.drawPath(path, bookmarkPaint)
+        if (bookmarks?.has(currentPage) == true) {
+            canvas.drawPath(path, bookmarkPaint)
+        } else {
+            canvas.drawPath(path, bookmarkOutlinePaint)
+        }
     }
 
     /**
@@ -948,6 +979,11 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
                 followLink(link)
                 return
             }
+        }
+        // Top-right corner → toggle the bookmark dog-ear (Kindle/KOReader convention).
+        if (w > 0f && h > 0f && x > w * 0.86f && y < h * 0.08f) {
+            toggleBookmark()
+            return
         }
         val third = w / 3f
         val zone = if (x < third) "PREV" else if (x > 2 * third) "NEXT" else "TOC"
@@ -1056,17 +1092,36 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(1).coerceAtLeast(1)),
         )
 
-        // Page-slider row:  [N / Total]  ────────●────────
+        // Page-slider row:  [N / Total]  ────────●────────  (grayscale, tap the chip to type a page)
         val pageLabel = TextView(this).apply {
             text = "${cur + 1} / $total"
             setTextColor(Color.BLACK)
-            textSize = 14f
-            setPadding(0, 0, dp(14), 0)
+            textSize = 13f
+            gravity = Gravity.CENTER
+            setPadding(dp(12), dp(5), dp(12), dp(5))
+            background = GradientDrawable().apply {
+                setColor(Color.parseColor("#F2F2F2"))
+                cornerRadius = dp(14).toFloat()
+            }
             setOnClickListener { dialog.dismiss(); showPageEntry(total) }
         }
+        // A refined, thin grayscale track + small round thumb (the default SeekBar reads clunky).
+        val trackH = dp(3).coerceAtLeast(2)
+        fun bar(c: Int) = GradientDrawable().apply { setColor(c); cornerRadius = trackH.toFloat(); setSize(0, trackH) }
+        val track = android.graphics.drawable.LayerDrawable(
+            arrayOf(
+                bar(Color.parseColor("#D8D8D8")),
+                android.graphics.drawable.ClipDrawable(bar(Color.BLACK), Gravity.START, android.graphics.drawable.ClipDrawable.HORIZONTAL),
+            ),
+        ).apply { setId(0, android.R.id.background); setId(1, android.R.id.progress) }
+        val knob = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(Color.BLACK); setSize(dp(16), dp(16)) }
         val seek = SeekBar(this).apply {
             max = total - 1
             progress = cur
+            progressDrawable = track
+            thumb = knob
+            splitTrack = false
+            setPadding(dp(10), dp(4), dp(10), dp(4))
             setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
                 override fun onProgressChanged(sb: SeekBar, p: Int, fromUser: Boolean) {
                     if (fromUser) pageLabel.text = "${p + 1} / $total"
@@ -1079,41 +1134,48 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
-                setPadding(dp(16), dp(10), dp(16), dp(4))
-                addView(pageLabel)
+                setPadding(dp(16), dp(12), dp(16), dp(6))
                 addView(seek, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+                addView(pageLabel, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { marginStart = dp(12) })
             },
         )
 
         // Control row: flat, evenly-weighted icon+label cells.
         val controls = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
-            setPadding(dp(2), dp(2), dp(2), dp(10))
+            setPadding(dp(2), dp(6), dp(2), dp(12))
         }
-        fun control(label: String, onClick: () -> Unit) {
-            controls.addView(
-                TextView(this).apply {
-                    text = label
-                    setTextColor(Color.BLACK)
-                    textSize = 11f
-                    gravity = Gravity.CENTER
-                    setPadding(0, dp(8), 0, dp(8))
-                    isClickable = true
-                    setOnClickListener { dialog.dismiss(); onClick() }
+        // One control = a line icon over a small label (Boox/NeoReader bottom-bar style, frame 069).
+        fun control(iconRes: Int, label: String, onClick: () -> Unit) {
+            val cell = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                gravity = Gravity.CENTER
+                setPadding(dp(2), dp(8), dp(2), dp(8))
+                isClickable = true
+                setOnClickListener { dialog.dismiss(); onClick() }
+            }
+            cell.addView(
+                ImageView(this).apply {
+                    setImageResource(iconRes); setColorFilter(Color.BLACK)
                 },
-                LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f),
+                LinearLayout.LayoutParams(dp(26), dp(26)),
             )
+            cell.addView(TextView(this).apply {
+                text = label; setTextColor(Color.parseColor("#444444")); textSize = 10f
+                gravity = Gravity.CENTER; setPadding(0, dp(4), 0, 0)
+            })
+            controls.addView(cell, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         }
-        val marked = bookmarks?.has(cur) == true
-        control("🏠\nHome") { goHome() }
-        control("📚\nLibrary") { showLibraryDialog() }
-        control(if (marked) "🔖\nRemove" else "🔖\nBookmark") { toggleBookmark() }
-        control("📑\nMarks") { showBookmarks() }
-        control("📄\nContents") { showContentsLazy() }
-        control("➖\nZoom") { zoomBy(1f / ZOOM_STEP) }
-        control("➕\nZoom") { zoomBy(ZOOM_STEP) }
-        control("💾\nExport") { showExportDialog() }
-        control("📂\nOpen") { openPicker() }
+        // "Home" already opens the library home, so a separate Library item here is redundant.
+        control(R.drawable.ic_menu_home, "Home") { goHome() }
+        // (Bookmark toggle moved to the top-right corner dog-ear; "Marks" lists them.)
+        control(R.drawable.ic_menu_marks, "Marks") { showBookmarks() }
+        control(R.drawable.ic_menu_contents, "Contents") { showContentsLazy() }
+        control(R.drawable.ic_menu_zoom_out, "Zoom −") { zoomBy(1f / ZOOM_STEP) }
+        control(R.drawable.ic_menu_zoom_in, "Zoom +") { zoomBy(ZOOM_STEP) }
+        control(R.drawable.ic_menu_export, "Export") { showExportDialog() }
+        control(R.drawable.ic_tool_define, "Dicts") { showDictionariesDialog() }
+        control(R.drawable.ic_menu_open, "Open") { openPicker() }
         container.addView(controls)
 
         dialog.setContentView(container)
@@ -1139,7 +1201,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         // inkread reads a PRIVATE copy of the PDF; to make the export visible on the desktop it must
         // land in a Partner-synced PUBLIC folder, which needs all-files access (Android 11+).
         if (!Environment.isExternalStorageManager()) {
-            AlertDialog.Builder(this)
+            AlertDialog.Builder(this, R.style.InkDialog)
                 .setTitle("Allow file access to export")
                 .setMessage("To save annotated PDFs into your synced $EXPORT_DIR_NAME folder (so they appear on your computer), inkread needs \"All files access\". Grant it on the next screen, then export again.")
                 .setPositiveButton("Open settings") { _, _ ->
@@ -1155,7 +1217,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             return
         }
         // NOTE: AlertDialog shows EITHER a message OR an items list, not both — choices go in labels.
-        AlertDialog.Builder(this)
+        AlertDialog.Builder(this, R.style.InkDialog)
             .setTitle("Export annotated PDF to $EXPORT_DIR_NAME")
             .setItems(
                 arrayOf(
@@ -1222,7 +1284,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             inputType = InputType.TYPE_CLASS_NUMBER
             hint = "1 – $total"
         }
-        AlertDialog.Builder(this)
+        AlertDialog.Builder(this, R.style.InkDialog)
             .setTitle("Go to page")
             .setView(input)
             .setPositiveButton("Go") { _, _ ->
@@ -1262,7 +1324,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
                     return@runOnUiThread
                 }
                 val labels = marks.map { "Page ${it + 1}" }.toTypedArray()
-                AlertDialog.Builder(this)
+                AlertDialog.Builder(this, R.style.InkDialog)
                     .setTitle("Bookmarks")
                     .setItems(labels) { _, which -> postJump(marks[which]) }
                     .show()
@@ -1293,15 +1355,53 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
     /** The document's table of contents (RR11-FR2), shown as a scrollable list from the popup. */
     private fun showContents(toc: List<TocItem>) {
         if (toc.isEmpty()) return
-        val labels = toc.map { item ->
-            val indent = "    ".repeat(item.depth)
-            val page = item.targetPage?.let { "  ·  p${it + 1}" } ?: ""
-            indent + item.title + page
-        }.toTypedArray()
-        AlertDialog.Builder(this)
-            .setTitle("Contents")
-            .setItems(labels) { _, which -> toc[which].targetPage?.let { postJump(it) } }
-            .show()
+        val d = resources.displayMetrics.density
+        fun dp(v: Int) = (v * d).toInt()
+        val dialog = Dialog(this).apply { requestWindowFeature(Window.FEATURE_NO_TITLE) }
+
+        val outer = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(Color.WHITE)
+            setPadding(dp(24), dp(20), dp(24), dp(12))
+        }
+        outer.addView(TextView(this).apply {
+            text = "Contents"; setTextColor(Color.BLACK); textSize = 20f
+            typeface = Typeface.DEFAULT_BOLD; setPadding(0, 0, 0, dp(12))
+        })
+        val list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        toc.forEachIndexed { i, item ->
+            if (i > 0) list.addView(View(this).apply { setBackgroundColor(Color.parseColor("#EEEEEE")) },
+                LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, maxOf(1, dp(1))))
+            list.addView(LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(dp(4) + item.depth * dp(18), dp(14), dp(4), dp(14))
+                isClickable = true
+                setOnClickListener { dialog.dismiss(); item.targetPage?.let { postJump(it) } }
+                addView(TextView(this@ReaderActivity).apply {
+                    text = item.title
+                    setTextColor(if (item.targetPage != null) Color.BLACK else Color.parseColor("#9E9E9E"))
+                    textSize = if (item.depth == 0) 16f else 15f
+                    if (item.depth == 0) typeface = Typeface.DEFAULT_BOLD
+                    maxLines = 2
+                }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+                item.targetPage?.let { p ->
+                    addView(TextView(this@ReaderActivity).apply {
+                        text = "${p + 1}"; setTextColor(Color.parseColor("#9E9E9E")); textSize = 13f
+                        setPadding(dp(12), 0, 0, 0)
+                    })
+                }
+            })
+        }
+        outer.addView(ScrollView(this).apply { addView(list) },
+            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, (resources.displayMetrics.heightPixels * 0.7f).toInt()))
+
+        dialog.setContentView(outer)
+        dialog.window?.apply {
+            setLayout((resources.displayMetrics.widthPixels * 0.82f).toInt(), ViewGroup.LayoutParams.WRAP_CONTENT)
+            setBackgroundDrawable(GradientDrawable().apply { setColor(Color.WHITE); cornerRadius = dp(12).toFloat() })
+        }
+        dialog.show()
     }
 
     /** The on-device library (RR17): pick a stored book to open it in place. */
@@ -1312,7 +1412,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             return
         }
         val labels = books.map { Books.title(it) }.toTypedArray()
-        AlertDialog.Builder(this)
+        AlertDialog.Builder(this, R.style.InkDialog)
             .setTitle("Library")
             .setItems(labels) { _, which -> openFromLibrary(books[which]) }
             .show()
@@ -1969,68 +2069,325 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         }
     }
 
-    /** The Kindle-style definition card: headword + senses + thesaurus, anchored to the bottom. */
+    /**
+     * The definition card (RR12 / ADR-INKREAD-0009 D3) — a bottom sheet styled after the Supernote
+     * dictionary plugin: the headword (with the *looked-up* word bracketed when it differs, e.g.
+     * `run ⟨running⟩`), a **WordNet** source label, a **Definition / Thesaurus** toggle, and senses
+     * grouped by part of speech with numbered glosses, examples in curly quotes, and per-sense
+     * synonyms. WordNet ships no phonetics/audio, so none are shown (no faux IPA). On-device
+     * results parse via [WordNet]; non-WordNet online hits fall back to plain numbered glosses.
+     */
     private fun showDictPopup(word: String, def: WordDefinition) {
         val d = resources.displayMetrics.density
         fun dp(v: Int) = (v * d).toInt()
+        val grey = Color.parseColor("#6B6B6B")
+        val faint = Color.parseColor("#9E9E9E")
+        val serif = Typeface.create("serif", Typeface.NORMAL)
+        val serifBold = Typeface.create("serif", Typeface.BOLD)
+
+        val parsed = WordNet.parse(def.senses)
+        val headword = def.headword.ifEmpty { word }
+        // Thesaurus = the synonyms table plus every per-sense [syn:] set, deduped, headword removed.
+        val thesaurus = (def.synonyms + parsed.senses.flatMap { it.synonyms })
+            .map { it.trim() }.filter { it.isNotEmpty() && !it.equals(headword, ignoreCase = true) }
+            .distinct()
+
         val dialog = Dialog(this).apply { requestWindowFeature(Window.FEATURE_NO_TITLE) }
-        val col = LinearLayout(this).apply {
+        val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setBackgroundColor(Color.WHITE)
-            setPadding(dp(22), dp(16), dp(22), dp(18))
+            background = GradientDrawable().apply {
+                setColor(Color.WHITE)
+                cornerRadii = floatArrayOf(dp(18).toFloat(), dp(18).toFloat(), dp(18).toFloat(), dp(18).toFloat(), 0f, 0f, 0f, 0f)
+            }
+            setPadding(dp(24), dp(12), dp(24), dp(20))
         }
-        col.addView(
-            TextView(this).apply {
-                text = def.headword.ifEmpty { word }
-                setTextColor(Color.BLACK)
-                textSize = 24f
-                typeface = Typeface.DEFAULT_BOLD
-            },
-        )
-        if (def.lang.isNotEmpty() && def.lang != "en") {
-            col.addView(
-                TextView(this).apply {
-                    text = def.lang
-                    setTextColor(Color.DKGRAY)
-                    textSize = 12f
-                },
-            )
+
+        // ── grab handle (calm sheet affordance) ──────────────────────────────────
+        root.addView(View(this).apply {
+            background = GradientDrawable().apply { setColor(Color.parseColor("#D8D8D8")); cornerRadius = dp(2).toFloat() }
+            layoutParams = LinearLayout.LayoutParams(dp(36), dp(4)).apply {
+                gravity = Gravity.CENTER_HORIZONTAL; bottomMargin = dp(12)
+            }
+        })
+
+        // ── header: headword + looked-up chip · WordNet source ───────────────────
+        val header = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+        header.addView(TextView(this).apply {
+            text = headword; setTextColor(Color.BLACK); textSize = 27f; typeface = serifBold
+        })
+        if (!word.equals(headword, ignoreCase = true) && word.isNotEmpty()) {
+            header.addView(TextView(this).apply {
+                text = "⟨ $word ⟩"; setTextColor(grey); textSize = 14f; typeface = serif
+                setPadding(dp(10), dp(8), 0, 0)
+            })
         }
-        for ((i, s) in def.senses.take(6).withIndex()) {
-            col.addView(
-                TextView(this).apply {
-                    text = "${i + 1}.  $s"
-                    setTextColor(Color.BLACK)
-                    textSize = 15f
-                    setPadding(0, dp(6), 0, 0)
-                },
-            )
+        header.addView(View(this), LinearLayout.LayoutParams(0, 0, 1f)) // spacer
+        header.addView(TextView(this).apply {
+            text = if (def.lang.isNotEmpty() && def.lang != "en") "WordNet · ${def.lang}" else "WordNet"
+            setTextColor(faint); textSize = 11f; letterSpacing = 0.06f
+        })
+        root.addView(header)
+
+        // ── Definition / Thesaurus toggle ────────────────────────────────────────
+        val body = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(0, dp(14), 0, 0) }
+        lateinit var tabDef: TextView
+        lateinit var tabThe: TextView
+        fun styleTab(tab: TextView, active: Boolean) {
+            tab.setTextColor(if (active) Color.BLACK else faint)
+            tab.typeface = if (active) Typeface.DEFAULT_BOLD else Typeface.DEFAULT
+            tab.paintFlags = if (active) tab.paintFlags or android.graphics.Paint.UNDERLINE_TEXT_FLAG
+            else tab.paintFlags and android.graphics.Paint.UNDERLINE_TEXT_FLAG.inv()
         }
-        if (def.synonyms.isNotEmpty()) {
-            col.addView(
-                TextView(this).apply {
-                    text = "SYNONYMS"
-                    setTextColor(Color.DKGRAY)
-                    textSize = 11f
-                    typeface = Typeface.DEFAULT_BOLD
-                    setPadding(0, dp(14), 0, dp(2))
-                },
-            )
-            col.addView(
-                TextView(this).apply {
-                    text = def.synonyms.take(12).joinToString(", ")
-                    setTextColor(Color.BLACK)
-                    textSize = 15f
-                },
-            )
+        fun renderDefinition() {
+            body.removeAllViews()
+            if (parsed.parseFailed) {
+                for ((i, s) in def.senses.filter { it.isNotBlank() }.take(8).withIndex()) {
+                    body.addView(senseRow(i + 1, s, dp(0)))
+                }
+                return
+            }
+            var lastPos: String? = "?" // sentinel so the first group always prints its badge
+            for (sense in parsed.senses) {
+                if (sense.pos != lastPos) {
+                    lastPos = sense.pos
+                    body.addView(posBadge(WordNet.labelForPos(sense.pos)))
+                }
+                body.addView(senseRow(sense.index, sense.definition, dp(2)))
+                for (ex in sense.examples) {
+                    body.addView(TextView(this).apply {
+                        text = "“$ex”"; setTextColor(grey); textSize = 14f
+                        typeface = Typeface.create(Typeface.DEFAULT, Typeface.ITALIC)
+                        setPadding(dp(22), dp(3), 0, 0)
+                    })
+                }
+                if (sense.synonyms.isNotEmpty()) {
+                    body.addView(TextView(this).apply {
+                        text = "≈ ${sense.synonyms.joinToString(", ")}"
+                        setTextColor(faint); textSize = 13f; setPadding(dp(22), dp(3), 0, 0)
+                    })
+                }
+            }
         }
-        dialog.setContentView(ScrollView(this).apply { addView(col) })
+        fun renderThesaurus() {
+            body.removeAllViews()
+            if (thesaurus.isEmpty()) {
+                body.addView(TextView(this).apply {
+                    text = "No thesaurus entries for this word."
+                    setTextColor(grey); textSize = 15f; setPadding(0, dp(4), 0, 0)
+                })
+                return
+            }
+            body.addView(posBadge("synonyms"))
+            body.addView(TextView(this).apply {
+                text = thesaurus.joinToString(" · ")
+                setTextColor(Color.BLACK); textSize = 16f; setLineSpacing(dp(4).toFloat(), 1f)
+                setPadding(0, dp(4), 0, 0)
+            })
+        }
+        val tabs = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; setPadding(0, dp(10), 0, 0) }
+        tabDef = TextView(this).apply {
+            text = "Definition"; textSize = 14f; setPadding(0, dp(4), dp(22), dp(4)); isClickable = true
+            setOnClickListener { styleTab(tabDef, true); styleTab(tabThe, false); renderDefinition() }
+        }
+        tabThe = TextView(this).apply {
+            text = "Thesaurus"; textSize = 14f; setPadding(0, dp(4), 0, dp(4)); isClickable = true
+            setOnClickListener { styleTab(tabThe, true); styleTab(tabDef, false); renderThesaurus() }
+        }
+        tabs.addView(tabDef); tabs.addView(tabThe)
+        root.addView(tabs)
+        root.addView(View(this).apply {
+            setBackgroundColor(Color.parseColor("#ECECEC"))
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, maxOf(1, dp(1))).apply {
+                topMargin = dp(8)
+            }
+        })
+        root.addView(ScrollView(this).apply {
+            isVerticalScrollBarEnabled = false
+            addView(body)
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                (resources.displayMetrics.heightPixels * 0.5f).toInt(),
+            )
+        })
+
+        styleTab(tabDef, true); styleTab(tabThe, false); renderDefinition()
+        dialog.setContentView(root)
         dialog.window?.apply {
             setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
             setGravity(Gravity.BOTTOM)
-            setBackgroundDrawable(ColorDrawable(Color.WHITE))
+            setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
         }
         dialog.show()
+    }
+
+    /** A part-of-speech badge (a small dark-outlined pill) heading a group of senses. */
+    private fun posBadge(label: String): TextView {
+        val d = resources.displayMetrics.density
+        fun dp(v: Int) = (v * d).toInt()
+        return TextView(this).apply {
+            text = label; setTextColor(Color.BLACK); textSize = 12f; typeface = Typeface.DEFAULT_BOLD
+            letterSpacing = 0.04f
+            setPadding(dp(10), dp(3), dp(10), dp(4))
+            background = GradientDrawable().apply {
+                setColor(Color.parseColor("#F0F0F0"))
+                setStroke(maxOf(1, dp(1)), Color.parseColor("#C9C9C9"))
+                cornerRadius = dp(10).toFloat()
+            }
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(14); bottomMargin = dp(2) }
+        }
+    }
+
+    /** A numbered sense line: a fixed-width index gutter and the gloss filling the rest. */
+    private fun senseRow(index: Int, text: String, topPad: Int): View {
+        val d = resources.displayMetrics.density
+        fun dp(v: Int) = (v * d).toInt()
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(0, maxOf(topPad, dp(7)), 0, 0)
+            addView(TextView(this@ReaderActivity).apply {
+                this.text = "$index."; setTextColor(Color.parseColor("#6B6B6B")); textSize = 15f
+                typeface = Typeface.DEFAULT_BOLD
+                layoutParams = LinearLayout.LayoutParams(dp(22), ViewGroup.LayoutParams.WRAP_CONTENT)
+            })
+            addView(TextView(this@ReaderActivity).apply {
+                this.text = text; setTextColor(Color.BLACK); textSize = 15f
+                setLineSpacing(dp(3).toFloat(), 1f)
+                layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+            })
+        }
+    }
+
+    /**
+     * Manage user-installed dictionaries (RR12 / ADR-INKREAD-0009 D2) — the KOReader-style "install
+     * your own dictionary" surface. Lists StarDict folders found under [Dictionaries.roots] with an
+     * Install / Remove action each; install compiles the bundle into the writable corpus via
+     * [NativeBridge.nativeDictImport] on the engine thread. Reading the public folders needs
+     * all-files access (same gate as export).
+     */
+    private fun showDictionariesDialog() {
+        if (!Environment.isExternalStorageManager()) {
+            AlertDialog.Builder(this, R.style.InkDialog)
+                .setTitle("Allow file access for dictionaries")
+                .setMessage("To find dictionaries you've copied to the device, inkread needs \"All files access\". Grant it on the next screen, then open Dicts again.")
+                .setPositiveButton("Open settings") { _, _ ->
+                    val uri = Uri.parse("package:$packageName")
+                    runCatching {
+                        startActivity(Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION, uri))
+                    }.onFailure { startActivity(Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION)) }
+                }
+                .setNegativeButton("Cancel", null)
+                .show()
+            return
+        }
+        val d = resources.displayMetrics.density
+        fun dp(v: Int) = (v * d).toInt()
+        val home = Dictionaries.homeRoot()
+        val list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(20), dp(8), dp(20), dp(8)) }
+
+        val dialog = AlertDialog.Builder(this, R.style.InkDialog)
+            .setTitle("Dictionaries")
+            .setView(ScrollView(this).apply { addView(list) })
+            .setPositiveButton("Done", null)
+            .create()
+
+        fun refresh() {
+            list.removeAllViews()
+            val bundles = Dictionaries.discover(this)
+            if (bundles.isEmpty()) {
+                list.addView(TextView(this).apply {
+                    text = "No dictionaries found.\n\nCopy a StarDict folder (its .ifo, .idx and .dict/.dict.dz files) into:\n${home.absolutePath}\n\nthen reopen this screen."
+                    setTextColor(Color.parseColor("#555555")); textSize = 14f; setLineSpacing(dp(3).toFloat(), 1f)
+                })
+                return
+            }
+            for (b in bundles) {
+                val row = LinearLayout(this).apply {
+                    orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
+                    setPadding(0, dp(10), 0, dp(10))
+                }
+                row.addView(LinearLayout(this).apply {
+                    orientation = LinearLayout.VERTICAL
+                    layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+                    addView(TextView(this@ReaderActivity).apply {
+                        text = b.name; setTextColor(Color.BLACK); textSize = 16f
+                    })
+                    addView(TextView(this@ReaderActivity).apply {
+                        text = if (b.installed) "Installed" else "Not installed"
+                        setTextColor(Color.parseColor("#9E9E9E")); textSize = 12f
+                    })
+                })
+                row.addView(TextView(this).apply {
+                    text = if (b.installed) "Remove" else "Install"
+                    setTextColor(Color.BLACK); textSize = 14f; typeface = Typeface.DEFAULT_BOLD
+                    setPadding(dp(14), dp(6), dp(14), dp(6))
+                    background = GradientDrawable().apply {
+                        setColor(Color.WHITE); setStroke(maxOf(1, dp(1)), Color.BLACK); cornerRadius = dp(16).toFloat()
+                    }
+                    isClickable = true
+                    setOnClickListener {
+                        if (b.installed) removeDictionary(b) { refresh() }
+                        else installDictionary(b) { refresh() }
+                    }
+                })
+                list.addView(row)
+                list.addView(View(this).apply {
+                    setBackgroundColor(Color.parseColor("#EEEEEE"))
+                    layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, maxOf(1, dp(1)))
+                })
+            }
+        }
+        refresh()
+        dialog.show()
+    }
+
+    /** Compile a StarDict bundle into the corpus on the engine thread, with a blocking progress note. */
+    private fun installDictionary(b: Dictionaries.Bundle, onDone: () -> Unit) {
+        val progress = AlertDialog.Builder(this, R.style.InkDialog)
+            .setTitle("Installing ${b.name}")
+            .setMessage("Large dictionaries can take a while. Please keep inkread open.")
+            .setCancelable(false)
+            .create()
+        progress.show()
+        engine.execute {
+            val ok = ensureDictOpen()
+            val result = if (ok) {
+                try {
+                    val n = NativeBridge.nativeDictImport(dictHandle, b.dir.absolutePath, b.sourceTag, false)
+                    Dictionaries.markInstalled(this, b.sourceTag)
+                    "Installed ${b.name} ($n entries)"
+                } catch (e: RuntimeException) {
+                    Log.e(TAG, "dict import failed: ${e.message}")
+                    "Couldn't install ${b.name}"
+                }
+            } else {
+                "Dictionary store unavailable"
+            }
+            runOnUiThread {
+                progress.dismiss()
+                Toast.makeText(this, result, Toast.LENGTH_SHORT).show()
+                onDone()
+            }
+        }
+    }
+
+    /** Drop every entry for a user dictionary's source tag (the inverse of install). */
+    private fun removeDictionary(b: Dictionaries.Bundle, onDone: () -> Unit) {
+        engine.execute {
+            if (ensureDictOpen()) {
+                try {
+                    NativeBridge.nativeDictForget(dictHandle, b.sourceTag)
+                } catch (e: RuntimeException) {
+                    Log.e(TAG, "dict forget failed: ${e.message}")
+                }
+            }
+            Dictionaries.markRemoved(this, b.sourceTag)
+            runOnUiThread {
+                Toast.makeText(this, "Removed ${b.name}", Toast.LENGTH_SHORT).show()
+                onDone()
+            }
+        }
     }
 
     /** Persist the current reading position (RR12-FR3 / RR27); store-less / closed = no-op. */
@@ -2040,6 +2397,11 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             NativeBridge.nativeSavePosition(docHandle)
         } catch (e: RuntimeException) {
             Log.e(TAG, "save position failed: ${e.message}")
+        }
+        // Record read progress for the home shelf (RR16/RR17).
+        val total = pageCount
+        if (total > 0 && currentBookId.isNotEmpty()) {
+            Books.setProgress(this, currentBookId, ((currentPage + 1) * 100) / total)
         }
     }
 
