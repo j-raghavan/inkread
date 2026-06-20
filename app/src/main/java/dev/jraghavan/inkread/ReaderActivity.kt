@@ -156,9 +156,8 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
     private val longPress = Runnable {
         mainHandler.removeCallbacks(strokeFinalize) // this hold is a lookup, not a stroke
         strokeBuf.clear()
-        val w = surfaceView.width.toFloat(); val h = surfaceView.height.toFloat()
-        if (w <= 0f || h <= 0f) return@Runnable
-        val nx = lpDownX / w; val ny = lpDownY / h
+        if (viewW == 0 || viewH == 0) return@Runnable
+        val nx = vToNx(lpDownX); val ny = vToNy(lpDownY)
         val page = currentPage
         Log.i(TAG, "DIAG long-press lookup @($nx,$ny) page=$page")
         engine.execute {
@@ -189,9 +188,8 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
 
     /** Look up the word under a view-pixel point (shared by stylus + finger long-press). */
     private fun lookupWordAtView(vx: Float, vy: Float) {
-        val w = surfaceView.width.toFloat(); val h = surfaceView.height.toFloat()
-        if (w <= 0f || h <= 0f) return
-        val nx = vx / w; val ny = vy / h; val page = currentPage
+        if (viewW == 0 || viewH == 0) return
+        val nx = vToNx(vx); val ny = vToNy(vy); val page = currentPage
         Log.i(TAG, "DIAG long-press lookup @($nx,$ny) page=$page")
         engine.execute { defineWord(page, nx, ny) }
     }
@@ -223,6 +221,13 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
     }
     /** Filled square handles at the selection box corners (NeoReader frame 132). */
     private val selectionHandlePaint = Paint().apply { color = Color.BLACK; style = Paint.Style.FILL; isAntiAlias = true }
+    /** Small full-page thumbnail (from the fit render) for the zoom minimap; null until first render. */
+    private var fitThumb: Bitmap? = null
+    private var minimapActive = false
+    private var minimapThumbDrag = false
+    private val minimapBgPaint = Paint().apply { color = Color.WHITE; style = Paint.Style.FILL }
+    private val minimapBorderPaint = Paint().apply { color = Color.BLACK; style = Paint.Style.STROKE; strokeWidth = 2f }
+    private val minimapViewportPaint = Paint().apply { color = Color.BLACK; style = Paint.Style.STROKE; strokeWidth = 4f }
     /** Current pen / highlighter colour (index into the palettes); re-tapping a tool cycles it. */
     private var penColorIdx = 0
     private var hlColorIdx = 0
@@ -297,10 +302,16 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
                     else -> captureStylus(event) // PEN (Highlighter is still P2)
                 }
             } else if (toolType == MotionEvent.TOOL_TYPE_FINGER) {
-                when (event.actionMasked) {
-                    MotionEvent.ACTION_DOWN -> onFingerDown(event)
-                    MotionEvent.ACTION_MOVE -> onFingerMove(event)
-                    MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> onFingerUp(event)
+                scaleDetector.onTouchEvent(event)
+                // While a pinch is in progress (2 fingers), don't run tap/pan/long-press logic.
+                if (!scaleDetector.isInProgress && event.pointerCount == 1) {
+                    // The zoom minimap (when shown) is an interactive navigator + zoom control;
+                    // it claims touches over its panel before the page gesture logic runs.
+                    if (!handleMinimapTouch(event)) when (event.actionMasked) {
+                        MotionEvent.ACTION_DOWN -> onFingerDown(event)
+                        MotionEvent.ACTION_MOVE -> onFingerMove(event)
+                        MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> onFingerUp(event)
+                    }
                 }
             }
             true
@@ -603,6 +614,10 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         for (s in pageStrokes) drawStroke(cv, s)
         // The active lasso selection's bounding box (ADR-INKREAD-0010).
         if (selectedIds.isNotEmpty() && selectionBounds.size == 4) drawSelectionBox(cv)
+        // Keep a small full-page thumbnail from the fit render to drive the zoom minimap.
+        if (zoom <= 1f) updateFitThumb(bmp)
+        // Zoom minimap (top-right): full page + the current viewport window (RR5-FR3).
+        if (zoom > 1f) drawZoomMinimap(cv)
         // A small dog-ear marks a bookmarked page (RR16).
         if (bookmarks?.has(currentPage) == true) drawBookmarkCorner(cv)
         // Cache the first page as the book's thumbnail, once (RR17-FR5).
@@ -711,15 +726,13 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         // Highlighter = a wide, translucent band (its own core tool + colour); Pen = thin black.
         val isHl = tool == Tool.HIGHLIGHTER
         val coreTool = if (isHl) CORE_TOOL_HIGHLIGHTER else CORE_TOOL_PEN
-        val widthNorm = (if (isHl) HIGHLIGHT_WIDTH_PX else INK_STROKE_WIDTH) / w
+        val widthNorm = lenToNorm(if (isHl) HIGHLIGHT_WIDTH_PX else INK_STROKE_WIDTH)
         val color = if (isHl) highlightColor() else penColor()
         try {
             NativeBridge.nativeInkBeginStroke(docHandle, coreTool, color, widthNorm, System.currentTimeMillis())
             var i = 0
             while (i + 1 < raw.size) {
-                val nx = (raw[i] / w).coerceIn(0f, 1f)
-                val ny = (raw[i + 1] / h).coerceIn(0f, 1f)
-                NativeBridge.nativeInkAddPoint(docHandle, nx, ny, 1.0f, Float.NaN, Float.NaN, 0)
+                NativeBridge.nativeInkAddPoint(docHandle, vToNx(raw[i]), vToNy(raw[i + 1]), 1.0f, Float.NaN, Float.NaN, 0)
                 i += 2
             }
             NativeBridge.nativeInkEndStroke(docHandle)
@@ -736,28 +749,109 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
 
     /** Draw one core stroke (normalized points + tool/color/width) onto [canvas]. */
     private fun drawStroke(canvas: Canvas, s: InkStrokeDraw) {
-        val w = viewW.toFloat(); val h = viewH.toFloat()
         val norm = s.points
         if (norm.isEmpty()) return
         inkPaint.color = Color.argb(s.a, s.r, s.g, s.b)
-        inkPaint.strokeWidth = (s.width * w).coerceAtLeast(1f)
+        inkPaint.strokeWidth = (s.width * viewW * zoom).coerceAtLeast(1f)
         if (norm.size == 2) {
             inkDotPaint.color = inkPaint.color
-            canvas.drawCircle(norm[0] * w, norm[1] * h, inkPaint.strokeWidth / 2f, inkDotPaint)
+            canvas.drawCircle(nToVx(norm[0]), nToVy(norm[1]), inkPaint.strokeWidth / 2f, inkDotPaint)
             return
         }
         val path = Path()
-        path.moveTo(norm[0] * w, norm[1] * h)
+        path.moveTo(nToVx(norm[0]), nToVy(norm[1]))
         var i = 2
-        while (i + 1 < norm.size) { path.lineTo(norm[i] * w, norm[i + 1] * h); i += 2 }
+        while (i + 1 < norm.size) { path.lineTo(nToVx(norm[i]), nToVy(norm[i + 1])); i += 2 }
         canvas.drawPath(path, inkPaint)
+    }
+
+    /** Refresh the cached full-page thumbnail from a fit render [src] (drives the zoom minimap). */
+    private fun updateFitThumb(src: Bitmap) {
+        val tw = viewW / 5; val th = viewH / 5
+        if (tw < 8 || th < 8) return
+        val old = fitThumb
+        fitThumb = Bitmap.createScaledBitmap(src, tw, th, true)
+        if (old != null && old != fitThumb) old.recycle()
+    }
+
+    /** Minimap panel geometry (thumbnail + the −/+ zoom buttons below it). Deterministic from the
+     *  viewport so the renderer and the touch hit-test agree. Null if the view isn't sized yet. */
+    private class MmGeom(
+        val left: Float, val top: Float, val tw: Float, val th: Float,
+        val minus: android.graphics.RectF, val plus: android.graphics.RectF,
+    )
+    private fun minimapGeometry(): MmGeom? {
+        if (viewW == 0 || viewH == 0) return null
+        val tw = (viewW / 5).toFloat(); val th = (viewH / 5).toFloat()
+        val m = dpInt(8).toFloat()
+        val left = viewW - tw - m; val top = m
+        val barTop = top + th + dpInt(6)
+        val barH = dpInt(48).toFloat(); val half = tw / 2f
+        val minus = android.graphics.RectF(left, barTop, left + half, barTop + barH)
+        val plus = android.graphics.RectF(left + half, barTop, left + tw, barTop + barH)
+        return MmGeom(left, top, tw, th, minus, plus)
+    }
+
+    /** Draw the zoom minimap (top-right): full-page thumb + visible-window rectangle + −/+ buttons. */
+    private fun drawZoomMinimap(canvas: Canvas) {
+        val thumb = fitThumb ?: return
+        val g = minimapGeometry() ?: return
+        // Backing + thumbnail + border.
+        canvas.drawRect(g.left - 3, g.top - 3, g.left + g.tw + 3, g.plus.bottom + 3, minimapBgPaint)
+        canvas.drawBitmap(thumb, g.left, g.top, null)
+        canvas.drawRect(g.left, g.top, g.left + g.tw, g.top + g.th, minimapBorderPaint)
+        // Visible window rectangle: origin = pan*(z-1)/z, size = 1/z.
+        val z = zoom
+        val vx0 = panX * (z - 1f) / z; val vy0 = panY * (z - 1f) / z; val v = 1f / z
+        canvas.drawRect(g.left + vx0 * g.tw, g.top + vy0 * g.th, g.left + (vx0 + v) * g.tw, g.top + (vy0 + v) * g.th, minimapViewportPaint)
+        // −/+ zoom buttons drawn as glyphs (crisp on e-ink), boxed.
+        canvas.drawRect(g.minus, minimapBorderPaint); canvas.drawRect(g.plus, minimapBorderPaint)
+        val cyMinus = g.minus.centerY(); val r = dpInt(9).toFloat()
+        canvas.drawLine(g.minus.centerX() - r, cyMinus, g.minus.centerX() + r, cyMinus, minimapViewportPaint)
+        canvas.drawLine(g.plus.centerX() - r, g.plus.centerY(), g.plus.centerX() + r, g.plus.centerY(), minimapViewportPaint)
+        canvas.drawLine(g.plus.centerX(), g.plus.centerY() - r, g.plus.centerX(), g.plus.centerY() + r, minimapViewportPaint)
+    }
+
+    /** Center the zoom viewport on a point tapped/dragged inside the minimap thumbnail. */
+    private fun navigateMinimap(x: Float, y: Float, g: MmGeom) {
+        val z = zoom
+        if (z <= 1f) return
+        val tnx = ((x - g.left) / g.tw).coerceIn(0f, 1f) // page-normalized target center
+        val tny = ((y - g.top) / g.th).coerceIn(0f, 1f)
+        panX = ((tnx * z - 0.5f) / (z - 1f)).coerceIn(0f, 1f)
+        panY = ((tny * z - 0.5f) / (z - 1f)).coerceIn(0f, 1f)
+    }
+
+    /** Handle a finger touch on the minimap panel (navigate / zoom buttons). Returns true if it
+     *  consumed the event so the page's tap/pan/long-press logic is skipped. */
+    private fun handleMinimapTouch(e: MotionEvent): Boolean {
+        if (zoom <= 1f) return false
+        val g = minimapGeometry() ?: return false
+        val x = e.x; val y = e.y
+        val inThumb = x >= g.left && x <= g.left + g.tw && y >= g.top && y <= g.top + g.th
+        when (e.actionMasked) {
+            MotionEvent.ACTION_DOWN -> {
+                when {
+                    g.minus.contains(x, y) -> { minimapActive = true; zoomBy(1f / ZOOM_STEP); return true }
+                    g.plus.contains(x, y) -> { minimapActive = true; zoomBy(ZOOM_STEP); return true }
+                    inThumb -> { minimapActive = true; minimapThumbDrag = true; navigateMinimap(x, y, g); applyZoom(); return true }
+                }
+            }
+            MotionEvent.ACTION_MOVE -> if (minimapThumbDrag && inThumb) {
+                navigateMinimap(x, y, g); throttledPreview { applyZoom() }; return true
+            } else if (minimapActive) return true
+            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> if (minimapActive) {
+                if (minimapThumbDrag) applyZoom()
+                minimapActive = false; minimapThumbDrag = false; return true
+            }
+        }
+        return minimapActive
     }
 
     /** Draw the active lasso selection's dashed bounding box + square corner handles (frame 132). */
     private fun drawSelectionBox(canvas: Canvas) {
         val b = selectionBounds
-        val w = viewW.toFloat(); val h = viewH.toFloat()
-        val l = b[0] * w; val t = b[1] * h; val r = b[2] * w; val btm = b[3] * h
+        val l = nToVx(b[0]); val t = nToVy(b[1]); val r = nToVx(b[2]); val btm = nToVy(b[3])
         canvas.drawRect(l, t, r, btm, selectionPaint)
         val hs = SELECTION_HANDLE_PX
         for (cx in floatArrayOf(l, r)) for (cy in floatArrayOf(t, btm)) {
@@ -800,22 +894,41 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         fingerDownX = e.x; fingerDownY = e.y
         fingerMoved = false; fingerLookupFired = false
         lastFingerMoveMs = SystemClock.uptimeMillis()
-        mainHandler.removeCallbacks(fingerLongPress)
-        mainHandler.postDelayed(fingerLongPress, FINGER_LONG_PRESS_MS)
+        // When zoomed in, a one-finger drag pans (handled on UP) — don't arm long-press lookup.
+        if (zoom <= 1f) {
+            mainHandler.removeCallbacks(fingerLongPress)
+            mainHandler.postDelayed(fingerLongPress, FINGER_LONG_PRESS_MS)
+        }
     }
 
-    /** Finger MOVE: track liveness; beyond the slop it's a swipe/scroll, not a tap or hold. */
+    /** Finger MOVE: track liveness; beyond the slop it's a swipe/scroll, not a tap or hold. When
+     *  zoomed, a drag live-previews the pan (cached bitmap translated); committed on UP. */
     private fun onFingerMove(e: MotionEvent) {
         lastFingerMoveMs = SystemClock.uptimeMillis()
         if (!fingerMoved && kotlin.math.hypot(e.x - fingerDownX, e.y - fingerDownY) > FINGER_MOVE_SLOP_PX) {
             fingerMoved = true
             mainHandler.removeCallbacks(fingerLongPress)
         }
+        if (fingerMoved && zoom > 1f) {
+            throttledPreview {
+                previewBitmap(android.graphics.Matrix().apply { postTranslate(e.x - fingerDownX, e.y - fingerDownY) })
+            }
+        }
     }
 
     /** Finger UP: a quick, still press is a navigation tap (page zones / link / TOC). */
     private fun onFingerUp(e: MotionEvent) {
         mainHandler.removeCallbacks(fingerLongPress)
+        // Zoomed in: a drag pans the page; a still tap does nothing (no page-turn while zoomed).
+        if (zoom > 1f) {
+            if (fingerMoved) {
+                val overX = viewW * (zoom - 1f); val overY = viewH * (zoom - 1f)
+                if (overX > 0f) panX = (panX - (e.x - fingerDownX) / overX).coerceIn(0f, 1f)
+                if (overY > 0f) panY = (panY - (e.y - fingerDownY) / overY).coerceIn(0f, 1f)
+                applyZoom()
+            }
+            return
+        }
         if (fingerLookupFired) { fingerLookupFired = false; return } // the hold already looked up
         if (fingerMoved) return // a swipe or rejected palm — not a tap
         if (SystemClock.uptimeMillis() - lastStylusMs > PALM_REJECT_MS && strokeBuf.isEmpty()) {
@@ -829,7 +942,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         val w = surfaceView.width.toFloat()
         val h = surfaceView.height.toFloat()
         if (w > 0f && h > 0f) {
-            val link = currentLinks.firstOrNull { it.contains(x / w, y / h) }
+            val link = currentLinks.firstOrNull { it.contains(vToNx(x), vToNy(y)) }
             if (link != null) {
                 Log.i(TAG, "DIAG handleTap link hit -> ${link.targetPage ?: link.uri}")
                 followLink(link)
@@ -997,6 +1110,8 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         control(if (marked) "🔖\nRemove" else "🔖\nBookmark") { toggleBookmark() }
         control("📑\nMarks") { showBookmarks() }
         control("📄\nContents") { showContentsLazy() }
+        control("➖\nZoom") { zoomBy(1f / ZOOM_STEP) }
+        control("➕\nZoom") { zoomBy(ZOOM_STEP) }
         control("💾\nExport") { showExportDialog() }
         control("📂\nOpen") { openPicker() }
         container.addView(controls)
@@ -1282,6 +1397,90 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
      */
     private fun dpInt(v: Int) = (v * resources.displayMetrics.density).toInt()
 
+    // ---- pinch-zoom transform (RR5-FR3). zoom=1 = fit; pan in [0,1] over the off-screen overscan.
+    //      Every ink coord conversion goes through these so the overlay tracks the zoomed page;
+    //      at zoom=1 they reduce to the old `x/viewW` / `nx*viewW` mapping. ----
+    @Volatile private var zoom = 1f
+    @Volatile private var panX = 0f
+    @Volatile private var panY = 0f
+    private fun nToVx(nx: Float) = nx * viewW * zoom - panX * viewW * (zoom - 1f)
+    private fun nToVy(ny: Float) = ny * viewH * zoom - panY * viewH * (zoom - 1f)
+    private fun vToNx(vx: Float) = ((vx + panX * viewW * (zoom - 1f)) / (viewW * zoom)).coerceIn(0f, 1f)
+    private fun vToNy(vy: Float) = ((vy + panY * viewH * (zoom - 1f)) / (viewH * zoom)).coerceIn(0f, 1f)
+    /** Convert an on-screen length (px) to normalized page units at the current zoom. */
+    private fun lenToNorm(px: Float) = px / (viewW * zoom)
+    /** Push the current zoom/pan to the core and re-render (engine thread). */
+    private fun applyZoom() {
+        engine.execute {
+            if (docHandle != 0L) {
+                try { NativeBridge.nativeSetZoom(docHandle, zoom, panX, panY) } catch (e: RuntimeException) {}
+            }
+            renderAndBlit()
+            adapter.refreshFull()
+        }
+    }
+
+    /** Multiply the zoom (clamped); snap back to fit at ~1. Used by the +/- buttons and pinch-end. */
+    private fun zoomBy(factor: Float) {
+        zoom = (zoom * factor).coerceIn(1f, MAX_ZOOM_UI)
+        if (zoom <= 1.01f) { zoom = 1f; panX = 0f; panY = 0f }
+        applyZoom()
+    }
+
+    // Live-preview state: during a pinch/pan we cheaply transform the CACHED page bitmap on the
+    // canvas (no pdfium, no JNI) for instant feedback, then re-render crisp once on gesture end.
+    private var gestureStartZoom = 1f
+    private var liveScale = 1f
+    private var focusX = 0f
+    private var focusY = 0f
+    private var lastPreviewMs = 0L
+    private val previewPaint = Paint().apply { isFilterBitmap = true }
+
+    /** Throttle live previews so e-ink isn't asked to refresh faster than it can. */
+    private inline fun throttledPreview(block: () -> Unit) {
+        val now = SystemClock.uptimeMillis()
+        if (now - lastPreviewMs >= PREVIEW_MS) { lastPreviewMs = now; block() }
+    }
+
+    /** Blit the cached page bitmap transformed by [m] — instant zoom/pan feedback, no re-render. */
+    private fun previewBitmap(m: android.graphics.Matrix) {
+        val bmp = bitmap ?: return
+        blit { c -> c.drawColor(Color.WHITE); c.drawBitmap(bmp, m, previewPaint) }
+    }
+
+    /** Pinch-to-zoom: live-preview the cached bitmap scaled around the focal point during the
+     *  gesture; on end, commit the zoom with focal-anchored pan and do one crisp pdfium re-render. */
+    private val scaleDetector by lazy {
+        android.view.ScaleGestureDetector(this, object : android.view.ScaleGestureDetector.SimpleOnScaleGestureListener() {
+            override fun onScaleBegin(d: android.view.ScaleGestureDetector): Boolean {
+                gestureStartZoom = zoom; liveScale = 1f; focusX = d.focusX; focusY = d.focusY
+                return true
+            }
+            override fun onScale(d: android.view.ScaleGestureDetector): Boolean {
+                liveScale *= d.scaleFactor
+                val eff = (gestureStartZoom * liveScale).coerceIn(1f, MAX_ZOOM_UI) / gestureStartZoom
+                throttledPreview {
+                    previewBitmap(android.graphics.Matrix().apply { postScale(eff, eff, focusX, focusY) })
+                }
+                return true
+            }
+            override fun onScaleEnd(d: android.view.ScaleGestureDetector) {
+                val newZoom = (gestureStartZoom * liveScale).coerceIn(1f, MAX_ZOOM_UI)
+                if (newZoom <= 1.01f) {
+                    zoom = 1f; panX = 0f; panY = 0f
+                } else {
+                    // Anchor the pinched point: keep the content under the focal point fixed.
+                    val nx = vToNx(focusX); val ny = vToNy(focusY) // uses the pre-zoom factor
+                    zoom = newZoom
+                    val overX = viewW * (zoom - 1f); val overY = viewH * (zoom - 1f)
+                    panX = if (overX > 0f) ((nx * viewW * zoom - focusX) / overX).coerceIn(0f, 1f) else 0f
+                    panY = if (overY > 0f) ((ny * viewH * zoom - focusY) / overY).coerceIn(0f, 1f) else 0f
+                }
+                applyZoom()
+            }
+        })
+    }
+
     /** Show the Lasso hint banner only while Lasso is active and nothing is selected (UI thread). */
     private fun updateLassoHint() {
         val show = tool == Tool.LASSO && selectedIds.isEmpty()
@@ -1347,14 +1546,12 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
     private fun commitErase(viewPts: FloatArray) {
         val w = viewW; val h = viewH
         if (docHandle == 0L || w == 0 || h == 0) return
-        val radiusNorm = ERASE_RADIUS_PX / w
+        val radiusNorm = lenToNorm(ERASE_RADIUS_PX)
         try {
             NativeBridge.nativeInkBeginStroke(docHandle, CORE_TOOL_ERASER, INK_COLOR_BLACK, radiusNorm, System.currentTimeMillis())
             var i = 0
             while (i + 1 < viewPts.size) {
-                val nx = (viewPts[i] / w).coerceIn(0f, 1f)
-                val ny = (viewPts[i + 1] / h).coerceIn(0f, 1f)
-                NativeBridge.nativeInkAddPoint(docHandle, nx, ny, 1.0f, Float.NaN, Float.NaN, 0)
+                NativeBridge.nativeInkAddPoint(docHandle, vToNx(viewPts[i]), vToNy(viewPts[i + 1]), 1.0f, Float.NaN, Float.NaN, 0)
                 i += 2
             }
             NativeBridge.nativeInkEndStroke(docHandle)
@@ -1444,7 +1641,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
     private fun pointInSelection(x: Float, y: Float): Boolean {
         val b = selectionBounds
         if (b.size != 4 || viewW == 0 || viewH == 0) return false
-        val nx = x / viewW; val ny = y / viewH
+        val nx = vToNx(x); val ny = vToNy(y)
         return nx in b[0]..b[2] && ny in b[1]..b[3]
     }
 
@@ -1463,8 +1660,8 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         val poly = FloatArray(raw.size)
         var i = 0
         while (i + 1 < raw.size) {
-            poly[i] = (raw[i] / w).coerceIn(0f, 1f)
-            poly[i + 1] = (raw[i + 1] / h).coerceIn(0f, 1f)
+            poly[i] = vToNx(raw[i])
+            poly[i + 1] = vToNy(raw[i + 1])
             i += 2
         }
         engine.execute {
@@ -1505,7 +1702,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
     private fun showSelectionToolbar() {
         val b = selectionBounds
         if (b.size != 4) return
-        val rect = android.graphics.RectF(b[0] * viewW, b[1] * viewH, b[2] * viewW, b[3] * viewH)
+        val rect = android.graphics.RectF(nToVx(b[0]), nToVy(b[1]), nToVx(b[2]), nToVy(b[3]))
         val canPaste = try { NativeBridge.nativeInkHasClipboard(docHandle) } catch (e: RuntimeException) { false }
         selectionToolbar.show(rect, canPaste)
     }
@@ -1514,7 +1711,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
     private fun applySelectionMove(dxPx: Float, dyPx: Float) {
         val ids = selectedIds
         if (ids.isEmpty() || viewW == 0 || viewH == 0) return
-        val dx = dxPx / viewW; val dy = dyPx / viewH
+        val dx = dxPx / (viewW * zoom); val dy = dyPx / (viewH * zoom)
         engine.execute {
             val changed = try {
                 NativeBridge.nativeInkMoveSelection(docHandle, ids, dx, dy)
@@ -1638,12 +1835,10 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         val dragged = (maxX - minX) > w * 0.03f || (maxY - minY) > h * 0.02f
         val page = currentPage
         if (dragged) {
-            val r = floatArrayOf(minX / w, minY / h, maxX / w, maxY / h)
+            val r = floatArrayOf(vToNx(minX), vToNy(minY), vToNx(maxX), vToNy(maxY))
             engine.execute { defineRect(page, r) }
         } else {
-            val nx = pts[0] / w
-            val ny = pts[1] / h
-            engine.execute { defineWord(page, nx, ny) }
+            engine.execute { defineWord(page, vToNx(pts[0]), vToNy(pts[1])) }
         }
         // Wipe the firmware ink the define gesture left behind (it never becomes an annotation).
         engine.execute { clearFirmwareInk(); renderAndBlit(); adapter.refreshFull() }
@@ -1874,6 +2069,9 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         const val PALM_REJECT_MS = 1000L // a finger tap within this long of a stylus event = palm.
         // Public, Partner-synced folder the annotated PDF export is written to (Android external
         // storage root + this) so it reaches the desktop. "Document" is in the Supernote sync set.
+        const val MAX_ZOOM_UI = 5f // matches the core's MAX_ZOOM clamp (RR5-FR3).
+        const val PREVIEW_MS = 50L // min interval between live zoom/pan preview blits (e-ink cadence).
+        const val ZOOM_STEP = 1.4f // +/- button zoom multiplier.
         const val EXPORT_DIR_NAME = "Document"
         // Supernote folders the Partner app syncs — searched to place the export beside the original.
         val SYNCED_DIRS = arrayOf("Document", "EXPORT", "Note", "INBOX", "MyStyle", "Download")

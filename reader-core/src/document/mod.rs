@@ -214,6 +214,22 @@ pub trait Document {
     /// bad index and a typed backend error on render failure — never panics (RR21-FR3).
     fn render_page(&self, index: usize, buf: &mut PixelBuffer<'_>) -> CoreResult<()>;
 
+    /// Render a magnified, panned view of `index` for pinch-zoom (RR5-FR3). The page is rendered as
+    /// if [`Self::render_page`] (stretched to the buffer) then scaled by `zoom` (≥1, buffer-relative)
+    /// and the `buf`-sized window at `(offset_x, offset_y)` scaled-buffer pixels is shown. So at
+    /// `zoom == 1, offset == 0` it is identical to [`Self::render_page`], and the shell's normalized
+    /// ink overlay transforms by the same `(zoom, offset)`. Default: ignores zoom → render_page.
+    fn render_zoom(
+        &self,
+        index: usize,
+        buf: &mut PixelBuffer<'_>,
+        _zoom: f32,
+        _offset_x: i32,
+        _offset_y: i32,
+    ) -> CoreResult<()> {
+        self.render_page(index, buf)
+    }
+
     /// Prefetch hint (RR4-FR7): the core may call this after rendering the current page so a
     /// backend can warm an internal handle for the likely-next page, making a page turn blit a
     /// ready buffer. Default: a no-op (backends opt in). Must never panic on a bad index.

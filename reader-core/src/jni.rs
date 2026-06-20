@@ -459,6 +459,25 @@ pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeExportPdf<'
     .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
 }
 
+// nativeSetZoom(handle, zoom, panX, panY) — set the pinch-zoom factor (>=1; 1=fit) and normalized
+// pan [0,1] (RR5-FR3). The next nativeRenderPage renders the magnified/panned view. Never throws.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeSetZoom<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+    zoom: jfloat,
+    pan_x: jfloat,
+    pan_y: jfloat,
+) {
+    env.with_env(|env| -> jni::errors::Result<()> {
+        let session = unsafe { session_mut(handle) }.map_err(|e| throw(env, &e))?;
+        session.set_zoom(zoom, pan_x, pan_y);
+        Ok(())
+    })
+    .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
+}
+
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeInkBeginStroke<'local>(
     mut env: EnvUnowned<'local>,

@@ -112,6 +112,10 @@ object NativeBridge {
     /** Cache a definition (e.g. an online result) into the corpus so the next lookup is instant. */
     external fun nativeDictPut(dictHandle: Long, lang: String, headword: String, defn: String)
 
+    /** Set pinch-zoom factor ([zoom] >= 1; 1 = fit) and normalized pan [0,1] (RR5-FR3). The next
+     *  [nativeRenderPage] renders the magnified/panned view. */
+    external fun nativeSetZoom(handle: Long, zoom: Float, panX: Float, panY: Float)
+
     // ---- ink annotation, persisted by the core to a sidecar (RR6/RR10 / ADR-INKREAD-0010) ----
 
     /** Attach a `.inkread` sidecar store for the open document so strokes persist (RR10). */
