@@ -16,6 +16,9 @@ use std::io::Cursor;
 use rbook::ebook::toc::TocEntry as RbookTocEntry;
 use rbook::Epub;
 
+pub mod content;
+pub use content::{parse_blocks, Block, Inline, TextRun};
+
 /// The error surface for EPUB parsing — mirrors `inkread-dict`'s shape so the `reader-core` adapter
 /// maps it uniformly. Never panics across the boundary (RR21-FR3).
 #[derive(Debug, Clone, PartialEq, Eq)]
