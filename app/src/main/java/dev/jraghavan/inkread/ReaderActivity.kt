@@ -423,11 +423,15 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
 
     /** Launch the system file picker for a PDF (RR22). */
     private fun openPicker() {
-        // PDF-only for now (the engine renders fixed-layout PDF). When EPUB/MOBI/image rendering
-        // lands, broaden these MIME types so "Open Document" accepts the full supported gamut.
+        // PDF (fixed-layout) + EPUB (reflowable). The core dispatches by file extension; some
+        // pickers tag .epub as octet-stream, so accept that too and let the core validate.
         val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
             addCategory(Intent.CATEGORY_OPENABLE)
-            type = "application/pdf"
+            type = "*/*"
+            putExtra(
+                Intent.EXTRA_MIME_TYPES,
+                arrayOf("application/pdf", "application/epub+zip", "application/octet-stream"),
+            )
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }
         try {
@@ -555,6 +559,12 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             // Bookmarks remain a Kotlin sidecar (RR16), keyed by the book id.
             bookmarks = Bookmarks(File(filesDir, "bookmarks/${bookId.hashCode()}.json")).also { it.load() }
             currentBookId = bookId
+            // Re-apply the saved reflow text scale (EPUB); a no-op (-1) on fixed-layout PDF.
+            val savedScale = textScalePref()
+            if (savedScale != 1.0f) {
+                val np = try { NativeBridge.nativeSetTextScale(docHandle, savedScale) } catch (e: RuntimeException) { -1 }
+                if (np >= 0) Log.i(TAG, "applied text scale $savedScale → page $np")
+            }
             pageCount = NativeBridge.nativePageCount(docHandle)
             Books.pushRecent(this, bookId, path)
             Log.i(
@@ -1175,6 +1185,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         control(R.drawable.ic_menu_zoom_in, "Zoom +") { zoomBy(ZOOM_STEP) }
         control(R.drawable.ic_menu_export, "Export") { showExportDialog() }
         control(R.drawable.ic_tool_define, "Dicts") { showDictionariesDialog() }
+        control(R.drawable.ic_menu_font, "Font") { showTypographyDialog() }
         control(R.drawable.ic_menu_open, "Open") { openPicker() }
         container.addView(controls)
 
@@ -2496,6 +2507,77 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         }
     }
 
+    /**
+     * Reflow **font size** control (RR2-FR5) — A− / A+ over a set of scale steps, applied live via
+     * [NativeBridge.nativeSetTextScale] (EPUB repaginates, preserving the chapter). The scale
+     * persists and is re-applied on the next open. A no-op toast on fixed-layout PDF.
+     */
+    private fun showTypographyDialog() {
+        val d = resources.displayMetrics.density
+        fun dp(v: Int) = (v * d).toInt()
+        var idx = nearestScaleIndex(textScalePref())
+        val label = TextView(this).apply {
+            textSize = 18f; setTextColor(Color.BLACK); gravity = Gravity.CENTER
+            minWidth = dp(96)
+        }
+        fun refreshLabel() { label.text = "${(TEXT_SCALES[idx] * 100).toInt()}%" }
+        refreshLabel()
+        fun apply() {
+            val scale = TEXT_SCALES[idx]
+            setTextScalePref(scale)
+            refreshLabel()
+            engine.execute {
+                val np = try { NativeBridge.nativeSetTextScale(docHandle, scale) } catch (e: RuntimeException) { -1 }
+                if (np >= 0) {
+                    pageCount = NativeBridge.nativePageCount(docHandle)
+                    renderAndBlit(); adapter.refreshFull()
+                } else {
+                    runOnUiThread {
+                        Toast.makeText(this, "Font size adjusts reflowable books (EPUB)", Toast.LENGTH_SHORT).show()
+                    }
+                }
+            }
+        }
+        fun stepButton(text: String, onTap: () -> Unit) = TextView(this).apply {
+            this.text = text; textSize = 22f; setTextColor(Color.BLACK); gravity = Gravity.CENTER
+            setPadding(dp(22), dp(6), dp(22), dp(10))
+            background = GradientDrawable().apply {
+                setColor(Color.WHITE); setStroke(maxOf(1, dp(1)), Color.BLACK); cornerRadius = dp(20).toFloat()
+            }
+            isClickable = true; setOnClickListener { onTap() }
+        }
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER
+            setPadding(dp(24), dp(22), dp(24), dp(10))
+            addView(stepButton("A−") { if (idx > 0) { idx--; apply() } })
+            addView(label, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                marginStart = dp(18); marginEnd = dp(18)
+            })
+            addView(stepButton("A+") { if (idx < TEXT_SCALES.size - 1) { idx++; apply() } })
+        }
+        AlertDialog.Builder(this, R.style.InkDialog)
+            .setTitle("Font size")
+            .setView(row)
+            .setPositiveButton("Done", null)
+            .show()
+    }
+
+    private fun textScalePref(): Float =
+        getSharedPreferences("typography", MODE_PRIVATE).getFloat("scale", 1.0f)
+
+    private fun setTextScalePref(scale: Float) =
+        getSharedPreferences("typography", MODE_PRIVATE).edit().putFloat("scale", scale).apply()
+
+    private fun nearestScaleIndex(scale: Float): Int {
+        var best = 0
+        var bestDist = Float.MAX_VALUE
+        TEXT_SCALES.forEachIndexed { i, v ->
+            val dist = kotlin.math.abs(v - scale)
+            if (dist < bestDist) { bestDist = dist; best = i }
+        }
+        return best
+    }
+
     /** Persist the current reading position (RR12-FR3 / RR27); store-less / closed = no-op. */
     private fun savePosition() {
         if (docHandle == 0L) return
@@ -2551,6 +2633,8 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         const val ERASE_RADIUS_PX = 22f // eraser hit radius (px): a stroke within this of the path goes.
 
         // Core ink seam constants (ADR-INKREAD-0010). Tool codes mirror `inkread_ink::Tool::code`.
+        /** Reflow font-size steps (multiples of the core's base body size); 1.0 = default. */
+        val TEXT_SCALES = floatArrayOf(0.6f, 0.7f, 0.8f, 0.9f, 1.0f, 1.15f, 1.3f, 1.5f, 1.75f, 2.0f, 2.5f)
         const val CORE_TOOL_PEN = 0
         const val CORE_TOOL_HIGHLIGHTER = 1
         const val CORE_TOOL_ERASER = 2

@@ -1,0 +1,20 @@
+[package]
+name = "inkread-epub"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "EPUB container parsing + (forthcoming) pure-Rust reflow for inkread (RR2-FR5 / ADR-INKREAD-0007). Host-testable; names no vendor (IR-7)."
+
+[dependencies]
+rbook = "0.7.9"
+# scraper (html5ever-based, ISC) parses chapter XHTML into a tree we lower to our own owned content
+# model; the parse tree is transient (never escapes parse_blocks). ego-tree (scraper's own tree, MIT)
+# is named directly so the recursive walker can take a `NodeRef`.
+scraper = { version = "0.27", default-features = false }
+ego-tree = "0.11"
+# ab_glyph (Apache-2.0/MIT, pure Rust) — glyph advances (Metrics) + outline rasterization for the
+# reflow renderer; cross-compiles to aarch64-android with no native font lib.
+ab_glyph = "0.2"

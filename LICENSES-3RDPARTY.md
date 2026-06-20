@@ -130,7 +130,12 @@ the dependency set changes.
 | Font | Source | License |
 |------|--------|---------|
 | Pinyon Script | github.com/SorkinType/Pinyon (Google Fonts) | SIL Open Font License 1.1 |
+| Spectral | github.com/productiontype/Spectral (Google Fonts) | SIL Open Font License 1.1 |
 
 Pinyon Script is bundled at `app/src/main/assets/fonts/pinyon_script.ttf` for the home-screen
 "Library" heading (Spencerian-inspired). © The Pinyon Script Project Authors; SIL OFL 1.1
 (http://scripts.sil.org/OFL) — free to use, bundle, and redistribute with attribution.
+
+Spectral (Regular) is bundled at `inkread-epub/fonts/Spectral-Regular.ttf` and embedded in the
+reflow renderer (`inkread-epub::render`) as the default EPUB reading face. © Production Type; SIL
+OFL 1.1 — the full license ships alongside the font at `inkread-epub/fonts/OFL.txt`.

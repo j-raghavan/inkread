@@ -142,12 +142,24 @@ pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeOpenDocumen
             .map_err(|e| CoreError::InvalidArgument(format!("read {path}: {e}")))
             .map_err(|e| throw(env, &e))?;
 
-        match ReaderSession::open_pdf(bytes, caps, viewport) {
+        let opened = if is_epub(&path) {
+            ReaderSession::open_epub(bytes, caps, viewport)
+        } else {
+            ReaderSession::open_pdf(bytes, caps, viewport)
+        };
+        match opened {
             Ok(session) => Ok(Box::into_raw(Box::new(session)) as jlong),
             Err(e) => Err(throw(env, &e)),
         }
     })
     .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
+}
+
+/// Pick the backend by file extension: `.epub` (case-insensitive) → reflowable EPUB, else PDF.
+fn is_epub(path: &str) -> bool {
+    std::path::Path::new(path)
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("epub"))
 }
 
 // =====================================================================================
@@ -186,7 +198,12 @@ pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeOpenDocumen
         let store = SqliteStore::open(Path::new(&db_path)).map_err(|e| throw(env, &e))?;
         let store: Arc<dyn ReaderStore> = Arc::new(store);
 
-        match ReaderSession::open_pdf_with_store(bytes, caps, viewport, store, book) {
+        let opened = if is_epub(&path) {
+            ReaderSession::open_epub_with_store(bytes, caps, viewport, store, book)
+        } else {
+            ReaderSession::open_pdf_with_store(bytes, caps, viewport, store, book)
+        };
+        match opened {
             Ok(session) => Ok(Box::into_raw(Box::new(session)) as jlong),
             Err(e) => Err(throw(env, &e)),
         }
@@ -475,6 +492,27 @@ pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeSetZoom<'lo
         let session = unsafe { session_mut(handle) }.map_err(|e| throw(env, &e))?;
         session.set_zoom(zoom, pan_x, pan_y);
         Ok(())
+    })
+    .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
+}
+
+// nativeSetTextScale(handle, scale) : int — set reflow font size (1.0 = default) for an EPUB;
+// repaginates, preserving the chapter. Returns the new current page index, or -1 for a fixed-layout
+// document (PDF) that does not reflow. The shell re-renders afterward (RR2-FR5).
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeSetTextScale<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+    scale: jfloat,
+) -> jint {
+    env.with_env(|env| -> jni::errors::Result<jint> {
+        let session = unsafe { session_mut(handle) }.map_err(|e| throw(env, &e))?;
+        if session.set_text_scale(scale) {
+            Ok(session.current_page() as jint)
+        } else {
+            Ok(-1)
+        }
     })
     .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
 }

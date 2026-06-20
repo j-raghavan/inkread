@@ -19,21 +19,26 @@ object Books {
     /** The books directory (created on demand). */
     fun dir(context: Context): File = File(context.filesDir, "books").apply { mkdirs() }
 
-    /** Every imported PDF, sorted by name (case-insensitive). */
+    /** Supported document extensions (the core dispatches a backend by extension). */
+    private val SUPPORTED = setOf("pdf", "epub")
+
+    /** Every imported document (PDF or EPUB), sorted by name (case-insensitive). */
     fun list(context: Context): List<File> =
         dir(context)
-            .listFiles { f -> f.isFile && f.extension.equals("pdf", ignoreCase = true) }
+            .listFiles { f -> f.isFile && f.extension.lowercase() in SUPPORTED }
             ?.sortedBy { it.name.lowercase() }
             ?: emptyList()
 
     /**
-     * Copy a SAF-picked PDF into the books dir under a sanitized name derived from its display
-     * name, returning the stored file (or null on failure). A re-import of the same display name
-     * overwrites — the name is the book's identity. Runs IO; call off the UI thread.
+     * Copy a SAF-picked document into the books dir under a sanitized name derived from its display
+     * name, **preserving the extension** (`.epub` → reflowable, else `.pdf`) so the core opens the
+     * right backend. Returns the stored file (or null on failure). A re-import of the same display
+     * name overwrites — the name is the book's identity. Runs IO; call off the UI thread.
      */
     fun importFrom(context: Context, uri: Uri): File? {
-        val base = sanitize(queryName(context, uri) ?: "document")
-        val dest = File(dir(context), "$base.pdf")
+        val raw = queryName(context, uri) ?: "document"
+        val ext = if (raw.substringAfterLast('.', "").equals("epub", ignoreCase = true)) "epub" else "pdf"
+        val dest = File(dir(context), "${sanitize(raw)}.$ext")
         return try {
             context.contentResolver.openInputStream(uri)?.use { input ->
                 dest.outputStream().use { out -> input.copyTo(out) }
@@ -44,7 +49,7 @@ object Books {
         }
     }
 
-    /** A human title for a stored book file (drop the `.pdf`). */
+    /** A human title for a stored book file (drop the extension). */
     fun title(file: File): String = file.nameWithoutExtension
 
     // ---- first-page thumbnails (RR17-FR5) ----

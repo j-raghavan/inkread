@@ -127,6 +127,11 @@ object NativeBridge {
      *  [nativeRenderPage] renders the magnified/panned view. */
     external fun nativeSetZoom(handle: Long, zoom: Float, panX: Float, panY: Float)
 
+    /** Set the reflow text scale ([scale]; 1.0 = default font size) for an EPUB, repaginating and
+     *  preserving the chapter (RR2-FR5). Returns the new current page index, or -1 for a
+     *  fixed-layout document (PDF) that does not reflow. Re-render after calling. */
+    external fun nativeSetTextScale(handle: Long, scale: Float): Int
+
     // ---- ink annotation, persisted by the core to a sidecar (RR6/RR10 / ADR-INKREAD-0010) ----
 
     /** Attach a `.inkread` sidecar store for the open document so strokes persist (RR10). */
