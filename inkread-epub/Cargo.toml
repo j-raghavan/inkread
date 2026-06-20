@@ -1,0 +1,12 @@
+[package]
+name = "inkread-epub"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "EPUB container parsing + (forthcoming) pure-Rust reflow for inkread (RR2-FR5 / ADR-INKREAD-0007). Host-testable; names no vendor (IR-7)."
+
+[dependencies]
+rbook = "0.7.9"
