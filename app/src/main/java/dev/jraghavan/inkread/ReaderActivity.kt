@@ -1772,8 +1772,114 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
                 Log.e(TAG, "lasso select failed: ${e.message}"); return@execute
             }
             Log.i(TAG, "DIAG lasso selected ${ids.size} strokes from ${poly.size / 2}-pt loop")
-            setSelection(ids)
+            // No ink under the loop → fall back to selecting the PRINTED words inside it (the user
+            // circled book text, not handwriting). Lasso thus selects ink OR text — circle anything.
+            if (ids.isEmpty()) selectTextInLoop(poly) else setSelection(ids)
         }
+    }
+
+    /**
+     * Lasso text fallback (engine thread): the loop found no ink, so select the printed text within
+     * the loop's bounding box via the core's text seam ([NativeBridge.nativeTextInRect]) and offer
+     * Define / Copy / Highlight. A polygon's bbox over a hand-drawn circle comfortably covers the
+     * words the user meant; per-vertex containment is a future refinement.
+     */
+    private fun selectTextInLoop(poly: FloatArray) {
+        if (docHandle == 0L || poly.size < 6) {
+            runOnUiThread { Toast.makeText(this, "Nothing under the loop", Toast.LENGTH_SHORT).show() }
+            return
+        }
+        var x0 = Float.MAX_VALUE; var y0 = Float.MAX_VALUE; var x1 = -Float.MAX_VALUE; var y1 = -Float.MAX_VALUE
+        var i = 0
+        while (i + 1 < poly.size) {
+            x0 = minOf(x0, poly[i]); x1 = maxOf(x1, poly[i])
+            y0 = minOf(y0, poly[i + 1]); y1 = maxOf(y1, poly[i + 1])
+            i += 2
+        }
+        val sel = try {
+            WireCodec.decodeSelection(NativeBridge.nativeTextInRect(docHandle, currentPage, x0, y0, x1, y1))
+        } catch (e: RuntimeException) {
+            Log.e(TAG, "lasso text-in-rect failed: ${e.message}"); Selection("", emptyList())
+        }
+        Log.i(TAG, "DIAG lasso text fallback: '${sel.text.take(40)}' (${sel.boxes.size} boxes)")
+        clearFirmwareInk() // wipe the firmware ink left by drawing the lasso loop
+        renderAndBlit()
+        if (sel.isEmpty) {
+            adapter.refreshFull()
+            runOnUiThread {
+                Toast.makeText(this, "Nothing under the loop — circle ink or printed words", Toast.LENGTH_SHORT).show()
+            }
+            return
+        }
+        drawTextSelectionBoxes(sel.boxes) // show what was caught, then offer actions
+        adapter.refreshFull()
+        runOnUiThread { showTextSelectionActions(sel) }
+    }
+
+    /** Shade the selected printed-text boxes over the cached page (so the user sees the catch). */
+    private fun drawTextSelectionBoxes(boxes: List<SelBox>) {
+        val bmp = bitmap ?: return
+        val fill = Paint().apply { color = Color.argb(60, 0, 0, 0); style = Paint.Style.FILL }
+        blit { canvas ->
+            canvas.drawBitmap(bmp, 0f, 0f, null)
+            for (b in boxes) canvas.drawRect(nToVx(b.x0), nToVy(b.y0), nToVx(b.x1), nToVy(b.y1), fill)
+        }
+    }
+
+    /** Action sheet for circled printed text: Define · Copy · Highlight (UI thread). */
+    private fun showTextSelectionActions(sel: Selection) {
+        val snippet = sel.text.trim().replace(Regex("\\s+"), " ")
+        AlertDialog.Builder(this, R.style.InkDialog)
+            .setTitle(if (snippet.length > 42) snippet.take(42) + "…" else snippet)
+            .setItems(arrayOf("Define", "Copy", "Highlight")) { _, which ->
+                when (which) {
+                    0 -> defineSelectionText(snippet)
+                    1 -> copyTextToClipboard(snippet)
+                    2 -> engine.execute { highlightTextBoxes(sel) }
+                }
+            }
+            // Any dismissal (action chosen or cancelled) clears the box overlay; a Highlight redraws
+            // it with the real annotation, a Define opens the dict card over the cleared page.
+            .setOnDismissListener { engine.execute { renderAndBlit(); adapter.refreshFull() } }
+            .show()
+    }
+
+    /** Define the first word-like token of a printed-text selection (lookup is per-word). */
+    private fun defineSelectionText(text: String) {
+        val word = text.split(Regex("\\s+")).firstOrNull { it.any(Char::isLetter) } ?: return
+        engine.execute { lookupAndShow(word) }
+    }
+
+    /** Copy printed-text selection to the system clipboard. */
+    private fun copyTextToClipboard(text: String) {
+        val cm = getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+        cm.setPrimaryClip(android.content.ClipData.newPlainText("inkread", text))
+        Toast.makeText(this, "Copied", Toast.LENGTH_SHORT).show()
+    }
+
+    /**
+     * Highlight circled printed text by laying one translucent highlighter stroke across each text
+     * box (engine thread) — reusing the ink highlighter's persistence + PDF export path, so no new
+     * annotation subsystem is needed. The band width matches the line height; colour follows the
+     * highlighter's current swatch.
+     */
+    private fun highlightTextBoxes(sel: Selection) {
+        if (docHandle == 0L || sel.boxes.isEmpty()) return
+        val color = highlightColor()
+        try {
+            for (b in sel.boxes) {
+                val midY = (b.y0 + b.y1) / 2f
+                val widthNorm = (b.y1 - b.y0) * viewH / viewW.coerceAtLeast(1) // line height as a page-space width
+                NativeBridge.nativeInkBeginStroke(docHandle, CORE_TOOL_HIGHLIGHTER, color, widthNorm, System.currentTimeMillis())
+                NativeBridge.nativeInkAddPoint(docHandle, b.x0, midY, 1.0f, Float.NaN, Float.NaN, 0)
+                NativeBridge.nativeInkAddPoint(docHandle, b.x1, midY, 1.0f, Float.NaN, Float.NaN, 0)
+                NativeBridge.nativeInkEndStroke(docHandle)
+            }
+            Log.i(TAG, "DIAG highlighted ${sel.boxes.size} text boxes")
+        } catch (e: RuntimeException) {
+            Log.e(TAG, "text highlight failed: ${e.message}")
+        }
+        clearFirmwareInk(); renderAndBlit(); adapter.refreshFull()
     }
 
     /** Adopt `ids` as the selection, refresh the box, and show/update the selection toolbar (engine). */
