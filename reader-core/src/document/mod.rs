@@ -231,6 +231,16 @@ pub trait Document {
         self.render_page(index, buf)
     }
 
+    /// Adjust the reflow **text scale** (`1.0` = the backend default size) and repaginate (RR2-FR5
+    /// font-size control). `current_page` is the page the reader is on *before* the change; the
+    /// backend returns `Some(new_page)` to jump to so the reading position is preserved across the
+    /// reflow (anchored to the chapter), or `None` for a **fixed-layout** format that has no reflow
+    /// (PDF — the shell leaves the page unchanged). Default: unsupported (`None`). Interior
+    /// mutability lets this stay `&self` like the render path.
+    fn set_text_scale(&self, _scale: f32, _current_page: usize) -> Option<usize> {
+        None
+    }
+
     /// Prefetch hint (RR4-FR7): the core may call this after rendering the current page so a
     /// backend can warm an internal handle for the likely-next page, making a page turn blit a
     /// ready buffer. Default: a no-op (backends opt in). Must never panic on a bad index.

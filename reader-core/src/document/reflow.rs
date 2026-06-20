@@ -6,10 +6,11 @@
 //! behind a [`RefCell`] so the trait's `&self` render path can repaginate lazily. Each spine chapter
 //! starts a new page (book convention), which also anchors TOC targets to page indices.
 //!
-//! `word_at`/`text_in_rect` (dictionary + selection on reflow text) and font-size control are
-//! follow-ups; this backend delivers open → paginate → render → navigate → TOC.
+//! Supports open → paginate → render → navigate → TOC → **font-size** ([`Document::set_text_scale`]
+//! repaginates, preserving the chapter). `word_at`/`text_in_rect` (dictionary + selection on reflow
+//! text) remain follow-ups.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 
 use inkread_epub::layout::{paginate, LayoutOpts, Page};
 use inkread_epub::render::{render_page as raster_page, AbFont, GrayCanvas};
@@ -19,9 +20,13 @@ use crate::document::{Document, DocumentMetadata, TocEntry};
 use crate::error::{CoreError, CoreResult};
 use crate::render::PixelBuffer;
 
-/// Default body font size in device pixels. Tuned for a Supernote-class panel; Phase 6 makes this a
-/// user setting that triggers repagination.
-const DEFAULT_FONT_PX: f32 = 38.0;
+/// Base body font size in device pixels at scale `1.0` (Supernote-class panel). The user's text
+/// scale multiplies this (RR2-FR5 font-size control).
+const BASE_FONT_PX: f32 = 38.0;
+
+/// Clamp for the user text scale (font size). `1.0` = [`BASE_FONT_PX`].
+const MIN_SCALE: f32 = 0.6;
+const MAX_SCALE: f32 = 2.5;
 
 /// A pagination of the whole book for one (viewport, font-size) — recomputed on a metrics change.
 struct Laid {
@@ -44,7 +49,9 @@ pub struct EpubBackend {
     meta: DocumentMetadata,
     /// The reading face (embedded default).
     font: AbFont,
-    /// The current pagination; recomputed when the viewport changes.
+    /// User text scale (font size); `1.0` = [`BASE_FONT_PX`]. Drives repagination.
+    scale: Cell<f32>,
+    /// The current pagination; recomputed when the viewport or scale changes.
     laid: RefCell<Laid>,
 }
 
@@ -66,7 +73,7 @@ impl EpubBackend {
             &font,
             viewport.width,
             viewport.height,
-            DEFAULT_FONT_PX,
+            BASE_FONT_PX,
         );
         Ok(Self {
             chapters,
@@ -74,21 +81,39 @@ impl EpubBackend {
             nav: pkg.toc,
             meta,
             font,
+            scale: Cell::new(1.0),
             laid: RefCell::new(laid),
         })
     }
 
-    /// Repaginate if the requested buffer dimensions differ from the cached layout's viewport.
+    /// The effective body font size for the current user scale.
+    fn font_px(&self) -> f32 {
+        BASE_FONT_PX * self.scale.get()
+    }
+
+    /// Repaginate if the requested buffer dimensions or the effective font size differ from the
+    /// cached layout.
     fn ensure_laid(&self, w: u32, h: u32) {
+        let font_px = self.font_px();
         let needs = {
             let laid = self.laid.borrow();
-            laid.opts.page_w as u32 != w || laid.opts.page_h as u32 != h
+            laid.opts.page_w as u32 != w
+                || laid.opts.page_h as u32 != h
+                || (laid.opts.font_px - font_px).abs() > 0.01
         };
         if needs {
-            let font_px = self.laid.borrow().opts.font_px;
             let fresh = layout_all(&self.chapters, &self.font, w, h, font_px);
             *self.laid.borrow_mut() = fresh;
         }
+    }
+
+    /// The chapter index that global `page` falls in (the last chapter whose start ≤ page).
+    fn chapter_of(&self, page: usize) -> usize {
+        let laid = self.laid.borrow();
+        laid.chapter_start
+            .iter()
+            .rposition(|&start| start <= page)
+            .unwrap_or(0)
     }
 }
 
@@ -129,6 +154,26 @@ impl Document for EpubBackend {
             .iter()
             .map(|n| resolve_nav(n, &self.chapter_keys, &laid.chapter_start))
             .collect()
+    }
+
+    fn set_text_scale(&self, scale: f32, current_page: usize) -> Option<usize> {
+        let scale = if scale.is_finite() {
+            scale.clamp(MIN_SCALE, MAX_SCALE)
+        } else {
+            1.0
+        };
+        // Anchor the reading position to the current chapter, repaginate at the new size, then
+        // return that chapter's new start page so the reader stays put across the reflow.
+        let chapter = self.chapter_of(current_page);
+        self.scale.set(scale);
+        let (w, h) = {
+            let laid = self.laid.borrow();
+            (laid.opts.page_w as u32, laid.opts.page_h as u32)
+        };
+        let fresh = layout_all(&self.chapters, &self.font, w, h, self.font_px());
+        let target = fresh.chapter_start.get(chapter).copied().unwrap_or(0);
+        *self.laid.borrow_mut() = fresh;
+        Some(target)
     }
 }
 
@@ -244,6 +289,24 @@ mod tests {
             "ch2 starts on a later page: {:?}",
             toc[1].target_page
         );
+    }
+
+    #[test]
+    fn larger_text_scale_repaginates_and_keeps_the_chapter() {
+        let b = EpubBackend::open(SAMPLE.to_vec(), vp(400, 600)).unwrap();
+        let _ = render(&b, 0, 400, 600); // settle the layout at this viewport
+        let base_pages = b.page_count();
+        // Reader is in chapter 2; bumping the size should land us back at chapter 2's new start.
+        let ch2_start = b.toc()[1].target_page.unwrap();
+        let new_page = b.set_text_scale(1.8, ch2_start).unwrap();
+        assert!(
+            b.page_count() >= base_pages,
+            "bigger text ⇒ at least as many pages"
+        );
+        // The returned page is chapter 2's start under the new pagination.
+        assert_eq!(new_page, b.toc()[1].target_page.unwrap());
+        // PDF-style fixed layout would return None; EPUB returns Some.
+        assert!(b.set_text_scale(1.0, 0).is_some());
     }
 
     #[test]

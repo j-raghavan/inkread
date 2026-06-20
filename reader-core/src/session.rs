@@ -359,6 +359,21 @@ impl ReaderSession {
         self.zoom
     }
 
+    /// Set the reflow **text scale** (font size; `1.0` = default) for a reflowable document,
+    /// repaginating and preserving the reading position by chapter (RR2-FR5). Returns `true` if the
+    /// format supports reflow (EPUB); `false` for fixed-layout PDF (no change). The shell re-renders
+    /// the (possibly new) current page afterward.
+    pub fn set_text_scale(&mut self, scale: f32) -> bool {
+        match self.document.set_text_scale(scale, self.page) {
+            Some(new_page) => {
+                self.page = new_page.min(self.page_count().saturating_sub(1));
+                self.load_ink_for_current_page();
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Apply a navigation gesture: move the position (clamped at the document ends), then
     /// delegate to the policy's `on_page_turn` for the refresh stream (Amendment 6).
     ///

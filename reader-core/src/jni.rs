@@ -496,6 +496,27 @@ pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeSetZoom<'lo
     .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
 }
 
+// nativeSetTextScale(handle, scale) : int — set reflow font size (1.0 = default) for an EPUB;
+// repaginates, preserving the chapter. Returns the new current page index, or -1 for a fixed-layout
+// document (PDF) that does not reflow. The shell re-renders afterward (RR2-FR5).
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeSetTextScale<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+    scale: jfloat,
+) -> jint {
+    env.with_env(|env| -> jni::errors::Result<jint> {
+        let session = unsafe { session_mut(handle) }.map_err(|e| throw(env, &e))?;
+        if session.set_text_scale(scale) {
+            Ok(session.current_page() as jint)
+        } else {
+            Ok(-1)
+        }
+    })
+    .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
+}
+
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeInkBeginStroke<'local>(
     mut env: EnvUnowned<'local>,
