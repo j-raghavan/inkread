@@ -516,3 +516,88 @@ fn eraser_rejects_non_positive_radius() {
         .ink_begin_stroke(Tool::Eraser, InkColor::BLACK, f32::NAN, 0)
         .is_err());
 }
+
+// ===== Lasso selection at the session layer (ADR-INKREAD-0010, M-Lasso-2) =====
+
+/// A box polygon covering the page centre (0.3..0.7), where `draw` strokes are placed.
+fn centre_box() -> Vec<(f32, f32)> {
+    vec![(0.3, 0.3), (0.7, 0.3), (0.7, 0.7), (0.3, 0.7)]
+}
+
+#[test]
+fn lasso_select_and_move_persists_and_undoes() {
+    let store: Arc<dyn InkStore> = Arc::new(MemInkStore::new());
+    let mut s = session(1, DeviceCapabilities::supernote_full());
+    s.attach_ink_store(Arc::clone(&store)).unwrap();
+    draw(&mut s, &[(0.45, 0.45), (0.55, 0.55)]);
+    let sel = s.ink_select_in_polygon(&centre_box(), 0).unwrap(); // Smart
+    assert_eq!(sel.len(), 1);
+
+    assert!(s.ink_move_selection(&sel, 0.05, 0.0).unwrap());
+    let moved_x = s.ink_strokes()[0].points[0].x;
+    assert!((moved_x - 0.50).abs() < 1e-5);
+    assert_eq!(store.pages_with_ink().unwrap(), vec![0], "move autosaved");
+
+    assert!(s.ink_undo().unwrap());
+    assert!((s.ink_strokes()[0].points[0].x - 0.45).abs() < 1e-5);
+}
+
+#[test]
+fn lasso_delete_persists_and_leaves_others() {
+    let store: Arc<dyn InkStore> = Arc::new(MemInkStore::new());
+    let mut s = session(1, DeviceCapabilities::supernote_full());
+    s.attach_ink_store(Arc::clone(&store)).unwrap();
+    draw(&mut s, &[(0.45, 0.45), (0.55, 0.55)]); // inside the box
+    draw(&mut s, &[(0.05, 0.05), (0.08, 0.08)]); // outside
+    let sel = s.ink_select_in_polygon(&centre_box(), 1).unwrap(); // Freehand
+    assert_eq!(sel.len(), 1);
+
+    let removed = s.ink_delete_selection(&sel).unwrap();
+    assert_eq!(removed, sel);
+    assert_eq!(s.ink_strokes().len(), 1, "the outside stroke survives");
+    assert!(s.ink_undo().unwrap());
+    assert_eq!(s.ink_strokes().len(), 2, "delete undoes atomically");
+}
+
+#[test]
+fn lasso_copy_paste_duplicates_on_the_same_page() {
+    let mut s = session(1, DeviceCapabilities::supernote_full());
+    s.attach_ink_store(Arc::new(MemInkStore::new())).unwrap();
+    draw(&mut s, &[(0.45, 0.45), (0.55, 0.55)]);
+    let sel = s.ink_select_all();
+    assert_eq!(s.ink_copy_selection(&sel), 1);
+    assert!(s.ink_has_clipboard());
+    let pasted = s.ink_paste(0.1, 0.1).unwrap();
+    assert_eq!(pasted.len(), 1);
+    assert_eq!(s.ink_strokes().len(), 2, "paste added a copy");
+}
+
+#[test]
+fn lasso_cut_then_paste_moves_strokes_across_pages() {
+    // NeoReader's cross-page clipboard: cut on page 0, paste on page 1.
+    let store: Arc<dyn InkStore> = Arc::new(MemInkStore::new());
+    let mut s = session(2, DeviceCapabilities::supernote_full());
+    s.attach_ink_store(Arc::clone(&store)).unwrap();
+    draw(&mut s, &[(0.45, 0.45), (0.55, 0.55)]); // page 0
+    let sel = s.ink_select_all();
+    let cut = s.ink_cut_selection(&sel).unwrap();
+    assert_eq!(cut.len(), 1);
+    assert!(s.ink_strokes().is_empty(), "page 0 emptied by cut");
+
+    s.on_gesture(Gesture::NextPage); // → page 1
+    assert!(s.ink_strokes().is_empty());
+    let pasted = s.ink_paste(0.0, 0.0).unwrap();
+    assert_eq!(pasted.len(), 1, "clipboard survived the page turn");
+    assert_eq!(s.ink_strokes().len(), 1);
+    assert_eq!(
+        store.pages_with_ink().unwrap(),
+        vec![1],
+        "ink now on page 1"
+    );
+}
+
+#[test]
+fn lasso_rejects_an_unknown_mode_code() {
+    let s = session(1, DeviceCapabilities::supernote_full());
+    assert!(s.ink_select_in_polygon(&centre_box(), 9).is_err());
+}

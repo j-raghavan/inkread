@@ -11,6 +11,7 @@ pub mod budget;
 pub mod dict;
 pub mod document;
 pub mod error;
+pub mod ink_wire;
 pub mod persistence;
 pub mod policy;
 pub mod render;

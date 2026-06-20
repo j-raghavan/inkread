@@ -12,6 +12,39 @@ pub use text_select::{CharBox, NormRect, TextSelection};
 use crate::error::CoreResult;
 use crate::render::PixelBuffer;
 
+/// One ink stroke to write into the PDF on export (ADR-INKREAD-0005). Points are normalized page
+/// space `[0,1]` (top-left origin, y-down) exactly like the ink model; the backend maps them to PDF
+/// points. `width` is normalized to the page width. RGBA is the true stroke colour.
+#[derive(Debug, Clone)]
+pub struct ExportStroke {
+    /// Stroke path as normalized `(x, y)` pairs.
+    pub points: Vec<(f32, f32)>,
+    pub r: u8,
+    pub g: u8,
+    pub b: u8,
+    pub a: u8,
+    /// Normalized stroke width (fraction of page width).
+    pub width: f32,
+}
+
+/// The ink to write onto one page on export.
+#[derive(Debug, Clone)]
+pub struct PageInk {
+    /// 0-based page index.
+    pub page: usize,
+    /// The strokes on that page (paint order).
+    pub strokes: Vec<ExportStroke>,
+}
+
+/// How an export writes the ink into the PDF (ADR-INKREAD-0005).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExportMode {
+    /// Editable PDF **Ink annotations** (selectable/removable in standard viewers; colour preserved).
+    Annotations,
+    /// **Flatten** the ink into the page content (visible in every viewer; not editable afterward).
+    Flatten,
+}
+
 /// Document metadata (title/author) — the M0 subset (RR5-FR2).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DocumentMetadata {
@@ -210,6 +243,20 @@ pub trait Document {
     /// D1). Default: an empty selection.
     fn text_in_rect(&self, _page: usize, _rect: NormRect) -> TextSelection {
         TextSelection::default()
+    }
+
+    /// Write `page_ink` into the document and save it to `out_path` (ADR-INKREAD-0005). [`ExportMode`]
+    /// chooses editable annotations vs. flattened page content. Default: unsupported (a format/back-
+    /// end without write support returns an error, never panics — RR21-FR3).
+    fn export_pdf(
+        &mut self,
+        _out_path: &str,
+        _page_ink: &[PageInk],
+        _mode: ExportMode,
+    ) -> CoreResult<()> {
+        Err(crate::error::CoreError::RenderBackend(
+            "PDF export not supported by this backend".to_string(),
+        ))
     }
 }
 
