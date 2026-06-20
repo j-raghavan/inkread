@@ -370,3 +370,113 @@ fn export_writes_ink_annotation_and_flatten_into_pdf() {
     let _ = std::fs::remove_file(&out_a);
     let _ = std::fs::remove_file(&out_f);
 }
+
+#[test]
+fn render_zoom_device_size_not_blank() {
+    let _s = pdfium_serial();
+    if !host_pdfium_available() {
+        eprintln!("SKIP render_zoom_device_size: host libpdfium UNVERIFIED");
+        return;
+    }
+    let bytes = std::fs::read(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/minimal.pdf"
+    ))
+    .unwrap();
+    let doc = PdfBackend::open(bytes).unwrap();
+    // Device-like buffer (1920x2560) at 2x zoom — the regime where the page rendered blank.
+    let (w, h) = (1920u32, 2560u32);
+    let mut px = vec![0u8; (w * h * 4) as usize];
+    let mut pb = PixelBuffer::from_rgba(&mut px, w, h).unwrap();
+    doc.render_zoom(0, &mut pb, 2.0, 0, 0).expect("render_zoom");
+    let any_ink = pb
+        .bytes()
+        .chunks_exact(4)
+        .any(|p| p[0] < 200 || p[1] < 200 || p[2] < 200);
+    assert!(
+        any_ink,
+        "render_zoom produced a blank page at device size/zoom"
+    );
+}
+
+#[test]
+fn render_zoom_panned_window_not_blank() {
+    // A panned zoom window (non-zero X AND Y offset) must show content — regression for the blank
+    // page where uniform scaling made content height ≠ h·z, so the Y offset landed below the page.
+    let _s = pdfium_serial();
+    if !host_pdfium_available() {
+        eprintln!("SKIP render_zoom_panned_window: host libpdfium UNVERIFIED");
+        return;
+    }
+    // A full-text page (if available) so a centre pan lands on content; else minimal (top-only).
+    let rich = "/tmp/annotated.pdf";
+    let bytes = if std::path::Path::new(rich).exists() {
+        std::fs::read(rich).unwrap()
+    } else {
+        std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/minimal.pdf"
+        ))
+        .unwrap()
+    };
+    let doc = PdfBackend::open(bytes).unwrap();
+    let (w, h) = (1920u32, 2560u32);
+    // 2x zoom, panned to the centre overscan (off = pan*size*(z-1) at pan=0.5 → 960, 1280).
+    let mut px = vec![0u8; (w * h * 4) as usize];
+    let mut pb = PixelBuffer::from_rgba(&mut px, w, h).unwrap();
+    doc.render_zoom(0, &mut pb, 2.0, 960, 1280)
+        .expect("render_zoom panned");
+    let ink = pb
+        .bytes()
+        .chunks_exact(4)
+        .filter(|p| p[0] < 200 || p[1] < 200 || p[2] < 200)
+        .count();
+    assert!(ink > 5000, "panned zoom window is blank (ink_px={ink})");
+}
+
+#[test]
+fn zoom_z1_matches_render_page_orientation() {
+    let _s = pdfium_serial();
+    if !host_pdfium_available() {
+        return;
+    }
+    let p = "/tmp/annotated.pdf";
+    let bytes = if std::path::Path::new(p).exists() {
+        std::fs::read(p).unwrap()
+    } else {
+        std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/minimal.pdf"
+        ))
+        .unwrap()
+    };
+    let doc = PdfBackend::open(bytes).unwrap();
+    let (w, h) = (300u32, 400u32);
+    let gray = |buf: &[u8], x: u32, y: u32| -> i64 {
+        let i = ((y * w + x) * 4) as usize;
+        buf[i] as i64
+    };
+    let mut a = vec![0u8; (w * h * 4) as usize];
+    let mut b = vec![0u8; (w * h * 4) as usize];
+    {
+        let mut pb = PixelBuffer::from_rgba(&mut a, w, h).unwrap();
+        doc.render_page(0, &mut pb).unwrap();
+    }
+    {
+        let mut pb = PixelBuffer::from_rgba(&mut b, w, h).unwrap();
+        doc.render_zoom(0, &mut pb, 1.0, 0, 0).unwrap();
+    }
+    let mut same = 0i64;
+    let mut flipped = 0i64;
+    for y in 0..h {
+        for x in 0..w {
+            same += (gray(&a, x, y) - gray(&b, x, y)).abs();
+            flipped += (gray(&a, x, y) - gray(&b, x, h - 1 - y)).abs();
+        }
+    }
+    // render_zoom at z=1, no pan must equal render_page (upright, same scale) — not vertically flipped.
+    assert!(
+        same < flipped,
+        "render_zoom(z=1) differs from render_page / is flipped (same={same} flipped={flipped})"
+    );
+}

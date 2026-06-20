@@ -11,6 +11,8 @@
 //! in-memory fixture.
 
 mod engine;
+#[cfg(feature = "import")]
+pub mod import;
 pub mod stardict;
 
 pub use engine::Dict;

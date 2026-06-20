@@ -6,6 +6,7 @@ import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.drawable.GradientDrawable
 import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.Typeface
@@ -30,6 +31,7 @@ import android.view.ViewGroup
 import android.view.Window
 import android.widget.EditText
 import android.widget.FrameLayout
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.SeekBar
@@ -156,9 +158,8 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
     private val longPress = Runnable {
         mainHandler.removeCallbacks(strokeFinalize) // this hold is a lookup, not a stroke
         strokeBuf.clear()
-        val w = surfaceView.width.toFloat(); val h = surfaceView.height.toFloat()
-        if (w <= 0f || h <= 0f) return@Runnable
-        val nx = lpDownX / w; val ny = lpDownY / h
+        if (viewW == 0 || viewH == 0) return@Runnable
+        val nx = vToNx(lpDownX); val ny = vToNy(lpDownY)
         val page = currentPage
         Log.i(TAG, "DIAG long-press lookup @($nx,$ny) page=$page")
         engine.execute {
@@ -189,9 +190,8 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
 
     /** Look up the word under a view-pixel point (shared by stylus + finger long-press). */
     private fun lookupWordAtView(vx: Float, vy: Float) {
-        val w = surfaceView.width.toFloat(); val h = surfaceView.height.toFloat()
-        if (w <= 0f || h <= 0f) return
-        val nx = vx / w; val ny = vy / h; val page = currentPage
+        if (viewW == 0 || viewH == 0) return
+        val nx = vToNx(vx); val ny = vToNy(vy); val page = currentPage
         Log.i(TAG, "DIAG long-press lookup @($nx,$ny) page=$page")
         engine.execute { defineWord(page, nx, ny) }
     }
@@ -213,6 +213,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
     }
     private val inkDotPaint = Paint().apply { color = Color.BLACK; style = Paint.Style.FILL; isAntiAlias = true }
     private val bookmarkPaint = Paint().apply { color = Color.BLACK; style = Paint.Style.FILL; isAntiAlias = true }
+    private val bookmarkOutlinePaint = Paint().apply { color = Color.parseColor("#9E9E9E"); style = Paint.Style.STROKE; strokeWidth = 2f; isAntiAlias = true }
     /** Dashed box around the active lasso selection (ADR-INKREAD-0010). */
     private val selectionPaint = Paint().apply {
         color = Color.BLACK
@@ -223,6 +224,16 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
     }
     /** Filled square handles at the selection box corners (NeoReader frame 132). */
     private val selectionHandlePaint = Paint().apply { color = Color.BLACK; style = Paint.Style.FILL; isAntiAlias = true }
+    /** Small full-page thumbnail (from the fit render) for the zoom minimap; null until first render. */
+    private var fitThumb: Bitmap? = null
+    private var minimapActive = false
+    private var minimapThumbDrag = false
+    private val minimapBgPaint = Paint().apply { color = Color.WHITE; style = Paint.Style.FILL; isAntiAlias = true }
+    private val minimapCardStroke = Paint().apply { color = Color.parseColor("#BDBDBD"); style = Paint.Style.STROKE; strokeWidth = 1.5f; isAntiAlias = true }
+    private val minimapThumbStroke = Paint().apply { color = Color.parseColor("#E0E0E0"); style = Paint.Style.STROKE; strokeWidth = 1f; isAntiAlias = true }
+    private val minimapViewportFill = Paint().apply { color = Color.parseColor("#22000000"); style = Paint.Style.FILL; isAntiAlias = true }
+    private val minimapViewportPaint = Paint().apply { color = Color.BLACK; style = Paint.Style.STROKE; strokeWidth = 3f; isAntiAlias = true }
+    private val minimapGlyphPaint = Paint().apply { color = Color.BLACK; style = Paint.Style.STROKE; strokeWidth = 3f; strokeCap = Paint.Cap.ROUND; isAntiAlias = true }
     /** Current pen / highlighter colour (index into the palettes); re-tapping a tool cycles it. */
     private var penColorIdx = 0
     private var hlColorIdx = 0
@@ -297,10 +308,16 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
                     else -> captureStylus(event) // PEN (Highlighter is still P2)
                 }
             } else if (toolType == MotionEvent.TOOL_TYPE_FINGER) {
-                when (event.actionMasked) {
-                    MotionEvent.ACTION_DOWN -> onFingerDown(event)
-                    MotionEvent.ACTION_MOVE -> onFingerMove(event)
-                    MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> onFingerUp(event)
+                scaleDetector.onTouchEvent(event)
+                // While a pinch is in progress (2 fingers), don't run tap/pan/long-press logic.
+                if (!scaleDetector.isInProgress && event.pointerCount == 1) {
+                    // The zoom minimap (when shown) is an interactive navigator + zoom control;
+                    // it claims touches over its panel before the page gesture logic runs.
+                    if (!handleMinimapTouch(event)) when (event.actionMasked) {
+                        MotionEvent.ACTION_DOWN -> onFingerDown(event)
+                        MotionEvent.ACTION_MOVE -> onFingerMove(event)
+                        MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> onFingerUp(event)
+                    }
                 }
             }
             true
@@ -406,6 +423,8 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
 
     /** Launch the system file picker for a PDF (RR22). */
     private fun openPicker() {
+        // PDF-only for now (the engine renders fixed-layout PDF). When EPUB/MOBI/image rendering
+        // lands, broaden these MIME types so "Open Document" accepts the full supported gamut.
         val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
             addCategory(Intent.CATEGORY_OPENABLE)
             type = "application/pdf"
@@ -603,8 +622,12 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         for (s in pageStrokes) drawStroke(cv, s)
         // The active lasso selection's bounding box (ADR-INKREAD-0010).
         if (selectedIds.isNotEmpty() && selectionBounds.size == 4) drawSelectionBox(cv)
-        // A small dog-ear marks a bookmarked page (RR16).
-        if (bookmarks?.has(currentPage) == true) drawBookmarkCorner(cv)
+        // Keep a small full-page thumbnail from the fit render to drive the zoom minimap.
+        if (zoom <= 1f) updateFitThumb(bmp)
+        // Zoom minimap (top-right): full page + the current viewport window (RR5-FR3).
+        if (zoom > 1f) drawZoomMinimap(cv)
+        // A top-right dog-ear: faint outline (tap-to-bookmark affordance) / solid when bookmarked.
+        drawBookmarkCorner(cv)
         // Cache the first page as the book's thumbnail, once (RR17-FR5).
         if (currentPage == 0 && currentBookId.isNotEmpty() && !Books.thumbFile(this, currentBookId).exists()) {
             Books.saveThumbnail(this, currentBookId, bmp)
@@ -711,15 +734,13 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         // Highlighter = a wide, translucent band (its own core tool + colour); Pen = thin black.
         val isHl = tool == Tool.HIGHLIGHTER
         val coreTool = if (isHl) CORE_TOOL_HIGHLIGHTER else CORE_TOOL_PEN
-        val widthNorm = (if (isHl) HIGHLIGHT_WIDTH_PX else INK_STROKE_WIDTH) / w
+        val widthNorm = lenToNorm(if (isHl) HIGHLIGHT_WIDTH_PX else INK_STROKE_WIDTH)
         val color = if (isHl) highlightColor() else penColor()
         try {
             NativeBridge.nativeInkBeginStroke(docHandle, coreTool, color, widthNorm, System.currentTimeMillis())
             var i = 0
             while (i + 1 < raw.size) {
-                val nx = (raw[i] / w).coerceIn(0f, 1f)
-                val ny = (raw[i + 1] / h).coerceIn(0f, 1f)
-                NativeBridge.nativeInkAddPoint(docHandle, nx, ny, 1.0f, Float.NaN, Float.NaN, 0)
+                NativeBridge.nativeInkAddPoint(docHandle, vToNx(raw[i]), vToNy(raw[i + 1]), 1.0f, Float.NaN, Float.NaN, 0)
                 i += 2
             }
             NativeBridge.nativeInkEndStroke(docHandle)
@@ -736,28 +757,120 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
 
     /** Draw one core stroke (normalized points + tool/color/width) onto [canvas]. */
     private fun drawStroke(canvas: Canvas, s: InkStrokeDraw) {
-        val w = viewW.toFloat(); val h = viewH.toFloat()
         val norm = s.points
         if (norm.isEmpty()) return
         inkPaint.color = Color.argb(s.a, s.r, s.g, s.b)
-        inkPaint.strokeWidth = (s.width * w).coerceAtLeast(1f)
+        inkPaint.strokeWidth = (s.width * viewW * zoom).coerceAtLeast(1f)
         if (norm.size == 2) {
             inkDotPaint.color = inkPaint.color
-            canvas.drawCircle(norm[0] * w, norm[1] * h, inkPaint.strokeWidth / 2f, inkDotPaint)
+            canvas.drawCircle(nToVx(norm[0]), nToVy(norm[1]), inkPaint.strokeWidth / 2f, inkDotPaint)
             return
         }
         val path = Path()
-        path.moveTo(norm[0] * w, norm[1] * h)
+        path.moveTo(nToVx(norm[0]), nToVy(norm[1]))
         var i = 2
-        while (i + 1 < norm.size) { path.lineTo(norm[i] * w, norm[i + 1] * h); i += 2 }
+        while (i + 1 < norm.size) { path.lineTo(nToVx(norm[i]), nToVy(norm[i + 1])); i += 2 }
         canvas.drawPath(path, inkPaint)
+    }
+
+    /** Refresh the cached full-page thumbnail from a fit render [src] (drives the zoom minimap). */
+    private fun updateFitThumb(src: Bitmap) {
+        val tw = viewW / 5; val th = viewH / 5
+        if (tw < 8 || th < 8) return
+        val old = fitThumb
+        fitThumb = Bitmap.createScaledBitmap(src, tw, th, true)
+        if (old != null && old != fitThumb) old.recycle()
+    }
+
+    /** Minimap panel geometry (thumbnail + the −/+ zoom buttons below it). Deterministic from the
+     *  viewport so the renderer and the touch hit-test agree. Null if the view isn't sized yet. */
+    private class MmGeom(
+        val left: Float, val top: Float, val tw: Float, val th: Float,
+        val minus: android.graphics.RectF, val plus: android.graphics.RectF,
+    )
+    private fun minimapGeometry(): MmGeom? {
+        if (viewW == 0 || viewH == 0) return null
+        val tw = (viewW / 5).toFloat(); val th = (viewH / 5).toFloat()
+        val m = dpInt(8).toFloat()
+        val left = viewW - tw - m; val top = m
+        val barTop = top + th + dpInt(6)
+        val barH = dpInt(48).toFloat(); val half = tw / 2f
+        val minus = android.graphics.RectF(left, barTop, left + half, barTop + barH)
+        val plus = android.graphics.RectF(left + half, barTop, left + tw, barTop + barH)
+        return MmGeom(left, top, tw, th, minus, plus)
+    }
+
+    /** Draw the zoom minimap (top-right): a rounded card with the full-page thumb, the visible
+     *  window highlighted, and clean −/+ zoom buttons below a divider. */
+    private fun drawZoomMinimap(canvas: Canvas) {
+        val thumb = fitThumb ?: return
+        val g = minimapGeometry() ?: return
+        val pad = dpInt(6).toFloat(); val rad = dpInt(10).toFloat()
+        val cardL = g.left - pad; val cardT = g.top - pad
+        val cardR = g.left + g.tw + pad; val cardB = g.plus.bottom + pad
+        // Rounded white card + subtle border.
+        canvas.drawRoundRect(cardL, cardT, cardR, cardB, rad, rad, minimapBgPaint)
+        canvas.drawRoundRect(cardL, cardT, cardR, cardB, rad, rad, minimapCardStroke)
+        // Thumbnail with a light frame.
+        canvas.drawBitmap(thumb, g.left, g.top, null)
+        canvas.drawRect(g.left, g.top, g.left + g.tw, g.top + g.th, minimapThumbStroke)
+        // Visible-window rectangle: translucent fill + solid border = clear "you are here".
+        val z = zoom
+        val vx0 = panX * (z - 1f) / z; val vy0 = panY * (z - 1f) / z; val v = 1f / z
+        val vl = g.left + vx0 * g.tw; val vt = g.top + vy0 * g.th
+        val vr = g.left + (vx0 + v) * g.tw; val vb = g.top + (vy0 + v) * g.th
+        canvas.drawRect(vl, vt, vr, vb, minimapViewportFill)
+        canvas.drawRect(vl, vt, vr, vb, minimapViewportPaint)
+        // Divider above the button row, then a vertical split between − and +.
+        canvas.drawLine(cardL + pad, g.minus.top, cardR - pad, g.minus.top, minimapThumbStroke)
+        canvas.drawLine(g.plus.left, g.minus.top + dpInt(4), g.plus.left, g.minus.bottom - dpInt(4), minimapThumbStroke)
+        // − / + glyphs.
+        val r = dpInt(8).toFloat()
+        canvas.drawLine(g.minus.centerX() - r, g.minus.centerY(), g.minus.centerX() + r, g.minus.centerY(), minimapGlyphPaint)
+        canvas.drawLine(g.plus.centerX() - r, g.plus.centerY(), g.plus.centerX() + r, g.plus.centerY(), minimapGlyphPaint)
+        canvas.drawLine(g.plus.centerX(), g.plus.centerY() - r, g.plus.centerX(), g.plus.centerY() + r, minimapGlyphPaint)
+    }
+
+    /** Center the zoom viewport on a point tapped/dragged inside the minimap thumbnail. */
+    private fun navigateMinimap(x: Float, y: Float, g: MmGeom) {
+        val z = zoom
+        if (z <= 1f) return
+        val tnx = ((x - g.left) / g.tw).coerceIn(0f, 1f) // page-normalized target center
+        val tny = ((y - g.top) / g.th).coerceIn(0f, 1f)
+        panX = ((tnx * z - 0.5f) / (z - 1f)).coerceIn(0f, 1f)
+        panY = ((tny * z - 0.5f) / (z - 1f)).coerceIn(0f, 1f)
+    }
+
+    /** Handle a finger touch on the minimap panel (navigate / zoom buttons). Returns true if it
+     *  consumed the event so the page's tap/pan/long-press logic is skipped. */
+    private fun handleMinimapTouch(e: MotionEvent): Boolean {
+        if (zoom <= 1f) return false
+        val g = minimapGeometry() ?: return false
+        val x = e.x; val y = e.y
+        val inThumb = x >= g.left && x <= g.left + g.tw && y >= g.top && y <= g.top + g.th
+        when (e.actionMasked) {
+            MotionEvent.ACTION_DOWN -> {
+                when {
+                    g.minus.contains(x, y) -> { minimapActive = true; zoomBy(1f / ZOOM_STEP); return true }
+                    g.plus.contains(x, y) -> { minimapActive = true; zoomBy(ZOOM_STEP); return true }
+                    inThumb -> { minimapActive = true; minimapThumbDrag = true; navigateMinimap(x, y, g); applyZoom(); return true }
+                }
+            }
+            MotionEvent.ACTION_MOVE -> if (minimapThumbDrag && inThumb) {
+                navigateMinimap(x, y, g); throttledPreview { applyZoom() }; return true
+            } else if (minimapActive) return true
+            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> if (minimapActive) {
+                if (minimapThumbDrag) applyZoom()
+                minimapActive = false; minimapThumbDrag = false; return true
+            }
+        }
+        return minimapActive
     }
 
     /** Draw the active lasso selection's dashed bounding box + square corner handles (frame 132). */
     private fun drawSelectionBox(canvas: Canvas) {
         val b = selectionBounds
-        val w = viewW.toFloat(); val h = viewH.toFloat()
-        val l = b[0] * w; val t = b[1] * h; val r = b[2] * w; val btm = b[3] * h
+        val l = nToVx(b[0]); val t = nToVy(b[1]); val r = nToVx(b[2]); val btm = nToVy(b[3])
         canvas.drawRect(l, t, r, btm, selectionPaint)
         val hs = SELECTION_HANDLE_PX
         for (cx in floatArrayOf(l, r)) for (cy in floatArrayOf(t, btm)) {
@@ -766,16 +879,28 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
     }
 
     /** A small filled dog-ear in the top-right corner marking a bookmarked page (RR16). */
+    /** Top-right **ribbon bookmark** (swallowtail): a faint outline always (the tappable affordance)
+     *  that fills solid when the page is bookmarked. Tapping the top-right corner toggles it. */
     private fun drawBookmarkCorner(canvas: Canvas) {
         val w = viewW.toFloat()
-        val s = viewW * 0.045f
+        val rw = viewW * 0.035f                 // ribbon width
+        val len = rw * 2.1f                      // ribbon length
+        val notch = rw * 0.45f                   // depth of the swallowtail notch
+        val right = w - rw * 1.4f                // inset from the right edge
+        val left = right - rw
         val path = Path().apply {
-            moveTo(w - s, 0f)
-            lineTo(w, 0f)
-            lineTo(w, s)
+            moveTo(left, 0f)
+            lineTo(right, 0f)
+            lineTo(right, len)
+            lineTo((left + right) / 2f, len - notch) // swallowtail
+            lineTo(left, len)
             close()
         }
-        canvas.drawPath(path, bookmarkPaint)
+        if (bookmarks?.has(currentPage) == true) {
+            canvas.drawPath(path, bookmarkPaint)
+        } else {
+            canvas.drawPath(path, bookmarkOutlinePaint)
+        }
     }
 
     /**
@@ -800,22 +925,41 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         fingerDownX = e.x; fingerDownY = e.y
         fingerMoved = false; fingerLookupFired = false
         lastFingerMoveMs = SystemClock.uptimeMillis()
-        mainHandler.removeCallbacks(fingerLongPress)
-        mainHandler.postDelayed(fingerLongPress, FINGER_LONG_PRESS_MS)
+        // When zoomed in, a one-finger drag pans (handled on UP) — don't arm long-press lookup.
+        if (zoom <= 1f) {
+            mainHandler.removeCallbacks(fingerLongPress)
+            mainHandler.postDelayed(fingerLongPress, FINGER_LONG_PRESS_MS)
+        }
     }
 
-    /** Finger MOVE: track liveness; beyond the slop it's a swipe/scroll, not a tap or hold. */
+    /** Finger MOVE: track liveness; beyond the slop it's a swipe/scroll, not a tap or hold. When
+     *  zoomed, a drag live-previews the pan (cached bitmap translated); committed on UP. */
     private fun onFingerMove(e: MotionEvent) {
         lastFingerMoveMs = SystemClock.uptimeMillis()
         if (!fingerMoved && kotlin.math.hypot(e.x - fingerDownX, e.y - fingerDownY) > FINGER_MOVE_SLOP_PX) {
             fingerMoved = true
             mainHandler.removeCallbacks(fingerLongPress)
         }
+        if (fingerMoved && zoom > 1f) {
+            throttledPreview {
+                previewBitmap(android.graphics.Matrix().apply { postTranslate(e.x - fingerDownX, e.y - fingerDownY) })
+            }
+        }
     }
 
     /** Finger UP: a quick, still press is a navigation tap (page zones / link / TOC). */
     private fun onFingerUp(e: MotionEvent) {
         mainHandler.removeCallbacks(fingerLongPress)
+        // Zoomed in: a drag pans the page; a still tap does nothing (no page-turn while zoomed).
+        if (zoom > 1f) {
+            if (fingerMoved) {
+                val overX = viewW * (zoom - 1f); val overY = viewH * (zoom - 1f)
+                if (overX > 0f) panX = (panX - (e.x - fingerDownX) / overX).coerceIn(0f, 1f)
+                if (overY > 0f) panY = (panY - (e.y - fingerDownY) / overY).coerceIn(0f, 1f)
+                applyZoom()
+            }
+            return
+        }
         if (fingerLookupFired) { fingerLookupFired = false; return } // the hold already looked up
         if (fingerMoved) return // a swipe or rejected palm — not a tap
         if (SystemClock.uptimeMillis() - lastStylusMs > PALM_REJECT_MS && strokeBuf.isEmpty()) {
@@ -829,12 +973,17 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         val w = surfaceView.width.toFloat()
         val h = surfaceView.height.toFloat()
         if (w > 0f && h > 0f) {
-            val link = currentLinks.firstOrNull { it.contains(x / w, y / h) }
+            val link = currentLinks.firstOrNull { it.contains(vToNx(x), vToNy(y)) }
             if (link != null) {
                 Log.i(TAG, "DIAG handleTap link hit -> ${link.targetPage ?: link.uri}")
                 followLink(link)
                 return
             }
+        }
+        // Top-right corner → toggle the bookmark dog-ear (Kindle/KOReader convention).
+        if (w > 0f && h > 0f && x > w * 0.86f && y < h * 0.08f) {
+            toggleBookmark()
+            return
         }
         val third = w / 3f
         val zone = if (x < third) "PREV" else if (x > 2 * third) "NEXT" else "TOC"
@@ -943,17 +1092,36 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(1).coerceAtLeast(1)),
         )
 
-        // Page-slider row:  [N / Total]  ────────●────────
+        // Page-slider row:  [N / Total]  ────────●────────  (grayscale, tap the chip to type a page)
         val pageLabel = TextView(this).apply {
             text = "${cur + 1} / $total"
             setTextColor(Color.BLACK)
-            textSize = 14f
-            setPadding(0, 0, dp(14), 0)
+            textSize = 13f
+            gravity = Gravity.CENTER
+            setPadding(dp(12), dp(5), dp(12), dp(5))
+            background = GradientDrawable().apply {
+                setColor(Color.parseColor("#F2F2F2"))
+                cornerRadius = dp(14).toFloat()
+            }
             setOnClickListener { dialog.dismiss(); showPageEntry(total) }
         }
+        // A refined, thin grayscale track + small round thumb (the default SeekBar reads clunky).
+        val trackH = dp(3).coerceAtLeast(2)
+        fun bar(c: Int) = GradientDrawable().apply { setColor(c); cornerRadius = trackH.toFloat(); setSize(0, trackH) }
+        val track = android.graphics.drawable.LayerDrawable(
+            arrayOf(
+                bar(Color.parseColor("#D8D8D8")),
+                android.graphics.drawable.ClipDrawable(bar(Color.BLACK), Gravity.START, android.graphics.drawable.ClipDrawable.HORIZONTAL),
+            ),
+        ).apply { setId(0, android.R.id.background); setId(1, android.R.id.progress) }
+        val knob = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(Color.BLACK); setSize(dp(16), dp(16)) }
         val seek = SeekBar(this).apply {
             max = total - 1
             progress = cur
+            progressDrawable = track
+            thumb = knob
+            splitTrack = false
+            setPadding(dp(10), dp(4), dp(10), dp(4))
             setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
                 override fun onProgressChanged(sb: SeekBar, p: Int, fromUser: Boolean) {
                     if (fromUser) pageLabel.text = "${p + 1} / $total"
@@ -966,39 +1134,48 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
-                setPadding(dp(16), dp(10), dp(16), dp(4))
-                addView(pageLabel)
+                setPadding(dp(16), dp(12), dp(16), dp(6))
                 addView(seek, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+                addView(pageLabel, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { marginStart = dp(12) })
             },
         )
 
         // Control row: flat, evenly-weighted icon+label cells.
         val controls = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
-            setPadding(dp(2), dp(2), dp(2), dp(10))
+            setPadding(dp(2), dp(6), dp(2), dp(12))
         }
-        fun control(label: String, onClick: () -> Unit) {
-            controls.addView(
-                TextView(this).apply {
-                    text = label
-                    setTextColor(Color.BLACK)
-                    textSize = 11f
-                    gravity = Gravity.CENTER
-                    setPadding(0, dp(8), 0, dp(8))
-                    isClickable = true
-                    setOnClickListener { dialog.dismiss(); onClick() }
+        // One control = a line icon over a small label (Boox/NeoReader bottom-bar style, frame 069).
+        fun control(iconRes: Int, label: String, onClick: () -> Unit) {
+            val cell = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                gravity = Gravity.CENTER
+                setPadding(dp(2), dp(8), dp(2), dp(8))
+                isClickable = true
+                setOnClickListener { dialog.dismiss(); onClick() }
+            }
+            cell.addView(
+                ImageView(this).apply {
+                    setImageResource(iconRes); setColorFilter(Color.BLACK)
                 },
-                LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f),
+                LinearLayout.LayoutParams(dp(26), dp(26)),
             )
+            cell.addView(TextView(this).apply {
+                text = label; setTextColor(Color.parseColor("#444444")); textSize = 10f
+                gravity = Gravity.CENTER; setPadding(0, dp(4), 0, 0)
+            })
+            controls.addView(cell, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         }
-        val marked = bookmarks?.has(cur) == true
-        control("🏠\nHome") { goHome() }
-        control("📚\nLibrary") { showLibraryDialog() }
-        control(if (marked) "🔖\nRemove" else "🔖\nBookmark") { toggleBookmark() }
-        control("📑\nMarks") { showBookmarks() }
-        control("📄\nContents") { showContentsLazy() }
-        control("💾\nExport") { showExportDialog() }
-        control("📂\nOpen") { openPicker() }
+        // "Home" already opens the library home, so a separate Library item here is redundant.
+        control(R.drawable.ic_menu_home, "Home") { goHome() }
+        // (Bookmark toggle moved to the top-right corner dog-ear; "Marks" lists them.)
+        control(R.drawable.ic_menu_marks, "Marks") { showBookmarks() }
+        control(R.drawable.ic_menu_contents, "Contents") { showContentsLazy() }
+        control(R.drawable.ic_menu_zoom_out, "Zoom −") { zoomBy(1f / ZOOM_STEP) }
+        control(R.drawable.ic_menu_zoom_in, "Zoom +") { zoomBy(ZOOM_STEP) }
+        control(R.drawable.ic_menu_export, "Export") { showExportDialog() }
+        control(R.drawable.ic_tool_define, "Dicts") { showDictionariesDialog() }
+        control(R.drawable.ic_menu_open, "Open") { openPicker() }
         container.addView(controls)
 
         dialog.setContentView(container)
@@ -1024,7 +1201,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         // inkread reads a PRIVATE copy of the PDF; to make the export visible on the desktop it must
         // land in a Partner-synced PUBLIC folder, which needs all-files access (Android 11+).
         if (!Environment.isExternalStorageManager()) {
-            AlertDialog.Builder(this)
+            AlertDialog.Builder(this, R.style.InkDialog)
                 .setTitle("Allow file access to export")
                 .setMessage("To save annotated PDFs into your synced $EXPORT_DIR_NAME folder (so they appear on your computer), inkread needs \"All files access\". Grant it on the next screen, then export again.")
                 .setPositiveButton("Open settings") { _, _ ->
@@ -1040,7 +1217,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             return
         }
         // NOTE: AlertDialog shows EITHER a message OR an items list, not both — choices go in labels.
-        AlertDialog.Builder(this)
+        AlertDialog.Builder(this, R.style.InkDialog)
             .setTitle("Export annotated PDF to $EXPORT_DIR_NAME")
             .setItems(
                 arrayOf(
@@ -1107,7 +1284,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             inputType = InputType.TYPE_CLASS_NUMBER
             hint = "1 – $total"
         }
-        AlertDialog.Builder(this)
+        AlertDialog.Builder(this, R.style.InkDialog)
             .setTitle("Go to page")
             .setView(input)
             .setPositiveButton("Go") { _, _ ->
@@ -1147,7 +1324,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
                     return@runOnUiThread
                 }
                 val labels = marks.map { "Page ${it + 1}" }.toTypedArray()
-                AlertDialog.Builder(this)
+                AlertDialog.Builder(this, R.style.InkDialog)
                     .setTitle("Bookmarks")
                     .setItems(labels) { _, which -> postJump(marks[which]) }
                     .show()
@@ -1178,15 +1355,53 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
     /** The document's table of contents (RR11-FR2), shown as a scrollable list from the popup. */
     private fun showContents(toc: List<TocItem>) {
         if (toc.isEmpty()) return
-        val labels = toc.map { item ->
-            val indent = "    ".repeat(item.depth)
-            val page = item.targetPage?.let { "  ·  p${it + 1}" } ?: ""
-            indent + item.title + page
-        }.toTypedArray()
-        AlertDialog.Builder(this)
-            .setTitle("Contents")
-            .setItems(labels) { _, which -> toc[which].targetPage?.let { postJump(it) } }
-            .show()
+        val d = resources.displayMetrics.density
+        fun dp(v: Int) = (v * d).toInt()
+        val dialog = Dialog(this).apply { requestWindowFeature(Window.FEATURE_NO_TITLE) }
+
+        val outer = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(Color.WHITE)
+            setPadding(dp(24), dp(20), dp(24), dp(12))
+        }
+        outer.addView(TextView(this).apply {
+            text = "Contents"; setTextColor(Color.BLACK); textSize = 20f
+            typeface = Typeface.DEFAULT_BOLD; setPadding(0, 0, 0, dp(12))
+        })
+        val list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        toc.forEachIndexed { i, item ->
+            if (i > 0) list.addView(View(this).apply { setBackgroundColor(Color.parseColor("#EEEEEE")) },
+                LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, maxOf(1, dp(1))))
+            list.addView(LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(dp(4) + item.depth * dp(18), dp(14), dp(4), dp(14))
+                isClickable = true
+                setOnClickListener { dialog.dismiss(); item.targetPage?.let { postJump(it) } }
+                addView(TextView(this@ReaderActivity).apply {
+                    text = item.title
+                    setTextColor(if (item.targetPage != null) Color.BLACK else Color.parseColor("#9E9E9E"))
+                    textSize = if (item.depth == 0) 16f else 15f
+                    if (item.depth == 0) typeface = Typeface.DEFAULT_BOLD
+                    maxLines = 2
+                }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+                item.targetPage?.let { p ->
+                    addView(TextView(this@ReaderActivity).apply {
+                        text = "${p + 1}"; setTextColor(Color.parseColor("#9E9E9E")); textSize = 13f
+                        setPadding(dp(12), 0, 0, 0)
+                    })
+                }
+            })
+        }
+        outer.addView(ScrollView(this).apply { addView(list) },
+            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, (resources.displayMetrics.heightPixels * 0.7f).toInt()))
+
+        dialog.setContentView(outer)
+        dialog.window?.apply {
+            setLayout((resources.displayMetrics.widthPixels * 0.82f).toInt(), ViewGroup.LayoutParams.WRAP_CONTENT)
+            setBackgroundDrawable(GradientDrawable().apply { setColor(Color.WHITE); cornerRadius = dp(12).toFloat() })
+        }
+        dialog.show()
     }
 
     /** The on-device library (RR17): pick a stored book to open it in place. */
@@ -1197,7 +1412,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             return
         }
         val labels = books.map { Books.title(it) }.toTypedArray()
-        AlertDialog.Builder(this)
+        AlertDialog.Builder(this, R.style.InkDialog)
             .setTitle("Library")
             .setItems(labels) { _, which -> openFromLibrary(books[which]) }
             .show()
@@ -1282,6 +1497,90 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
      */
     private fun dpInt(v: Int) = (v * resources.displayMetrics.density).toInt()
 
+    // ---- pinch-zoom transform (RR5-FR3). zoom=1 = fit; pan in [0,1] over the off-screen overscan.
+    //      Every ink coord conversion goes through these so the overlay tracks the zoomed page;
+    //      at zoom=1 they reduce to the old `x/viewW` / `nx*viewW` mapping. ----
+    @Volatile private var zoom = 1f
+    @Volatile private var panX = 0f
+    @Volatile private var panY = 0f
+    private fun nToVx(nx: Float) = nx * viewW * zoom - panX * viewW * (zoom - 1f)
+    private fun nToVy(ny: Float) = ny * viewH * zoom - panY * viewH * (zoom - 1f)
+    private fun vToNx(vx: Float) = ((vx + panX * viewW * (zoom - 1f)) / (viewW * zoom)).coerceIn(0f, 1f)
+    private fun vToNy(vy: Float) = ((vy + panY * viewH * (zoom - 1f)) / (viewH * zoom)).coerceIn(0f, 1f)
+    /** Convert an on-screen length (px) to normalized page units at the current zoom. */
+    private fun lenToNorm(px: Float) = px / (viewW * zoom)
+    /** Push the current zoom/pan to the core and re-render (engine thread). */
+    private fun applyZoom() {
+        engine.execute {
+            if (docHandle != 0L) {
+                try { NativeBridge.nativeSetZoom(docHandle, zoom, panX, panY) } catch (e: RuntimeException) {}
+            }
+            renderAndBlit()
+            adapter.refreshFull()
+        }
+    }
+
+    /** Multiply the zoom (clamped); snap back to fit at ~1. Used by the +/- buttons and pinch-end. */
+    private fun zoomBy(factor: Float) {
+        zoom = (zoom * factor).coerceIn(1f, MAX_ZOOM_UI)
+        if (zoom <= 1.01f) { zoom = 1f; panX = 0f; panY = 0f }
+        applyZoom()
+    }
+
+    // Live-preview state: during a pinch/pan we cheaply transform the CACHED page bitmap on the
+    // canvas (no pdfium, no JNI) for instant feedback, then re-render crisp once on gesture end.
+    private var gestureStartZoom = 1f
+    private var liveScale = 1f
+    private var focusX = 0f
+    private var focusY = 0f
+    private var lastPreviewMs = 0L
+    private val previewPaint = Paint().apply { isFilterBitmap = true }
+
+    /** Throttle live previews so e-ink isn't asked to refresh faster than it can. */
+    private inline fun throttledPreview(block: () -> Unit) {
+        val now = SystemClock.uptimeMillis()
+        if (now - lastPreviewMs >= PREVIEW_MS) { lastPreviewMs = now; block() }
+    }
+
+    /** Blit the cached page bitmap transformed by [m] — instant zoom/pan feedback, no re-render. */
+    private fun previewBitmap(m: android.graphics.Matrix) {
+        val bmp = bitmap ?: return
+        blit { c -> c.drawColor(Color.WHITE); c.drawBitmap(bmp, m, previewPaint) }
+    }
+
+    /** Pinch-to-zoom: live-preview the cached bitmap scaled around the focal point during the
+     *  gesture; on end, commit the zoom with focal-anchored pan and do one crisp pdfium re-render. */
+    private val scaleDetector by lazy {
+        android.view.ScaleGestureDetector(this, object : android.view.ScaleGestureDetector.SimpleOnScaleGestureListener() {
+            override fun onScaleBegin(d: android.view.ScaleGestureDetector): Boolean {
+                gestureStartZoom = zoom; liveScale = 1f; focusX = d.focusX; focusY = d.focusY
+                return true
+            }
+            override fun onScale(d: android.view.ScaleGestureDetector): Boolean {
+                liveScale *= d.scaleFactor
+                val eff = (gestureStartZoom * liveScale).coerceIn(1f, MAX_ZOOM_UI) / gestureStartZoom
+                throttledPreview {
+                    previewBitmap(android.graphics.Matrix().apply { postScale(eff, eff, focusX, focusY) })
+                }
+                return true
+            }
+            override fun onScaleEnd(d: android.view.ScaleGestureDetector) {
+                val newZoom = (gestureStartZoom * liveScale).coerceIn(1f, MAX_ZOOM_UI)
+                if (newZoom <= 1.01f) {
+                    zoom = 1f; panX = 0f; panY = 0f
+                } else {
+                    // Anchor the pinched point: keep the content under the focal point fixed.
+                    val nx = vToNx(focusX); val ny = vToNy(focusY) // uses the pre-zoom factor
+                    zoom = newZoom
+                    val overX = viewW * (zoom - 1f); val overY = viewH * (zoom - 1f)
+                    panX = if (overX > 0f) ((nx * viewW * zoom - focusX) / overX).coerceIn(0f, 1f) else 0f
+                    panY = if (overY > 0f) ((ny * viewH * zoom - focusY) / overY).coerceIn(0f, 1f) else 0f
+                }
+                applyZoom()
+            }
+        })
+    }
+
     /** Show the Lasso hint banner only while Lasso is active and nothing is selected (UI thread). */
     private fun updateLassoHint() {
         val show = tool == Tool.LASSO && selectedIds.isEmpty()
@@ -1347,14 +1646,12 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
     private fun commitErase(viewPts: FloatArray) {
         val w = viewW; val h = viewH
         if (docHandle == 0L || w == 0 || h == 0) return
-        val radiusNorm = ERASE_RADIUS_PX / w
+        val radiusNorm = lenToNorm(ERASE_RADIUS_PX)
         try {
             NativeBridge.nativeInkBeginStroke(docHandle, CORE_TOOL_ERASER, INK_COLOR_BLACK, radiusNorm, System.currentTimeMillis())
             var i = 0
             while (i + 1 < viewPts.size) {
-                val nx = (viewPts[i] / w).coerceIn(0f, 1f)
-                val ny = (viewPts[i + 1] / h).coerceIn(0f, 1f)
-                NativeBridge.nativeInkAddPoint(docHandle, nx, ny, 1.0f, Float.NaN, Float.NaN, 0)
+                NativeBridge.nativeInkAddPoint(docHandle, vToNx(viewPts[i]), vToNy(viewPts[i + 1]), 1.0f, Float.NaN, Float.NaN, 0)
                 i += 2
             }
             NativeBridge.nativeInkEndStroke(docHandle)
@@ -1444,7 +1741,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
     private fun pointInSelection(x: Float, y: Float): Boolean {
         val b = selectionBounds
         if (b.size != 4 || viewW == 0 || viewH == 0) return false
-        val nx = x / viewW; val ny = y / viewH
+        val nx = vToNx(x); val ny = vToNy(y)
         return nx in b[0]..b[2] && ny in b[1]..b[3]
     }
 
@@ -1463,8 +1760,8 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         val poly = FloatArray(raw.size)
         var i = 0
         while (i + 1 < raw.size) {
-            poly[i] = (raw[i] / w).coerceIn(0f, 1f)
-            poly[i + 1] = (raw[i + 1] / h).coerceIn(0f, 1f)
+            poly[i] = vToNx(raw[i])
+            poly[i + 1] = vToNy(raw[i + 1])
             i += 2
         }
         engine.execute {
@@ -1505,7 +1802,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
     private fun showSelectionToolbar() {
         val b = selectionBounds
         if (b.size != 4) return
-        val rect = android.graphics.RectF(b[0] * viewW, b[1] * viewH, b[2] * viewW, b[3] * viewH)
+        val rect = android.graphics.RectF(nToVx(b[0]), nToVy(b[1]), nToVx(b[2]), nToVy(b[3]))
         val canPaste = try { NativeBridge.nativeInkHasClipboard(docHandle) } catch (e: RuntimeException) { false }
         selectionToolbar.show(rect, canPaste)
     }
@@ -1514,7 +1811,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
     private fun applySelectionMove(dxPx: Float, dyPx: Float) {
         val ids = selectedIds
         if (ids.isEmpty() || viewW == 0 || viewH == 0) return
-        val dx = dxPx / viewW; val dy = dyPx / viewH
+        val dx = dxPx / (viewW * zoom); val dy = dyPx / (viewH * zoom)
         engine.execute {
             val changed = try {
                 NativeBridge.nativeInkMoveSelection(docHandle, ids, dx, dy)
@@ -1638,12 +1935,10 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         val dragged = (maxX - minX) > w * 0.03f || (maxY - minY) > h * 0.02f
         val page = currentPage
         if (dragged) {
-            val r = floatArrayOf(minX / w, minY / h, maxX / w, maxY / h)
+            val r = floatArrayOf(vToNx(minX), vToNy(minY), vToNx(maxX), vToNy(maxY))
             engine.execute { defineRect(page, r) }
         } else {
-            val nx = pts[0] / w
-            val ny = pts[1] / h
-            engine.execute { defineWord(page, nx, ny) }
+            engine.execute { defineWord(page, vToNx(pts[0]), vToNy(pts[1])) }
         }
         // Wipe the firmware ink the define gesture left behind (it never becomes an annotation).
         engine.execute { clearFirmwareInk(); renderAndBlit(); adapter.refreshFull() }
@@ -1774,68 +2069,325 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         }
     }
 
-    /** The Kindle-style definition card: headword + senses + thesaurus, anchored to the bottom. */
+    /**
+     * The definition card (RR12 / ADR-INKREAD-0009 D3) — a bottom sheet styled after the Supernote
+     * dictionary plugin: the headword (with the *looked-up* word bracketed when it differs, e.g.
+     * `run ⟨running⟩`), a **WordNet** source label, a **Definition / Thesaurus** toggle, and senses
+     * grouped by part of speech with numbered glosses, examples in curly quotes, and per-sense
+     * synonyms. WordNet ships no phonetics/audio, so none are shown (no faux IPA). On-device
+     * results parse via [WordNet]; non-WordNet online hits fall back to plain numbered glosses.
+     */
     private fun showDictPopup(word: String, def: WordDefinition) {
         val d = resources.displayMetrics.density
         fun dp(v: Int) = (v * d).toInt()
+        val grey = Color.parseColor("#6B6B6B")
+        val faint = Color.parseColor("#9E9E9E")
+        val serif = Typeface.create("serif", Typeface.NORMAL)
+        val serifBold = Typeface.create("serif", Typeface.BOLD)
+
+        val parsed = WordNet.parse(def.senses)
+        val headword = def.headword.ifEmpty { word }
+        // Thesaurus = the synonyms table plus every per-sense [syn:] set, deduped, headword removed.
+        val thesaurus = (def.synonyms + parsed.senses.flatMap { it.synonyms })
+            .map { it.trim() }.filter { it.isNotEmpty() && !it.equals(headword, ignoreCase = true) }
+            .distinct()
+
         val dialog = Dialog(this).apply { requestWindowFeature(Window.FEATURE_NO_TITLE) }
-        val col = LinearLayout(this).apply {
+        val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setBackgroundColor(Color.WHITE)
-            setPadding(dp(22), dp(16), dp(22), dp(18))
+            background = GradientDrawable().apply {
+                setColor(Color.WHITE)
+                cornerRadii = floatArrayOf(dp(18).toFloat(), dp(18).toFloat(), dp(18).toFloat(), dp(18).toFloat(), 0f, 0f, 0f, 0f)
+            }
+            setPadding(dp(24), dp(12), dp(24), dp(20))
         }
-        col.addView(
-            TextView(this).apply {
-                text = def.headword.ifEmpty { word }
-                setTextColor(Color.BLACK)
-                textSize = 24f
-                typeface = Typeface.DEFAULT_BOLD
-            },
-        )
-        if (def.lang.isNotEmpty() && def.lang != "en") {
-            col.addView(
-                TextView(this).apply {
-                    text = def.lang
-                    setTextColor(Color.DKGRAY)
-                    textSize = 12f
-                },
-            )
+
+        // ── grab handle (calm sheet affordance) ──────────────────────────────────
+        root.addView(View(this).apply {
+            background = GradientDrawable().apply { setColor(Color.parseColor("#D8D8D8")); cornerRadius = dp(2).toFloat() }
+            layoutParams = LinearLayout.LayoutParams(dp(36), dp(4)).apply {
+                gravity = Gravity.CENTER_HORIZONTAL; bottomMargin = dp(12)
+            }
+        })
+
+        // ── header: headword + looked-up chip · WordNet source ───────────────────
+        val header = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+        header.addView(TextView(this).apply {
+            text = headword; setTextColor(Color.BLACK); textSize = 27f; typeface = serifBold
+        })
+        if (!word.equals(headword, ignoreCase = true) && word.isNotEmpty()) {
+            header.addView(TextView(this).apply {
+                text = "⟨ $word ⟩"; setTextColor(grey); textSize = 14f; typeface = serif
+                setPadding(dp(10), dp(8), 0, 0)
+            })
         }
-        for ((i, s) in def.senses.take(6).withIndex()) {
-            col.addView(
-                TextView(this).apply {
-                    text = "${i + 1}.  $s"
-                    setTextColor(Color.BLACK)
-                    textSize = 15f
-                    setPadding(0, dp(6), 0, 0)
-                },
-            )
+        header.addView(View(this), LinearLayout.LayoutParams(0, 0, 1f)) // spacer
+        header.addView(TextView(this).apply {
+            text = if (def.lang.isNotEmpty() && def.lang != "en") "WordNet · ${def.lang}" else "WordNet"
+            setTextColor(faint); textSize = 11f; letterSpacing = 0.06f
+        })
+        root.addView(header)
+
+        // ── Definition / Thesaurus toggle ────────────────────────────────────────
+        val body = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(0, dp(14), 0, 0) }
+        lateinit var tabDef: TextView
+        lateinit var tabThe: TextView
+        fun styleTab(tab: TextView, active: Boolean) {
+            tab.setTextColor(if (active) Color.BLACK else faint)
+            tab.typeface = if (active) Typeface.DEFAULT_BOLD else Typeface.DEFAULT
+            tab.paintFlags = if (active) tab.paintFlags or android.graphics.Paint.UNDERLINE_TEXT_FLAG
+            else tab.paintFlags and android.graphics.Paint.UNDERLINE_TEXT_FLAG.inv()
         }
-        if (def.synonyms.isNotEmpty()) {
-            col.addView(
-                TextView(this).apply {
-                    text = "SYNONYMS"
-                    setTextColor(Color.DKGRAY)
-                    textSize = 11f
-                    typeface = Typeface.DEFAULT_BOLD
-                    setPadding(0, dp(14), 0, dp(2))
-                },
-            )
-            col.addView(
-                TextView(this).apply {
-                    text = def.synonyms.take(12).joinToString(", ")
-                    setTextColor(Color.BLACK)
-                    textSize = 15f
-                },
-            )
+        fun renderDefinition() {
+            body.removeAllViews()
+            if (parsed.parseFailed) {
+                for ((i, s) in def.senses.filter { it.isNotBlank() }.take(8).withIndex()) {
+                    body.addView(senseRow(i + 1, s, dp(0)))
+                }
+                return
+            }
+            var lastPos: String? = "?" // sentinel so the first group always prints its badge
+            for (sense in parsed.senses) {
+                if (sense.pos != lastPos) {
+                    lastPos = sense.pos
+                    body.addView(posBadge(WordNet.labelForPos(sense.pos)))
+                }
+                body.addView(senseRow(sense.index, sense.definition, dp(2)))
+                for (ex in sense.examples) {
+                    body.addView(TextView(this).apply {
+                        text = "“$ex”"; setTextColor(grey); textSize = 14f
+                        typeface = Typeface.create(Typeface.DEFAULT, Typeface.ITALIC)
+                        setPadding(dp(22), dp(3), 0, 0)
+                    })
+                }
+                if (sense.synonyms.isNotEmpty()) {
+                    body.addView(TextView(this).apply {
+                        text = "≈ ${sense.synonyms.joinToString(", ")}"
+                        setTextColor(faint); textSize = 13f; setPadding(dp(22), dp(3), 0, 0)
+                    })
+                }
+            }
         }
-        dialog.setContentView(ScrollView(this).apply { addView(col) })
+        fun renderThesaurus() {
+            body.removeAllViews()
+            if (thesaurus.isEmpty()) {
+                body.addView(TextView(this).apply {
+                    text = "No thesaurus entries for this word."
+                    setTextColor(grey); textSize = 15f; setPadding(0, dp(4), 0, 0)
+                })
+                return
+            }
+            body.addView(posBadge("synonyms"))
+            body.addView(TextView(this).apply {
+                text = thesaurus.joinToString(" · ")
+                setTextColor(Color.BLACK); textSize = 16f; setLineSpacing(dp(4).toFloat(), 1f)
+                setPadding(0, dp(4), 0, 0)
+            })
+        }
+        val tabs = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; setPadding(0, dp(10), 0, 0) }
+        tabDef = TextView(this).apply {
+            text = "Definition"; textSize = 14f; setPadding(0, dp(4), dp(22), dp(4)); isClickable = true
+            setOnClickListener { styleTab(tabDef, true); styleTab(tabThe, false); renderDefinition() }
+        }
+        tabThe = TextView(this).apply {
+            text = "Thesaurus"; textSize = 14f; setPadding(0, dp(4), 0, dp(4)); isClickable = true
+            setOnClickListener { styleTab(tabThe, true); styleTab(tabDef, false); renderThesaurus() }
+        }
+        tabs.addView(tabDef); tabs.addView(tabThe)
+        root.addView(tabs)
+        root.addView(View(this).apply {
+            setBackgroundColor(Color.parseColor("#ECECEC"))
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, maxOf(1, dp(1))).apply {
+                topMargin = dp(8)
+            }
+        })
+        root.addView(ScrollView(this).apply {
+            isVerticalScrollBarEnabled = false
+            addView(body)
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                (resources.displayMetrics.heightPixels * 0.5f).toInt(),
+            )
+        })
+
+        styleTab(tabDef, true); styleTab(tabThe, false); renderDefinition()
+        dialog.setContentView(root)
         dialog.window?.apply {
             setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
             setGravity(Gravity.BOTTOM)
-            setBackgroundDrawable(ColorDrawable(Color.WHITE))
+            setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
         }
         dialog.show()
+    }
+
+    /** A part-of-speech badge (a small dark-outlined pill) heading a group of senses. */
+    private fun posBadge(label: String): TextView {
+        val d = resources.displayMetrics.density
+        fun dp(v: Int) = (v * d).toInt()
+        return TextView(this).apply {
+            text = label; setTextColor(Color.BLACK); textSize = 12f; typeface = Typeface.DEFAULT_BOLD
+            letterSpacing = 0.04f
+            setPadding(dp(10), dp(3), dp(10), dp(4))
+            background = GradientDrawable().apply {
+                setColor(Color.parseColor("#F0F0F0"))
+                setStroke(maxOf(1, dp(1)), Color.parseColor("#C9C9C9"))
+                cornerRadius = dp(10).toFloat()
+            }
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(14); bottomMargin = dp(2) }
+        }
+    }
+
+    /** A numbered sense line: a fixed-width index gutter and the gloss filling the rest. */
+    private fun senseRow(index: Int, text: String, topPad: Int): View {
+        val d = resources.displayMetrics.density
+        fun dp(v: Int) = (v * d).toInt()
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(0, maxOf(topPad, dp(7)), 0, 0)
+            addView(TextView(this@ReaderActivity).apply {
+                this.text = "$index."; setTextColor(Color.parseColor("#6B6B6B")); textSize = 15f
+                typeface = Typeface.DEFAULT_BOLD
+                layoutParams = LinearLayout.LayoutParams(dp(22), ViewGroup.LayoutParams.WRAP_CONTENT)
+            })
+            addView(TextView(this@ReaderActivity).apply {
+                this.text = text; setTextColor(Color.BLACK); textSize = 15f
+                setLineSpacing(dp(3).toFloat(), 1f)
+                layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+            })
+        }
+    }
+
+    /**
+     * Manage user-installed dictionaries (RR12 / ADR-INKREAD-0009 D2) — the KOReader-style "install
+     * your own dictionary" surface. Lists StarDict folders found under [Dictionaries.roots] with an
+     * Install / Remove action each; install compiles the bundle into the writable corpus via
+     * [NativeBridge.nativeDictImport] on the engine thread. Reading the public folders needs
+     * all-files access (same gate as export).
+     */
+    private fun showDictionariesDialog() {
+        if (!Environment.isExternalStorageManager()) {
+            AlertDialog.Builder(this, R.style.InkDialog)
+                .setTitle("Allow file access for dictionaries")
+                .setMessage("To find dictionaries you've copied to the device, inkread needs \"All files access\". Grant it on the next screen, then open Dicts again.")
+                .setPositiveButton("Open settings") { _, _ ->
+                    val uri = Uri.parse("package:$packageName")
+                    runCatching {
+                        startActivity(Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION, uri))
+                    }.onFailure { startActivity(Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION)) }
+                }
+                .setNegativeButton("Cancel", null)
+                .show()
+            return
+        }
+        val d = resources.displayMetrics.density
+        fun dp(v: Int) = (v * d).toInt()
+        val home = Dictionaries.homeRoot()
+        val list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(20), dp(8), dp(20), dp(8)) }
+
+        val dialog = AlertDialog.Builder(this, R.style.InkDialog)
+            .setTitle("Dictionaries")
+            .setView(ScrollView(this).apply { addView(list) })
+            .setPositiveButton("Done", null)
+            .create()
+
+        fun refresh() {
+            list.removeAllViews()
+            val bundles = Dictionaries.discover(this)
+            if (bundles.isEmpty()) {
+                list.addView(TextView(this).apply {
+                    text = "No dictionaries found.\n\nCopy a StarDict folder (its .ifo, .idx and .dict/.dict.dz files) into:\n${home.absolutePath}\n\nthen reopen this screen."
+                    setTextColor(Color.parseColor("#555555")); textSize = 14f; setLineSpacing(dp(3).toFloat(), 1f)
+                })
+                return
+            }
+            for (b in bundles) {
+                val row = LinearLayout(this).apply {
+                    orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
+                    setPadding(0, dp(10), 0, dp(10))
+                }
+                row.addView(LinearLayout(this).apply {
+                    orientation = LinearLayout.VERTICAL
+                    layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+                    addView(TextView(this@ReaderActivity).apply {
+                        text = b.name; setTextColor(Color.BLACK); textSize = 16f
+                    })
+                    addView(TextView(this@ReaderActivity).apply {
+                        text = if (b.installed) "Installed" else "Not installed"
+                        setTextColor(Color.parseColor("#9E9E9E")); textSize = 12f
+                    })
+                })
+                row.addView(TextView(this).apply {
+                    text = if (b.installed) "Remove" else "Install"
+                    setTextColor(Color.BLACK); textSize = 14f; typeface = Typeface.DEFAULT_BOLD
+                    setPadding(dp(14), dp(6), dp(14), dp(6))
+                    background = GradientDrawable().apply {
+                        setColor(Color.WHITE); setStroke(maxOf(1, dp(1)), Color.BLACK); cornerRadius = dp(16).toFloat()
+                    }
+                    isClickable = true
+                    setOnClickListener {
+                        if (b.installed) removeDictionary(b) { refresh() }
+                        else installDictionary(b) { refresh() }
+                    }
+                })
+                list.addView(row)
+                list.addView(View(this).apply {
+                    setBackgroundColor(Color.parseColor("#EEEEEE"))
+                    layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, maxOf(1, dp(1)))
+                })
+            }
+        }
+        refresh()
+        dialog.show()
+    }
+
+    /** Compile a StarDict bundle into the corpus on the engine thread, with a blocking progress note. */
+    private fun installDictionary(b: Dictionaries.Bundle, onDone: () -> Unit) {
+        val progress = AlertDialog.Builder(this, R.style.InkDialog)
+            .setTitle("Installing ${b.name}")
+            .setMessage("Large dictionaries can take a while. Please keep inkread open.")
+            .setCancelable(false)
+            .create()
+        progress.show()
+        engine.execute {
+            val ok = ensureDictOpen()
+            val result = if (ok) {
+                try {
+                    val n = NativeBridge.nativeDictImport(dictHandle, b.dir.absolutePath, b.sourceTag, false)
+                    Dictionaries.markInstalled(this, b.sourceTag)
+                    "Installed ${b.name} ($n entries)"
+                } catch (e: RuntimeException) {
+                    Log.e(TAG, "dict import failed: ${e.message}")
+                    "Couldn't install ${b.name}"
+                }
+            } else {
+                "Dictionary store unavailable"
+            }
+            runOnUiThread {
+                progress.dismiss()
+                Toast.makeText(this, result, Toast.LENGTH_SHORT).show()
+                onDone()
+            }
+        }
+    }
+
+    /** Drop every entry for a user dictionary's source tag (the inverse of install). */
+    private fun removeDictionary(b: Dictionaries.Bundle, onDone: () -> Unit) {
+        engine.execute {
+            if (ensureDictOpen()) {
+                try {
+                    NativeBridge.nativeDictForget(dictHandle, b.sourceTag)
+                } catch (e: RuntimeException) {
+                    Log.e(TAG, "dict forget failed: ${e.message}")
+                }
+            }
+            Dictionaries.markRemoved(this, b.sourceTag)
+            runOnUiThread {
+                Toast.makeText(this, "Removed ${b.name}", Toast.LENGTH_SHORT).show()
+                onDone()
+            }
+        }
     }
 
     /** Persist the current reading position (RR12-FR3 / RR27); store-less / closed = no-op. */
@@ -1845,6 +2397,11 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             NativeBridge.nativeSavePosition(docHandle)
         } catch (e: RuntimeException) {
             Log.e(TAG, "save position failed: ${e.message}")
+        }
+        // Record read progress for the home shelf (RR16/RR17).
+        val total = pageCount
+        if (total > 0 && currentBookId.isNotEmpty()) {
+            Books.setProgress(this, currentBookId, ((currentPage + 1) * 100) / total)
         }
     }
 
@@ -1874,6 +2431,9 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         const val PALM_REJECT_MS = 1000L // a finger tap within this long of a stylus event = palm.
         // Public, Partner-synced folder the annotated PDF export is written to (Android external
         // storage root + this) so it reaches the desktop. "Document" is in the Supernote sync set.
+        const val MAX_ZOOM_UI = 5f // matches the core's MAX_ZOOM clamp (RR5-FR3).
+        const val PREVIEW_MS = 50L // min interval between live zoom/pan preview blits (e-ink cadence).
+        const val ZOOM_STEP = 1.4f // +/- button zoom multiplier.
         const val EXPORT_DIR_NAME = "Document"
         // Supernote folders the Partner app syncs — searched to place the export beside the original.
         val SYNCED_DIRS = arrayOf("Document", "EXPORT", "Note", "INBOX", "MyStyle", "Download")

@@ -212,7 +212,7 @@ impl PdfBackend {
     /// Render a clipped, scaled viewport window of a page for pan/zoom (RR5-FR3). The page is
     /// scaled by `zoom`, then the `buf`-sized window whose top-left is `(offset_x, offset_y)`
     /// (in scaled-page pixels) is rasterized into `buf`. A non-finite/non-positive `zoom`
-    /// falls back to 1.0.
+    /// falls back to 1.0. (Inherent helper used by tests; the session uses [`Document::render_zoom`].)
     pub fn render_region(
         &self,
         index: usize,
@@ -380,6 +380,56 @@ impl Document for PdfBackend {
         self.render_with_config(index, buf, |w, h| {
             PdfRenderConfig::new()
                 .set_target_size(w, h)
+                .set_format(PdfBitmapFormat::BGRA)
+                .set_reverse_byte_order(true)
+        })
+    }
+
+    fn render_zoom(
+        &self,
+        index: usize,
+        buf: &mut PixelBuffer<'_>,
+        zoom: f32,
+        offset_x: i32,
+        offset_y: i32,
+    ) -> CoreResult<()> {
+        let z = if zoom.is_finite() && zoom > 0.0 {
+            zoom
+        } else {
+            1.0
+        };
+        // Stretch the page independently in X and Y so the content is exactly (w·z)×(h·z) — at z=1
+        // this equals render_page (stretch-to-buffer), and the buf-sized window at (offset_x,
+        // offset_y) matches the session's pan math and the shell's ink overlay on BOTH axes.
+        // (Uniform scale_page_by_factor made content height ≠ h·z, so the Y offset went blank;
+        //  set_target_size + clip renders blank in pdfium 0.9.1 — hence per-axis scale + clip.)
+        let (pw, ph) = self
+            .document
+            .pages()
+            .get(index as i32)
+            .map(|p| (p.width().value, p.height().value))
+            .unwrap_or((0.0, 0.0));
+        self.render_with_config(index, buf, move |w, h| {
+            let fw = if pw > 0.0 { (w as f32 * z) / pw } else { z };
+            let fh = if ph > 0.0 { (h as f32 * z) / ph } else { z };
+            // PAN by translating the page (clip only masks, it does not pan). translate() is in
+            // page points, applied before the per-axis scale, so device-px offset → points = off/f.
+            // clip(0,0,w,h) is a full-bitmap mask whose only job is to enable the matrix path.
+            let base = PdfRenderConfig::new()
+                .scale_page_width_by_factor(fw)
+                .scale_page_height_by_factor(fh);
+            let panned = base
+                .translate(
+                    PdfPoints::new(-(offset_x as f32) / fw),
+                    PdfPoints::new(-(offset_y as f32) / fh),
+                )
+                .unwrap_or_else(|_| {
+                    PdfRenderConfig::new()
+                        .scale_page_width_by_factor(fw)
+                        .scale_page_height_by_factor(fh)
+                });
+            panned
+                .clip(0, 0, w, h)
                 .set_format(PdfBitmapFormat::BGRA)
                 .set_reverse_byte_order(true)
         })

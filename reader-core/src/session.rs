@@ -33,6 +33,9 @@ use inkread_ink::{
     SelectMode, Stroke, StrokeId, Tool,
 };
 
+/// Maximum pinch-zoom factor (RR5-FR3) — beyond this, e-ink legibility gains nothing.
+const MAX_ZOOM: f32 = 5.0;
+
 /// A navigation gesture (Amendment 6). The int↔enum mapping is defined **once** here and
 /// documented at the JNI boundary; `nativeOnGesture` decodes an int into this.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -84,6 +87,11 @@ pub struct ReaderSession {
     ink: Option<Arc<dyn InkStore>>,
     /// The current page's ink layer (RR6). Reloaded on page change; empty without ink.
     layer: InkLayer,
+    /// Pinch-zoom factor (1.0 = fit, the render_page baseline) and normalized pan `[0,1]` of the
+    /// off-screen overscan (RR5-FR3). Reset to fit on a page change.
+    zoom: f32,
+    pan_x: f32,
+    pan_y: f32,
     /// The tool of the in-progress stroke — routes [`Self::ink_add_point`] (ink vs. erase).
     active_tool: Tool,
     /// Width of the in-progress ink stroke, or the erase radius for the eraser (normalized).
@@ -132,6 +140,9 @@ impl ReaderSession {
             caches: Caches::new(&ResourceBudget::default_supernote()),
             ink: None,
             layer: InkLayer::new(),
+            zoom: 1.0,
+            pan_x: 0.0,
+            pan_y: 0.0,
             active_tool: Tool::Pen,
             active_width: 0.0,
             erase_changed: false,
@@ -218,6 +229,9 @@ impl ReaderSession {
             caches: Caches::new(&ResourceBudget::default_supernote()),
             ink: None,
             layer: InkLayer::new(),
+            zoom: 1.0,
+            pan_x: 0.0,
+            pan_y: 0.0,
             active_tool: Tool::Pen,
             active_width: 0.0,
             erase_changed: false,
@@ -290,7 +304,34 @@ impl ReaderSession {
                 self.viewport.height
             )));
         }
-        self.document.render_page(self.page, buf)
+        if self.zoom <= 1.0 + 1e-3 {
+            return self.document.render_page(self.page, buf);
+        }
+        // Magnified view: the content is buf*zoom; show a buf-sized window panned over the overscan.
+        let bw = self.viewport.width as f32;
+        let bh = self.viewport.height as f32;
+        let off_x = (self.pan_x * bw * (self.zoom - 1.0)).round() as i32;
+        let off_y = (self.pan_y * bh * (self.zoom - 1.0)).round() as i32;
+        self.document
+            .render_zoom(self.page, buf, self.zoom, off_x, off_y)
+    }
+
+    /// Set the pinch-zoom factor (clamped to `[1.0, MAX_ZOOM]`) and normalized pan `[0,1]`
+    /// (RR5-FR3). The shell drives this from pinch + drag; render uses it on the next frame.
+    pub fn set_zoom(&mut self, zoom: f32, pan_x: f32, pan_y: f32) {
+        self.zoom = if zoom.is_finite() {
+            zoom.clamp(1.0, MAX_ZOOM)
+        } else {
+            1.0
+        };
+        self.pan_x = pan_x.clamp(0.0, 1.0);
+        self.pan_y = pan_y.clamp(0.0, 1.0);
+    }
+
+    /// The current zoom factor (1.0 = fit).
+    #[must_use]
+    pub fn zoom(&self) -> f32 {
+        self.zoom
     }
 
     /// Apply a navigation gesture: move the position (clamped at the document ends), then
@@ -658,6 +699,10 @@ impl ReaderSession {
     fn load_ink_for_current_page(&mut self) {
         self.layer.cancel_stroke();
         self.layer = self.load_layer_for_page(self.page);
+        // A page turn resets the view to fit (RR5-FR3): the old pan/zoom is meaningless on a new page.
+        self.zoom = 1.0;
+        self.pan_x = 0.0;
+        self.pan_y = 0.0;
     }
 
     /// Load `page`'s ink, degrading safely so open/navigation never fails: a **corrupt** page is

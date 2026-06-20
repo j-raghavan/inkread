@@ -124,3 +124,13 @@ the dependency set changes.
 | zune-core | 0.5.1 | MIT OR Apache-2.0 OR Zlib |
 | zune-jpeg | 0.5.15 | MIT OR Apache-2.0 OR Zlib |
 
+
+## Bundled fonts
+
+| Font | Source | License |
+|------|--------|---------|
+| Pinyon Script | github.com/SorkinType/Pinyon (Google Fonts) | SIL Open Font License 1.1 |
+
+Pinyon Script is bundled at `app/src/main/assets/fonts/pinyon_script.ttf` for the home-screen
+"Library" heading (Spencerian-inspired). © The Pinyon Script Project Authors; SIL OFL 1.1
+(http://scripts.sil.org/OFL) — free to use, bundle, and redistribute with attribution.

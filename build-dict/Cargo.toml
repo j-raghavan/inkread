@@ -13,6 +13,7 @@ name = "build-dict"
 path = "src/main.rs"
 
 [dependencies]
-inkread-dict = { workspace = true }
-# .dict.dz is dictzip — gzip-compatible, so flate2's GzDecoder decompresses it. MIT/Apache.
-flate2 = "1"
+# The StarDict import pipeline (file IO + gzip + the parse primitives) now lives in the library
+# behind the `import` feature; this tool is a thin host-side CLI over it (the same code the device
+# uses), so build-dict carries no gzip dep of its own.
+inkread-dict = { workspace = true, features = ["import"] }

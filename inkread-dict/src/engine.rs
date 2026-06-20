@@ -122,6 +122,19 @@ impl Dict {
         Ok(n)
     }
 
+    /// Remove every entry and synonym for a `lang`/source tag — undoes a user dictionary install
+    /// (the inverse of [`Dict::import_entries`]). Returns the number of entry rows deleted. A
+    /// no-op (0) when nothing matches; never touches other sources.
+    pub fn forget(&self, lang: &str) -> DictResult<usize> {
+        let conn = self.lock();
+        conn.execute("DELETE FROM synonyms WHERE lang = ?1", params![lang])
+            .map_err(be)?;
+        let n = conn
+            .execute("DELETE FROM entries WHERE lang = ?1", params![lang])
+            .map_err(be)?;
+        Ok(n)
+    }
+
     /// Resolve `query` to a [`Definition`] (RR12): try `lang_hints` first then any language, then a
     /// stem fallback for inflected forms (`running`→`run`). On a full on-device miss, fall through
     /// to `online` (if supplied) and cache the result. `None` if nothing matches.
@@ -323,6 +336,21 @@ mod tests {
     fn lookup_is_trimmed_and_case_insensitive() {
         let d = fixture();
         assert_eq!(d.lookup("  RUN  ", &["en"], None).unwrap().headword, "run");
+    }
+
+    #[test]
+    fn forget_removes_only_the_named_source() {
+        let d = fixture();
+        // The Italian source is a stand-in for an installed user dictionary.
+        assert!(d.lookup("casa", &["it"], None).is_some());
+        let removed = d.forget("it").unwrap();
+        assert_eq!(removed, 1, "one Italian entry deleted");
+        assert!(d.lookup("casa", &["it"], None).is_none(), "source gone");
+        // English (and its synonyms) untouched.
+        let run = d.lookup("run", &["en"], None).unwrap();
+        assert_eq!(run.synonyms, vec!["sprint", "dash"]);
+        // Forgetting an unknown source is a no-op, not an error.
+        assert_eq!(d.forget("nope").unwrap(), 0);
     }
 
     #[test]
