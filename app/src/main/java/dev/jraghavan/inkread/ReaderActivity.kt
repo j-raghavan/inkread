@@ -252,16 +252,6 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
     private var hlColorIdx = 0
     private fun penColor() = PEN_COLORS[penColorIdx]
     private fun highlightColor() = HIGHLIGHT_COLORS[hlColorIdx]
-    private val hlLivePaint = Paint().apply {
-        style = Paint.Style.STROKE; strokeCap = Paint.Cap.ROUND; strokeJoin = Paint.Join.ROUND; isAntiAlias = true
-    }
-    /** Live highlighter band paint, coloured + sized to the current shade. */
-    private fun highlighterLivePaint(): Paint {
-        val c = highlightColor()
-        hlLivePaint.color = Color.argb(c and 0xFF, (c ushr 24) and 0xFF, (c ushr 16) and 0xFF, (c ushr 8) and 0xFF)
-        hlLivePaint.strokeWidth = HIGHLIGHT_WIDTH_PX
-        return hlLivePaint
-    }
     /** Dashed marching-ants line for the in-progress lasso loop (mirrors the firmware's own
      *  AreaSelectionView dashPaint — DashPathEffect{6,6} on a normal canvas). */
     private val lassoPaint = Paint().apply {
@@ -315,10 +305,13 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
                     Log.i(TAG, "DIAG stylus action=$a tool=$tool type=$toolType hist=${event.historySize}")
                 }
                 when (tool) {
+                    // Define + Highlighter both drag over printed text (the same select capture);
+                    // finalizeSelection routes by tool — Define looks up, Highlighter bakes a band.
                     Tool.DEFINE -> captureSelection(event)
+                    Tool.HIGHLIGHTER -> captureSelection(event)
                     Tool.ERASER -> captureErase(event)
                     Tool.LASSO -> captureLasso(event)
-                    else -> captureStylus(event) // PEN (Highlighter is still P2)
+                    else -> captureStylus(event) // PEN (firmware paints live ink)
                 }
             } else if (toolType == MotionEvent.TOOL_TYPE_FINGER) {
                 scaleDetector.onTouchEvent(event)
@@ -726,8 +719,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
                 if (!lpMoved && kotlin.math.hypot(e.x - lpDownX, e.y - lpDownY) > LONG_PRESS_SLOP_PX) {
                     lpMoved = true; mainHandler.removeCallbacks(longPress)
                 }
-                // Pen rides the fast firmware overlay; Highlighter's is suppressed, so draw its band.
-                if (tool == Tool.HIGHLIGHTER) drawLivePath(strokeBuf, highlighterLivePaint())
+                // Pen rides the fast firmware overlay — no app-side live draw needed.
             }
             MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
                 mainHandler.removeCallbacks(longPress) // lifted before the hold fired → normal stroke
@@ -752,30 +744,24 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         engine.execute { commitStroke(raw) }
     }
 
-    /** Feed the captured pen stroke to the core (begin→points→end → autosave). Engine thread. */
+    /** Feed the captured pen stroke to the core (begin→points→end → autosave). Engine thread.
+     *  Pen-only: Highlighter snaps to text via [highlightTextBoxes], not freehand capture. */
     private fun commitStroke(raw: FloatArray) {
         val w = viewW; val h = viewH
         if (docHandle == 0L || w == 0 || h == 0) return
-        // Highlighter = a wide, translucent band (its own core tool + colour); Pen = thin black.
-        val isHl = tool == Tool.HIGHLIGHTER
-        val coreTool = if (isHl) CORE_TOOL_HIGHLIGHTER else CORE_TOOL_PEN
-        val widthNorm = lenToNorm(if (isHl) HIGHLIGHT_WIDTH_PX else INK_STROKE_WIDTH)
-        val color = if (isHl) highlightColor() else penColor()
+        val widthNorm = lenToNorm(INK_STROKE_WIDTH)
         try {
-            NativeBridge.nativeInkBeginStroke(docHandle, coreTool, color, widthNorm, System.currentTimeMillis())
+            NativeBridge.nativeInkBeginStroke(docHandle, CORE_TOOL_PEN, penColor(), widthNorm, System.currentTimeMillis())
             var i = 0
             while (i + 1 < raw.size) {
                 NativeBridge.nativeInkAddPoint(docHandle, vToNx(raw[i]), vToNy(raw[i + 1]), 1.0f, Float.NaN, Float.NaN, 0)
                 i += 2
             }
             NativeBridge.nativeInkEndStroke(docHandle)
-            Log.i(TAG, "DIAG commitStroke OK ${raw.size / 2} pts tool=$tool → core page $currentPage")
+            Log.i(TAG, "DIAG commitStroke OK ${raw.size / 2} pts → core page $currentPage")
         } catch (e: RuntimeException) {
             Log.e(TAG, "ink commit failed: ${e.message}")
         }
-        // Highlighter's firmware EMR ink is suppressed (we drew the live band ourselves), so bake it
-        // from the core now. Pen rides the firmware overlay and bakes on the next full render.
-        if (isHl) { clearFirmwareInk(); renderAndBlit(); adapter.refreshFull(); return }
         // The firmware overlay already shows this stroke live; it bakes from the core on the next
         // full render (page turn / revisit), so no immediate re-blit is needed here.
     }
@@ -2245,14 +2231,54 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         }
         val dragged = (maxX - minX) > w * 0.03f || (maxY - minY) > h * 0.02f
         val page = currentPage
+        val rect = floatArrayOf(vToNx(minX), vToNy(minY), vToNx(maxX), vToNy(maxY))
+        // Highlighter: a drag over text snaps to the spanned lines and bakes a band automatically
+        // (a tap highlights the single word). highlightRect/Word do their own clear+render+refresh.
+        if (tool == Tool.HIGHLIGHTER) {
+            if (dragged) engine.execute { highlightRect(page, rect) }
+            else engine.execute { highlightWord(page, vToNx(pts[0]), vToNy(pts[1])) }
+            return
+        }
         if (dragged) {
-            val r = floatArrayOf(vToNx(minX), vToNy(minY), vToNx(maxX), vToNy(maxY))
-            engine.execute { defineRect(page, r) }
+            engine.execute { defineRect(page, rect) }
         } else {
             engine.execute { defineWord(page, vToNx(pts[0]), vToNy(pts[1])) }
         }
         // Wipe the firmware ink the define gesture left behind (it never becomes an annotation).
         engine.execute { clearFirmwareInk(); renderAndBlit(); adapter.refreshFull() }
+    }
+
+    /** Highlight the printed text spanned by a drag rect: resolve the multi-line selection via the
+     *  core's text seam, then bake one highlighter band per line ([highlightTextBoxes]). Engine. */
+    private fun highlightRect(page: Int, r: FloatArray) {
+        if (docHandle == 0L) return
+        val sel = try {
+            WireCodec.decodeSelection(NativeBridge.nativeTextInRect(docHandle, page, r[0], r[1], r[2], r[3]))
+        } catch (e: RuntimeException) {
+            Log.e(TAG, "highlight textInRect failed: ${e.message}"); return
+        }
+        if (sel.isEmpty) {
+            clearFirmwareInk(); renderAndBlit(); adapter.refreshFull()
+            runOnUiThread { Toast.makeText(this, "No text to highlight there", Toast.LENGTH_SHORT).show() }
+            return
+        }
+        highlightTextBoxes(sel)
+    }
+
+    /** Highlight the single word under a highlighter tap (engine thread). */
+    private fun highlightWord(page: Int, nx: Float, ny: Float) {
+        if (docHandle == 0L) return
+        val sel = try {
+            WireCodec.decodeSelection(NativeBridge.nativeWordAt(docHandle, page, nx, ny))
+        } catch (e: RuntimeException) {
+            Log.e(TAG, "highlight wordAt failed: ${e.message}"); return
+        }
+        if (sel.isEmpty) {
+            clearFirmwareInk(); renderAndBlit(); adapter.refreshFull()
+            runOnUiThread { Toast.makeText(this, "No word there", Toast.LENGTH_SHORT).show() }
+            return
+        }
+        highlightTextBoxes(sel)
     }
 
     /** Resolve the word under a normalized point and look it up (engine thread). */
@@ -2821,7 +2847,6 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         val SYNCED_DIRS = arrayOf("Document", "EXPORT", "Note", "INBOX", "MyStyle", "Download")
         const val SELECTION_HANDLE_PX = 8f // half-size of the square corner handles on the selection box.
         const val MAX_SEARCH_HITS = 1000 // cap a query's collected hits to bound memory + scan time (RR2/RR19).
-        const val HIGHLIGHT_WIDTH_PX = 30f // wide marker band (vs INK_STROKE_WIDTH for the pen).
         const val STROKE_PAUSE_MS = 600L // commit a stroke after this pen-pause (swallowed-UP net).
         const val LONG_PRESS_MS = 500L // hold the pen this long (≈still) on a word → look it up.
         const val LONG_PRESS_SLOP_PX = 16f // movement beyond this cancels the long-press (it's a stroke).
