@@ -258,3 +258,40 @@ fn layout_all(
         unit_start,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use inkread_epub::{Inline, TextRun};
+
+    // A heading flowed through the whole reflow pipeline (layout → render → page_chars) keeps its
+    // words intact across font sizes — guards the device "regressio n" / "valu e" regression at the
+    // integration level (the unit-level cause is covered in inkread-pdftext).
+    #[test]
+    fn heading_word_not_split_across_scales() {
+        let unit = vec![Block::Heading {
+            level: 2,
+            content: vec![Inline::Run(TextRun {
+                text: "Minimizing loss with logistic regression".to_string(),
+                bold: true,
+                italic: false,
+                href: None,
+            })],
+        }];
+        let view = ReflowView::new(vec![unit], 1404, 1872);
+        for scale in [1.0_f32, 1.5, 2.0] {
+            view.set_scale(scale, 0);
+            let mut bytes = vec![0u8; 1404 * 1872 * 4];
+            {
+                let mut buf = PixelBuffer::from_rgba(&mut bytes, 1404, 1872).unwrap();
+                view.render(0, &mut buf).unwrap();
+            }
+            let text: String = view.page_chars(0).iter().map(|c| c.ch).collect();
+            // The word must never be broken mid-word (no "regressio n").
+            assert!(
+                !text.contains("regressio n"),
+                "scale {scale} split the heading word: {text:?}"
+            );
+        }
+    }
+}

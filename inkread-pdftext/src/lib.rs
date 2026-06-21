@@ -66,9 +66,14 @@ impl Glyph {
 pub struct ReconstructOpts {
     /// New line when a glyph's vertical center jumps more than this × the median glyph height.
     pub line_split_mult: f32,
-    /// Insert a space when the horizontal gap between adjacent glyphs exceeds this × the line's
-    /// median glyph **height** (font size) — a space is ~0.25 em (see [`line_from_glyphs`]).
+    /// On a line with **no explicit space glyphs**, synthesize a space when the gap between adjacent
+    /// glyphs exceeds this × the line's median glyph **height** (font size) — a space is ~0.25 em.
     pub word_gap_mult: f32,
+    /// On a line that **does** have explicit space glyphs (the common case — they already mark every
+    /// word boundary), only synthesize across a gap this much larger × the median height. Kept high
+    /// so loose tracking, bold headings, or punctuation side-bearing can't fabricate intra-word
+    /// splits; genuine large gaps (tabs/columns missing a space glyph) still break.
+    pub word_gap_mult_spaced: f32,
     /// New paragraph when the vertical gap between lines exceeds this × the median line height.
     pub para_gap_mult: f32,
     /// New paragraph when a line's left edge is indented more than this × median width past the
@@ -90,6 +95,7 @@ impl Default for ReconstructOpts {
         Self {
             line_split_mult: 0.6,
             word_gap_mult: 0.25,
+            word_gap_mult_spaced: 1.0,
             para_gap_mult: 0.65,
             indent_mult: 1.5,
             heading_ratio: 1.3,
@@ -114,9 +120,20 @@ pub fn reconstruct_with(glyphs: &[Glyph], opts: &ReconstructOpts) -> Vec<Block> 
     // slightly different baseline, can be tie-broken *after* it) is handled where lines are ordered:
     // the x-sort orders by glyph center, and the pen tracks a running max. Median metrics below
     // ignore these as a minority (spaces are < half of glyphs), so zero heights don't skew them.
+    // Also drop control characters (CR/LF/TAB): PDFs emit them at line ends with an unreliable box
+    // — the device's pdfium places the line-break glyph *back over the last letter* (negative gap),
+    // so ordering by x-center would sort that zero-width whitespace *before* the final glyph and
+    // inject a mid-word space ("value" → "valu e"). Lines are formed by geometry, not newlines, so
+    // these carry no information and are pure noise.
     let glyphs: Vec<&Glyph> = glyphs
         .iter()
-        .filter(|g| g.x0.is_finite() && g.y0.is_finite() && g.x1.is_finite() && g.y1.is_finite())
+        .filter(|g| {
+            g.x0.is_finite()
+                && g.y0.is_finite()
+                && g.x1.is_finite()
+                && g.y1.is_finite()
+                && !g.ch.is_control()
+        })
         .collect();
     if glyphs.is_empty() {
         return Vec::new();
@@ -236,7 +253,13 @@ pub fn reconstruct_pages_with(pages: &[Vec<Glyph>], opts: &ReconstructOpts) -> V
 fn margin_lines(glyphs: &[Glyph], opts: &ReconstructOpts) -> Vec<(Band, String, f32, f32)> {
     let refs: Vec<&Glyph> = glyphs
         .iter()
-        .filter(|g| g.x0.is_finite() && g.y0.is_finite() && g.x1.is_finite() && g.y1.is_finite())
+        .filter(|g| {
+            g.x0.is_finite()
+                && g.y0.is_finite()
+                && g.x1.is_finite()
+                && g.y1.is_finite()
+                && !g.ch.is_control()
+        })
         .collect();
     if refs.is_empty() {
         return Vec::new();
@@ -457,7 +480,17 @@ fn line_from_glyphs(glyphs: &[&Glyph], opts: &ReconstructOpts) -> Option<Line> {
     // by narrow glyphs (i, l, t, f, .) on text-heavy lines, over-splitting words. Height is uniform
     // across a line's font and aspect-correct in point space.
     let h_med = median(glyphs.iter().map(|g| g.height())).max(f32::EPSILON);
-    let word_gap = opts.word_gap_mult * h_med;
+    // PDFs that emit explicit space glyphs (most) already mark every word boundary; trust them and
+    // only *synthesize* across a clearly large gap, so loose tracking / bold headings / punctuation
+    // side-bearing can't fabricate intra-word splits. Lines with no space glyphs use the sensitive
+    // positional threshold.
+    let has_space = glyphs.iter().any(|g| g.ch.is_whitespace());
+    let mult = if has_space {
+        opts.word_gap_mult_spaced
+    } else {
+        opts.word_gap_mult
+    };
+    let word_gap = mult * h_med;
 
     let mut text = String::new();
     // Running max of right edges seen so far — a glyph that sits behind a wider predecessor (kerning
@@ -465,7 +498,9 @@ fn line_from_glyphs(glyphs: &[&Glyph], opts: &ReconstructOpts) -> Option<Line> {
     let mut pen_x1: Option<f32> = None;
     for g in glyphs {
         if let Some(px1) = pen_x1 {
-            if g.x0 - px1 > word_gap {
+            // Never synthesize a space *before* closing punctuation — a space before '.'/',' is
+            // always wrong (the glyph's left side-bearing reads as a gap).
+            if g.x0 - px1 > word_gap && !is_closing_punct(g.ch) {
                 text.push(' ');
             }
         }
@@ -608,6 +643,16 @@ fn heading_level(ratio: f32) -> u8 {
     } else {
         3
     }
+}
+
+/// Closing punctuation that must never be preceded by a synthesized space (its left side-bearing can
+/// read as a word gap). Limited to unambiguous closers — quotes/apostrophes are excluded (they open
+/// as often as they close).
+fn is_closing_punct(c: char) -> bool {
+    matches!(
+        c,
+        '.' | ',' | ';' | ':' | '!' | '?' | ')' | ']' | '}' | '%' | '…'
+    )
 }
 
 /// Collapse runs of whitespace to single spaces and trim — normalizes synthesized + source spaces.
@@ -922,5 +967,91 @@ mod tests {
             text.contains("Header"),
             "short doc keeps margin line: {text:?}"
         );
+    }
+
+    /// A glyph with explicit geometry on a single line (y 0..10), not bold.
+    fn gx(ch: char, x0: f32, x1: f32) -> Glyph {
+        Glyph {
+            ch,
+            x0,
+            y0: 0.0,
+            x1,
+            y1: 10.0,
+            bold: false,
+        }
+    }
+    /// A zero-width explicit space glyph at `x` (as pdfium emits).
+    fn sp(x: f32) -> Glyph {
+        Glyph {
+            ch: ' ',
+            x0: x,
+            y0: 5.0,
+            x1: x,
+            y1: 5.0,
+            bold: false,
+        }
+    }
+
+    #[test]
+    fn explicit_spaces_suppress_intraword_split() {
+        // "hello world" with an explicit space and a wide intra-word gap inside "world" (loose
+        // tracking / a bold heading). Because the line carries explicit spaces, the wide gap must
+        // NOT be read as a word break — the word stays whole. (At the sensitive no-space threshold
+        // it would split into "wor ld".)
+        let g = vec![
+            gx('h', 0.0, 8.0),
+            gx('e', 8.0, 16.0),
+            gx('l', 16.0, 24.0),
+            gx('l', 24.0, 32.0),
+            gx('o', 32.0, 40.0),
+            sp(43.0),
+            gx('w', 43.0, 51.0),
+            gx('o', 51.0, 59.0),
+            gx('r', 59.0, 67.0),
+            gx('l', 75.0, 83.0),
+            gx('d', 83.0, 91.0), // 8px gap before 'l' (< 1.0×height)
+        ];
+        let blocks = reconstruct(&g);
+        assert_eq!(block_text(&blocks[0]), "hello world", "{blocks:?}");
+    }
+
+    #[test]
+    fn line_end_control_glyph_does_not_split_last_word() {
+        // Device repro: "value" at a line end, followed by a CR/LF glyph whose box sits *back over*
+        // the last letter (negative gap) — at a slightly lower baseline. Ordered by x-center it would
+        // land between 'u' and 'e' and inject a space ("valu e"); dropping control chars fixes it.
+        let g = vec![
+            gx('v', 0.0, 9.0),
+            gx('a', 9.0, 18.0),
+            gx('l', 18.0, 27.0),
+            gx('u', 27.0, 36.0),
+            gx('e', 36.0, 45.0),
+            // CR/LF: zero-width, x backed up 8.3 over 'e', baseline 5.4 lower (h≈9 → still same line).
+            Glyph {
+                ch: '\n',
+                x0: 36.7,
+                y0: 5.4,
+                x1: 36.7,
+                y1: 5.4,
+                bold: false,
+            },
+        ];
+        let blocks = reconstruct(&g);
+        assert_eq!(block_text(&blocks[0]), "value", "{blocks:?}");
+    }
+
+    #[test]
+    fn no_synthesized_space_before_period() {
+        // "loss." with no explicit spaces and a gap before the period (its left side-bearing). The
+        // closing-punctuation guard must suppress a synthesized "loss ." → keep "loss.".
+        let g = vec![
+            gx('l', 0.0, 8.0),
+            gx('o', 8.0, 16.0),
+            gx('s', 16.0, 24.0),
+            gx('s', 24.0, 32.0),
+            gx('.', 35.0, 38.0), // 3px gap before '.' (> 0.25×height)
+        ];
+        let blocks = reconstruct(&g);
+        assert_eq!(block_text(&blocks[0]), "loss.", "{blocks:?}");
     }
 }
