@@ -12,7 +12,7 @@
 
 use std::cell::{Cell, RefCell};
 
-use inkread_epub::layout::{paginate, LayoutOpts, Page};
+use inkread_epub::layout::{paginate, Align, LayoutOpts, Page};
 use inkread_epub::render::{render_page as raster_page, AbFont, GrayCanvas};
 use inkread_epub::{parse_blocks, Block, EpubPackage, NavPoint};
 
@@ -51,6 +51,10 @@ pub struct EpubBackend {
     font: AbFont,
     /// User text scale (font size); `1.0` = [`BASE_FONT_PX`]. Drives repagination.
     scale: Cell<f32>,
+    /// Line-spacing multiple (RR4 — default 1.4). Drives repagination.
+    line_spacing: Cell<f32>,
+    /// Text alignment (RR4 — default Left). Drives repagination.
+    align: Cell<Align>,
     /// The current pagination; recomputed when the viewport or scale changes.
     laid: RefCell<Laid>,
 }
@@ -74,6 +78,8 @@ impl EpubBackend {
             viewport.width,
             viewport.height,
             BASE_FONT_PX,
+            1.4,
+            Align::Left,
         );
         Ok(Self {
             chapters,
@@ -82,6 +88,8 @@ impl EpubBackend {
             meta,
             font,
             scale: Cell::new(1.0),
+            line_spacing: Cell::new(1.4),
+            align: Cell::new(Align::Left),
             laid: RefCell::new(laid),
         })
     }
@@ -102,9 +110,39 @@ impl EpubBackend {
                 || (laid.opts.font_px - font_px).abs() > 0.01
         };
         if needs {
-            let fresh = layout_all(&self.chapters, &self.font, w, h, font_px);
+            let fresh = layout_all(
+                &self.chapters,
+                &self.font,
+                w,
+                h,
+                font_px,
+                self.line_spacing.get(),
+                self.align.get(),
+            );
             *self.laid.borrow_mut() = fresh;
         }
+    }
+
+    /// Repaginate at the current viewport/scale, anchoring the reading position to the chapter
+    /// `current_page` is in, and return that chapter's new start page (RR4 line-spacing/alignment).
+    fn repaginate_keeping_chapter(&self, current_page: usize) -> Option<usize> {
+        let chapter = self.chapter_of(current_page);
+        let (w, h) = {
+            let laid = self.laid.borrow();
+            (laid.opts.page_w as u32, laid.opts.page_h as u32)
+        };
+        let fresh = layout_all(
+            &self.chapters,
+            &self.font,
+            w,
+            h,
+            self.font_px(),
+            self.line_spacing.get(),
+            self.align.get(),
+        );
+        let target = fresh.chapter_start.get(chapter).copied().unwrap_or(0);
+        *self.laid.borrow_mut() = fresh;
+        Some(target)
     }
 
     /// The chapter index that global `page` falls in (the last chapter whose start ≤ page).
@@ -164,22 +202,39 @@ impl Document for EpubBackend {
         };
         // Anchor the reading position to the current chapter, repaginate at the new size, then
         // return that chapter's new start page so the reader stays put across the reflow.
-        let chapter = self.chapter_of(current_page);
         self.scale.set(scale);
-        let (w, h) = {
-            let laid = self.laid.borrow();
-            (laid.opts.page_w as u32, laid.opts.page_h as u32)
+        self.repaginate_keeping_chapter(current_page)
+    }
+
+    fn set_line_spacing(&self, mult: f32, current_page: usize) -> Option<usize> {
+        let mult = if mult.is_finite() {
+            mult.clamp(1.0, 2.5)
+        } else {
+            1.4
         };
-        let fresh = layout_all(&self.chapters, &self.font, w, h, self.font_px());
-        let target = fresh.chapter_start.get(chapter).copied().unwrap_or(0);
-        *self.laid.borrow_mut() = fresh;
-        Some(target)
+        self.line_spacing.set(mult);
+        self.repaginate_keeping_chapter(current_page)
+    }
+
+    fn set_alignment(&self, align_code: i32, current_page: usize) -> Option<usize> {
+        self.align.set(Align::from_code(align_code));
+        self.repaginate_keeping_chapter(current_page)
     }
 }
 
-/// Paginate every chapter for `(w, h, font_px)`; each chapter starts a fresh page.
-fn layout_all(chapters: &[Vec<Block>], font: &AbFont, w: u32, h: u32, font_px: f32) -> Laid {
-    let opts = LayoutOpts::new(w as f32, h as f32, font_px);
+/// Paginate every chapter for `(w, h, font_px, line_spacing, align)`; each chapter starts a page.
+fn layout_all(
+    chapters: &[Vec<Block>],
+    font: &AbFont,
+    w: u32,
+    h: u32,
+    font_px: f32,
+    line_spacing: f32,
+    align: Align,
+) -> Laid {
+    let mut opts = LayoutOpts::new(w as f32, h as f32, font_px);
+    opts.line_spacing = line_spacing;
+    opts.align = align;
     let mut pages = Vec::new();
     let mut chapter_start = Vec::with_capacity(chapters.len());
     for blocks in chapters {

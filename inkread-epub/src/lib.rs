@@ -20,7 +20,7 @@ pub mod content;
 pub mod layout;
 pub mod render;
 pub use content::{parse_blocks, Block, Inline, TextRun};
-pub use layout::{paginate, LayoutLine, LayoutOpts, Metrics, Page, PlacedRun};
+pub use layout::{paginate, Align, LayoutLine, LayoutOpts, Metrics, Page, PlacedRun};
 pub use render::{render_page, AbFont, GrayCanvas};
 
 /// The error surface for EPUB parsing — mirrors `inkread-dict`'s shape so the `reader-core` adapter

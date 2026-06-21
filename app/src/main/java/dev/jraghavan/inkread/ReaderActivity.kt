@@ -588,6 +588,13 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             try { NativeBridge.nativeSetCrop(docHandle, if (cropAutoPref()) 1 else 0, cropMarginPref()) } catch (e: RuntimeException) {}
             // Re-apply the saved render quality (RR4); default 1.
             try { NativeBridge.nativeSetRenderQuality(docHandle, renderQualityPref()) } catch (e: RuntimeException) {}
+            // Re-apply saved reflow line-spacing + alignment (RR4; EPUB only — PDF returns -1).
+            if (lineSpacingPref() != 1) {
+                try { NativeBridge.nativeSetLineSpacing(docHandle, LINE_SPACINGS[lineSpacingPref()]) } catch (e: RuntimeException) {}
+            }
+            if (alignmentPref() != 0) {
+                try { NativeBridge.nativeSetAlignment(docHandle, alignmentPref()) } catch (e: RuntimeException) {}
+            }
             pageCount = NativeBridge.nativePageCount(docHandle)
             Books.pushRecent(this, bookId, path)
             Log.i(
@@ -2558,6 +2565,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             Triple("Rotate", R.drawable.ic_menu_rotate) { rotationPanel() },
             Triple("Crop", R.drawable.ic_menu_crop) { cropPanel() },
             Triple("Zoom", R.drawable.ic_menu_fit) { zoomPanel() },
+            Triple("Page", R.drawable.ic_menu_page) { pagePanel() },
             Triple("Font", R.drawable.ic_menu_font) { fontPanel() },
             Triple("Display", R.drawable.ic_menu_display) { displayPanel() },
         )
@@ -2774,6 +2782,45 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
     private fun setCropMarginPref(v: Int) =
         getSharedPreferences("display", MODE_PRIVATE).edit().putInt("crop_margin", v).apply()
 
+    /** The "Page" tab: reflow Line Spacing + Alignment (EPUB; a toast on fixed-layout PDF). */
+    private fun pagePanel(): View {
+        fun applyReflow(call: () -> Int) {
+            engine.execute {
+                val np = try { call() } catch (e: RuntimeException) { -1 }
+                if (np >= 0) {
+                    pageCount = NativeBridge.nativePageCount(docHandle)
+                    renderAndBlit(); adapter.refreshFull()
+                } else {
+                    runOnUiThread { Toast.makeText(this, "Page layout adjusts reflowable books (EPUB)", Toast.LENGTH_SHORT).show() }
+                }
+            }
+        }
+        val container = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        container.addView(settingRow("Line Spacing", segmented(listOf("Small", "Medium", "Large"), lineSpacingPref()) { which ->
+            setLineSpacingPref(which)
+            Log.i(TAG, "DIAG line spacing=$which")
+            applyReflow { NativeBridge.nativeSetLineSpacing(docHandle, LINE_SPACINGS[which]) }
+        }))
+        container.addView(settingRow("Alignment", segmented(listOf("Left", "Justify", "Center", "Right"), alignmentPref()) { which ->
+            setAlignmentPref(which)
+            Log.i(TAG, "DIAG alignment=$which")
+            applyReflow { NativeBridge.nativeSetAlignment(docHandle, which) }
+        }))
+        return container
+    }
+
+    private fun lineSpacingPref(): Int =
+        getSharedPreferences("typography", MODE_PRIVATE).getInt("line_spacing", 1).coerceIn(0, 2)
+
+    private fun setLineSpacingPref(i: Int) =
+        getSharedPreferences("typography", MODE_PRIVATE).edit().putInt("line_spacing", i).apply()
+
+    private fun alignmentPref(): Int =
+        getSharedPreferences("typography", MODE_PRIVATE).getInt("alignment", 0).coerceIn(0, 3)
+
+    private fun setAlignmentPref(i: Int) =
+        getSharedPreferences("typography", MODE_PRIVATE).edit().putInt("alignment", i).apply()
+
     /** The "Zoom" tab: the Fit segmented row + a live zoom −/+ stepper (zoom moved off the bar). */
     private fun zoomPanel(): View {
         val d = resources.displayMetrics.density
@@ -2953,6 +3000,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         val SYNCED_DIRS = arrayOf("Document", "EXPORT", "Note", "INBOX", "MyStyle", "Download")
         const val SELECTION_HANDLE_PX = 8f // half-size of the square corner handles on the selection box.
         const val CONTRAST_MAX = 8 // mirrors reader-core render::contrast::MAX_CONTRAST_STEP (RR4).
+        val LINE_SPACINGS = floatArrayOf(1.2f, 1.4f, 1.7f) // Small / Medium / Large (RR4).
         const val STROKE_PAUSE_MS = 600L // commit a stroke after this pen-pause (swallowed-UP net).
         const val LONG_PRESS_MS = 500L // hold the pen this long (≈still) on a word → look it up.
         const val LONG_PRESS_SLOP_PX = 16f // movement beyond this cancels the long-press (it's a stroke).

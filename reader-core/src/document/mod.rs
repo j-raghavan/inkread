@@ -305,6 +305,20 @@ pub trait Document {
         None
     }
 
+    /// Set the reflow **line spacing** multiplier (e.g. `1.2`/`1.4`/`1.7`) and repaginate, preserving
+    /// the chapter (RR4 — KOReader's "Line Spacing"). Returns the new page, or `None` for a
+    /// fixed-layout format (PDF). Default: unsupported.
+    fn set_line_spacing(&self, _mult: f32, _current_page: usize) -> Option<usize> {
+        None
+    }
+
+    /// Set the reflow **alignment** (`0=Left, 1=Justify, 2=Center, 3=Right`) and repaginate,
+    /// preserving the chapter (RR4 — KOReader's "Alignment"). Returns the new page, or `None` for a
+    /// fixed-layout format (PDF). Default: unsupported.
+    fn set_alignment(&self, _align_code: i32, _current_page: usize) -> Option<usize> {
+        None
+    }
+
     /// Prefetch hint (RR4-FR7): the core may call this after rendering the current page so a
     /// backend can warm an internal handle for the likely-next page, making a page turn blit a
     /// ready buffer. Default: a no-op (backends opt in). Must never panic on a bad index.

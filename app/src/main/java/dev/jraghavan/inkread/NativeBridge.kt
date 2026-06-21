@@ -152,6 +152,14 @@ object NativeBridge {
      *  Re-render after calling. */
     external fun nativeSetRenderQuality(handle: Long, quality: Int)
 
+    /** Reflow line-spacing multiplier (RR4); repaginates EPUB. Returns the new page, or -1 for a
+     *  fixed-layout PDF. Re-render after. */
+    external fun nativeSetLineSpacing(handle: Long, mult: Float): Int
+
+    /** Reflow alignment (0=Left, 1=Justify, 2=Center, 3=Right; RR4); repaginates EPUB. Returns the
+     *  new page, or -1 for a fixed-layout PDF. Re-render after. */
+    external fun nativeSetAlignment(handle: Long, code: Int): Int
+
     // ---- ink annotation, persisted by the core to a sidecar (RR6/RR10 / ADR-INKREAD-0010) ----
 
     /** Attach a `.inkread` sidecar store for the open document so strokes persist (RR10). */
