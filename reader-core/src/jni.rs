@@ -41,6 +41,7 @@ use crate::persistence::ink_store::{FsInkStore, InkStore};
 use crate::persistence::sidecar::SidecarPaths;
 use crate::persistence::sqlite::SqliteStore;
 use crate::persistence::{BookId, ReaderStore};
+use crate::plugins::{encode_menu_wire, encode_messages_wire};
 use crate::render::{PixelBuffer, Viewport};
 use crate::session::{Gesture, ReaderSession};
 use inkread_dict::import::import_stardict;
@@ -1106,6 +1107,66 @@ fn read_viewport(
         ));
     }
     Ok(Viewport::new(width as u32, height as u32, dpi as u32))
+}
+
+// =====================================================================================
+// Lua plugins (RR13/RR14 / ADR-INKREAD-0006). The shell points the core at a plugins dir,
+// lists the registered menu items, and fires one — getting back any UI messages to show.
+//   nativeLoadPlugins(handle, dir): int            — # plugins loaded (best-effort)
+//   nativePluginMenuItems(handle): bytes           — menu wire (WireCodec.decodePluginMenu)
+//   nativePluginInvoke(handle, key): bytes         — message wire (WireCodec.decodeStringList)
+// =====================================================================================
+
+/// Load every `.koplugin` under the plugins root `dir`; returns how many loaded.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeLoadPlugins<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+    dir: JString<'local>,
+) -> jint {
+    env.with_env(|env| -> jni::errors::Result<jint> {
+        let session = unsafe { session_mut(handle) }.map_err(|e| throw(env, &e))?;
+        let dir: String = dir.try_to_string(env)?;
+        match session.load_plugins_dir(std::path::Path::new(&dir)) {
+            Ok(n) => Ok(i32::try_from(n).unwrap_or(i32::MAX)),
+            Err(e) => Err(throw(env, &e)),
+        }
+    })
+    .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
+}
+
+/// The loaded plugins' main-menu items (key + label) as the menu wire.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativePluginMenuItems<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+) -> JByteArray<'local> {
+    env.with_env(|env| -> jni::errors::Result<JByteArray<'local>> {
+        let session = unsafe { session_mut(handle) }.map_err(|e| throw(env, &e))?;
+        env.byte_array_from_slice(&encode_menu_wire(&session.plugin_menu_items()))
+    })
+    .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
+}
+
+/// Fire a plugin menu item by `key`; returns the UI messages it queued (message wire).
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativePluginInvoke<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+    key: JString<'local>,
+) -> JByteArray<'local> {
+    env.with_env(|env| -> jni::errors::Result<JByteArray<'local>> {
+        let session = unsafe { session_mut(handle) }.map_err(|e| throw(env, &e))?;
+        let key: String = key.try_to_string(env)?;
+        match session.plugin_invoke(&key) {
+            Ok(msgs) => env.byte_array_from_slice(&encode_messages_wire(&msgs)),
+            Err(e) => Err(throw(env, &e)),
+        }
+    })
+    .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
 }
 
 /// The session's viewport dimensions (for the render buffer geometry).

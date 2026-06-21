@@ -471,6 +471,35 @@ impl ReaderSession {
             .load_koplugin_dir(dir)
     }
 
+    /// Load every plugin under a plugins **root** directory: each immediate sub-directory containing
+    /// a `main.lua` is loaded as a `.koplugin` (RR14). Best-effort — a plugin that fails to load
+    /// (e.g. needs an unsupported API) is skipped so one bad plugin can't block the others. Returns
+    /// the number successfully loaded. Creates the manager on first use.
+    pub fn load_plugins_dir(&mut self, root: &std::path::Path) -> CoreResult<usize> {
+        if self.plugins.is_none() {
+            self.plugins = Some(crate::plugins::PluginManager::new()?);
+        }
+        self.sync_plugins();
+        let mut count = 0usize;
+        if let Ok(entries) = std::fs::read_dir(root) {
+            for entry in entries.flatten() {
+                let dir = entry.path();
+                if dir.is_dir()
+                    && dir.join("main.lua").exists()
+                    && self
+                        .plugins
+                        .as_ref()
+                        .expect("just set")
+                        .load_koplugin_dir(&dir)
+                        .is_ok()
+                {
+                    count += 1;
+                }
+            }
+        }
+        Ok(count)
+    }
+
     /// Load a KOReader plugin from in-memory sources (`_meta.lua`, `main.lua`) — used by the JNI
     /// seam and tests. Creates the manager on first use.
     pub fn load_plugin_src(&mut self, meta_src: &str, main_src: &str) -> CoreResult<()> {

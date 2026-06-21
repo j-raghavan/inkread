@@ -163,6 +163,44 @@ fn to_core_err(e: inkread_lua::PluginError) -> CoreError {
     CoreError::Plugin(e.0)
 }
 
+/// Wire-format version for the plugin menu / message streams the JNI bridge ships to the shell.
+const PLUGIN_WIRE_VERSION: u8 = 0x01;
+
+fn put_str(out: &mut Vec<u8>, s: &str) {
+    let b = s.as_bytes();
+    let len = u16::try_from(b.len()).unwrap_or(u16::MAX);
+    out.extend_from_slice(&len.to_le_bytes());
+    out.extend_from_slice(&b[..len as usize]);
+}
+
+/// Encode plugin menu items for the shell (RR14). Layout (little-endian):
+/// `[ver=1][count u16]` then, per item, `[keyLen u16][key][labelLen u16][label]`. Saturates,
+/// never panics (RR21-FR3).
+#[must_use]
+pub fn encode_menu_wire(items: &[(String, String)]) -> Vec<u8> {
+    let mut out = vec![PLUGIN_WIRE_VERSION];
+    let count = u16::try_from(items.len()).unwrap_or(u16::MAX);
+    out.extend_from_slice(&count.to_le_bytes());
+    for (key, label) in items.iter().take(count as usize) {
+        put_str(&mut out, key);
+        put_str(&mut out, label);
+    }
+    out
+}
+
+/// Encode a list of plugin UI messages for the shell (RR14). Layout: `[ver=1][count u16]` then per
+/// message `[len u16][utf-8]`. Saturates, never panics.
+#[must_use]
+pub fn encode_messages_wire(messages: &[String]) -> Vec<u8> {
+    let mut out = vec![PLUGIN_WIRE_VERSION];
+    let count = u16::try_from(messages.len()).unwrap_or(u16::MAX);
+    out.extend_from_slice(&count.to_le_bytes());
+    for m in messages.iter().take(count as usize) {
+        put_str(&mut out, m);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -232,6 +270,25 @@ mod tests {
             .log_sink()
             .messages()
             .contains(&"page 8/42".to_string()));
+    }
+
+    #[test]
+    fn wire_codecs_round_trip() {
+        let menu = encode_menu_wire(&[
+            ("k1".into(), "Label One".into()),
+            ("k2".into(), "Two".into()),
+        ]);
+        assert_eq!(menu[0], PLUGIN_WIRE_VERSION);
+        assert_eq!(u16::from_le_bytes([menu[1], menu[2]]), 2);
+        // decode item 0 the way the shell does
+        let mut off = 3usize;
+        let klen = u16::from_le_bytes([menu[off], menu[off + 1]]) as usize;
+        off += 2;
+        assert_eq!(&menu[off..off + klen], b"k1");
+
+        let msgs = encode_messages_wire(&["hello".into(), "world".into()]);
+        assert_eq!(u16::from_le_bytes([msgs[1], msgs[2]]), 2);
+        assert_eq!(encode_messages_wire(&[]), vec![PLUGIN_WIRE_VERSION, 0, 0]);
     }
 
     #[test]

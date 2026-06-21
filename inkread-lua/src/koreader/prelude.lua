@@ -75,7 +75,7 @@ function Dispatcher:registerAction(name, spec) self._actions[name] = spec end
 M["dispatcher"] = Dispatcher
 
 -- ===== custom require resolver (strict by default; probe records gaps) =====
-__inkread_ko = { probe = false, probed = {} }
+__inkread_ko = { probe = false, probed = {}, items = {}, instances = {} }
 
 local function record(path)
     __inkread_ko.probed[path] = true
@@ -98,7 +98,8 @@ require = function(name) -- luacheck: ignore (intentional global override)
     error("inkread: KOReader API '" .. tostring(name) .. "' is not supported (RR14)")
 end
 
--- ===== harness: load a plugin's main.lua, run lifecycle, expose its menu =====
+-- ===== harness: load a plugin's main.lua, run lifecycle, accumulate its menu =====
+-- Menu items + instances ACCUMULATE across every loaded plugin (a plugins dir may hold several).
 function __inkread_ko.run(main_src, chunk_name)
     local chunk = assert(load(main_src, chunk_name or "koplugin/main.lua"))
     local PluginClass = chunk()
@@ -107,28 +108,25 @@ function __inkread_ko.run(main_src, chunk_name)
     function menu:registerToMainMenu(p) table.insert(self._plugins, p) end
     local ui = { menu = menu }
     local instance = PluginClass:new{ ui = ui, view = {}, document = {} }
-    local items = {}
+    table.insert(__inkread_ko.instances, instance)
     for _, p in ipairs(menu._plugins) do
-        if p.addToMainMenu then p:addToMainMenu(items) end
+        if p.addToMainMenu then p:addToMainMenu(__inkread_ko.items) end
     end
-    __inkread_ko._last = { instance = instance, items = items }
     return true
 end
 
 -- Menu items as "key=text" lines (simple wire to Rust; avoids table marshaling).
 function __inkread_ko.menu_keys()
     local out = {}
-    if __inkread_ko._last then
-        for k, v in pairs(__inkread_ko._last.items) do
-            out[#out + 1] = k .. "=" .. tostring(v.text or "")
-        end
+    for k, v in pairs(__inkread_ko.items) do
+        out[#out + 1] = k .. "=" .. tostring(v.text or "")
     end
     return table.concat(out, "\n")
 end
 
 -- Fire a menu item's callback by key. Returns true if it ran.
 function __inkread_ko.invoke(key)
-    local it = __inkread_ko._last and __inkread_ko._last.items[key]
+    local it = __inkread_ko.items[key]
     if it and it.callback then it.callback(); return true end
     return false
 end

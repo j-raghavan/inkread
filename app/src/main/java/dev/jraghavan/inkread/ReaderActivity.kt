@@ -566,6 +566,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
                 if (np >= 0) Log.i(TAG, "applied text scale $savedScale → page $np")
             }
             pageCount = NativeBridge.nativePageCount(docHandle)
+            loadPlugins(docHandle) // RR13/RR14: stage built-in .koplugins + load into the session
             Books.pushRecent(this, bookId, path)
             Log.i(
                 TAG,
@@ -598,6 +599,73 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         openBook(path, id)
         renderAndBlit()
         adapter.refreshFull() // the new book's first page has no command stream → refresh
+    }
+
+    // ---- Lua plugins (RR13/RR14 / ADR-INKREAD-0006) ----
+
+    /** Stage the built-in `.koplugin`s from assets into filesDir/plugins, then load them all into
+     *  the session [handle]. Engine thread (called from openBook). Best-effort + logged. */
+    private fun loadPlugins(handle: Long) {
+        val dir = File(filesDir, "plugins")
+        try {
+            stageAssetTree("plugins", dir.parentFile ?: filesDir)
+            val n = NativeBridge.nativeLoadPlugins(handle, dir.absolutePath)
+            Log.i(TAG, "loaded $n plugin(s) from ${dir.absolutePath}")
+        } catch (e: Exception) {
+            Log.e(TAG, "plugin load failed: ${e.message}")
+        }
+    }
+
+    /** Recursively copy an asset subtree [rel] into [destRoot] (overwrites — cheap; eases updates). */
+    private fun stageAssetTree(rel: String, destRoot: File) {
+        val children = assets.list(rel) ?: return
+        if (children.isEmpty()) { // a leaf file
+            val out = File(destRoot, rel)
+            out.parentFile?.mkdirs()
+            assets.open(rel).use { input -> out.outputStream().use { input.copyTo(it) } }
+        } else {
+            for (c in children) stageAssetTree("$rel/$c", destRoot)
+        }
+    }
+
+    /** Show the loaded plugins' menu items (fetched on the engine thread); tap one to run it. */
+    private fun showPluginsMenu() {
+        if (docHandle == 0L) { openPicker(); return }
+        engine.execute {
+            val items = try {
+                WireCodec.decodePluginMenu(NativeBridge.nativePluginMenuItems(docHandle))
+            } catch (e: RuntimeException) {
+                Log.e(TAG, "plugin menu failed: ${e.message}"); emptyList()
+            }
+            runOnUiThread {
+                if (items.isEmpty()) {
+                    Toast.makeText(this, "No plugins loaded", Toast.LENGTH_SHORT).show()
+                    return@runOnUiThread
+                }
+                val labels = items.map { it.label }.toTypedArray()
+                AlertDialog.Builder(this)
+                    .setTitle("Plugins")
+                    .setItems(labels) { _, which -> invokePlugin(items[which].key) }
+                    .setNegativeButton("Close", null)
+                    .show()
+            }
+        }
+    }
+
+    /** Fire a plugin menu item on the engine thread; toast any messages it queued, then re-render. */
+    private fun invokePlugin(key: String) {
+        engine.execute {
+            if (docHandle == 0L) return@execute
+            val msgs = try {
+                WireCodec.decodeStringList(NativeBridge.nativePluginInvoke(docHandle, key))
+            } catch (e: RuntimeException) {
+                Log.e(TAG, "plugin invoke failed: ${e.message}"); listOf("Plugin error")
+            }
+            runOnUiThread { for (m in msgs) Toast.makeText(this, m, Toast.LENGTH_SHORT).show() }
+            // A plugin may have changed view state (e.g. zoom) → repaint.
+            renderAndBlit()
+            adapter.refreshFull()
+        }
     }
 
     /** Open a Library book in place (invoked from the reader popup; engine thread). */
@@ -1185,6 +1253,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         control(R.drawable.ic_menu_zoom_in, "Zoom +") { zoomBy(ZOOM_STEP) }
         control(R.drawable.ic_menu_export, "Export") { showExportDialog() }
         control(R.drawable.ic_tool_define, "Dicts") { showDictionariesDialog() }
+        control(R.drawable.ic_menu_plugins, "Plugins") { showPluginsMenu() }
         control(R.drawable.ic_menu_font, "Font") { showTypographyDialog() }
         control(R.drawable.ic_menu_open, "Open") { openPicker() }
         container.addView(controls)

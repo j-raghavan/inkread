@@ -123,6 +123,18 @@ object NativeBridge {
     /** Uninstall a user dictionary: drop every entry + synonym tagged [lang]. Returns rows removed. */
     external fun nativeDictForget(dictHandle: Long, lang: String): Int
 
+    // ---- Lua plugins (RR13/RR14 / ADR-INKREAD-0006) ----
+
+    /** Load every `.koplugin` under the plugins root [dir]; returns how many loaded (best-effort). */
+    external fun nativeLoadPlugins(handle: Long, dir: String): Int
+
+    /** The loaded plugins' main-menu items; decode with [WireCodec.decodePluginMenu]. */
+    external fun nativePluginMenuItems(handle: Long): ByteArray
+
+    /** Fire a plugin menu item by [key]; returns the UI messages it queued
+     *  (decode with [WireCodec.decodeStringList]) for the shell to show. */
+    external fun nativePluginInvoke(handle: Long, key: String): ByteArray
+
     /** Set pinch-zoom factor ([zoom] >= 1; 1 = fit) and normalized pan [0,1] (RR5-FR3). The next
      *  [nativeRenderPage] renders the magnified/panned view. */
     external fun nativeSetZoom(handle: Long, zoom: Float, panX: Float, panY: Float)
@@ -236,6 +248,9 @@ data class SelBox(val x0: Float, val y0: Float, val x1: Float, val y1: Float)
 data class Selection(val text: String, val boxes: List<SelBox>) {
     val isEmpty: Boolean get() = text.isEmpty()
 }
+
+/** One plugin main-menu item (RR14): a stable [key] the shell fires + its display [label]. */
+data class PluginMenuItem(val key: String, val label: String)
 
 /** A dictionary lookup result (RR12 / D3); [found] is false on a miss (try online next). */
 data class WordDefinition(
@@ -463,6 +478,47 @@ object WireCodec {
         val senses = list()
         val synonyms = list()
         return WordDefinition(true, headword, lang, senses, synonyms)
+    }
+
+    /**
+     * Decode the plugin menu wire from [NativeBridge.nativePluginMenuItems] (RR14): `[ver][count u16]`
+     * then per item `[keyLen u16][key][labelLen u16][label]`. Mirrors `encode_menu_wire`.
+     */
+    fun decodePluginMenu(bytes: ByteArray): List<PluginMenuItem> {
+        if (bytes.size < 3 || bytes[0] != WIRE_VERSION) return emptyList()
+        val buf = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
+        val count = buf.getShort(1).toInt() and 0xFFFF
+        var off = 3
+        fun str16(): String {
+            require(bytes.size >= off + 2) { "plugin string length truncated" }
+            val n = buf.getShort(off).toInt() and 0xFFFF
+            off += 2
+            require(bytes.size >= off + n) { "plugin string overruns" }
+            val s = String(bytes, off, n, Charsets.UTF_8); off += n; return s
+        }
+        return ArrayList<PluginMenuItem>(count).apply {
+            repeat(count) { add(PluginMenuItem(str16(), str16())) }
+        }
+    }
+
+    /**
+     * Decode a `[ver][count u16]` then `[len u16][utf-8]` string list (RR14 plugin UI messages from
+     * [NativeBridge.nativePluginInvoke]). Mirrors `encode_messages_wire`.
+     */
+    fun decodeStringList(bytes: ByteArray): List<String> {
+        if (bytes.size < 3 || bytes[0] != WIRE_VERSION) return emptyList()
+        val buf = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
+        val count = buf.getShort(1).toInt() and 0xFFFF
+        var off = 3
+        return ArrayList<String>(count).apply {
+            repeat(count) {
+                require(bytes.size >= off + 2) { "message length truncated" }
+                val n = buf.getShort(off).toInt() and 0xFFFF
+                off += 2
+                require(bytes.size >= off + n) { "message overruns" }
+                add(String(bytes, off, n, Charsets.UTF_8)); off += n
+            }
+        }
     }
 
     /**
