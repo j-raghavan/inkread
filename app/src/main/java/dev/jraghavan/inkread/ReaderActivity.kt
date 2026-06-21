@@ -584,6 +584,8 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             try { NativeBridge.nativeSetContrast(docHandle, contrastPref()) } catch (e: RuntimeException) {}
             // Re-apply the saved page fit mode (RR4); default Page/contain.
             try { NativeBridge.nativeSetFit(docHandle, fitPref()) } catch (e: RuntimeException) {}
+            // Re-apply the saved auto-crop + margin (RR4); default off.
+            try { NativeBridge.nativeSetCrop(docHandle, if (cropAutoPref()) 1 else 0, cropMarginPref()) } catch (e: RuntimeException) {}
             pageCount = NativeBridge.nativePageCount(docHandle)
             Books.pushRecent(this, bookId, path)
             Log.i(
@@ -2552,6 +2554,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
 
         val panels: List<Triple<String, Int, () -> View>> = listOf(
             Triple("Rotate", R.drawable.ic_menu_rotate) { rotationPanel() },
+            Triple("Crop", R.drawable.ic_menu_crop) { cropPanel() },
             Triple("Zoom", R.drawable.ic_menu_fit) { zoomPanel() },
             Triple("Font", R.drawable.ic_menu_font) { fontPanel() },
             Triple("Display", R.drawable.ic_menu_display) { displayPanel() },
@@ -2734,6 +2737,40 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             }
         })
     }
+
+    /** The "Crop" tab: Page Crop (None/Auto) + a Margin cell bar (margin kept around the content). */
+    private fun cropPanel(): View {
+        val container = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        container.addView(settingRow("Page Crop", segmented(listOf("None", "Auto"), if (cropAutoPref()) 1 else 0) { which ->
+            setCropAutoPref(which == 1)
+            Log.i(TAG, "DIAG crop auto=${which == 1}")
+            engine.execute {
+                try { NativeBridge.nativeSetCrop(docHandle, which, cropMarginPref()) } catch (e: RuntimeException) {}
+                renderAndBlit(); adapter.refreshFull()
+            }
+        }))
+        container.addView(settingRow("Margin", cellBar(8, cropMarginPref()) { level ->
+            setCropMarginPref(level)
+            Log.i(TAG, "DIAG crop margin=$level")
+            engine.execute {
+                try { NativeBridge.nativeSetCrop(docHandle, if (cropAutoPref()) 1 else 0, level) } catch (e: RuntimeException) {}
+                renderAndBlit(); adapter.refreshFull()
+            }
+        }))
+        return container
+    }
+
+    private fun cropAutoPref(): Boolean =
+        getSharedPreferences("display", MODE_PRIVATE).getBoolean("crop_auto", false)
+
+    private fun setCropAutoPref(v: Boolean) =
+        getSharedPreferences("display", MODE_PRIVATE).edit().putBoolean("crop_auto", v).apply()
+
+    private fun cropMarginPref(): Int =
+        getSharedPreferences("display", MODE_PRIVATE).getInt("crop_margin", 1).coerceIn(0, 8)
+
+    private fun setCropMarginPref(v: Int) =
+        getSharedPreferences("display", MODE_PRIVATE).edit().putInt("crop_margin", v).apply()
 
     /** The "Zoom" tab: the Fit segmented row + a live zoom −/+ stepper (zoom moved off the bar). */
     private fun zoomPanel(): View {

@@ -530,6 +530,25 @@ pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeSetFit<'loc
     .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
 }
 
+// nativeSetCrop(handle, auto, marginStep) — auto-crop white margins (RR4). auto!=0 enables it;
+// marginStep (0..8, 1%-of-page each) keeps a margin around the detected content. Re-render after.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeSetCrop<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+    auto: jint,
+    margin_step: jint,
+) {
+    env.with_env(|env| -> jni::errors::Result<()> {
+        let session = unsafe { session_mut(handle) }.map_err(|e| throw(env, &e))?;
+        session.set_crop_auto(auto != 0);
+        session.set_crop_margin(u8::try_from(margin_step.max(0)).unwrap_or(u8::MAX));
+        Ok(())
+    })
+    .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
+}
+
 // nativeSetViewport(handle, width, height, dpi) — update the render viewport after a surface
 // resize / screen rotation (RR21-FR4). Without this the core keeps the open-time viewport and a
 // render into the new (resized) buffer is rejected as a size mismatch. PDF re-renders at the new

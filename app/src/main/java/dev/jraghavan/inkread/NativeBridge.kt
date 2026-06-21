@@ -144,6 +144,10 @@ object NativeBridge {
      *  EPUB ignores it. Re-render after calling. */
     external fun nativeSetFit(handle: Long, mode: Int)
 
+    /** Auto-crop white margins (RR4). [auto] != 0 enables it; [marginStep] (0..8, 1%-of-page each)
+     *  keeps a margin around the detected content. PDF only; re-render after. */
+    external fun nativeSetCrop(handle: Long, auto: Int, marginStep: Int)
+
     // ---- ink annotation, persisted by the core to a sidecar (RR6/RR10 / ADR-INKREAD-0010) ----
 
     /** Attach a `.inkread` sidecar store for the open document so strokes persist (RR10). */

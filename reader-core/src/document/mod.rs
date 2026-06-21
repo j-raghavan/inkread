@@ -272,6 +272,29 @@ pub trait Document {
         self.render_page(index, buf)
     }
 
+    /// The page's **content bounding box** in normalized page coords `[0,1]` (RR4 — KOReader's
+    /// auto Crop): the tight rectangle around the non-white content, used to trim white margins.
+    /// `None` if undetectable or not applicable (blank page / reflowable backend). Never panics.
+    fn content_bbox(&self, _index: usize) -> Option<NormRect> {
+        None
+    }
+
+    /// Render the normalized `crop` sub-rect of page `index` fit to `buf` per [`FitMode`] (RR4 —
+    /// Crop). Like [`Self::render_fit`] but only the cropped region is shown (margins trimmed), so
+    /// the content fills the screen. `pan_x`/`pan_y` scroll an overflowing axis. Default: ignores
+    /// the crop and falls back to [`Self::render_fit`] (reflowable backends don't crop).
+    fn render_cropped(
+        &self,
+        index: usize,
+        buf: &mut PixelBuffer<'_>,
+        _crop: NormRect,
+        mode: FitMode,
+        pan_x: f32,
+        pan_y: f32,
+    ) -> CoreResult<()> {
+        self.render_fit(index, buf, mode, pan_x, pan_y)
+    }
+
     /// Adjust the reflow **text scale** (`1.0` = the backend default size) and repaginate (RR2-FR5
     /// font-size control). `current_page` is the page the reader is on *before* the change; the
     /// backend returns `Some(new_page)` to jump to so the reading position is preserved across the

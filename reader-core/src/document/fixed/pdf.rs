@@ -413,22 +413,8 @@ impl Document for PdfBackend {
             return self.render_page(index, buf);
         }
 
-        // Fitted render size (aspect-preserved). Page = contain; Width/Height fill that dimension.
-        let (tw, th) = match mode {
-            FitMode::Page => {
-                if (bw as f32 / bh as f32) > aspect {
-                    (((bh as f32) * aspect).round() as i32, bh)
-                } else {
-                    (bw, ((bw as f32) / aspect).round() as i32)
-                }
-            }
-            FitMode::Width => (bw, ((bw as f32) / aspect).round() as i32),
-            FitMode::Height => (((bh as f32) * aspect).round() as i32, bh),
-        };
-        let tw = tw.clamp(1, 1 << 15);
-        let th = th.clamp(1, 1 << 15);
-
-        // Render the page aspect-correct into a temp buffer, then composite into the white page.
+        // Render the page aspect-correct into a temp buffer, then composite it into the white page.
+        let (tw, th) = fit_dims(aspect, bw, bh, mode);
         let mut tmp = vec![0u8; (tw as usize) * (th as usize) * 4];
         {
             let mut tbuf = PixelBuffer::from_rgba(&mut tmp, tw as u32, th as u32)?;
@@ -439,17 +425,99 @@ impl Document for PdfBackend {
                     .set_reverse_byte_order(true)
             })?;
         }
+        composite_centered(buf, &tmp, tw, th, pan_x, pan_y);
+        Ok(())
+    }
 
-        // Center when the fitted page fits the axis; pan (scroll) when it overflows.
-        let (sx, dx, cw) = fit_place(tw, bw, pan_x);
-        let (sy, dy, ch) = fit_place(th, bh, pan_y);
-        let dst = buf.bytes_mut();
-        for row in 0..ch {
-            let s = (((sy + row) * tw + sx) * 4) as usize;
-            let d = (((dy + row) * bw + dx) * 4) as usize;
-            let n = (cw * 4) as usize;
-            dst[d..d + n].copy_from_slice(&tmp[s..s + n]);
+    fn content_bbox(&self, index: usize) -> Option<NormRect> {
+        let page = i32::try_from(index)
+            .ok()
+            .and_then(|i| self.document.pages().get(i).ok())?;
+        let (pw, ph) = (page.width().value, page.height().value);
+        if pw <= 0.0 || ph <= 0.0 {
+            return None;
         }
+        // Render the page small (aspect-correct) and scan for the non-white content box.
+        let aspect = pw / ph;
+        let probe_w = 480i32;
+        let probe_h = ((probe_w as f32 / aspect).round() as i32).clamp(1, 2000);
+        let mut px = vec![0u8; (probe_w as usize) * (probe_h as usize) * 4];
+        {
+            let mut pbuf = PixelBuffer::from_rgba(&mut px, probe_w as u32, probe_h as u32).ok()?;
+            self.render_with_config(index, &mut pbuf, |w, h| {
+                PdfRenderConfig::new()
+                    .set_target_size(w, h)
+                    .set_format(PdfBitmapFormat::BGRA)
+                    .set_reverse_byte_order(true)
+            })
+            .ok()?;
+        }
+        const INK: u8 = 235; // any channel below this counts as content (not paper white)
+        let (mut minx, mut miny, mut maxx, mut maxy) = (probe_w, probe_h, -1i32, -1i32);
+        for y in 0..probe_h {
+            for x in 0..probe_w {
+                let o = ((y * probe_w + x) * 4) as usize;
+                if px[o] < INK || px[o + 1] < INK || px[o + 2] < INK {
+                    minx = minx.min(x);
+                    maxx = maxx.max(x);
+                    miny = miny.min(y);
+                    maxy = maxy.max(y);
+                }
+            }
+        }
+        if maxx < minx || maxy < miny {
+            return None; // blank page
+        }
+        let pad = 0.01f32; // keep a hair of margin so glyph edges aren't clipped
+        let x0 = (minx as f32 / probe_w as f32 - pad).clamp(0.0, 1.0);
+        let y0 = (miny as f32 / probe_h as f32 - pad).clamp(0.0, 1.0);
+        let x1 = ((maxx + 1) as f32 / probe_w as f32 + pad).clamp(0.0, 1.0);
+        let y1 = ((maxy + 1) as f32 / probe_h as f32 + pad).clamp(0.0, 1.0);
+        if x1 - x0 < 0.05 || y1 - y0 < 0.05 {
+            return None; // implausibly tiny — ignore the crop
+        }
+        Some(NormRect { x0, y0, x1, y1 })
+    }
+
+    fn render_cropped(
+        &self,
+        index: usize,
+        buf: &mut PixelBuffer<'_>,
+        crop: NormRect,
+        mode: FitMode,
+        pan_x: f32,
+        pan_y: f32,
+    ) -> CoreResult<()> {
+        buf.fill_white();
+        let bw = i32::try_from(buf.width()).unwrap_or(0);
+        let bh = i32::try_from(buf.height()).unwrap_or(0);
+        let page = i32::try_from(index)
+            .ok()
+            .and_then(|i| self.document.pages().get(i).ok());
+        let (pw, ph) = match &page {
+            Some(p) => (p.width().value, p.height().value),
+            None => return self.render_fit(index, buf, mode, pan_x, pan_y),
+        };
+        let x0 = crop.x0.clamp(0.0, 1.0);
+        let y0 = crop.y0.clamp(0.0, 1.0);
+        let x1 = crop.x1.clamp(0.0, 1.0);
+        let y1 = crop.y1.clamp(0.0, 1.0);
+        let crop_w_pt = (x1 - x0) * pw;
+        let crop_h_pt = (y1 - y0) * ph;
+        if crop_w_pt <= 0.0 || crop_h_pt <= 0.0 || bw <= 0 || bh <= 0 {
+            return self.render_fit(index, buf, mode, pan_x, pan_y);
+        }
+        let (tw, th) = fit_dims(crop_w_pt / crop_h_pt, bw, bh, mode);
+        // Scale so the crop region becomes the temp size, then render just that window.
+        let s = tw as f32 / crop_w_pt;
+        let off_x = (x0 * pw * s).round() as i32;
+        let off_y = (y0 * ph * s).round() as i32;
+        let mut tmp = vec![0u8; (tw as usize) * (th as usize) * 4];
+        {
+            let mut tbuf = PixelBuffer::from_rgba(&mut tmp, tw as u32, th as u32)?;
+            self.render_region(index, &mut tbuf, s, off_x, off_y)?;
+        }
+        composite_centered(buf, &tmp, tw, th, pan_x, pan_y);
         Ok(())
     }
 
@@ -563,6 +631,46 @@ impl Document for PdfBackend {
 
     fn text_in_rect(&self, page: usize, rect: NormRect) -> TextSelection {
         text_select::text_in_rect(&self.page_chars(page), rect)
+    }
+}
+
+/// The aspect-preserving render size for `aspect` (w/h) inside a `bw`×`bh` buffer under [`FitMode`]
+/// (RR4). `Page` contains; `Width`/`Height` fill that axis (the other may overflow). Clamped sane.
+fn fit_dims(aspect: f32, bw: i32, bh: i32, mode: FitMode) -> (i32, i32) {
+    let (tw, th) = match mode {
+        FitMode::Page => {
+            if (bw as f32 / bh as f32) > aspect {
+                (((bh as f32) * aspect).round() as i32, bh)
+            } else {
+                (bw, ((bw as f32) / aspect).round() as i32)
+            }
+        }
+        FitMode::Width => (bw, ((bw as f32) / aspect).round() as i32),
+        FitMode::Height => (((bh as f32) * aspect).round() as i32, bh),
+    };
+    (tw.clamp(1, 1 << 15), th.clamp(1, 1 << 15))
+}
+
+/// Composite a `tw`×`th` RGBA `tmp` image into `buf` (RR4): centered with white letterbox when it
+/// fits, panned by the normalized `pan_*` when it overflows. Shared by fit + crop renders.
+fn composite_centered(
+    buf: &mut PixelBuffer<'_>,
+    tmp: &[u8],
+    tw: i32,
+    th: i32,
+    pan_x: f32,
+    pan_y: f32,
+) {
+    let bw = i32::try_from(buf.width()).unwrap_or(0);
+    let bh = i32::try_from(buf.height()).unwrap_or(0);
+    let (sx, dx, cw) = fit_place(tw, bw, pan_x);
+    let (sy, dy, ch) = fit_place(th, bh, pan_y);
+    let dst = buf.bytes_mut();
+    for row in 0..ch {
+        let s = (((sy + row) * tw + sx) * 4) as usize;
+        let d = (((dy + row) * bw + dx) * 4) as usize;
+        let n = (cw * 4) as usize;
+        dst[d..d + n].copy_from_slice(&tmp[s..s + n]);
     }
 }
 

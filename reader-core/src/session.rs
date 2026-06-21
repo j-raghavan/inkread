@@ -110,6 +110,13 @@ pub struct ReaderSession {
     contrast: u8,
     /// How a fixed-layout page is fit to the viewport (RR4 — KOReader's "Fit"). Default: contain.
     fit_mode: FitMode,
+    /// Auto-crop the page's white margins (RR4 — KOReader Crop = auto). `false` = full page.
+    crop_auto: bool,
+    /// Margin kept around the auto-crop, in 1%-of-page steps (RR4 — KOReader Margin).
+    crop_margin: u8,
+    /// Per-page content-bbox memo for auto-crop (recomputed when the page changes). Interior-mutable
+    /// so the `&self` render path can cache the probe render.
+    crop_cache: std::cell::RefCell<Option<(usize, Option<NormRect>)>>,
 }
 
 impl ReaderSession {
@@ -199,6 +206,9 @@ impl ReaderSession {
             identity,
             contrast: 0,
             fit_mode: FitMode::Page,
+            crop_auto: false,
+            crop_margin: 0,
+            crop_cache: std::cell::RefCell::new(None),
         }
     }
 
@@ -337,10 +347,35 @@ impl ReaderSession {
             )));
         }
         if self.zoom <= 1.0 + 1e-3 {
-            // At fit (no pinch-zoom): aspect-preserving fit per the chosen mode (RR4). PDF honors
-            // it; reflowable backends fall back to a full-buffer render.
-            self.document
-                .render_fit(self.page, buf, self.fit_mode, self.pan_x, self.pan_y)?;
+            // At fit (no pinch-zoom): aspect-preserving fit per the chosen mode (RR4). With
+            // auto-crop on, trim the white margins to the detected content box first. PDF honors
+            // both; reflowable backends fall back to a full-buffer render.
+            match self
+                .crop_auto
+                .then(|| self.cached_crop_bbox(self.page))
+                .flatten()
+            {
+                Some(b) => {
+                    let crop = self.expand_crop(b);
+                    self.document.render_cropped(
+                        self.page,
+                        buf,
+                        crop,
+                        self.fit_mode,
+                        self.pan_x,
+                        self.pan_y,
+                    )?;
+                }
+                None => {
+                    self.document.render_fit(
+                        self.page,
+                        buf,
+                        self.fit_mode,
+                        self.pan_x,
+                        self.pan_y,
+                    )?;
+                }
+            }
         } else {
             // Magnified view: content is buf*zoom; show a buf-sized window panned over the overscan.
             let bw = self.viewport.width as f32;
@@ -379,6 +414,51 @@ impl ReaderSession {
     #[must_use]
     pub fn fit_mode(&self) -> FitMode {
         self.fit_mode
+    }
+
+    /// Enable/disable auto-crop of the page's white margins (RR4). Re-render to apply.
+    pub fn set_crop_auto(&mut self, auto: bool) {
+        self.crop_auto = auto;
+    }
+
+    /// Whether auto-crop is on.
+    #[must_use]
+    pub fn crop_auto(&self) -> bool {
+        self.crop_auto
+    }
+
+    /// Set the margin kept around the auto-crop (1%-of-page steps, clamped 0..=8). Re-render to apply.
+    pub fn set_crop_margin(&mut self, step: u8) {
+        self.crop_margin = step.min(8);
+    }
+
+    /// The current crop margin step.
+    #[must_use]
+    pub fn crop_margin(&self) -> u8 {
+        self.crop_margin
+    }
+
+    /// The content bounding box for `page`, memoized per page (recomputed on a page change).
+    fn cached_crop_bbox(&self, page: usize) -> Option<NormRect> {
+        if let Some((p, b)) = self.crop_cache.borrow().as_ref() {
+            if *p == page {
+                return *b;
+            }
+        }
+        let b = self.document.content_bbox(page);
+        *self.crop_cache.borrow_mut() = Some((page, b));
+        b
+    }
+
+    /// Expand a content box by the current margin (kept within the page).
+    fn expand_crop(&self, b: NormRect) -> NormRect {
+        let m = f32::from(self.crop_margin) * 0.01;
+        NormRect {
+            x0: (b.x0 - m).clamp(0.0, 1.0),
+            y0: (b.y0 - m).clamp(0.0, 1.0),
+            x1: (b.x1 + m).clamp(0.0, 1.0),
+            y1: (b.y1 + m).clamp(0.0, 1.0),
+        }
     }
 
     /// Set the pinch-zoom factor (clamped to `[1.0, MAX_ZOOM]`) and normalized pan `[0,1]`
