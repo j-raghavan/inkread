@@ -167,6 +167,16 @@ object NativeBridge {
      *  new page, or -1 for a fixed-layout PDF. Re-render after. */
     external fun nativeSetAlignment(handle: Long, code: Int): Int
 
+    /** Whether the open document can be reflowed — a text-layer PDF (ADR-INKREAD-0011). Use to
+     *  enable/disable the Reflow control (false for scanned PDFs and for EPUB, already reflowable). */
+    external fun nativeSupportsReflow(handle: Long): Boolean
+
+    /** Toggle reflow mode on a text-layer PDF (ADR-INKREAD-0011): reconstructs the page text and flows
+     *  it like a book so font/spacing/alignment take effect; off restores the fixed page. Returns the
+     *  new current page index (page count changes across the toggle), or -1 if reflow is unavailable.
+     *  Re-render after. */
+    external fun nativeSetReflow(handle: Long, on: Boolean): Int
+
     // ---- ink annotation, persisted by the core to a sidecar (RR6/RR10 / ADR-INKREAD-0010) ----
 
     /** Attach a `.inkread` sidecar store for the open document so strokes persist (RR10). */

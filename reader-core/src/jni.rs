@@ -651,6 +651,43 @@ pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeSetAlignmen
     .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
 }
 
+// nativeSupportsReflow(handle) : boolean — whether the open document can be reflowed (a text-layer
+// PDF). The shell uses this to enable/disable the Reflow control (ADR-INKREAD-0011).
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeSupportsReflow<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+) -> jboolean {
+    env.with_env(|env| -> jni::errors::Result<jboolean> {
+        let session = unsafe { session_mut(handle) }.map_err(|e| throw(env, &e))?;
+        Ok(session.supports_reflow())
+    })
+    .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
+}
+
+// nativeSetReflow(handle, on) : int — toggle reflow mode on a text-layer PDF (ADR-INKREAD-0011):
+// reconstruct the page text and flow it like a book so font/spacing/alignment take effect; off
+// restores the fixed page. Returns the new current page index (page count changes across the
+// toggle), or -1 if reflow is unavailable (no text layer / unsupported). Re-render afterward.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeSetReflow<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+    on: jboolean,
+) -> jint {
+    env.with_env(|env| -> jni::errors::Result<jint> {
+        let session = unsafe { session_mut(handle) }.map_err(|e| throw(env, &e))?;
+        if session.set_reflow(on) {
+            Ok(session.current_page() as jint)
+        } else {
+            Ok(-1)
+        }
+    })
+    .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
+}
+
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeInkBeginStroke<'local>(
     mut env: EnvUnowned<'local>,
