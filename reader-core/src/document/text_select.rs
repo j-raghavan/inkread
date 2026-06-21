@@ -75,6 +75,120 @@ impl TextSelection {
     }
 }
 
+/// One occurrence of a search query on a page (RR2 in-document search).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SearchMatch {
+    /// Highlight boxes, one per line run the match spans (like a [`TextSelection`]) — for
+    /// drawing the on-page highlight and the dirty-rect refresh when the reader jumps to it.
+    pub boxes: Vec<NormRect>,
+    /// A short context snippet around the match (for the results list), with `…` where trimmed.
+    pub snippet: String,
+}
+
+/// Context characters kept on each side of a match for its results-list snippet.
+const SNIPPET_CONTEXT: usize = 28;
+
+/// Case-insensitive, whitespace-normalized substring search over a page's `chars`. Returns one
+/// [`SearchMatch`] per **non-overlapping** occurrence, left to right, each with per-line highlight
+/// boxes and a context snippet. An empty or whitespace-only `query` yields no matches. Pure and
+/// dependency-free (host-tested) — the backend only supplies the page's `CharBox`es (RR21-FR3:
+/// never panics).
+#[must_use]
+pub fn find_matches(chars: &[CharBox], query: &str) -> Vec<SearchMatch> {
+    let needle: Vec<char> = normalize_query(query);
+    if needle.is_empty() {
+        return Vec::new();
+    }
+    // Normalized page text as chars, with a parallel map from each normalized char back to its
+    // source `chars` index (so a hit's positions resolve to highlight boxes + a snippet).
+    let mut hay: Vec<char> = Vec::with_capacity(chars.len());
+    let mut src: Vec<usize> = Vec::with_capacity(chars.len());
+    let mut prev_space = false;
+    let mut prev_rect: Option<NormRect> = None;
+    for (i, c) in chars.iter().enumerate() {
+        if c.ch.is_whitespace() {
+            if !prev_space && !hay.is_empty() {
+                hay.push(' ');
+                src.push(i);
+                prev_space = true;
+            }
+        } else {
+            // A line break with no explicit space glyph (text wrap) still separates words, so the
+            // query "foo bar" matches across the wrap.
+            if !prev_space {
+                if let Some(pr) = prev_rect {
+                    if !same_line(&pr, &c.rect) {
+                        hay.push(' ');
+                        src.push(i);
+                    }
+                }
+            }
+            for lc in c.ch.to_lowercase() {
+                hay.push(lc);
+                src.push(i);
+            }
+            prev_space = false;
+            prev_rect = Some(c.rect);
+        }
+    }
+
+    let n = needle.len();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i + n <= hay.len() {
+        if hay[i..i + n] == needle[..] {
+            let s = src[i];
+            let e = src[i + n - 1];
+            out.push(SearchMatch {
+                boxes: line_boxes(&chars[s..=e]),
+                snippet: snippet_around(&hay, i, n),
+            });
+            i += n; // non-overlapping: resume past this match
+        } else {
+            i += 1;
+        }
+    }
+    out
+}
+
+/// Lowercase + collapse internal whitespace + trim a query into its char sequence.
+fn normalize_query(query: &str) -> Vec<char> {
+    let mut out: Vec<char> = Vec::new();
+    let mut prev_space = false;
+    for c in query.chars() {
+        if c.is_whitespace() {
+            if !out.is_empty() && !prev_space {
+                out.push(' ');
+                prev_space = true;
+            }
+        } else {
+            for lc in c.to_lowercase() {
+                out.push(lc);
+            }
+            prev_space = false;
+        }
+    }
+    while out.last() == Some(&' ') {
+        out.pop();
+    }
+    out
+}
+
+/// A `…`-trimmed context window of `hay` around the match at `[start, start+len)`.
+fn snippet_around(hay: &[char], start: usize, len: usize) -> String {
+    let from = start.saturating_sub(SNIPPET_CONTEXT);
+    let to = (start + len + SNIPPET_CONTEXT).min(hay.len());
+    let mut s = String::new();
+    if from > 0 {
+        s.push('…');
+    }
+    s.extend(&hay[from..to]);
+    if to < hay.len() {
+        s.push('…');
+    }
+    s
+}
+
 /// Vertical tolerance (page-height fraction) for "same line" / nearest-on-line tap matching.
 const LINE_MARGIN: f32 = 0.012;
 /// Horizontal tolerance (page-width fraction) for snapping a near-miss tap to a glyph.
@@ -317,6 +431,61 @@ mod tests {
             },
         );
         assert!(sel.is_empty());
+    }
+
+    #[test]
+    fn find_matches_is_case_insensitive_and_non_overlapping() {
+        let chars = line("the Cat sat on the cat mat", 0.0, 1.0, 0.10, 0.03);
+        let m = find_matches(&chars, "cat");
+        assert_eq!(m.len(), 2, "both 'Cat' and 'cat' match, case-insensitively");
+        assert!(m[0].boxes.len() == 1 && m[1].boxes.len() == 1);
+    }
+
+    #[test]
+    fn find_matches_spans_words_with_normalized_whitespace() {
+        let chars = line("the quick fox", 0.0, 0.6, 0.10, 0.03);
+        // a multi-word query matches across the inter-word space
+        let m = find_matches(&chars, "quick fox");
+        assert_eq!(m.len(), 1);
+        assert!(m[0].snippet.contains("quick fox"));
+    }
+
+    #[test]
+    fn find_matches_spans_two_lines_into_two_boxes() {
+        let mut chars = line("hello", 0.0, 0.3, 0.10, 0.03);
+        chars.extend(line("world", 0.0, 0.3, 0.16, 0.03));
+        // The two words sit on different lines; "hello world" (normalized) spans both.
+        let m = find_matches(&chars, "hello world");
+        assert_eq!(m.len(), 1);
+        assert_eq!(m[0].boxes.len(), 2, "a match across two lines → two boxes");
+    }
+
+    #[test]
+    fn find_matches_empty_or_absent_query_is_empty() {
+        let chars = line("anything", 0.0, 0.4, 0.1, 0.03);
+        assert!(find_matches(&chars, "").is_empty());
+        assert!(find_matches(&chars, "   ").is_empty());
+        assert!(find_matches(&chars, "zzz").is_empty());
+    }
+
+    #[test]
+    fn find_matches_snippet_has_ellipses_when_trimmed() {
+        let chars = line(
+            "a very long line of text that completely surrounds the needle that is buried \
+             deep inside the middle of a long body of running text on the page",
+            0.0,
+            1.0,
+            0.1,
+            0.03,
+        );
+        let m = find_matches(&chars, "needle");
+        assert_eq!(m.len(), 1);
+        assert!(
+            m[0].snippet.starts_with('…') && m[0].snippet.ends_with('…'),
+            "snippet trimmed on both sides: {:?}",
+            m[0].snippet
+        );
+        assert!(m[0].snippet.contains("needle"));
     }
 
     #[test]

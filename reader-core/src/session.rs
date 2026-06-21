@@ -440,6 +440,13 @@ impl ReaderSession {
         self.document.text_in_rect(page, rect)
     }
 
+    /// Find `query` on `page` (RR2 in-document search) — a pass-through to
+    /// [`Document::search_page`]. The shell drives the scan page-by-page so it stays memory-bounded.
+    #[must_use]
+    pub fn search_page(&self, page: usize, query: &str) -> Vec<crate::document::SearchMatch> {
+        self.document.search_page(page, query)
+    }
+
     /// Navigate to a TOC entry's target page (RR11-AC1). An unresolved entry (no
     /// `target_page`) does not move and returns no refresh commands.
     pub fn jump_to_toc(&mut self, entry: &TocEntry) -> Vec<RefreshCommand> {
