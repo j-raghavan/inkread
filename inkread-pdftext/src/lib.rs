@@ -61,7 +61,8 @@ impl Glyph {
 pub struct ReconstructOpts {
     /// New line when a glyph's vertical center jumps more than this × the median glyph height.
     pub line_split_mult: f32,
-    /// Insert a space when the horizontal gap between adjacent glyphs exceeds this × median width.
+    /// Insert a space when the horizontal gap between adjacent glyphs exceeds this × the line's
+    /// median glyph **height** (font size) — a space is ~0.25 em (see [`line_from_glyphs`]).
     pub word_gap_mult: f32,
     /// New paragraph when the vertical gap between lines exceeds this × the median line height.
     pub para_gap_mult: f32,
@@ -83,7 +84,7 @@ impl Default for ReconstructOpts {
     fn default() -> Self {
         Self {
             line_split_mult: 0.6,
-            word_gap_mult: 0.3,
+            word_gap_mult: 0.25,
             para_gap_mult: 0.65,
             indent_mult: 1.5,
             heading_ratio: 1.3,
@@ -102,6 +103,16 @@ pub fn reconstruct(glyphs: &[Glyph]) -> Vec<Block> {
 /// Reconstruct with explicit [`ReconstructOpts`]. Never panics; an empty/degenerate page → `[]`.
 #[must_use]
 pub fn reconstruct_with(glyphs: &[Glyph], opts: &ReconstructOpts) -> Vec<Block> {
+    // Keep explicit space glyphs (PDFs emit them as zero-width boxes and they are sometimes the only
+    // word-boundary signal — letters can butt together with no gap), dropping only non-finite boxes.
+    // The ordering hazard they pose (a zero-width space shares an x0 with the next letter and, at a
+    // slightly different baseline, can be tie-broken *after* it) is handled where lines are ordered:
+    // the x-sort tie-breaks on the right edge, and the pen tracks a running max. Median metrics below
+    // ignore these as a minority (spaces are < half of glyphs), so zero heights don't skew them.
+    let glyphs: Vec<&Glyph> = glyphs
+        .iter()
+        .filter(|g| g.x0.is_finite() && g.y0.is_finite() && g.x1.is_finite() && g.y1.is_finite())
+        .collect();
     if glyphs.is_empty() {
         return Vec::new();
     }
@@ -110,11 +121,10 @@ pub fn reconstruct_with(glyphs: &[Glyph], opts: &ReconstructOpts) -> Vec<Block> 
     // held fixed across the recursive segmentation below. Segmentation must run on glyphs *before*
     // line clustering — otherwise glyphs sharing a baseline across columns would merge into one
     // full-width line and erase the gutter.
-    let body_h = median(glyphs.iter().map(Glyph::height)).max(f32::EPSILON);
-    let glyph_w = median(glyphs.iter().map(Glyph::width)).max(f32::EPSILON);
-    let refs: Vec<&Glyph> = glyphs.iter().collect();
+    let body_h = median(glyphs.iter().map(|g| g.height())).max(f32::EPSILON);
+    let glyph_w = median(glyphs.iter().map(|g| g.width())).max(f32::EPSILON);
     let mut out = Vec::new();
-    xy_cut(&refs, opts, body_h, glyph_w, 0, &mut out);
+    xy_cut(&glyphs, opts, body_h, glyph_w, 0, &mut out);
     out
 }
 
@@ -274,7 +284,15 @@ fn cluster_lines(glyphs: &[&Glyph], opts: &ReconstructOpts) -> Vec<Line> {
     groups
         .into_iter()
         .filter_map(|mut g| {
-            g.sort_by(|a, b| a.x0.partial_cmp(&b.x0).unwrap_or(std::cmp::Ordering::Equal));
+            // Order left→right by glyph **center**, not left edge: a zero-width space sits at the
+            // word gap, and its center falls cleanly between the neighbouring letters' centers —
+            // whereas its left edge ties (to sub-pixel noise) with the next letter's, which would
+            // sort it mid-word and split the word.
+            g.sort_by(|a, b| {
+                a.x_center()
+                    .partial_cmp(&b.x_center())
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
             line_from_glyphs(&g, opts)
         })
         .collect()
@@ -283,13 +301,19 @@ fn cluster_lines(glyphs: &[&Glyph], opts: &ReconstructOpts) -> Vec<Line> {
 /// Build a [`Line`] from one cluster's left-ordered glyphs, synthesizing inter-word spaces from
 /// horizontal gaps. Returns `None` for an all-whitespace line (contributes no block content).
 fn line_from_glyphs(glyphs: &[&Glyph], opts: &ReconstructOpts) -> Option<Line> {
-    let w_med = median(glyphs.iter().map(|g| g.width())).max(f32::EPSILON);
-    let word_gap = opts.word_gap_mult * w_med;
+    // The word gap is scaled by the line's **font size** (median glyph *height*), not glyph width:
+    // a space is ~0.25 em regardless of which letters border it, and a width-median is dragged down
+    // by narrow glyphs (i, l, t, f, .) on text-heavy lines, over-splitting words. Height is uniform
+    // across a line's font and aspect-correct in point space.
+    let h_med = median(glyphs.iter().map(|g| g.height())).max(f32::EPSILON);
+    let word_gap = opts.word_gap_mult * h_med;
 
     let mut text = String::new();
-    let mut prev_x1: Option<f32> = None;
+    // Running max of right edges seen so far — a glyph that sits behind a wider predecessor (kerning
+    // overlap, or a stray narrow box) can't regress the pen and fabricate a gap before the next one.
+    let mut pen_x1: Option<f32> = None;
     for g in glyphs {
-        if let Some(px1) = prev_x1 {
+        if let Some(px1) = pen_x1 {
             if g.x0 - px1 > word_gap {
                 text.push(' ');
             }
@@ -299,7 +323,7 @@ fn line_from_glyphs(glyphs: &[&Glyph], opts: &ReconstructOpts) -> Option<Line> {
         } else {
             text.push(g.ch);
         }
-        prev_x1 = Some(g.x1);
+        pen_x1 = Some(pen_x1.map_or(g.x1, |p| p.max(g.x1)));
     }
 
     let text = collapse_ws(&text);

@@ -181,17 +181,24 @@ impl PdfBackend {
         self.document.pages().len() as usize
     }
 
-    /// Map a source page's normalized [`CharBox`]es into reconstruction [`Glyph`]s (same normalized
-    /// `[0,1]`, y-down geometry — see `inkread_pdftext`'s coordinate contract).
+    /// Map a source page's [`CharBox`]es into reconstruction [`Glyph`]s in **aspect-correct point
+    /// space** (un-normalizing by the page size), y-down — so reconstruction's per-axis thresholds
+    /// (a width-based column gutter, a height-based word gap) are in one physical scale rather than
+    /// x and y normalized independently (which distorts gaps). See `inkread_pdftext`'s contract.
     fn glyphs_for_page(&self, index: usize) -> Vec<Glyph> {
+        let (pw, ph) = i32::try_from(index)
+            .ok()
+            .and_then(|i| self.document.pages().get(i).ok())
+            .map(|p| (p.width().value, p.height().value))
+            .unwrap_or((1.0, 1.0));
         self.page_chars(index)
             .into_iter()
             .map(|c| Glyph {
                 ch: c.ch,
-                x0: c.rect.x0,
-                y0: c.rect.y0,
-                x1: c.rect.x1,
-                y1: c.rect.y1,
+                x0: c.rect.x0 * pw,
+                y0: c.rect.y0 * ph,
+                x1: c.rect.x1 * pw,
+                y1: c.rect.y1 * ph,
             })
             .collect()
     }
