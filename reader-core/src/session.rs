@@ -557,6 +557,30 @@ impl ReaderSession {
         }
     }
 
+    /// Whether the open document can be **reflowed** (ADR-INKREAD-0011) — a text-layer PDF. The
+    /// shell uses this to enable/disable the Reflow control (disabled for scanned PDFs / EPUB).
+    #[must_use]
+    pub fn supports_reflow(&self) -> bool {
+        self.document.supports_reflow()
+    }
+
+    /// Toggle **reflow mode** on the open PDF (ADR-INKREAD-0011): reconstructs the text and flows it
+    /// like a book so the font-size/line-spacing/alignment controls take effect; toggling off
+    /// restores the fixed page. Preserves the reading position across the changing page count and
+    /// invalidates the (now stale-keyed) crop cache. Returns `true` if the toggle applied, `false`
+    /// if reflow is unavailable (no text layer / unsupported format). Re-render after.
+    pub fn set_reflow(&mut self, on: bool) -> bool {
+        match self.document.set_reflow(on, self.page) {
+            Some(new_page) => {
+                self.page = new_page.min(self.page_count().saturating_sub(1));
+                *self.crop_cache.borrow_mut() = None; // page indices change meaning across the toggle
+                self.load_ink_for_current_page();
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Apply a navigation gesture: move the position (clamped at the document ends), then
     /// delegate to the policy's `on_page_turn` for the refresh stream (Amendment 6).
     ///

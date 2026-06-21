@@ -14,10 +14,14 @@
 //! a vendored binary) → the system library → else [`CoreError::BackendUnavailable`]. On
 //! Android the loader finds `libpdfium.so` in `jniLibs/` via the system path.
 
+use std::cell::{Cell, RefCell};
 use std::sync::{Mutex, OnceLock};
 
+use inkread_epub::Block;
+use inkread_pdftext::Glyph;
 use pdfium_render::prelude::*;
 
+use crate::document::reflow_view::ReflowView;
 use crate::document::text_select::{self, CharBox, NormRect, TextSelection};
 use crate::document::{
     Document, DocumentMetadata, ExportMode, FitMode, LinkTarget, PageInk, PageLink, TocEntry,
@@ -143,8 +147,18 @@ fn chaikin(points: &[(f32, f32)], iterations: u8) -> Vec<(f32, f32)> {
 }
 
 /// A loaded PDF, rendered directly into the shell's buffer (RR5, Amendment 4).
+///
+/// When **reflow mode** is on (ADR-INKREAD-0011), rendering, page count, selection, search, and the
+/// typesetting setters are served by the [`ReflowView`] over the document's reconstructed text
+/// instead of the fixed pdfium page; toggling back restores the fixed-layout path.
 pub struct PdfBackend {
     document: PdfDocument<'static>,
+    /// Reflow view over the reconstructed text, `Some` while reflow mode is on. Interior mutability
+    /// so the `&self` render/setter paths can build/repaginate it.
+    reflow: RefCell<Option<ReflowView>>,
+    /// The last viewport (panel) size rendered at — the initial pagination guess when reflow is
+    /// enabled, so the position-preserving jump lands correctly (the first render then confirms it).
+    last_viewport: Cell<(u32, u32)>,
 }
 
 impl PdfBackend {
@@ -155,7 +169,50 @@ impl PdfBackend {
         let document = pdfium
             .load_pdf_from_byte_vec(bytes, None)
             .map_err(map_load_error)?;
-        Ok(Self { document })
+        Ok(Self {
+            document,
+            reflow: RefCell::new(None),
+            last_viewport: Cell::new((0, 0)),
+        })
+    }
+
+    /// The number of source (fixed-layout) pages in the document.
+    fn source_page_count(&self) -> usize {
+        self.document.pages().len() as usize
+    }
+
+    /// Map a source page's normalized [`CharBox`]es into reconstruction [`Glyph`]s (same normalized
+    /// `[0,1]`, y-down geometry — see `inkread_pdftext`'s coordinate contract).
+    fn glyphs_for_page(&self, index: usize) -> Vec<Glyph> {
+        self.page_chars(index)
+            .into_iter()
+            .map(|c| Glyph {
+                ch: c.ch,
+                x0: c.rect.x0,
+                y0: c.rect.y0,
+                x1: c.rect.x1,
+                y1: c.rect.y1,
+            })
+            .collect()
+    }
+
+    /// Reconstruct every source page into a reflowable [`Block`] unit (ADR-0011 page-by-page). Text
+    /// only — bounded by the document's text size, like the EPUB backend holding all chapters.
+    fn extract_units(&self) -> Vec<Vec<Block>> {
+        (0..self.source_page_count())
+            .map(|i| inkread_pdftext::reconstruct(&self.glyphs_for_page(i)))
+            .collect()
+    }
+
+    /// Whether the PDF carries a usable text layer (sampling the first pages — a cover/blank first
+    /// page is common). A pure scan has none and cannot be reflowed without OCR (out of scope).
+    fn has_text_layer(&self) -> bool {
+        (0..self.source_page_count().min(8)).any(|i| !self.page_chars(i).is_empty())
+    }
+
+    /// Borrow the reflow view if reflow mode is on.
+    fn reflow_on(&self) -> bool {
+        self.reflow.borrow().is_some()
     }
 
     /// Render page `index` into `buf` using a [`PdfRenderConfig`] built from the buffer's
@@ -284,7 +341,10 @@ impl PdfBackend {
 
 impl Document for PdfBackend {
     fn page_count(&self) -> usize {
-        self.document.pages().len() as usize
+        match &*self.reflow.borrow() {
+            Some(v) => v.page_count(),
+            None => self.source_page_count(),
+        }
     }
 
     fn metadata(&self) -> DocumentMetadata {
@@ -375,6 +435,10 @@ impl Document for PdfBackend {
     }
 
     fn render_page(&self, index: usize, buf: &mut PixelBuffer<'_>) -> CoreResult<()> {
+        self.last_viewport.set((buf.width(), buf.height()));
+        if let Some(v) = &*self.reflow.borrow() {
+            return v.render(index, buf);
+        }
         // Full-page render: scale the whole page to the buffer. Amendment 3: reverse byte
         // order so pdfium emits RGBA into our RGBA buffer.
         self.render_with_config(index, buf, |w, h| {
@@ -393,6 +457,11 @@ impl Document for PdfBackend {
         pan_x: f32,
         pan_y: f32,
     ) -> CoreResult<()> {
+        self.last_viewport.set((buf.width(), buf.height()));
+        // Reflowed text already fills the viewport — fit modes don't apply.
+        if let Some(v) = &*self.reflow.borrow() {
+            return v.render(index, buf);
+        }
         buf.fill_white();
         let bw = i32::try_from(buf.width()).unwrap_or(0);
         let bh = i32::try_from(buf.height()).unwrap_or(0);
@@ -430,6 +499,10 @@ impl Document for PdfBackend {
     }
 
     fn content_bbox(&self, index: usize) -> Option<NormRect> {
+        // Reflowed text fills the viewport with no white margins — nothing to crop.
+        if self.reflow_on() {
+            return None;
+        }
         let page = i32::try_from(index)
             .ok()
             .and_then(|i| self.document.pages().get(i).ok())?;
@@ -488,6 +561,11 @@ impl Document for PdfBackend {
         pan_x: f32,
         pan_y: f32,
     ) -> CoreResult<()> {
+        self.last_viewport.set((buf.width(), buf.height()));
+        // Reflowed text already fills the viewport — there is no crop region to apply.
+        if let Some(v) = &*self.reflow.borrow() {
+            return v.render(index, buf);
+        }
         buf.fill_white();
         let bw = i32::try_from(buf.width()).unwrap_or(0);
         let bh = i32::try_from(buf.height()).unwrap_or(0);
@@ -529,6 +607,11 @@ impl Document for PdfBackend {
         offset_x: i32,
         offset_y: i32,
     ) -> CoreResult<()> {
+        self.last_viewport.set((buf.width(), buf.height()));
+        // Reflow has no fixed page to magnify; the reader uses font size instead of pinch-zoom.
+        if let Some(v) = &*self.reflow.borrow() {
+            return v.render(index, buf);
+        }
         let z = if zoom.is_finite() && zoom > 0.0 {
             zoom
         } else {
@@ -626,15 +709,78 @@ impl Document for PdfBackend {
     }
 
     fn word_at(&self, page: usize, x: f32, y: f32) -> Option<TextSelection> {
-        text_select::word_at(&self.page_chars(page), x, y)
+        match &*self.reflow.borrow() {
+            Some(v) => text_select::word_at(&v.page_chars(page), x, y),
+            None => text_select::word_at(&self.page_chars(page), x, y),
+        }
     }
 
     fn text_in_rect(&self, page: usize, rect: NormRect) -> TextSelection {
-        text_select::text_in_rect(&self.page_chars(page), rect)
+        match &*self.reflow.borrow() {
+            Some(v) => text_select::text_in_rect(&v.page_chars(page), rect),
+            None => text_select::text_in_rect(&self.page_chars(page), rect),
+        }
     }
 
     fn search_page(&self, page: usize, query: &str) -> Vec<crate::document::SearchMatch> {
-        text_select::find_matches(&self.page_chars(page), query)
+        match &*self.reflow.borrow() {
+            Some(v) => text_select::find_matches(&v.page_chars(page), query),
+            None => text_select::find_matches(&self.page_chars(page), query),
+        }
+    }
+
+    fn set_text_scale(&self, scale: f32, current_page: usize) -> Option<usize> {
+        self.reflow
+            .borrow()
+            .as_ref()
+            .map(|v| v.set_scale(scale, current_page))
+    }
+
+    fn set_line_spacing(&self, mult: f32, current_page: usize) -> Option<usize> {
+        self.reflow
+            .borrow()
+            .as_ref()
+            .map(|v| v.set_line_spacing(mult, current_page))
+    }
+
+    fn set_alignment(&self, align_code: i32, current_page: usize) -> Option<usize> {
+        self.reflow
+            .borrow()
+            .as_ref()
+            .map(|v| v.set_alignment(align_code, current_page))
+    }
+
+    fn supports_reflow(&self) -> bool {
+        self.has_text_layer()
+    }
+
+    fn set_reflow(&self, on: bool, current_page: usize) -> Option<usize> {
+        if on {
+            // Already on → no-op jump. No text layer → can't reflow (scanned PDF needs OCR).
+            if self.reflow_on() {
+                return Some(current_page);
+            }
+            if !self.has_text_layer() {
+                return None;
+            }
+            let units = self.extract_units();
+            let (w, h) = self.last_viewport.get();
+            let view = ReflowView::new(units, w, h);
+            // `current_page` is a source page (fixed mode) → land on its first reflowed page.
+            let target = view.unit_start_page(current_page);
+            *self.reflow.borrow_mut() = Some(view);
+            Some(target)
+        } else {
+            // Map the current reflowed page back to its source page before tearing the view down.
+            let target = {
+                self.reflow
+                    .borrow()
+                    .as_ref()
+                    .map(|v| v.unit_of(current_page))
+            };
+            *self.reflow.borrow_mut() = None;
+            Some(target.unwrap_or(current_page))
+        }
     }
 }
 
