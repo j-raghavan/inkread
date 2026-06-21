@@ -20,7 +20,7 @@ use pdfium_render::prelude::*;
 
 use crate::document::text_select::{self, CharBox, NormRect, TextSelection};
 use crate::document::{
-    Document, DocumentMetadata, ExportMode, LinkTarget, PageInk, PageLink, TocEntry,
+    Document, DocumentMetadata, ExportMode, FitMode, LinkTarget, PageInk, PageLink, TocEntry,
 };
 use crate::error::{CoreError, CoreResult};
 use crate::render::PixelBuffer;
@@ -385,6 +385,74 @@ impl Document for PdfBackend {
         })
     }
 
+    fn render_fit(
+        &self,
+        index: usize,
+        buf: &mut PixelBuffer<'_>,
+        mode: FitMode,
+        pan_x: f32,
+        pan_y: f32,
+    ) -> CoreResult<()> {
+        buf.fill_white();
+        let bw = i32::try_from(buf.width()).unwrap_or(0);
+        let bh = i32::try_from(buf.height()).unwrap_or(0);
+        // The page's native aspect (points). Unknown/degenerate → fall back to the stretch render.
+        let aspect = i32::try_from(index)
+            .ok()
+            .and_then(|i| self.document.pages().get(i).ok())
+            .map(|p| {
+                let (pw, ph) = (p.width().value, p.height().value);
+                if pw > 0.0 && ph > 0.0 {
+                    pw / ph
+                } else {
+                    0.0
+                }
+            })
+            .unwrap_or(0.0);
+        if aspect <= 0.0 || bw <= 0 || bh <= 0 {
+            return self.render_page(index, buf);
+        }
+
+        // Fitted render size (aspect-preserved). Page = contain; Width/Height fill that dimension.
+        let (tw, th) = match mode {
+            FitMode::Page => {
+                if (bw as f32 / bh as f32) > aspect {
+                    (((bh as f32) * aspect).round() as i32, bh)
+                } else {
+                    (bw, ((bw as f32) / aspect).round() as i32)
+                }
+            }
+            FitMode::Width => (bw, ((bw as f32) / aspect).round() as i32),
+            FitMode::Height => (((bh as f32) * aspect).round() as i32, bh),
+        };
+        let tw = tw.clamp(1, 1 << 15);
+        let th = th.clamp(1, 1 << 15);
+
+        // Render the page aspect-correct into a temp buffer, then composite into the white page.
+        let mut tmp = vec![0u8; (tw as usize) * (th as usize) * 4];
+        {
+            let mut tbuf = PixelBuffer::from_rgba(&mut tmp, tw as u32, th as u32)?;
+            self.render_with_config(index, &mut tbuf, |w, h| {
+                PdfRenderConfig::new()
+                    .set_target_size(w, h)
+                    .set_format(PdfBitmapFormat::BGRA)
+                    .set_reverse_byte_order(true)
+            })?;
+        }
+
+        // Center when the fitted page fits the axis; pan (scroll) when it overflows.
+        let (sx, dx, cw) = fit_place(tw, bw, pan_x);
+        let (sy, dy, ch) = fit_place(th, bh, pan_y);
+        let dst = buf.bytes_mut();
+        for row in 0..ch {
+            let s = (((sy + row) * tw + sx) * 4) as usize;
+            let d = (((dy + row) * bw + dx) * 4) as usize;
+            let n = (cw * 4) as usize;
+            dst[d..d + n].copy_from_slice(&tmp[s..s + n]);
+        }
+        Ok(())
+    }
+
     fn render_zoom(
         &self,
         index: usize,
@@ -495,6 +563,19 @@ impl Document for PdfBackend {
 
     fn text_in_rect(&self, page: usize, rect: NormRect) -> TextSelection {
         text_select::text_in_rect(&self.page_chars(page), rect)
+    }
+}
+
+/// Placement of a fitted dimension `fit` inside a buffer dimension `buf` (RR4 Fit). Returns
+/// `(src_offset, dst_offset, count)`: **centered** with white letterbox when it fits, **panned** by
+/// the normalized `pan` when it overflows. Always in-bounds for both buffers.
+fn fit_place(fit: i32, buf: i32, pan: f32) -> (i32, i32, i32) {
+    if fit <= buf {
+        (0, (buf - fit) / 2, fit)
+    } else {
+        let over = fit - buf;
+        let src = (pan.clamp(0.0, 1.0) * over as f32).round() as i32;
+        (src.clamp(0, over), 0, buf)
     }
 }
 

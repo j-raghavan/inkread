@@ -46,6 +46,31 @@ pub enum ExportMode {
     Flatten,
 }
 
+/// How a fixed-layout page is fit to the viewport (RR4 — KOReader's "Fit"). All modes preserve the
+/// page's aspect ratio (unlike a raw stretch); the difference is which dimension is filled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FitMode {
+    /// Fit the whole page within the viewport (contain), centered with white letterbox. Default.
+    #[default]
+    Page,
+    /// Scale so the page **width** fills the viewport; taller pages overflow vertically (pannable).
+    Width,
+    /// Scale so the page **height** fills the viewport; wider pages overflow horizontally (pannable).
+    Height,
+}
+
+impl FitMode {
+    /// Decode the wire integer (`0=Page, 1=Width, 2=Height`); unknown → `Page`.
+    #[must_use]
+    pub fn from_code(code: i32) -> FitMode {
+        match code {
+            1 => FitMode::Width,
+            2 => FitMode::Height,
+            _ => FitMode::Page,
+        }
+    }
+}
+
 /// Document metadata (title/author) — the M0 subset (RR5-FR2).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DocumentMetadata {
@@ -227,6 +252,22 @@ pub trait Document {
         _zoom: f32,
         _offset_x: i32,
         _offset_y: i32,
+    ) -> CoreResult<()> {
+        self.render_page(index, buf)
+    }
+
+    /// Render page `index` fit to `buf` per [`FitMode`], preserving the page aspect ratio (RR4).
+    /// `pan_x`/`pan_y` are normalized `[0,1]` scroll positions used only when a mode overflows the
+    /// viewport (e.g. `Width` on a tall page); centered when the page fits. Default: ignores fit and
+    /// falls back to [`Self::render_page`] — correct for reflowable backends (EPUB), which already
+    /// fill the viewport. Fixed-layout backends (PDF) override this.
+    fn render_fit(
+        &self,
+        index: usize,
+        buf: &mut PixelBuffer<'_>,
+        _mode: FitMode,
+        _pan_x: f32,
+        _pan_y: f32,
     ) -> CoreResult<()> {
         self.render_page(index, buf)
     }

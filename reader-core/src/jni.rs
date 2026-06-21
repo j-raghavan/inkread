@@ -513,6 +513,23 @@ pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeSetContrast
     .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
 }
 
+// nativeSetFit(handle, mode) — page fit mode (0=Page/contain, 1=Width, 2=Height; RR4). Aspect-
+// preserving; the shell re-renders afterward. Never throws (mode decoded leniently).
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeSetFit<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+    mode: jint,
+) {
+    env.with_env(|env| -> jni::errors::Result<()> {
+        let session = unsafe { session_mut(handle) }.map_err(|e| throw(env, &e))?;
+        session.set_fit(crate::document::FitMode::from_code(mode));
+        Ok(())
+    })
+    .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
+}
+
 // nativeSetViewport(handle, width, height, dpi) — update the render viewport after a surface
 // resize / screen rotation (RR21-FR4). Without this the core keeps the open-time viewport and a
 // render into the new (resized) buffer is rejected as a size mismatch. PDF re-renders at the new

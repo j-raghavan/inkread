@@ -140,6 +140,10 @@ object NativeBridge {
      *  the core renders into the new buffer size (PDF re-renders, EPUB repaginates). Re-render after. */
     external fun nativeSetViewport(handle: Long, width: Int, height: Int, dpi: Int)
 
+    /** Set the page fit mode (0=Page/contain, 1=Width, 2=Height; RR4). Aspect-preserving (PDF);
+     *  EPUB ignores it. Re-render after calling. */
+    external fun nativeSetFit(handle: Long, mode: Int)
+
     // ---- ink annotation, persisted by the core to a sidecar (RR6/RR10 / ADR-INKREAD-0010) ----
 
     /** Attach a `.inkread` sidecar store for the open document so strokes persist (RR10). */

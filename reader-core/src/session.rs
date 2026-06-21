@@ -16,7 +16,7 @@ use std::sync::Arc;
 use crate::budget::{Caches, ResourceBudget, TrimLevel};
 use crate::document::fixed::PdfBackend;
 use crate::document::{
-    Document, DocumentMetadata, ExportMode, ExportStroke, NormRect, PageInk, PageLink,
+    Document, DocumentMetadata, ExportMode, ExportStroke, FitMode, NormRect, PageInk, PageLink,
     TextSelection, TocEntry,
 };
 use crate::error::{CoreError, CoreResult};
@@ -108,6 +108,8 @@ pub struct ReaderSession {
     /// Contrast/display-enhancement step (`0` = off; RR4 — KOReader's "Contrast"). Applied as a
     /// per-pixel remap after render so faint scans read better on e-ink.
     contrast: u8,
+    /// How a fixed-layout page is fit to the viewport (RR4 — KOReader's "Fit"). Default: contain.
+    fit_mode: FitMode,
 }
 
 impl ReaderSession {
@@ -196,6 +198,7 @@ impl ReaderSession {
             clipboard: Vec::new(),
             identity,
             contrast: 0,
+            fit_mode: FitMode::Page,
         }
     }
 
@@ -334,7 +337,10 @@ impl ReaderSession {
             )));
         }
         if self.zoom <= 1.0 + 1e-3 {
-            self.document.render_page(self.page, buf)?;
+            // At fit (no pinch-zoom): aspect-preserving fit per the chosen mode (RR4). PDF honors
+            // it; reflowable backends fall back to a full-buffer render.
+            self.document
+                .render_fit(self.page, buf, self.fit_mode, self.pan_x, self.pan_y)?;
         } else {
             // Magnified view: content is buf*zoom; show a buf-sized window panned over the overscan.
             let bw = self.viewport.width as f32;
@@ -362,6 +368,17 @@ impl ReaderSession {
     #[must_use]
     pub fn contrast(&self) -> u8 {
         self.contrast
+    }
+
+    /// Set the page fit mode (RR4 — KOReader's "Fit"). Re-render to apply.
+    pub fn set_fit(&mut self, mode: FitMode) {
+        self.fit_mode = mode;
+    }
+
+    /// The current page fit mode.
+    #[must_use]
+    pub fn fit_mode(&self) -> FitMode {
+        self.fit_mode
     }
 
     /// Set the pinch-zoom factor (clamped to `[1.0, MAX_ZOOM]`) and normalized pan `[0,1]`

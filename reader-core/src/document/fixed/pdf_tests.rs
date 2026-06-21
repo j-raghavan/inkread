@@ -480,3 +480,43 @@ fn zoom_z1_matches_render_page_orientation() {
         "render_zoom(z=1) differs from render_page / is flipped (same={same} flipped={flipped})"
     );
 }
+
+// RR4 Fit: Page mode preserves aspect and letterboxes — a portrait/letter page rendered into a
+// WIDE buffer is centered with white left/right margins (not stretched edge-to-edge).
+#[test]
+fn render_fit_page_letterboxes_and_preserves_aspect() {
+    let _g = pdfium_serial();
+    if !host_pdfium_available() {
+        eprintln!("SKIP render_fit_page_letterboxes: host libpdfium UNVERIFIED");
+        return;
+    }
+    let bytes = std::fs::read(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/minimal.pdf"
+    ))
+    .expect("fixture present");
+    let doc = PdfBackend::open(bytes).unwrap();
+    let (w, h) = (400u32, 100u32); // wide buffer; a portrait/letter page must letterbox L/R
+    let mut pixels = vec![0u8; (w * h * 4) as usize];
+    let mut pb = PixelBuffer::from_rgba(&mut pixels, w, h).unwrap();
+    doc.render_fit(0, &mut pb, FitMode::Page, 0.0, 0.0).unwrap();
+
+    let px = pb.bytes();
+    let col_white = |x: u32| {
+        (0..h).all(|y| {
+            let o = ((y * w + x) * 4) as usize;
+            px[o] == 255 && px[o + 1] == 255 && px[o + 2] == 255
+        })
+    };
+    assert!(
+        col_white(0),
+        "left edge is white letterbox (page centered, not stretched)"
+    );
+    assert!(col_white(w - 1), "right edge is white letterbox");
+    assert!(
+        px.chunks_exact(4)
+            .any(|p| p[0] < 200 || p[1] < 200 || p[2] < 200),
+        "the page actually rendered (some ink)"
+    );
+    assert!(px.chunks_exact(4).all(|p| p[3] == 0xFF), "opaque");
+}

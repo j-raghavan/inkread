@@ -1,0 +1,10 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp" android:height="24dp"
+    android:viewportWidth="24" android:viewportHeight="24">
+    <!-- Fit: a page contained within the screen frame (inner rect inside outer rect). -->
+    <path android:strokeColor="@android:color/black" android:strokeWidth="1.6"
+        android:fillColor="#00000000"
+        android:pathData="M3,4 h18 a0,0 0,0 1,0 0 v16 a0,0 0,0 1,0 0 H3 a0,0 0,0 1,0 0 V4 a0,0 0,0 1,0 0 Z"/>
+    <path android:fillColor="#22000000" android:strokeColor="@android:color/black"
+        android:strokeWidth="1.2" android:pathData="M8,7 h8 v10 h-8 z"/>
+</vector>

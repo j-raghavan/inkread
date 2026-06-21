@@ -582,6 +582,8 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             }
             // Re-apply the saved display contrast (RR4); 0 = off (a no-op in the core).
             try { NativeBridge.nativeSetContrast(docHandle, contrastPref()) } catch (e: RuntimeException) {}
+            // Re-apply the saved page fit mode (RR4); default Page/contain.
+            try { NativeBridge.nativeSetFit(docHandle, fitPref()) } catch (e: RuntimeException) {}
             pageCount = NativeBridge.nativePageCount(docHandle)
             Books.pushRecent(this, bookId, path)
             Log.i(
@@ -1207,6 +1209,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         control(R.drawable.ic_menu_font, "Font") { showTypographyDialog() }
         control(R.drawable.ic_menu_display, "Display") { showDisplayDialog() }
         control(R.drawable.ic_menu_rotate, "Rotate") { showRotationDialog() }
+        control(R.drawable.ic_menu_fit, "Fit") { showFitDialog() }
         control(R.drawable.ic_menu_open, "Open") { openPicker() }
         container.addView(controls)
 
@@ -2673,6 +2676,37 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         setOrientationPref(orientation)
         requestedOrientation = orientation
     }
+
+    /**
+     * Page fit (RR4 — KOReader's "Fit"). Aspect-preserving: whole page (contain) / fit width / fit
+     * height. Persisted + re-applied on open. PDF honors it; EPUB ignores it (it reflows already).
+     */
+    private fun showFitDialog() {
+        if (docHandle == 0L) { openPicker(); return }
+        val options = arrayOf("Whole page", "Fit width", "Fit height") // index = core FitMode code
+        val current = fitPref().coerceIn(0, options.size - 1)
+        AlertDialog.Builder(this, R.style.InkDialog)
+            .setTitle("Fit")
+            .setSingleChoiceItems(options, current) { dialog, which ->
+                setFitPref(which)
+                Log.i(TAG, "DIAG fit -> ${options[which]} (mode=$which)")
+                engine.execute {
+                    try { NativeBridge.nativeSetFit(docHandle, which) } catch (e: RuntimeException) {
+                        Log.e(TAG, "setFit failed: ${e.message}")
+                    }
+                    renderAndBlit(); adapter.refreshFull()
+                }
+                dialog.dismiss()
+            }
+            .setNegativeButton("Close", null)
+            .show()
+    }
+
+    private fun fitPref(): Int =
+        getSharedPreferences("display", MODE_PRIVATE).getInt("fit", 0)
+
+    private fun setFitPref(mode: Int) =
+        getSharedPreferences("display", MODE_PRIVATE).edit().putInt("fit", mode).apply()
 
     private fun orientationPref(): Int =
         getSharedPreferences("display", MODE_PRIVATE)
