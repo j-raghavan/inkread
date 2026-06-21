@@ -1202,10 +1202,11 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         // (Bookmark toggle moved to the top-right corner dog-ear; "Marks" lists them.)
         control(R.drawable.ic_menu_marks, "Marks") { showBookmarks() }
         control(R.drawable.ic_menu_contents, "Contents") { showContentsLazy() }
+        // Quick zoom (framed −/+ icons — not magnifiers, which are reserved for Search). Also in Adjust → Zoom.
         control(R.drawable.ic_menu_zoom_out, "Zoom −") { zoomBy(1f / ZOOM_STEP) }
         control(R.drawable.ic_menu_zoom_in, "Zoom +") { zoomBy(ZOOM_STEP) }
         control(R.drawable.ic_menu_export, "Export") { showExportDialog() }
-        control(R.drawable.ic_tool_define, "Dicts") { showDictionariesDialog() }
+        control(R.drawable.ic_menu_dict, "Dicts") { showDictionariesDialog() }
         // Document controls consolidated into one KOReader-style tabbed sheet (Rotate/Fit/Font/Display).
         control(R.drawable.ic_menu_adjust, "Adjust") { showAdjustSheet() }
         control(R.drawable.ic_menu_open, "Open") { openPicker() }
@@ -2551,7 +2552,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
 
         val panels: List<Triple<String, Int, () -> View>> = listOf(
             Triple("Rotate", R.drawable.ic_menu_rotate) { rotationPanel() },
-            Triple("Fit", R.drawable.ic_menu_fit) { fitPanel() },
+            Triple("Zoom", R.drawable.ic_menu_fit) { zoomPanel() },
             Triple("Font", R.drawable.ic_menu_font) { fontPanel() },
             Triple("Display", R.drawable.ic_menu_display) { displayPanel() },
         )
@@ -2732,6 +2733,38 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
                 renderAndBlit(); adapter.refreshFull()
             }
         })
+    }
+
+    /** The "Zoom" tab: the Fit segmented row + a live zoom −/+ stepper (zoom moved off the bar). */
+    private fun zoomPanel(): View {
+        val d = resources.displayMetrics.density
+        fun dp(v: Int) = (v * d).toInt()
+        val zlabel = TextView(this).apply {
+            textSize = 16f; setTextColor(Color.BLACK); gravity = Gravity.CENTER; minWidth = dp(64)
+        }
+        fun refresh() { zlabel.text = "${(zoom * 100).toInt()}%" }
+        refresh()
+        fun pill(t: String, on: () -> Unit) = TextView(this).apply {
+            text = t; textSize = 16f; gravity = Gravity.CENTER; setTextColor(Color.BLACK)
+            setPadding(dp(18), dp(10), dp(18), dp(10)); isClickable = true
+            background = GradientDrawable().apply {
+                setColor(Color.WHITE); cornerRadius = dp(20).toFloat(); setStroke(maxOf(1, dp(1)), Color.parseColor("#9E9E9E"))
+            }
+            setOnClickListener { on() }
+        }
+        val zoomControl = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
+            addView(pill("−") { zoomBy(1f / ZOOM_STEP); refresh() })
+            addView(zlabel, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                val m = dp(10); setMargins(m, 0, m, 0)
+            })
+            addView(pill("+") { zoomBy(ZOOM_STEP); refresh() })
+        }
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            addView(fitPanel())
+            addView(settingRow("Zoom", zoomControl))
+        }
     }
 
     private fun displayPanel(): View {

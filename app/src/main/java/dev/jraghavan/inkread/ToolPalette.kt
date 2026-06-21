@@ -23,7 +23,7 @@ enum class Tool(val label: String, val iconRes: Int, val phase2: Boolean) {
     HIGHLIGHTER("Highlight", R.drawable.ic_tool_highlighter, false),
     ERASER("Eraser", R.drawable.ic_tool_eraser, false),
     LASSO("Lasso", R.drawable.ic_tool_lasso, false),
-    DEFINE("Define", R.drawable.ic_tool_define, false),
+    DEFINE("Define", R.drawable.ic_menu_dict, false),
 }
 
 /**
