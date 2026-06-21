@@ -16,12 +16,13 @@
 //! the median glyph *width*, vertical gaps from the median glyph *height* — so the reconstruction is
 //! robust to non-square normalization and to DPI/scale.
 //!
-//! ## Stages (single column in v1; column segmentation is the next phase, ADR-0011 Decision 3)
-//! 1. cluster glyphs into baseline **lines**;
-//! 2. split each line into **words** by inter-glyph x-gap (synthesizing spaces);
-//! 3. group lines into **paragraphs** by vertical gap / first-line indent;
-//! 4. join end-of-line **hyphenation**;
-//! 5. classify **headings** by font-size outlier.
+//! ## Pipeline
+//! - **Multi-page** ([`reconstruct_pages`]): strip recurring running headers/footers and page
+//!   numbers across pages, then reconstruct each page.
+//! - **Per page** ([`reconstruct`]): segment into reading-order column/band regions (XY-cut), then
+//!   per region: cluster glyphs into baseline **lines** → split into **words** by inter-glyph x-gap
+//!   → group lines into **paragraphs** (vertical gap / first-line indent) → join end-of-line
+//!   **hyphenation** → classify **headings** (font-size outliers and short bold lines).
 
 use inkread_epub::{Block, Inline, TextRun};
 
@@ -38,6 +39,10 @@ pub struct Glyph {
     pub x1: f32,
     /// Bottom edge.
     pub y1: f32,
+    /// Whether this glyph's font is bold — used to classify body-sized **bold section headings**
+    /// that font-size-outlier detection alone would miss (the adapter reads this from the PDF font
+    /// weight; a non-PDF caller may leave it `false`).
+    pub bold: bool,
 }
 
 impl Glyph {
@@ -107,7 +112,7 @@ pub fn reconstruct_with(glyphs: &[Glyph], opts: &ReconstructOpts) -> Vec<Block> 
     // word-boundary signal — letters can butt together with no gap), dropping only non-finite boxes.
     // The ordering hazard they pose (a zero-width space shares an x0 with the next letter and, at a
     // slightly different baseline, can be tie-broken *after* it) is handled where lines are ordered:
-    // the x-sort tie-breaks on the right edge, and the pen tracks a running max. Median metrics below
+    // the x-sort orders by glyph center, and the pen tracks a running max. Median metrics below
     // ignore these as a minority (spaces are < half of glyphs), so zero heights don't skew them.
     let glyphs: Vec<&Glyph> = glyphs
         .iter()
@@ -123,14 +128,150 @@ pub fn reconstruct_with(glyphs: &[Glyph], opts: &ReconstructOpts) -> Vec<Block> 
     // full-width line and erase the gutter.
     let body_h = median(glyphs.iter().map(|g| g.height())).max(f32::EPSILON);
     let glyph_w = median(glyphs.iter().map(|g| g.width())).max(f32::EPSILON);
+    // Typical body line width (median across all baseline lines) — the reference a *short* bold
+    // section heading is measured against. Global, so a heading later isolated into its own
+    // single-line region still reads as short relative to the body. (For multi-column pages this
+    // over-estimates, since cross-column lines merge; bold body text — the only false-positive risk
+    // — is rare, so the trade-off is acceptable for v1.)
+    let body_width = median(cluster_lines(&glyphs, opts).iter().map(Line::width)).max(f32::EPSILON);
+    let metrics = Metrics {
+        body_h,
+        body_width,
+        glyph_w,
+    };
     let mut out = Vec::new();
-    xy_cut(&glyphs, opts, body_h, glyph_w, 0, &mut out);
+    xy_cut(&glyphs, opts, &metrics, 0, &mut out);
     out
+}
+
+/// Page-global reference metrics held fixed across the recursive segmentation, so per-region leaves
+/// classify headings and gutters against a stable document-wide baseline rather than their own
+/// (possibly single-line) contents.
+struct Metrics {
+    body_h: f32,
+    body_width: f32,
+    glyph_w: f32,
 }
 
 /// Recursion depth bound for [`xy_cut`] — far beyond any real page's column/band nesting; a guard
 /// against pathological geometry, never reached in practice.
 const MAX_CUT_DEPTH: usize = 16;
+
+/// Fraction of page height at the top/bottom treated as the header/footer margin band.
+const MARGIN_BAND_FRAC: f32 = 0.12;
+/// Below this page count there is no basis to call a margin line a *recurring* header/footer, so
+/// stripping is skipped (avoids removing a one-off margin line from a short document).
+const MIN_PAGES_FOR_MARGIN_STRIP: usize = 3;
+
+/// Which page margin a candidate header/footer line sits in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum Band {
+    Top,
+    Bottom,
+}
+
+/// Reconstruct a **multi-page document** (one [`Glyph`] vec per source page), stripping recurring
+/// running **headers/footers and page numbers** before per-page reconstruction (ADR-INKREAD-0011).
+/// A margin-band line whose alphabetic-normalized text recurs across enough pages — a running title,
+/// or every page number once digits are normalized away — is chrome, not content, and is removed.
+#[must_use]
+pub fn reconstruct_pages(pages: &[Vec<Glyph>]) -> Vec<Vec<Block>> {
+    reconstruct_pages_with(pages, &ReconstructOpts::default())
+}
+
+/// [`reconstruct_pages`] with explicit options.
+#[must_use]
+pub fn reconstruct_pages_with(pages: &[Vec<Glyph>], opts: &ReconstructOpts) -> Vec<Vec<Block>> {
+    if pages.len() < MIN_PAGES_FOR_MARGIN_STRIP {
+        return pages.iter().map(|g| reconstruct_with(g, opts)).collect();
+    }
+
+    // One candidate per margin line: which band, its alphabetic-normalized text, and its y-extent.
+    let per_page: Vec<Vec<(Band, String, f32, f32)>> =
+        pages.iter().map(|g| margin_lines(g, opts)).collect();
+
+    // Tally how many distinct pages each (band, normalized-text) appears on.
+    let mut tally: std::collections::HashMap<(Band, String), usize> =
+        std::collections::HashMap::new();
+    for cands in &per_page {
+        let mut seen = std::collections::HashSet::new();
+        for (band, norm, _, _) in cands {
+            if seen.insert((*band, norm.clone())) {
+                *tally.entry((*band, norm.clone())).or_default() += 1;
+            }
+        }
+    }
+    let threshold = (pages.len() / 2).max(2);
+
+    pages
+        .iter()
+        .zip(&per_page)
+        .map(|(glyphs, cands)| {
+            // y-bands of this page's margin lines that recur across the document → strip them.
+            let strip: Vec<(f32, f32)> = cands
+                .iter()
+                .filter(|(b, n, _, _)| {
+                    tally.get(&(*b, n.clone())).copied().unwrap_or(0) >= threshold
+                })
+                .map(|(_, _, y0, y1)| (*y0, *y1))
+                .collect();
+            if strip.is_empty() {
+                return reconstruct_with(glyphs, opts);
+            }
+            let kept: Vec<Glyph> = glyphs
+                .iter()
+                .filter(|g| {
+                    let yc = g.y_center();
+                    !strip.iter().any(|&(t, b)| yc >= t && yc <= b)
+                })
+                .copied()
+                .collect();
+            reconstruct_with(&kept, opts)
+        })
+        .collect()
+}
+
+/// The page's header/footer-candidate lines: lines lying wholly within the top or bottom margin
+/// band, as `(band, alphabetic-normalized text, y_top, y_bottom)`.
+fn margin_lines(glyphs: &[Glyph], opts: &ReconstructOpts) -> Vec<(Band, String, f32, f32)> {
+    let refs: Vec<&Glyph> = glyphs
+        .iter()
+        .filter(|g| g.x0.is_finite() && g.y0.is_finite() && g.x1.is_finite() && g.y1.is_finite())
+        .collect();
+    if refs.is_empty() {
+        return Vec::new();
+    }
+    let y_min = refs.iter().map(|g| g.y0).fold(f32::INFINITY, f32::min);
+    let y_max = refs.iter().map(|g| g.y1).fold(f32::NEG_INFINITY, f32::max);
+    let h = (y_max - y_min).max(f32::EPSILON);
+    let top_limit = y_min + MARGIN_BAND_FRAC * h;
+    let bottom_limit = y_max - MARGIN_BAND_FRAC * h;
+
+    group_by_baseline(&refs, opts)
+        .into_iter()
+        .filter_map(|g| {
+            let line = line_from_glyphs(&g, opts)?;
+            let band = if line.y_bottom <= top_limit {
+                Band::Top
+            } else if line.y_top >= bottom_limit {
+                Band::Bottom
+            } else {
+                return None; // body line, never chrome
+            };
+            Some((band, margin_norm(&line.text), line.y_top, line.y_bottom))
+        })
+        .collect()
+}
+
+/// Normalize a margin line for recurrence comparison: keep only lowercase letters. This makes every
+/// page number collapse to the same empty key (so they tally together) while a running title keeps
+/// its alphabetic signature.
+fn margin_norm(text: &str) -> String {
+    text.chars()
+        .filter(|c| c.is_alphabetic())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
 
 /// **Column/band segmentation (XY-cut).** Recursively split a region of glyphs by the most salient
 /// *clean* separator — a vertical column gutter (no glyph crosses it) or a full-width horizontal
@@ -142,8 +283,7 @@ const MAX_CUT_DEPTH: usize = 16;
 fn xy_cut(
     glyphs: &[&Glyph],
     opts: &ReconstructOpts,
-    body_h: f32,
-    glyph_w: f32,
+    metrics: &Metrics,
     depth: usize,
     out: &mut Vec<Block>,
 ) {
@@ -151,10 +291,10 @@ fn xy_cut(
         return;
     }
     let vert = (depth < MAX_CUT_DEPTH)
-        .then(|| best_vertical_gutter(glyphs, opts, glyph_w))
+        .then(|| best_vertical_gutter(glyphs, opts, metrics.glyph_w))
         .flatten();
     let horiz = (depth < MAX_CUT_DEPTH)
-        .then(|| best_horizontal_band(glyphs, opts, body_h))
+        .then(|| best_horizontal_band(glyphs, opts, metrics.body_h))
         .flatten();
 
     // Prefer the separator with the larger axis-normalized score; vertical wins ties (a clean
@@ -165,7 +305,7 @@ fn xy_cut(
         (None, Some(_)) => false,
         (None, None) => {
             let lines = cluster_lines(glyphs, opts);
-            out.extend(group_blocks(&lines, body_h, opts));
+            out.extend(group_blocks(&lines, metrics, opts));
             return;
         }
     };
@@ -174,14 +314,14 @@ fn xy_cut(
         let (mid, _) = vert.unwrap();
         let (left, right): (Vec<&Glyph>, Vec<&Glyph>) =
             glyphs.iter().copied().partition(|g| g.x_center() < mid);
-        xy_cut(&left, opts, body_h, glyph_w, depth + 1, out);
-        xy_cut(&right, opts, body_h, glyph_w, depth + 1, out);
+        xy_cut(&left, opts, metrics, depth + 1, out);
+        xy_cut(&right, opts, metrics, depth + 1, out);
     } else {
         let (mid, _) = horiz.unwrap();
         let (top, bottom): (Vec<&Glyph>, Vec<&Glyph>) =
             glyphs.iter().copied().partition(|g| g.y_center() < mid);
-        xy_cut(&top, opts, body_h, glyph_w, depth + 1, out);
-        xy_cut(&bottom, opts, body_h, glyph_w, depth + 1, out);
+        xy_cut(&top, opts, metrics, depth + 1, out);
+        xy_cut(&bottom, opts, metrics, depth + 1, out);
     }
 }
 
@@ -234,19 +374,29 @@ fn largest_interior_gap(spans: &[(f32, f32)], min: f32) -> Option<(f32, f32)> {
 }
 
 /// A reconstructed text line: its glyph-derived text plus the geometry the paragraph/heading stage
-/// needs (vertical extent, representative height, left edge).
+/// needs (vertical extent, representative height, horizontal extent, and whether it is mostly bold).
 struct Line {
     text: String,
     y_top: f32,
     y_bottom: f32,
     height: f32,
     x_left: f32,
+    x_right: f32,
+    /// Majority of the line's visible glyphs are bold — a body-sized **section heading** signal.
+    bold: bool,
 }
 
-/// Stage 1+2 — cluster glyphs into baseline lines (top→bottom) and render each to text with
-/// x-gap-synthesized spaces. Glyphs are grouped by vertical-center proximity (relative to the median
-/// glyph height), then ordered left→right within a line.
-fn cluster_lines(glyphs: &[&Glyph], opts: &ReconstructOpts) -> Vec<Line> {
+impl Line {
+    fn width(&self) -> f32 {
+        (self.x_right - self.x_left).max(0.0)
+    }
+}
+
+/// Group glyphs into baseline lines (top→bottom); each line's glyphs are ordered left→right by
+/// **center** (a zero-width space sits at the word gap, its center falling cleanly between the
+/// neighbouring letters' — whereas its left edge ties to sub-pixel noise and would sort it mid-word).
+/// Shared by line reconstruction ([`cluster_lines`]) and margin/header-footer detection.
+fn group_by_baseline<'a>(glyphs: &[&'a Glyph], opts: &ReconstructOpts) -> Vec<Vec<&'a Glyph>> {
     if glyphs.is_empty() {
         return Vec::new();
     }
@@ -280,21 +430,22 @@ fn cluster_lines(glyphs: &[&Glyph], opts: &ReconstructOpts) -> Vec<Line> {
     if !cur.is_empty() {
         groups.push(cur);
     }
-
+    for g in &mut groups {
+        g.sort_by(|a, b| {
+            a.x_center()
+                .partial_cmp(&b.x_center())
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+    }
     groups
+}
+
+/// Stage 1+2 — cluster glyphs into baseline lines and render each to text with x-gap-synthesized
+/// spaces (empty lines dropped).
+fn cluster_lines(glyphs: &[&Glyph], opts: &ReconstructOpts) -> Vec<Line> {
+    group_by_baseline(glyphs, opts)
         .into_iter()
-        .filter_map(|mut g| {
-            // Order left→right by glyph **center**, not left edge: a zero-width space sits at the
-            // word gap, and its center falls cleanly between the neighbouring letters' centers —
-            // whereas its left edge ties (to sub-pixel noise) with the next letter's, which would
-            // sort it mid-word and split the word.
-            g.sort_by(|a, b| {
-                a.x_center()
-                    .partial_cmp(&b.x_center())
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            });
-            line_from_glyphs(&g, opts)
-        })
+        .filter_map(|g| line_from_glyphs(&g, opts))
         .collect()
 }
 
@@ -337,24 +488,39 @@ fn line_from_glyphs(glyphs: &[&Glyph], opts: &ReconstructOpts) -> Option<Line> {
         .fold(f32::NEG_INFINITY, f32::max);
     let height = median(glyphs.iter().map(|g| g.height())).max(f32::EPSILON);
     let x_left = glyphs.iter().map(|g| g.x0).fold(f32::INFINITY, f32::min);
+    let x_right = glyphs
+        .iter()
+        .map(|g| g.x1)
+        .fold(f32::NEG_INFINITY, f32::max);
+    // Majority of the *visible* (non-space) glyphs bold → a section-heading signal.
+    let visible = glyphs.iter().filter(|g| !g.ch.is_whitespace()).count();
+    let bold_n = glyphs
+        .iter()
+        .filter(|g| !g.ch.is_whitespace() && g.bold)
+        .count();
+    let bold = visible > 0 && bold_n * 2 > visible;
     Some(Line {
         text,
         y_top,
         y_bottom,
         height,
         x_left,
+        x_right,
+        bold,
     })
 }
 
 /// Stages 3–5 — group a single region's lines into paragraphs (vertical gap / first-line indent),
-/// join hyphenation, and split out headings (font-size outliers) as their own blocks. `body_h` is
-/// the **global** body line height (so heading detection is stable even when a region holds only a
-/// heading); the left margin is taken **locally** so a right column's indent is measured against its
-/// own edge, not the page's.
-fn group_blocks(lines: &[Line], body_h: f32, opts: &ReconstructOpts) -> Vec<Block> {
+/// join hyphenation, and split out headings (font-size outliers and short bold lines) as their own
+/// blocks. `metrics` carries the **global** body line height/width (so heading detection is stable
+/// even when a region holds only a heading); the left margin is taken **locally** so a right column's
+/// indent is measured against its own edge, not the page's.
+fn group_blocks(lines: &[Line], metrics: &Metrics, opts: &ReconstructOpts) -> Vec<Block> {
     if lines.is_empty() {
         return Vec::new();
     }
+    let body_h = metrics.body_h;
+    let body_width = metrics.body_width;
     let left_margin = lines.iter().map(|l| l.x_left).fold(f32::INFINITY, f32::min);
     let para_gap = opts.para_gap_mult * body_h;
     let indent = opts.indent_mult * body_h; // body height ≈ font size — the indent length scale
@@ -364,13 +530,14 @@ fn group_blocks(lines: &[Line], body_h: f32, opts: &ReconstructOpts) -> Vec<Bloc
     let mut prev_bottom: Option<f32> = None;
 
     for line in lines {
-        // Headings stand alone — flush any open paragraph first.
-        if line.height > opts.heading_ratio * body_h {
+        // A heading is either a font-size outlier, or a *short, mostly-bold* line — a body-sized
+        // bold section heading. The shortness guard (well under the widest line) keeps a fully-bold
+        // body paragraph, whose lines run full width, from being misread as a stack of headings.
+        let size_ratio = line.height / body_h;
+        let bold_heading = line.bold && line.width() < 0.6 * body_width;
+        if size_ratio > opts.heading_ratio || bold_heading {
             flush_paragraph(&mut out, &mut para);
-            out.push(text_block(
-                &line.text,
-                Some(heading_level(line.height / body_h)),
-            ));
+            out.push(text_block(&line.text, Some(heading_level(size_ratio))));
             prev_bottom = Some(line.y_bottom);
             continue;
         }
@@ -485,9 +652,18 @@ mod tests {
                 y0: y_top,
                 x1: x0 + BOX_W,
                 y1: y_top + h,
+                bold: false,
             });
         }
         out
+    }
+
+    /// Mark every glyph bold (a bold line/heading fixture).
+    fn bold(mut glyphs: Vec<Glyph>) -> Vec<Glyph> {
+        for g in &mut glyphs {
+            g.bold = true;
+        }
+        glyphs
     }
 
     /// Pull the plain text out of a block (heading or paragraph) for assertions.
@@ -629,6 +805,7 @@ mod tests {
                 y0: 0.0,
                 x1: 0.0,
                 y1: 0.0,
+                bold: false,
             },
             Glyph {
                 ch: 'b',
@@ -636,8 +813,114 @@ mod tests {
                 y0: 1.0,
                 x1: 0.5,
                 y1: 0.5,
+                bold: false,
             },
         ];
         let _ = reconstruct(&g); // must return without panicking
+    }
+
+    #[test]
+    fn short_bold_line_is_a_heading() {
+        // A body-sized but bold short line above full-width body prose → a section heading, even
+        // though it is not a font-size outlier.
+        let mut g = bold(lay_line("Model Architecture", 0.0, 0.0, 10.0));
+        g.extend(lay_line(
+            "this is a much longer body line of ordinary prose",
+            0.0,
+            30.0,
+            10.0,
+        ));
+        g.extend(lay_line(
+            "that wraps and continues across the column width",
+            0.0,
+            42.0,
+            10.0,
+        ));
+        let blocks = reconstruct(&g);
+        assert!(
+            matches!(blocks[0], Block::Heading { .. }),
+            "bold short line is a heading: {blocks:?}"
+        );
+        assert_eq!(block_text(&blocks[0]), "Model Architecture");
+        assert!(blocks[1..]
+            .iter()
+            .all(|b| matches!(b, Block::Paragraph { .. })));
+    }
+
+    #[test]
+    fn fully_bold_paragraph_is_not_all_headings() {
+        // A bold paragraph whose lines run the full body width must stay a paragraph, not become a
+        // stack of headings (the shortness guard).
+        let mut g = bold(lay_line(
+            "this entire paragraph is set in bold yet it is",
+            0.0,
+            0.0,
+            10.0,
+        ));
+        g.extend(bold(lay_line(
+            "ordinary running prose spanning the whole width",
+            0.0,
+            12.0,
+            10.0,
+        )));
+        let blocks = reconstruct(&g);
+        assert!(
+            blocks.iter().all(|b| matches!(b, Block::Paragraph { .. })),
+            "full-width bold lines stay paragraphs: {blocks:?}"
+        );
+    }
+
+    #[test]
+    fn recurring_page_numbers_and_running_header_are_stripped() {
+        // Five pages, each with a running header line at top, a body line, and a page number at
+        // bottom. The header (same text) and the page numbers (different digits) both recur in their
+        // margin bands → stripped; only the body survives.
+        let pages: Vec<Vec<Glyph>> = (1..=5)
+            .map(|n| {
+                let mut g = lay_line("Running Header Title", 0.0, 0.0, 10.0); // top band
+                g.extend(lay_line("body content of this page", 0.0, 150.0, 10.0)); // middle
+                g.extend(lay_line(&format!("{n}"), 0.0, 290.0, 10.0)); // bottom page number
+                g
+            })
+            .collect();
+        let docs = reconstruct_pages(&pages);
+        assert_eq!(docs.len(), 5);
+        for (i, blocks) in docs.iter().enumerate() {
+            let text: String = blocks
+                .iter()
+                .map(block_text)
+                .collect::<Vec<_>>()
+                .join(" | ");
+            assert!(
+                text.contains("body content"),
+                "page {i} keeps its body: {text:?}"
+            );
+            assert!(
+                !text.contains("Running Header"),
+                "page {i} strips the running header: {text:?}"
+            );
+            assert!(
+                !text.chars().any(|c| c.is_ascii_digit()),
+                "page {i} strips the page number: {text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn few_pages_keep_margin_lines() {
+        // With only two pages there is no basis to call a margin line recurring chrome — keep it.
+        let pages: Vec<Vec<Glyph>> = (1..=2)
+            .map(|_| {
+                let mut g = lay_line("Header", 0.0, 0.0, 10.0);
+                g.extend(lay_line("body content here", 0.0, 150.0, 10.0));
+                g
+            })
+            .collect();
+        let docs = reconstruct_pages(&pages);
+        let text: String = docs[0].iter().map(block_text).collect();
+        assert!(
+            text.contains("Header"),
+            "short doc keeps margin line: {text:?}"
+        );
     }
 }

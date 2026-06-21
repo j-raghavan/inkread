@@ -91,6 +91,18 @@ fn bind_pdfium() -> CoreResult<Box<dyn PdfiumLibraryBindings>> {
     })
 }
 
+/// Whether a pdfium font weight counts as **bold** (≥ 600, i.e. semibold and up) — used to flag
+/// body-sized bold section headings during reflow reconstruction (ADR-INKREAD-0011).
+fn weight_is_bold(w: PdfFontWeight) -> bool {
+    matches!(
+        w,
+        PdfFontWeight::Weight600
+            | PdfFontWeight::Weight700Bold
+            | PdfFontWeight::Weight800
+            | PdfFontWeight::Weight900
+    ) || matches!(w, PdfFontWeight::Custom(n) if n >= 600)
+}
+
 /// Map a pdfium load error to a typed [`CoreError`] (DRM vs corrupt vs other — RR7-FR5).
 fn map_load_error(e: PdfiumError) -> CoreError {
     match e {
@@ -181,34 +193,49 @@ impl PdfBackend {
         self.document.pages().len() as usize
     }
 
-    /// Map a source page's [`CharBox`]es into reconstruction [`Glyph`]s in **aspect-correct point
-    /// space** (un-normalizing by the page size), y-down — so reconstruction's per-axis thresholds
-    /// (a width-based column gutter, a height-based word gap) are in one physical scale rather than
-    /// x and y normalized independently (which distorts gaps). See `inkread_pdftext`'s contract.
+    /// Extract a source page's glyphs for reconstruction directly from pdfium, in **aspect-correct
+    /// point space**, y-down, carrying the per-char **bold** flag. Point space (not the normalized
+    /// `[0,1]` `page_chars` returns) keeps reconstruction's per-axis thresholds in one physical scale;
+    /// bold lets it pick out body-sized bold section headings. See `inkread_pdftext`'s contract.
     fn glyphs_for_page(&self, index: usize) -> Vec<Glyph> {
-        let (pw, ph) = i32::try_from(index)
+        let Some(page) = i32::try_from(index)
             .ok()
             .and_then(|i| self.document.pages().get(i).ok())
-            .map(|p| (p.width().value, p.height().value))
-            .unwrap_or((1.0, 1.0));
-        self.page_chars(index)
-            .into_iter()
-            .map(|c| Glyph {
-                ch: c.ch,
-                x0: c.rect.x0 * pw,
-                y0: c.rect.y0 * ph,
-                x1: c.rect.x1 * pw,
-                y1: c.rect.y1 * ph,
-            })
-            .collect()
+        else {
+            return Vec::new();
+        };
+        let ph = page.height().value;
+        let Ok(text) = page.text() else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        for ch in text.chars().iter() {
+            let Some(c) = ch.unicode_char() else { continue };
+            let Ok(b) = ch.loose_bounds() else { continue };
+            // pdfium origin is bottom-left; flip to y-down (matches page_chars).
+            let (x0, x1) = (b.left().value, b.right().value);
+            let (y_top, y_bottom) = (ph - b.top().value, ph - b.bottom().value);
+            let bold = ch.font_is_bold_reenforced() || ch.font_weight().is_some_and(weight_is_bold);
+            out.push(Glyph {
+                ch: c,
+                x0: x0.min(x1),
+                y0: y_top.min(y_bottom),
+                x1: x0.max(x1),
+                y1: y_top.max(y_bottom),
+                bold,
+            });
+        }
+        out
     }
 
-    /// Reconstruct every source page into a reflowable [`Block`] unit (ADR-0011 page-by-page). Text
+    /// Reconstruct every source page into a reflowable [`Block`] unit (ADR-0011 page-by-page). Runs
+    /// the multi-page path so recurring running headers/footers and page numbers are stripped. Text
     /// only — bounded by the document's text size, like the EPUB backend holding all chapters.
     fn extract_units(&self) -> Vec<Vec<Block>> {
-        (0..self.source_page_count())
-            .map(|i| inkread_pdftext::reconstruct(&self.glyphs_for_page(i)))
-            .collect()
+        let pages: Vec<Vec<Glyph>> = (0..self.source_page_count())
+            .map(|i| self.glyphs_for_page(i))
+            .collect();
+        inkread_pdftext::reconstruct_pages(&pages)
     }
 
     /// Whether the PDF carries a usable text layer (sampling the first pages — a cover/blank first
