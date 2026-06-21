@@ -47,6 +47,9 @@ impl Glyph {
     fn height(&self) -> f32 {
         (self.y1 - self.y0).max(0.0)
     }
+    fn x_center(&self) -> f32 {
+        (self.x0 + self.x1) * 0.5
+    }
     fn y_center(&self) -> f32 {
         (self.y0 + self.y1) * 0.5
     }
@@ -67,6 +70,13 @@ pub struct ReconstructOpts {
     pub indent_mult: f32,
     /// A line is a heading when its height exceeds this × the body (median) line height.
     pub heading_ratio: f32,
+    /// A vertical **column gutter** must be at least this × the median glyph width (an interior
+    /// whitespace band crossed by no line — the separator between columns).
+    pub column_gap_mult: f32,
+    /// A horizontal **band** cut needs a full-width vertical gap of at least this × the body line
+    /// height (clearly larger than a paragraph gap, so it fires only at major separators — e.g. a
+    /// spanning title above multiple columns — not between ordinary paragraphs).
+    pub band_gap_mult: f32,
 }
 
 impl Default for ReconstructOpts {
@@ -77,6 +87,8 @@ impl Default for ReconstructOpts {
             para_gap_mult: 0.65,
             indent_mult: 1.5,
             heading_ratio: 1.3,
+            column_gap_mult: 1.5,
+            band_gap_mult: 1.5,
         }
     }
 }
@@ -90,8 +102,125 @@ pub fn reconstruct(glyphs: &[Glyph]) -> Vec<Block> {
 /// Reconstruct with explicit [`ReconstructOpts`]. Never panics; an empty/degenerate page → `[]`.
 #[must_use]
 pub fn reconstruct_with(glyphs: &[Glyph], opts: &ReconstructOpts) -> Vec<Block> {
-    let lines = cluster_lines(glyphs, opts);
-    group_blocks(&lines, opts)
+    if glyphs.is_empty() {
+        return Vec::new();
+    }
+    // Body line height and glyph width are estimated **globally** from raw glyph geometry (so
+    // heading detection has a stable body baseline and gutter/band thresholds a stable scale) and
+    // held fixed across the recursive segmentation below. Segmentation must run on glyphs *before*
+    // line clustering — otherwise glyphs sharing a baseline across columns would merge into one
+    // full-width line and erase the gutter.
+    let body_h = median(glyphs.iter().map(Glyph::height)).max(f32::EPSILON);
+    let glyph_w = median(glyphs.iter().map(Glyph::width)).max(f32::EPSILON);
+    let refs: Vec<&Glyph> = glyphs.iter().collect();
+    let mut out = Vec::new();
+    xy_cut(&refs, opts, body_h, glyph_w, 0, &mut out);
+    out
+}
+
+/// Recursion depth bound for [`xy_cut`] — far beyond any real page's column/band nesting; a guard
+/// against pathological geometry, never reached in practice.
+const MAX_CUT_DEPTH: usize = 16;
+
+/// **Column/band segmentation (XY-cut).** Recursively split a region of glyphs by the most salient
+/// *clean* separator — a vertical column gutter (no glyph crosses it) or a full-width horizontal
+/// band gap — emitting reading order naturally: a vertical cut reads left region then right; a
+/// horizontal cut reads top then bottom. A region with no clean separator is a leaf, where glyphs
+/// are finally clustered into lines ([`cluster_lines`]) and grouped into blocks ([`group_blocks`]).
+/// This resolves multi-column papers and a spanning title above columns; single-column pages have no
+/// interior gutter and fall straight through to one leaf.
+fn xy_cut(
+    glyphs: &[&Glyph],
+    opts: &ReconstructOpts,
+    body_h: f32,
+    glyph_w: f32,
+    depth: usize,
+    out: &mut Vec<Block>,
+) {
+    if glyphs.is_empty() {
+        return;
+    }
+    let vert = (depth < MAX_CUT_DEPTH)
+        .then(|| best_vertical_gutter(glyphs, opts, glyph_w))
+        .flatten();
+    let horiz = (depth < MAX_CUT_DEPTH)
+        .then(|| best_horizontal_band(glyphs, opts, body_h))
+        .flatten();
+
+    // Prefer the separator with the larger axis-normalized score; vertical wins ties (a clean
+    // column gutter is a stronger reading-order signal than an incidental band gap).
+    let take_vertical = match (&vert, &horiz) {
+        (Some(v), Some(h)) => v.1 >= h.1,
+        (Some(_), None) => true,
+        (None, Some(_)) => false,
+        (None, None) => {
+            let lines = cluster_lines(glyphs, opts);
+            out.extend(group_blocks(&lines, body_h, opts));
+            return;
+        }
+    };
+
+    if take_vertical {
+        let (mid, _) = vert.unwrap();
+        let (left, right): (Vec<&Glyph>, Vec<&Glyph>) =
+            glyphs.iter().copied().partition(|g| g.x_center() < mid);
+        xy_cut(&left, opts, body_h, glyph_w, depth + 1, out);
+        xy_cut(&right, opts, body_h, glyph_w, depth + 1, out);
+    } else {
+        let (mid, _) = horiz.unwrap();
+        let (top, bottom): (Vec<&Glyph>, Vec<&Glyph>) =
+            glyphs.iter().copied().partition(|g| g.y_center() < mid);
+        xy_cut(&top, opts, body_h, glyph_w, depth + 1, out);
+        xy_cut(&bottom, opts, body_h, glyph_w, depth + 1, out);
+    }
+}
+
+/// Find the widest **interior vertical gutter** — an x-interval that no glyph's `[x0, x1]` overlaps —
+/// at least `column_gap_mult × glyph_w` wide. Returns `(split_x, score)` where `score` is the gutter
+/// width in glyph-width units (comparable to the horizontal band score). `None` if the region's
+/// glyphs cover x continuously (a single column): only a true column gutter, empty on *every* line,
+/// survives the merge.
+fn best_vertical_gutter(
+    glyphs: &[&Glyph],
+    opts: &ReconstructOpts,
+    glyph_w: f32,
+) -> Option<(f32, f32)> {
+    let min_w = opts.column_gap_mult * glyph_w;
+    let mut spans: Vec<(f32, f32)> = glyphs.iter().map(|g| (g.x0, g.x1)).collect();
+    spans.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    largest_interior_gap(&spans, min_w).map(|(mid, gap)| (mid, gap / glyph_w))
+}
+
+/// Find the widest **full-width horizontal band gap** — a y crossed by no glyph, separating an upper
+/// region from a lower one — at least `band_gap_mult × body_h` tall (clearly larger than a paragraph
+/// gap, so it fires only at major separators like a spanning title above columns). Returns
+/// `(split_y, score)` in body-height units. `None` when glyphs pack vertically with no major break
+/// (interleaved columns, or a single column whose gaps are mere line leading / paragraph spacing).
+fn best_horizontal_band(
+    glyphs: &[&Glyph],
+    opts: &ReconstructOpts,
+    body_h: f32,
+) -> Option<(f32, f32)> {
+    let min_h = opts.band_gap_mult * body_h;
+    let mut spans: Vec<(f32, f32)> = glyphs.iter().map(|g| (g.y0, g.y1)).collect();
+    spans.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    largest_interior_gap(&spans, min_h).map(|(mid, gap)| (mid, gap / body_h))
+}
+
+/// Over `[lo, hi]` spans sorted by `lo`, find the widest interior gap (region uncovered by any span)
+/// exceeding `min`. Returns `(gap_midpoint, gap_width)`, or `None` if coverage is continuous. Shared
+/// by both axes — a vertical gutter and a horizontal band are the same 1-D problem.
+fn largest_interior_gap(spans: &[(f32, f32)], min: f32) -> Option<(f32, f32)> {
+    let mut best: Option<(f32, f32)> = None;
+    let mut cover_end = spans.first()?.1;
+    for &(lo, hi) in &spans[1..] {
+        let gap = lo - cover_end;
+        if gap > min && best.is_none_or(|(_, w)| gap > w) {
+            best = Some((cover_end + gap * 0.5, gap));
+        }
+        cover_end = cover_end.max(hi);
+    }
+    best
 }
 
 /// A reconstructed text line: its glyph-derived text plus the geometry the paragraph/heading stage
@@ -107,15 +236,15 @@ struct Line {
 /// Stage 1+2 — cluster glyphs into baseline lines (top→bottom) and render each to text with
 /// x-gap-synthesized spaces. Glyphs are grouped by vertical-center proximity (relative to the median
 /// glyph height), then ordered left→right within a line.
-fn cluster_lines(glyphs: &[Glyph], opts: &ReconstructOpts) -> Vec<Line> {
+fn cluster_lines(glyphs: &[&Glyph], opts: &ReconstructOpts) -> Vec<Line> {
     if glyphs.is_empty() {
         return Vec::new();
     }
-    let h_med = median(glyphs.iter().map(Glyph::height)).max(f32::EPSILON);
+    let h_med = median(glyphs.iter().map(|g| g.height())).max(f32::EPSILON);
     let split = opts.line_split_mult * h_med;
 
     // Sort by vertical center, then left edge, so same-baseline glyphs are adjacent.
-    let mut order: Vec<&Glyph> = glyphs.iter().collect();
+    let mut order: Vec<&Glyph> = glyphs.to_vec();
     order.sort_by(|a, b| {
         a.y_center()
             .partial_cmp(&b.y_center())
@@ -193,17 +322,18 @@ fn line_from_glyphs(glyphs: &[&Glyph], opts: &ReconstructOpts) -> Option<Line> {
     })
 }
 
-/// Stages 3–5 — group lines into paragraphs (vertical gap / first-line indent), join hyphenation,
-/// and split out headings (font-size outliers) as their own blocks.
-fn group_blocks(lines: &[Line], opts: &ReconstructOpts) -> Vec<Block> {
+/// Stages 3–5 — group a single region's lines into paragraphs (vertical gap / first-line indent),
+/// join hyphenation, and split out headings (font-size outliers) as their own blocks. `body_h` is
+/// the **global** body line height (so heading detection is stable even when a region holds only a
+/// heading); the left margin is taken **locally** so a right column's indent is measured against its
+/// own edge, not the page's.
+fn group_blocks(lines: &[Line], body_h: f32, opts: &ReconstructOpts) -> Vec<Block> {
     if lines.is_empty() {
         return Vec::new();
     }
-    let body_h = median(lines.iter().map(|l| l.height)).max(f32::EPSILON);
     let left_margin = lines.iter().map(|l| l.x_left).fold(f32::INFINITY, f32::min);
-    let w_med = median(lines.iter().map(|l| l.height)).max(f32::EPSILON); // height ≈ font size proxy
     let para_gap = opts.para_gap_mult * body_h;
-    let indent = opts.indent_mult * w_med;
+    let indent = opts.indent_mult * body_h; // body height ≈ font size — the indent length scale
 
     let mut out: Vec<Block> = Vec::new();
     let mut para = String::new();
@@ -426,6 +556,43 @@ mod tests {
                 .all(|b| matches!(b, Block::Paragraph { .. })),
             "body lines are paragraphs: {blocks:?}"
         );
+    }
+
+    #[test]
+    fn two_columns_read_left_then_right() {
+        // Two vertically-stacked lines in each of two columns separated by a wide gutter (left
+        // spans x∈[0,~78], right starts at x=120 → ~42 gutter ≫ column threshold). Reading order
+        // must be the whole left column, then the whole right column — not interleaved by row.
+        let mut g = lay_line("left one", 0.0, 0.0, 10.0);
+        g.extend(lay_line("left two", 0.0, 12.0, 10.0));
+        g.extend(lay_line("right one", 120.0, 0.0, 10.0));
+        g.extend(lay_line("right two", 120.0, 12.0, 10.0));
+        let blocks = reconstruct(&g);
+        assert_eq!(blocks.len(), 2, "one paragraph per column: {blocks:?}");
+        assert_eq!(block_text(&blocks[0]), "left one left two");
+        assert_eq!(block_text(&blocks[1]), "right one right two");
+    }
+
+    #[test]
+    fn spanning_title_above_two_columns_reads_title_then_columns() {
+        // A full-width title (crosses the gutter, so no top-level vertical cut) with a large gap to
+        // two columns below. XY-cut peels the title band first, then splits the body into columns:
+        // reading order = title, left column, right column.
+        let mut g = lay_line("the full width title", 0.0, 0.0, 20.0);
+        g.extend(lay_line("left alpha", 0.0, 50.0, 10.0));
+        g.extend(lay_line("left beta", 0.0, 62.0, 10.0));
+        g.extend(lay_line("right alpha", 120.0, 50.0, 10.0));
+        g.extend(lay_line("right beta", 120.0, 62.0, 10.0));
+        let blocks = reconstruct(&g);
+        assert_eq!(blocks.len(), 3, "title + two columns: {blocks:?}");
+        assert!(
+            matches!(blocks[0], Block::Heading { .. }),
+            "spanning title is a heading: {:?}",
+            blocks[0]
+        );
+        assert_eq!(block_text(&blocks[0]), "the full width title");
+        assert_eq!(block_text(&blocks[1]), "left alpha left beta");
+        assert_eq!(block_text(&blocks[2]), "right alpha right beta");
     }
 
     #[test]
