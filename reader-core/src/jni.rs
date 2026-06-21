@@ -35,7 +35,9 @@ use std::sync::Arc;
 use inkread_ink::{InkColor, Tool};
 
 use crate::dict::{encode_definition_wire, Dict};
-use crate::document::{encode_links_wire, encode_selection_wire, encode_toc_wire, NormRect};
+use crate::document::{
+    encode_links_wire, encode_search_wire, encode_selection_wire, encode_toc_wire, NormRect,
+};
 use crate::error::{CoreError, CoreResult};
 use crate::persistence::ink_store::{FsInkStore, InkStore};
 use crate::persistence::sidecar::SidecarPaths;
@@ -938,6 +940,27 @@ pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeTextInRect<
         let target = if page < 0 { 0usize } else { page as usize };
         let sel = session.text_in_rect(target, NormRect { x0, y0, x1, y1 });
         env.byte_array_from_slice(&encode_selection_wire(&sel))
+    })
+    .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
+}
+
+/// Find `query` on `page` (RR2 in-document search). Returns the search wire (decode:
+/// `WireCodec.decodeSearch`): the page's matches as snippet + highlight boxes. The shell calls this
+/// page-by-page so the scan stays memory-bounded.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeSearchPage<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+    page: jint,
+    query: JString<'local>,
+) -> JByteArray<'local> {
+    env.with_env(|env| -> jni::errors::Result<JByteArray<'local>> {
+        let session = unsafe { session_mut(handle) }.map_err(|e| throw(env, &e))?;
+        let query: String = query.try_to_string(env)?;
+        let target = if page < 0 { 0usize } else { page as usize };
+        let matches = session.search_page(target, &query);
+        env.byte_array_from_slice(&encode_search_wire(&matches))
     })
     .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
 }

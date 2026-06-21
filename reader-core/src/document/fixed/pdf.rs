@@ -496,6 +496,10 @@ impl Document for PdfBackend {
     fn text_in_rect(&self, page: usize, rect: NormRect) -> TextSelection {
         text_select::text_in_rect(&self.page_chars(page), rect)
     }
+
+    fn search_page(&self, page: usize, query: &str) -> Vec<crate::document::SearchMatch> {
+        text_select::find_matches(&self.page_chars(page), query)
+    }
 }
 
 /// Resolve a pdfium link's target (RR11-FR3): a direct destination or a GoTo/URI action.

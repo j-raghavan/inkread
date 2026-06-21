@@ -139,6 +139,73 @@ pub fn render_page(page: &Page, opts: &LayoutOpts, font: &AbFont, canvas: &mut G
     }
 }
 
+/// A glyph with its pixel box on the page (top-left origin), mirroring [`render_page`]'s layout
+/// transform. Feeds text selection + in-document search in `reader-core` (which normalizes the box
+/// to `[0,1]`). The vertical extent is the **line box** (`top..top+height`) so boxes on a line
+/// align, matching the selection logic's "same line" grouping.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlacedGlyph {
+    pub ch: char,
+    pub x0: f32,
+    pub y0: f32,
+    pub x1: f32,
+    pub y1: f32,
+}
+
+/// Extract a laid-out [`Page`]'s glyphs as positioned boxes (pixel space), walking runs **exactly**
+/// like [`render_page`] so a selection/search highlight lands on the painted glyphs. A single space
+/// glyph is synthesized between consecutive runs on a line (the layout drops inter-word spaces into
+/// run `x` offsets) so multi-word selection/search reads with spaces. Rule lines contribute nothing.
+#[must_use]
+pub fn page_glyphs(page: &Page, opts: &LayoutOpts, font: &AbFont) -> Vec<PlacedGlyph> {
+    let margin = opts.margin;
+    let mut out = Vec::new();
+    for line in &page.lines {
+        if line.rule {
+            continue;
+        }
+        let y0 = margin + line.top;
+        let y1 = y0 + line.height;
+        let mut prev_run_end: Option<f32> = None;
+        for run in &line.runs {
+            let sf = font.font.as_scaled(PxScale::from(run.size_px));
+            let run_start = margin + run.x;
+            // Bridge the gap to the previous run on this line with a space glyph.
+            if let Some(end) = prev_run_end {
+                if run_start > end {
+                    out.push(PlacedGlyph {
+                        ch: ' ',
+                        x0: end,
+                        y0,
+                        x1: run_start,
+                        y1,
+                    });
+                }
+            }
+            let mut pen_x = run_start;
+            let mut prev = None;
+            for ch in run.text.chars() {
+                let id = font.font.glyph_id(ch);
+                if let Some(p) = prev {
+                    pen_x += sf.kern(p, id);
+                }
+                let adv = sf.h_advance(id);
+                out.push(PlacedGlyph {
+                    ch,
+                    x0: pen_x,
+                    y0,
+                    x1: pen_x + adv,
+                    y1,
+                });
+                pen_x += adv;
+                prev = Some(id);
+            }
+            prev_run_end = Some(pen_x);
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -195,6 +262,23 @@ mod tests {
             .filter(|&(y, x)| canvas.pixels[y * 400 + x] < 250)
             .count();
         assert_eq!(top_band, 0, "no ink above the top margin");
+    }
+
+    #[test]
+    fn page_glyphs_recovers_text_in_reading_order() {
+        let font = AbFont::default_font();
+        let opts = LayoutOpts::new(400.0, 600.0, 18.0);
+        let pages = paginate(&[paragraph("Hello reflowed world")], &opts, &font);
+        let glyphs = page_glyphs(&pages[0], &opts, &font);
+        let text: String = glyphs.iter().map(|g| g.ch).collect();
+        assert_eq!(text, "Hello reflowed world", "words rejoined with spaces");
+        // Boxes are inside the page and ordered left-to-right on the (single) line.
+        assert!(glyphs.iter().all(|g| g.x0 >= 0.0 && g.x1 <= 400.0));
+        let first_word = glyphs
+            .iter()
+            .take_while(|g| g.ch != ' ')
+            .collect::<Vec<_>>();
+        assert!(first_word.windows(2).all(|w| w[0].x0 <= w[1].x0));
     }
 
     #[test]
