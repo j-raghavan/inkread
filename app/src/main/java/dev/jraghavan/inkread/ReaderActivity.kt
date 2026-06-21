@@ -565,6 +565,8 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
                 val np = try { NativeBridge.nativeSetTextScale(docHandle, savedScale) } catch (e: RuntimeException) { -1 }
                 if (np >= 0) Log.i(TAG, "applied text scale $savedScale → page $np")
             }
+            // Re-apply the saved display contrast (RR4); 0 = off (a no-op in the core).
+            try { NativeBridge.nativeSetContrast(docHandle, contrastPref()) } catch (e: RuntimeException) {}
             pageCount = NativeBridge.nativePageCount(docHandle)
             Books.pushRecent(this, bookId, path)
             Log.i(
@@ -1186,6 +1188,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         control(R.drawable.ic_menu_export, "Export") { showExportDialog() }
         control(R.drawable.ic_tool_define, "Dicts") { showDictionariesDialog() }
         control(R.drawable.ic_menu_font, "Font") { showTypographyDialog() }
+        control(R.drawable.ic_menu_display, "Display") { showDisplayDialog() }
         control(R.drawable.ic_menu_open, "Open") { openPicker() }
         container.addView(controls)
 
@@ -2562,6 +2565,60 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             .show()
     }
 
+    /**
+     * Display settings (RR4 — KOReader's "Contrast" tab). A contrast stepper (0 = off … MAX) that
+     * applies live and persists per the app (re-applied on open). The matching native control is a
+     * post-render pixel remap, so it works on PDF and EPUB and needs only a re-render.
+     */
+    private fun showDisplayDialog() {
+        if (docHandle == 0L) { openPicker(); return }
+        val d = resources.displayMetrics.density
+        fun dp(v: Int) = (v * d).toInt()
+        var step = contrastPref()
+
+        val label = TextView(this).apply {
+            textSize = 18f; setTextColor(Color.BLACK); gravity = Gravity.CENTER; minWidth = dp(72)
+        }
+        fun refresh() { label.text = if (step == 0) "Off" else step.toString() }
+        refresh()
+        fun apply() {
+            setContrastPref(step)
+            refresh()
+            engine.execute {
+                try { NativeBridge.nativeSetContrast(docHandle, step) } catch (e: RuntimeException) {}
+                renderAndBlit(); adapter.refreshFull()
+            }
+        }
+        fun button(txt: String, onTap: () -> Unit) = TextView(this).apply {
+            text = txt; textSize = 22f; gravity = Gravity.CENTER
+            setTextColor(Color.BLACK); setPadding(dp(20), dp(6), dp(20), dp(6)); isClickable = true
+            setOnClickListener { onTap() }
+        }
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(20), dp(8), dp(20), dp(8))
+            addView(button("−") { if (step > 0) { step--; apply() } })
+            addView(label)
+            addView(button("+") { if (step < CONTRAST_MAX) { step++; apply() } })
+        }
+        val container = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            addView(TextView(this@ReaderActivity).apply {
+                text = "Contrast"; textSize = 13f; setTextColor(Color.parseColor("#666666"))
+                setPadding(dp(20), dp(14), dp(20), 0)
+            })
+            addView(row)
+        }
+        AlertDialog.Builder(this).setTitle("Display").setView(container)
+            .setPositiveButton("Done", null).show()
+    }
+
+    private fun contrastPref(): Int =
+        getSharedPreferences("display", MODE_PRIVATE).getInt("contrast", 0).coerceIn(0, CONTRAST_MAX)
+
+    private fun setContrastPref(step: Int) =
+        getSharedPreferences("display", MODE_PRIVATE).edit().putInt("contrast", step).apply()
+
     private fun textScalePref(): Float =
         getSharedPreferences("typography", MODE_PRIVATE).getFloat("scale", 1.0f)
 
@@ -2626,6 +2683,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         // Supernote folders the Partner app syncs — searched to place the export beside the original.
         val SYNCED_DIRS = arrayOf("Document", "EXPORT", "Note", "INBOX", "MyStyle", "Download")
         const val SELECTION_HANDLE_PX = 8f // half-size of the square corner handles on the selection box.
+        const val CONTRAST_MAX = 8 // mirrors reader-core render::contrast::MAX_CONTRAST_STEP (RR4).
         const val STROKE_PAUSE_MS = 600L // commit a stroke after this pen-pause (swallowed-UP net).
         const val LONG_PRESS_MS = 500L // hold the pen this long (≈still) on a word → look it up.
         const val LONG_PRESS_SLOP_PX = 16f // movement beyond this cancels the long-press (it's a stroke).

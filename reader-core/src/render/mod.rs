@@ -3,6 +3,7 @@
 //! M0 is the single-copy full-page render path (Fork 4); dirty-rect/cache/prefetch are M1b.
 
 pub mod cache;
+pub mod contrast;
 pub mod gray;
 pub mod pixel_buffer;
 pub mod viewport;

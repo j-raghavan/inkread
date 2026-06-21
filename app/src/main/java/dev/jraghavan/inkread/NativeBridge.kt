@@ -132,6 +132,10 @@ object NativeBridge {
      *  fixed-layout document (PDF) that does not reflow. Re-render after calling. */
     external fun nativeSetTextScale(handle: Long, scale: Float): Int
 
+    /** Set the display-enhancement contrast [step] (0 = off; RR4). Applied as a post-render pixel
+     *  remap (works on PDF + EPUB); re-render after calling. */
+    external fun nativeSetContrast(handle: Long, step: Int)
+
     // ---- ink annotation, persisted by the core to a sidecar (RR6/RR10 / ADR-INKREAD-0010) ----
 
     /** Attach a `.inkread` sidecar store for the open document so strokes persist (RR10). */

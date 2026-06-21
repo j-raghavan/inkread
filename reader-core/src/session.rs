@@ -105,6 +105,9 @@ pub struct ReaderSession {
     /// The opened document's content identity (RR10-FR6), computed from its bytes at open. `None`
     /// for a byte-less test session ([`Self::with_document`]). Used to stamp/verify the sidecar.
     identity: Option<DocIdentity>,
+    /// Contrast/display-enhancement step (`0` = off; RR4 — KOReader's "Contrast"). Applied as a
+    /// per-pixel remap after render so faint scans read better on e-ink.
+    contrast: u8,
 }
 
 impl ReaderSession {
@@ -192,6 +195,7 @@ impl ReaderSession {
             erase_changed: false,
             clipboard: Vec::new(),
             identity,
+            contrast: 0,
         }
     }
 
@@ -330,15 +334,34 @@ impl ReaderSession {
             )));
         }
         if self.zoom <= 1.0 + 1e-3 {
-            return self.document.render_page(self.page, buf);
+            self.document.render_page(self.page, buf)?;
+        } else {
+            // Magnified view: content is buf*zoom; show a buf-sized window panned over the overscan.
+            let bw = self.viewport.width as f32;
+            let bh = self.viewport.height as f32;
+            let off_x = (self.pan_x * bw * (self.zoom - 1.0)).round() as i32;
+            let off_y = (self.pan_y * bh * (self.zoom - 1.0)).round() as i32;
+            self.document
+                .render_zoom(self.page, buf, self.zoom, off_x, off_y)?;
         }
-        // Magnified view: the content is buf*zoom; show a buf-sized window panned over the overscan.
-        let bw = self.viewport.width as f32;
-        let bh = self.viewport.height as f32;
-        let off_x = (self.pan_x * bw * (self.zoom - 1.0)).round() as i32;
-        let off_y = (self.pan_y * bh * (self.zoom - 1.0)).round() as i32;
-        self.document
-            .render_zoom(self.page, buf, self.zoom, off_x, off_y)
+        // Display enhancement (RR4): remap pixels for contrast after the backend renders.
+        crate::render::contrast::apply_contrast(
+            buf,
+            crate::render::contrast::step_to_factor(self.contrast),
+        );
+        Ok(())
+    }
+
+    /// Set the contrast/display-enhancement step (`0` = off, clamped to
+    /// [`MAX_CONTRAST_STEP`](crate::render::contrast::MAX_CONTRAST_STEP)) — RR4. Re-render to apply.
+    pub fn set_contrast(&mut self, step: u8) {
+        self.contrast = step.min(crate::render::contrast::MAX_CONTRAST_STEP);
+    }
+
+    /// The current contrast step (`0` = off).
+    #[must_use]
+    pub fn contrast(&self) -> u8 {
+        self.contrast
     }
 
     /// Set the pinch-zoom factor (clamped to `[1.0, MAX_ZOOM]`) and normalized pan `[0,1]`
