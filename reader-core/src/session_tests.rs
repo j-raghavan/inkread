@@ -601,3 +601,70 @@ fn lasso_rejects_an_unknown_mode_code() {
     let s = session(1, DeviceCapabilities::supernote_full());
     assert!(s.ink_select_in_polygon(&centre_box(), 9).is_err());
 }
+
+// RR13/RR14: a KOReader plugin loads against a real session, its menu item fires, and the UI
+// message it queues comes back through the session (the on-device path, host-tested).
+#[test]
+fn plugin_menu_item_runs_against_the_session() {
+    let mut s = session(5, DeviceCapabilities::supernote_full());
+    s.load_plugin_src(
+        "",
+        r#"
+        local InfoMessage = require("ui/widget/infomessage")
+        local UIManager = require("ui/uimanager")
+        local WidgetContainer = require("ui/widget/container/widgetcontainer")
+        local _ = require("gettext")
+        local P = WidgetContainer:extend{ name = "hello" }
+        function P:init() self.ui.menu:registerToMainMenu(self) end
+        function P:addToMainMenu(items)
+            items.hello = { text = _("Hello World"), callback = function()
+                UIManager:show(InfoMessage:new{ text = "pages=" .. inkread.document.page_count() })
+            end }
+        end
+        return P
+        "#,
+    )
+    .unwrap();
+    assert_eq!(
+        s.plugin_menu_items(),
+        vec![("hello".to_string(), "Hello World".to_string())]
+    );
+    let msgs = s.plugin_invoke("hello").unwrap();
+    assert_eq!(
+        msgs,
+        vec!["pages=5".to_string()],
+        "UI message routed via the session"
+    );
+}
+
+// RR5-FR3: a plugin's view.set_zoom request is applied to the session through plugin_invoke.
+#[test]
+fn plugin_zoom_request_changes_the_session_zoom() {
+    let mut s = session(3, DeviceCapabilities::supernote_full());
+    s.load_plugin_src(
+        "",
+        r#"
+        local WidgetContainer = require("ui/widget/container/widgetcontainer")
+        local P = WidgetContainer:extend{ name = "z" }
+        function P:init() self.ui.menu:registerToMainMenu(self) end
+        function P:addToMainMenu(items)
+            items.z2 = { text = "Zoom", callback = function() inkread.view.set_zoom(2.0, 0.5, 0.5) end }
+        end
+        return P
+        "#,
+    )
+    .unwrap();
+    assert_eq!(s.zoom(), 1.0);
+    s.plugin_invoke("z2").unwrap();
+    assert_eq!(s.zoom(), 2.0, "plugin set_zoom applied through the session");
+}
+
+// RR21-FR3: an unsupported KOReader API surfaces as a typed plugin error, never a panic.
+#[test]
+fn plugin_unsupported_api_is_a_typed_error() {
+    let mut s = session(1, DeviceCapabilities::supernote_full());
+    let err = s
+        .load_plugin_src("", r#"require("ffi/framebuffer") return {}"#)
+        .unwrap_err();
+    assert!(matches!(err, crate::error::CoreError::Plugin(_)));
+}

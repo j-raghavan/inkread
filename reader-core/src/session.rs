@@ -105,6 +105,8 @@ pub struct ReaderSession {
     /// The opened document's content identity (RR10-FR6), computed from its bytes at open. `None`
     /// for a byte-less test session ([`Self::with_document`]). Used to stamp/verify the sidecar.
     identity: Option<DocIdentity>,
+    /// The Lua plugin manager (RR13/RR14), once a plugin has been attached. `None` = no plugins.
+    plugins: Option<crate::plugins::PluginManager>,
 }
 
 impl ReaderSession {
@@ -192,6 +194,7 @@ impl ReaderSession {
             erase_changed: false,
             clipboard: Vec::new(),
             identity,
+            plugins: None,
         }
     }
 
@@ -438,6 +441,83 @@ impl ReaderSession {
     #[must_use]
     pub fn text_in_rect(&self, page: usize, rect: NormRect) -> TextSelection {
         self.document.text_in_rect(page, rect)
+    }
+
+    // ---- Lua plugins (RR13/RR14 / ADR-INKREAD-0006) ----
+
+    /// Push the current reader facts into the plugin context (so a plugin call reads live state).
+    fn sync_plugins(&self) {
+        if let Some(pm) = &self.plugins {
+            pm.sync(
+                self.document.page_count(),
+                self.page,
+                (self.viewport.width, self.viewport.height),
+                self.zoom,
+                None, // per-page aspect not yet exposed by the backends
+            );
+        }
+    }
+
+    /// Load a KOReader `.koplugin` directory, creating the plugin manager on first use (RR14). The
+    /// plugin's `init`/`addToMainMenu` run against the live reader state.
+    pub fn load_plugin_dir(&mut self, dir: &std::path::Path) -> CoreResult<()> {
+        if self.plugins.is_none() {
+            self.plugins = Some(crate::plugins::PluginManager::new()?);
+        }
+        self.sync_plugins();
+        self.plugins
+            .as_ref()
+            .expect("just set")
+            .load_koplugin_dir(dir)
+    }
+
+    /// Load a KOReader plugin from in-memory sources (`_meta.lua`, `main.lua`) — used by the JNI
+    /// seam and tests. Creates the manager on first use.
+    pub fn load_plugin_src(&mut self, meta_src: &str, main_src: &str) -> CoreResult<()> {
+        if self.plugins.is_none() {
+            self.plugins = Some(crate::plugins::PluginManager::new()?);
+        }
+        self.sync_plugins();
+        self.plugins
+            .as_ref()
+            .expect("just set")
+            .load_koplugin(meta_src, main_src)
+    }
+
+    /// The loaded plugins' main-menu items as `(key, label)` pairs (empty if no plugins).
+    #[must_use]
+    pub fn plugin_menu_items(&self) -> Vec<(String, String)> {
+        self.plugins
+            .as_ref()
+            .map(crate::plugins::PluginManager::menu_items)
+            .unwrap_or_default()
+    }
+
+    /// Fire a plugin menu item by key: syncs reader state, runs the callback, applies any zoom the
+    /// plugin requested, and returns the UI messages it queued (the shell shows them). RR21-FR3:
+    /// a plugin error is typed, never a panic.
+    pub fn plugin_invoke(&mut self, key: &str) -> CoreResult<Vec<String>> {
+        if self.plugins.is_none() {
+            return Ok(Vec::new());
+        }
+        self.sync_plugins();
+        self.plugins
+            .as_ref()
+            .expect("checked")
+            .invoke_menu_item(key)?;
+        // Apply a plugin-requested zoom through the normal view path (RR5-FR3).
+        if let Some((z, px, py)) = self
+            .plugins
+            .as_ref()
+            .and_then(crate::plugins::PluginManager::take_requested_zoom)
+        {
+            self.set_zoom(z, px, py);
+        }
+        Ok(self
+            .plugins
+            .as_ref()
+            .map(crate::plugins::PluginManager::drain_ui_messages)
+            .unwrap_or_default())
     }
 
     /// Navigate to a TOC entry's target page (RR11-AC1). An unresolved entry (no

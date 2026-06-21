@@ -26,6 +26,9 @@ inkread-ink = { workspace = true }
 # EPUB backend: parsing + reflow layout + glyph rasterization (RR2-FR5). Pure Rust; the EpubBackend
 # adapter (document/reflow) maps it to the Document trait.
 inkread-epub = { workspace = true }
+# Embedded Lua plugin runtime + KOReader compat shim (RR13/RR14). reader-core is the adapter:
+# it implements inkread-lua's HostServices ports over ReaderSession (ADR-INKREAD-0006 D1).
+inkread-lua = { workspace = true }
 pdfium-render = { workspace = true }
 tiny-skia = { workspace = true }
 rusqlite = { workspace = true }

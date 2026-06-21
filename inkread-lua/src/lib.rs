@@ -23,6 +23,29 @@ use mlua::{Function, Lua, Result as LuaResult};
 
 pub use services::{DocumentService, HostServices, UiService, ViewService};
 
+/// The plugin runtime's public error — a message, **decoupled from `mlua`** so dependents
+/// (`reader-core`) need not depend on `mlua` to handle plugin failures (a syntax error, an
+/// unsupported KOReader API in strict mode, or a runtime error inside a plugin).
+#[derive(Debug, Clone)]
+pub struct PluginError(pub String);
+
+impl std::fmt::Display for PluginError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl std::error::Error for PluginError {}
+
+impl From<mlua::Error> for PluginError {
+    fn from(e: mlua::Error) -> Self {
+        PluginError(e.to_string())
+    }
+}
+
+/// Result alias for the plugin runtime's public API (KOReader shim, etc.).
+pub type PluginResult<T> = Result<T, PluginError>;
+
 /// A sink the host reads plugin log output from — a test seam now, the plugin console later.
 #[derive(Clone, Default)]
 pub struct LogSink(Arc<Mutex<Vec<String>>>);

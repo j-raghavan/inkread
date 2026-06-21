@@ -14,9 +14,9 @@
 
 use std::rc::Rc;
 
-use mlua::{Function, Result as LuaResult, Table};
+use mlua::{Function, Table};
 
-use crate::{HostServices, LogSink, PluginHost};
+use crate::{HostServices, LogSink, PluginHost, PluginResult};
 
 /// The pure-Lua KOReader compatibility prelude, embedded at build time.
 const PRELUDE: &str = include_str!("prelude.lua");
@@ -28,22 +28,23 @@ pub struct KoPluginRuntime {
 
 impl KoPluginRuntime {
     /// Build the runtime over `services` and install the compat prelude.
-    pub fn new(services: Rc<dyn HostServices>) -> LuaResult<Self> {
+    pub fn new(services: Rc<dyn HostServices>) -> PluginResult<Self> {
         let host = PluginHost::new(services)?;
         host.load(PRELUDE)?;
         Ok(Self { host })
     }
 
     /// Enable/disable probe mode (records unsupported `require`s/symbols instead of erroring).
-    pub fn set_probe(&self, on: bool) -> LuaResult<()> {
+    pub fn set_probe(&self, on: bool) -> PluginResult<()> {
         let ko: Table = self.host.lua().globals().get("__inkread_ko")?;
-        ko.set("probe", on)
+        ko.set("probe", on)?;
+        Ok(())
     }
 
     /// Load a KOReader plugin and run its lifecycle (instantiate → `init` → `addToMainMenu`).
     /// `meta_src` is the plugin's `_meta.lua` (executed for its metadata; may be empty); `main_src`
     /// is `main.lua`. In strict mode an unsupported API raises a clear `mlua` error.
-    pub fn load_koplugin(&self, meta_src: &str, main_src: &str) -> LuaResult<()> {
+    pub fn load_koplugin(&self, meta_src: &str, main_src: &str) -> PluginResult<()> {
         if !meta_src.trim().is_empty() {
             // _meta.lua returns a metadata table; executing it also exercises its `require`s.
             self.host.lua().load(meta_src).exec()?;
@@ -55,7 +56,7 @@ impl KoPluginRuntime {
     }
 
     /// The plugin's registered main-menu items as `(key, label)` pairs.
-    pub fn menu_items(&self) -> LuaResult<Vec<(String, String)>> {
+    pub fn menu_items(&self) -> PluginResult<Vec<(String, String)>> {
         let ko: Table = self.host.lua().globals().get("__inkread_ko")?;
         let f: Function = ko.get("menu_keys")?;
         let s: String = f.call(())?;
@@ -68,14 +69,14 @@ impl KoPluginRuntime {
     }
 
     /// Fire a menu item's callback by key; returns whether it ran.
-    pub fn invoke_menu_item(&self, key: &str) -> LuaResult<bool> {
+    pub fn invoke_menu_item(&self, key: &str) -> PluginResult<bool> {
         let ko: Table = self.host.lua().globals().get("__inkread_ko")?;
         let f: Function = ko.get("invoke")?;
-        f.call(key.to_string())
+        Ok(f.call(key.to_string())?)
     }
 
     /// The probe-recorded unsupported API paths (for generating the compatibility matrix).
-    pub fn probed_paths(&self) -> LuaResult<Vec<String>> {
+    pub fn probed_paths(&self) -> PluginResult<Vec<String>> {
         let ko: Table = self.host.lua().globals().get("__inkread_ko")?;
         let f: Function = ko.get("probed_list")?;
         let s: String = f.call(())?;

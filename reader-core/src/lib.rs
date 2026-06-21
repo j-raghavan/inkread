@@ -13,6 +13,7 @@ pub mod document;
 pub mod error;
 pub mod ink_wire;
 pub mod persistence;
+pub mod plugins;
 pub mod policy;
 pub mod render;
 pub mod session;

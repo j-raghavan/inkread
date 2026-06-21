@@ -41,6 +41,9 @@ pub enum CoreError {
     Persistence(String),
     /// A panic was caught at the boundary and converted (RR21-FR3).
     InternalPanic(String),
+    /// A Lua plugin failed to load or run (RR13/RR14): a syntax error, an unsupported KOReader
+    /// API in strict mode, or a runtime error inside the plugin. Never crashes the reader.
+    Plugin(String),
 }
 
 impl CoreError {
@@ -58,6 +61,7 @@ impl CoreError {
             CoreError::BackendUnavailable(_) => 8,
             CoreError::InternalPanic(_) => 9,
             CoreError::Persistence(_) => 10,
+            CoreError::Plugin(_) => 11,
         }
     }
 }
@@ -78,6 +82,7 @@ impl fmt::Display for CoreError {
             CoreError::BackendUnavailable(m) => write!(f, "render backend unavailable: {m}"),
             CoreError::Persistence(m) => write!(f, "storage error: {m}"),
             CoreError::InternalPanic(m) => write!(f, "internal error: {m}"),
+            CoreError::Plugin(m) => write!(f, "plugin error: {m}"),
         }
     }
 }
@@ -120,6 +125,7 @@ mod tests {
             CoreError::BackendUnavailable(String::new()),
             CoreError::Persistence(String::new()),
             CoreError::InternalPanic(String::new()),
+            CoreError::Plugin(String::new()),
         ];
         let mut codes: Vec<StatusCode> = errs.iter().map(CoreError::status_code).collect();
         assert!(codes.iter().all(|&c| c != STATUS_OK));
