@@ -1206,10 +1206,8 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         control(R.drawable.ic_menu_zoom_in, "Zoom +") { zoomBy(ZOOM_STEP) }
         control(R.drawable.ic_menu_export, "Export") { showExportDialog() }
         control(R.drawable.ic_tool_define, "Dicts") { showDictionariesDialog() }
-        control(R.drawable.ic_menu_font, "Font") { showTypographyDialog() }
-        control(R.drawable.ic_menu_display, "Display") { showDisplayDialog() }
-        control(R.drawable.ic_menu_rotate, "Rotate") { showRotationDialog() }
-        control(R.drawable.ic_menu_fit, "Fit") { showFitDialog() }
+        // Document controls consolidated into one KOReader-style tabbed sheet (Rotate/Fit/Font/Display).
+        control(R.drawable.ic_menu_adjust, "Adjust") { showAdjustSheet() }
         control(R.drawable.ic_menu_open, "Open") { openPicker() }
         container.addView(controls)
 
@@ -2531,175 +2529,262 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         }
     }
 
-    /**
-     * Reflow **font size** control (RR2-FR5) — A− / A+ over a set of scale steps, applied live via
-     * [NativeBridge.nativeSetTextScale] (EPUB repaginates, preserving the chapter). The scale
-     * persists and is re-applied on the next open. A no-op toast on fixed-layout PDF.
-     */
-    private fun showTypographyDialog() {
-        val d = resources.displayMetrics.density
-        fun dp(v: Int) = (v * d).toInt()
-        var idx = nearestScaleIndex(textScalePref())
-        val label = TextView(this).apply {
-            textSize = 18f; setTextColor(Color.BLACK); gravity = Gravity.CENTER
-            minWidth = dp(96)
-        }
-        fun refreshLabel() { label.text = "${(TEXT_SCALES[idx] * 100).toInt()}%" }
-        refreshLabel()
-        fun apply() {
-            val scale = TEXT_SCALES[idx]
-            setTextScalePref(scale)
-            refreshLabel()
-            engine.execute {
-                val np = try { NativeBridge.nativeSetTextScale(docHandle, scale) } catch (e: RuntimeException) { -1 }
-                if (np >= 0) {
-                    pageCount = NativeBridge.nativePageCount(docHandle)
-                    renderAndBlit(); adapter.refreshFull()
-                } else {
-                    runOnUiThread {
-                        Toast.makeText(this, "Font size adjusts reflowable books (EPUB)", Toast.LENGTH_SHORT).show()
-                    }
-                }
-            }
-        }
-        fun stepButton(text: String, onTap: () -> Unit) = TextView(this).apply {
-            this.text = text; textSize = 22f; setTextColor(Color.BLACK); gravity = Gravity.CENTER
-            setPadding(dp(22), dp(6), dp(22), dp(10))
-            background = GradientDrawable().apply {
-                setColor(Color.WHITE); setStroke(maxOf(1, dp(1)), Color.BLACK); cornerRadius = dp(20).toFloat()
-            }
-            isClickable = true; setOnClickListener { onTap() }
-        }
-        val row = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER
-            setPadding(dp(24), dp(22), dp(24), dp(10))
-            addView(stepButton("A−") { if (idx > 0) { idx--; apply() } })
-            addView(label, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
-                marginStart = dp(18); marginEnd = dp(18)
-            })
-            addView(stepButton("A+") { if (idx < TEXT_SCALES.size - 1) { idx++; apply() } })
-        }
-        AlertDialog.Builder(this, R.style.InkDialog)
-            .setTitle("Font size")
-            .setView(row)
-            .setPositiveButton("Done", null)
-            .show()
-    }
-
-    /**
-     * Display settings (RR4 — KOReader's "Contrast" tab). A contrast stepper (0 = off … MAX) that
-     * applies live and persists per the app (re-applied on open). The matching native control is a
-     * post-render pixel remap, so it works on PDF and EPUB and needs only a re-render.
-     */
-    private fun showDisplayDialog() {
-        if (docHandle == 0L) { openPicker(); return }
-        val d = resources.displayMetrics.density
-        fun dp(v: Int) = (v * d).toInt()
-        var step = contrastPref()
-
-        val label = TextView(this).apply {
-            textSize = 18f; setTextColor(Color.BLACK); gravity = Gravity.CENTER; minWidth = dp(72)
-        }
-        fun refresh() { label.text = if (step == 0) "Off" else step.toString() }
-        refresh()
-        fun apply() {
-            setContrastPref(step)
-            refresh()
-            engine.execute {
-                Log.i(TAG, "DIAG contrast step=$step → nativeSetContrast + render")
-                try { NativeBridge.nativeSetContrast(docHandle, step) } catch (e: RuntimeException) {
-                    Log.e(TAG, "setContrast failed: ${e.message}")
-                }
-                renderAndBlit(); adapter.refreshFull()
-            }
-        }
-        fun button(txt: String, onTap: () -> Unit) = TextView(this).apply {
-            text = txt; textSize = 22f; gravity = Gravity.CENTER
-            setTextColor(Color.BLACK); setPadding(dp(20), dp(6), dp(20), dp(6)); isClickable = true
-            setOnClickListener { onTap() }
-        }
-        val row = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(20), dp(8), dp(20), dp(8))
-            addView(button("−") { if (step > 0) { step--; apply() } })
-            addView(label)
-            addView(button("+") { if (step < CONTRAST_MAX) { step++; apply() } })
-        }
-        val container = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            addView(TextView(this@ReaderActivity).apply {
-                text = "Contrast"; textSize = 13f; setTextColor(Color.parseColor("#666666"))
-                setPadding(dp(20), dp(14), dp(20), 0)
-            })
-            addView(row)
-        }
-        AlertDialog.Builder(this, R.style.InkDialog).setTitle("Display").setView(container)
-            .setPositiveButton("Done", null).show()
-    }
-
     private fun contrastPref(): Int =
         getSharedPreferences("display", MODE_PRIVATE).getInt("contrast", 0).coerceIn(0, CONTRAST_MAX)
 
     private fun setContrastPref(step: Int) =
         getSharedPreferences("display", MODE_PRIVATE).edit().putInt("contrast", step).apply()
 
+    // ---- Document settings sheet (RR4 — KOReader-style tabbed controls) ----
+
     /**
-     * Page rotation (RR4 — KOReader's "Rotation"). Rotation is a **shell** concern on this device:
-     * we change the Activity's requested screen orientation; with `configChanges=orientation` the
-     * SurfaceView just resizes → `surfaceChanged` → re-render at the new viewport (PDF re-renders,
-     * EPUB repaginates). Persisted + re-applied on open. The four options mirror KOReader's 0/90/
-     * 180/270.
+     * A KOReader-style tabbed settings sheet that consolidates the document controls
+     * (Rotate / Fit / Font / Display) behind one bottom-bar entry — matching KOReader's bottom
+     * sheet structure. Each tab swaps an inline control panel; changes apply live + persist.
      */
-    private fun showRotationDialog() {
-        val options = arrayOf("Portrait", "Landscape", "Portrait (flipped)", "Landscape (flipped)")
+    private fun showAdjustSheet() {
+        if (docHandle == 0L) { openPicker(); return }
+        val d = resources.displayMetrics.density
+        fun dp(v: Int) = (v * d).toInt()
+        val dialog = Dialog(this).apply { requestWindowFeature(Window.FEATURE_NO_TITLE) }
+        val content = android.widget.FrameLayout(this)
+
+        val panels: List<Triple<String, Int, () -> View>> = listOf(
+            Triple("Rotate", R.drawable.ic_menu_rotate) { rotationPanel() },
+            Triple("Fit", R.drawable.ic_menu_fit) { fitPanel() },
+            Triple("Font", R.drawable.ic_menu_font) { fontPanel() },
+            Triple("Display", R.drawable.ic_menu_display) { displayPanel() },
+        )
+        val cells = ArrayList<LinearLayout>()
+        fun select(i: Int) {
+            content.removeAllViews()
+            content.addView(panels[i].third())
+            cells.forEachIndexed { j, c ->
+                // Active tab: white, boxed (connected to the panel) + bold label. Inactive: flat gray.
+                if (j == i) {
+                    c.background = GradientDrawable().apply {
+                        setColor(Color.WHITE); setStroke(maxOf(1, dp(2)), Color.BLACK)
+                    }
+                } else {
+                    c.background = null
+                    c.setBackgroundColor(Color.parseColor("#F2F2F2"))
+                }
+                (c.getChildAt(1) as? TextView)?.setTypeface(
+                    null, if (j == i) android.graphics.Typeface.BOLD else android.graphics.Typeface.NORMAL,
+                )
+            }
+        }
+        val tabRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setBackgroundColor(Color.parseColor("#F2F2F2"))
+        }
+        panels.forEachIndexed { i, (label, icon, _) ->
+            val cell = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER
+                setPadding(dp(4), dp(10), dp(4), dp(10)); isClickable = true
+                setOnClickListener { select(i) }
+                addView(
+                    ImageView(this@ReaderActivity).apply { setImageResource(icon); setColorFilter(Color.BLACK) },
+                    LinearLayout.LayoutParams(dp(24), dp(24)),
+                )
+                addView(TextView(this@ReaderActivity).apply {
+                    text = label; textSize = 10f; setTextColor(Color.parseColor("#444444"))
+                    gravity = Gravity.CENTER; setPadding(0, dp(3), 0, 0)
+                })
+            }
+            cells.add(cell)
+            tabRow.addView(cell, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        }
+        val container = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(Color.WHITE)
+            // Hairline top divider so the sheet reads as a surface (established bottom-bar template).
+            addView(
+                View(this@ReaderActivity).apply { setBackgroundColor(Color.parseColor("#33000000")) },
+                LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(1).coerceAtLeast(1)),
+            )
+            // Active tab's panel — WRAP_CONTENT so the sheet GROWS UP per tab (KOReader-style),
+            // bottom-anchored, instead of a fixed box with dead space.
+            addView(
+                content,
+                LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT),
+            )
+            addView(
+                View(this@ReaderActivity).apply { setBackgroundColor(Color.parseColor("#22000000")) },
+                LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 1),
+            )
+            addView(tabRow)
+        }
+        select(0)
+        dialog.setContentView(container)
+        dialog.window?.apply {
+            setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+            setGravity(Gravity.BOTTOM)
+            setBackgroundDrawable(android.graphics.drawable.ColorDrawable(Color.WHITE))
+        }
+        dialog.show()
+    }
+
+    /** A KOReader-style **segmented control**: a rounded pill of [options] with the [selected]
+     *  segment filled dark. Updates its own highlight on tap, then calls [onSelect]. */
+    private fun segmented(options: List<String>, selected: Int, onSelect: (Int) -> Unit): View {
+        val d = resources.displayMetrics.density
+        fun dp(v: Int) = (v * d).toInt()
+        val radius = dp(20).toFloat()
+        var sel = selected
+        val segs = ArrayList<TextView>()
+        fun style(tv: TextView, on: Boolean) {
+            if (on) {
+                tv.setTextColor(Color.WHITE)
+                tv.setTypeface(null, android.graphics.Typeface.BOLD)
+                tv.background = GradientDrawable().apply { setColor(Color.parseColor("#5A5A5A")); cornerRadius = radius }
+            } else {
+                tv.setTextColor(Color.BLACK)
+                tv.setTypeface(null, android.graphics.Typeface.NORMAL)
+                tv.background = null
+            }
+        }
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            background = GradientDrawable().apply {
+                setColor(Color.WHITE); cornerRadius = radius
+                setStroke(maxOf(1, dp(1)), Color.parseColor("#9E9E9E"))
+            }
+            val p = dp(3); setPadding(p, p, p, p)
+            options.forEachIndexed { i, opt ->
+                val tv = TextView(this@ReaderActivity).apply {
+                    text = opt; textSize = 15f; gravity = Gravity.CENTER
+                    setPadding(dp(6), dp(10), dp(6), dp(10)); isClickable = true
+                    setOnClickListener { sel = i; segs.forEachIndexed { j, t -> style(t, j == sel) }; onSelect(i) }
+                }
+                style(tv, i == sel)
+                segs.add(tv)
+                addView(tv, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+            }
+        }
+    }
+
+    /** A KOReader-style **cell bar**: [count] boxes filled up to the current level; tapping box i
+     *  sets level i+1 (tapping the current top cell turns it off → 0). Repaints on tap. */
+    private fun cellBar(count: Int, initial: Int, onSet: (Int) -> Unit): View {
+        val d = resources.displayMetrics.density
+        fun dp(v: Int) = (v * d).toInt()
+        var filled = initial
+        val draws = ArrayList<GradientDrawable>()
+        fun repaint() = draws.forEachIndexed { i, g ->
+            g.setColor(if (i < filled) Color.parseColor("#5A5A5A") else Color.WHITE)
+        }
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
+            for (i in 0 until count) {
+                val g = GradientDrawable().apply { setStroke(maxOf(1, dp(1)), Color.parseColor("#9E9E9E")) }
+                draws.add(g)
+                addView(View(this@ReaderActivity).apply {
+                    background = g; isClickable = true
+                    setOnClickListener {
+                        filled = if (i + 1 == filled) 0 else i + 1
+                        repaint(); invalidate()
+                        onSet(filled)
+                    }
+                }, LinearLayout.LayoutParams(0, dp(30), 1f).apply { val m = dp(2); setMargins(m, 0, m, 0) })
+            }
+            repaint()
+        }
+    }
+
+    /** A KOReader-style settings row: a right-aligned [label] on the left, the [control] on the right. */
+    private fun settingRow(label: String, control: View): View {
+        val d = resources.displayMetrics.density
+        fun dp(v: Int) = (v * d).toInt()
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(16), dp(14), dp(16), dp(14))
+            addView(TextView(this@ReaderActivity).apply {
+                text = label; textSize = 16f; setTextColor(Color.BLACK); gravity = Gravity.END
+            }, LinearLayout.LayoutParams(dp(96), ViewGroup.LayoutParams.WRAP_CONTENT))
+            addView(control, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
+                marginStart = dp(14)
+            })
+        }
+    }
+
+    private fun rotationPanel(): View {
         val orients = intArrayOf(
             ActivityInfo.SCREEN_ORIENTATION_PORTRAIT,
             ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE,
             ActivityInfo.SCREEN_ORIENTATION_REVERSE_PORTRAIT,
             ActivityInfo.SCREEN_ORIENTATION_REVERSE_LANDSCAPE,
         )
-        val current = orientationPref()
-        val checked = orients.indexOf(current).coerceAtLeast(0)
-        AlertDialog.Builder(this, R.style.InkDialog)
-            .setTitle("Rotation")
-            .setSingleChoiceItems(options, checked) { dialog, which ->
-                applyOrientation(orients[which])
-                Log.i(TAG, "DIAG rotation -> ${options[which]} (orient=${orients[which]})")
-                dialog.dismiss()
+        val sel = orients.indexOf(orientationPref()).coerceAtLeast(0)
+        return settingRow("Rotation", segmented(listOf("0°", "90°", "180°", "270°"), sel) { which ->
+            Log.i(TAG, "DIAG rotation -> $which")
+            applyOrientation(orients[which])
+        })
+    }
+
+    private fun fitPanel(): View {
+        val sel = fitPref().coerceIn(0, 2) // index = core FitMode code
+        return settingRow("Fit", segmented(listOf("Full", "Width", "Height"), sel) { which ->
+            setFitPref(which)
+            Log.i(TAG, "DIAG fit -> mode=$which")
+            engine.execute {
+                try { NativeBridge.nativeSetFit(docHandle, which) } catch (e: RuntimeException) {}
+                renderAndBlit(); adapter.refreshFull()
             }
-            .setNegativeButton("Close", null)
-            .show()
+        })
+    }
+
+    private fun displayPanel(): View {
+        return settingRow("Contrast", cellBar(CONTRAST_MAX, contrastPref()) { level ->
+            setContrastPref(level)
+            Log.i(TAG, "DIAG contrast step=$level")
+            engine.execute {
+                try { NativeBridge.nativeSetContrast(docHandle, level) } catch (e: RuntimeException) {}
+                renderAndBlit(); adapter.refreshFull()
+            }
+        })
+    }
+
+    private fun fontPanel(): View {
+        val d = resources.displayMetrics.density
+        fun dp(v: Int) = (v * d).toInt()
+        var idx = nearestScaleIndex(textScalePref())
+        val value = TextView(this).apply {
+            textSize = 16f; setTextColor(Color.BLACK); gravity = Gravity.CENTER; minWidth = dp(64)
+        }
+        fun refresh() { value.text = "${(TEXT_SCALES[idx] * 100).toInt()}%" }
+        refresh()
+        fun apply() {
+            setTextScalePref(TEXT_SCALES[idx]); refresh()
+            engine.execute {
+                val np = try { NativeBridge.nativeSetTextScale(docHandle, TEXT_SCALES[idx]) } catch (e: RuntimeException) { -1 }
+                if (np >= 0) { pageCount = NativeBridge.nativePageCount(docHandle); renderAndBlit(); adapter.refreshFull() }
+                else runOnUiThread { Toast.makeText(this, "Font size adjusts reflowable books (EPUB)", Toast.LENGTH_SHORT).show() }
+            }
+        }
+        fun pill(t: String, on: () -> Unit) = TextView(this).apply {
+            text = t; textSize = 16f; gravity = Gravity.CENTER; setTextColor(Color.BLACK)
+            setPadding(dp(18), dp(10), dp(18), dp(10)); isClickable = true
+            background = GradientDrawable().apply {
+                setColor(Color.WHITE); cornerRadius = dp(20).toFloat(); setStroke(maxOf(1, dp(1)), Color.parseColor("#9E9E9E"))
+            }
+            setOnClickListener { on() }
+        }
+        val control = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
+            addView(pill("A−") { if (idx > 0) { idx--; apply() } })
+            addView(value, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                val m = dp(10); setMargins(m, 0, m, 0)
+            })
+            addView(pill("A+") { if (idx < TEXT_SCALES.size - 1) { idx++; apply() } })
+        }
+        return settingRow("Font Size", control)
     }
 
     /** Set + persist the screen orientation; the resize re-renders the page (engine via surfaceChanged). */
     private fun applyOrientation(orientation: Int) {
         setOrientationPref(orientation)
         requestedOrientation = orientation
-    }
-
-    /**
-     * Page fit (RR4 — KOReader's "Fit"). Aspect-preserving: whole page (contain) / fit width / fit
-     * height. Persisted + re-applied on open. PDF honors it; EPUB ignores it (it reflows already).
-     */
-    private fun showFitDialog() {
-        if (docHandle == 0L) { openPicker(); return }
-        val options = arrayOf("Whole page", "Fit width", "Fit height") // index = core FitMode code
-        val current = fitPref().coerceIn(0, options.size - 1)
-        AlertDialog.Builder(this, R.style.InkDialog)
-            .setTitle("Fit")
-            .setSingleChoiceItems(options, current) { dialog, which ->
-                setFitPref(which)
-                Log.i(TAG, "DIAG fit -> ${options[which]} (mode=$which)")
-                engine.execute {
-                    try { NativeBridge.nativeSetFit(docHandle, which) } catch (e: RuntimeException) {
-                        Log.e(TAG, "setFit failed: ${e.message}")
-                    }
-                    renderAndBlit(); adapter.refreshFull()
-                }
-                dialog.dismiss()
-            }
-            .setNegativeButton("Close", null)
-            .show()
     }
 
     private fun fitPref(): Int =
