@@ -3,6 +3,7 @@ package dev.jraghavan.inkread
 import android.app.Activity
 import android.app.AlertDialog
 import android.content.Intent
+import android.content.pm.ActivityInfo
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
@@ -214,6 +215,9 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
     private val inkDotPaint = Paint().apply { color = Color.BLACK; style = Paint.Style.FILL; isAntiAlias = true }
     private val bookmarkPaint = Paint().apply { color = Color.BLACK; style = Paint.Style.FILL; isAntiAlias = true }
     private val bookmarkOutlinePaint = Paint().apply { color = Color.parseColor("#9E9E9E"); style = Paint.Style.STROKE; strokeWidth = 2f; isAntiAlias = true }
+    /** White halo drawn under the ribbon so it stays visible over a dark page region (e.g. a black
+     *  title band) — without it a black/gray ribbon vanishes on dark backgrounds. */
+    private val bookmarkHaloPaint = Paint().apply { color = Color.WHITE; style = Paint.Style.STROKE; strokeWidth = 5f; isAntiAlias = true }
     /** Dashed box around the active lasso selection (ADR-INKREAD-0010). */
     private val selectionPaint = Paint().apply {
         color = Color.BLACK
@@ -272,6 +276,9 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // Re-apply the saved page rotation (RR4) before the surface is created so the first render
+        // is at the right orientation. configChanges=orientation keeps us from recreating.
+        requestedOrientation = orientationPref()
         // Prove the JNI boundary up front (RR1-AC2). Cheap; fine on the UI thread.
         Log.i(TAG, "core: ${NativeBridge.nativeHello()}")
 
@@ -474,7 +481,15 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         renderBuffer = ByteBuffer.allocateDirect(width * height * 4).order(ByteOrder.LITTLE_ENDIAN)
 
         drawLoading() // quick feedback while the (slow) open runs
+        val wasOpen = docHandle != 0L
         openDocumentIfNeeded()
+        // A resize/rotation of an ALREADY-open doc: tell the core the new viewport so it renders at
+        // the new size (else the render is size-mismatched → the rotated smear). RR21-FR4.
+        if (wasOpen && docHandle != 0L) {
+            try { NativeBridge.nativeSetViewport(docHandle, width, height, DPI) } catch (e: RuntimeException) {
+                Log.e(TAG, "setViewport failed: ${e.message}")
+            }
+        }
         renderAndBlit()
         adapter.refreshFull() // first page carries no command stream → refresh the panel (RR2-FR4)
     }
@@ -908,6 +923,8 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             lineTo(left, len)
             close()
         }
+        // A white halo first so the ribbon reads on any background (e.g. a black title band).
+        canvas.drawPath(path, bookmarkHaloPaint)
         if (bookmarks?.has(currentPage) == true) {
             canvas.drawPath(path, bookmarkPaint)
         } else {
@@ -1189,6 +1206,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         control(R.drawable.ic_tool_define, "Dicts") { showDictionariesDialog() }
         control(R.drawable.ic_menu_font, "Font") { showTypographyDialog() }
         control(R.drawable.ic_menu_display, "Display") { showDisplayDialog() }
+        control(R.drawable.ic_menu_rotate, "Rotate") { showRotationDialog() }
         control(R.drawable.ic_menu_open, "Open") { openPicker() }
         container.addView(controls)
 
@@ -2585,7 +2603,10 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             setContrastPref(step)
             refresh()
             engine.execute {
-                try { NativeBridge.nativeSetContrast(docHandle, step) } catch (e: RuntimeException) {}
+                Log.i(TAG, "DIAG contrast step=$step → nativeSetContrast + render")
+                try { NativeBridge.nativeSetContrast(docHandle, step) } catch (e: RuntimeException) {
+                    Log.e(TAG, "setContrast failed: ${e.message}")
+                }
                 renderAndBlit(); adapter.refreshFull()
             }
         }
@@ -2609,7 +2630,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             })
             addView(row)
         }
-        AlertDialog.Builder(this).setTitle("Display").setView(container)
+        AlertDialog.Builder(this, R.style.InkDialog).setTitle("Display").setView(container)
             .setPositiveButton("Done", null).show()
     }
 
@@ -2618,6 +2639,47 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
 
     private fun setContrastPref(step: Int) =
         getSharedPreferences("display", MODE_PRIVATE).edit().putInt("contrast", step).apply()
+
+    /**
+     * Page rotation (RR4 — KOReader's "Rotation"). Rotation is a **shell** concern on this device:
+     * we change the Activity's requested screen orientation; with `configChanges=orientation` the
+     * SurfaceView just resizes → `surfaceChanged` → re-render at the new viewport (PDF re-renders,
+     * EPUB repaginates). Persisted + re-applied on open. The four options mirror KOReader's 0/90/
+     * 180/270.
+     */
+    private fun showRotationDialog() {
+        val options = arrayOf("Portrait", "Landscape", "Portrait (flipped)", "Landscape (flipped)")
+        val orients = intArrayOf(
+            ActivityInfo.SCREEN_ORIENTATION_PORTRAIT,
+            ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE,
+            ActivityInfo.SCREEN_ORIENTATION_REVERSE_PORTRAIT,
+            ActivityInfo.SCREEN_ORIENTATION_REVERSE_LANDSCAPE,
+        )
+        val current = orientationPref()
+        val checked = orients.indexOf(current).coerceAtLeast(0)
+        AlertDialog.Builder(this, R.style.InkDialog)
+            .setTitle("Rotation")
+            .setSingleChoiceItems(options, checked) { dialog, which ->
+                applyOrientation(orients[which])
+                Log.i(TAG, "DIAG rotation -> ${options[which]} (orient=${orients[which]})")
+                dialog.dismiss()
+            }
+            .setNegativeButton("Close", null)
+            .show()
+    }
+
+    /** Set + persist the screen orientation; the resize re-renders the page (engine via surfaceChanged). */
+    private fun applyOrientation(orientation: Int) {
+        setOrientationPref(orientation)
+        requestedOrientation = orientation
+    }
+
+    private fun orientationPref(): Int =
+        getSharedPreferences("display", MODE_PRIVATE)
+            .getInt("orientation", ActivityInfo.SCREEN_ORIENTATION_PORTRAIT)
+
+    private fun setOrientationPref(orientation: Int) =
+        getSharedPreferences("display", MODE_PRIVATE).edit().putInt("orientation", orientation).apply()
 
     private fun textScalePref(): Float =
         getSharedPreferences("typography", MODE_PRIVATE).getFloat("scale", 1.0f)

@@ -513,6 +513,28 @@ pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeSetContrast
     .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
 }
 
+// nativeSetViewport(handle, width, height, dpi) — update the render viewport after a surface
+// resize / screen rotation (RR21-FR4). Without this the core keeps the open-time viewport and a
+// render into the new (resized) buffer is rejected as a size mismatch. PDF re-renders at the new
+// size; EPUB repaginates on the next render. The shell re-renders afterward.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeSetViewport<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+    width: jint,
+    height: jint,
+    dpi: jint,
+) {
+    env.with_env(|env| -> jni::errors::Result<()> {
+        let session = unsafe { session_mut(handle) }.map_err(|e| throw(env, &e))?;
+        let viewport = read_viewport(env, width, height, dpi)?;
+        session.set_viewport(viewport);
+        Ok(())
+    })
+    .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
+}
+
 // nativeSetTextScale(handle, scale) : int — set reflow font size (1.0 = default) for an EPUB;
 // repaginates, preserving the chapter. Returns the new current page index, or -1 for a fixed-layout
 // document (PDF) that does not reflow. The shell re-renders afterward (RR2-FR5).

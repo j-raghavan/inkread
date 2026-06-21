@@ -136,6 +136,10 @@ object NativeBridge {
      *  remap (works on PDF + EPUB); re-render after calling. */
     external fun nativeSetContrast(handle: Long, step: Int)
 
+    /** Update the render viewport after a surface resize / screen rotation (RR21-FR4). Required so
+     *  the core renders into the new buffer size (PDF re-renders, EPUB repaginates). Re-render after. */
+    external fun nativeSetViewport(handle: Long, width: Int, height: Int, dpi: Int)
+
     // ---- ink annotation, persisted by the core to a sidecar (RR6/RR10 / ADR-INKREAD-0010) ----
 
     /** Attach a `.inkread` sidecar store for the open document so strokes persist (RR10). */

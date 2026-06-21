@@ -347,7 +347,7 @@ impl ReaderSession {
         // Display enhancement (RR4): remap pixels for contrast after the backend renders.
         crate::render::contrast::apply_contrast(
             buf,
-            crate::render::contrast::step_to_factor(self.contrast),
+            crate::render::contrast::step_to_gamma(self.contrast),
         );
         Ok(())
     }
