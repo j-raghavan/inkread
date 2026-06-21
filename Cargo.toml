@@ -7,7 +7,7 @@
 # RR1-AC3: bare `cargo test -p reader-core` builds with `jni` absent from the resolved graph.
 [workspace]
 resolver = "2"
-members = ["build-dict", "device-eink", "inkread-dict", "inkread-epub", "inkread-ink", "reader-core", "reader-desktop"]
+members = ["build-dict", "device-eink", "inkread-dict", "inkread-epub", "inkread-ink", "inkread-lua", "reader-core", "reader-desktop"]
 
 [workspace.package]
 version = "0.1.0"
@@ -23,6 +23,7 @@ device-eink = { path = "device-eink" }
 inkread-dict = { path = "inkread-dict" }
 inkread-epub = { path = "inkread-epub" }
 inkread-ink = { path = "inkread-ink" }
+inkread-lua = { path = "inkread-lua" }
 reader-core = { path = "reader-core" }
 
 # External — versions verified against docs.rs at implementation time.
@@ -40,6 +41,9 @@ serde_json = "1"
 # rusqlite with `bundled` SQLite (compiled from source) so the host build is hermetic and the
 # Android cdylib cross-compiles the same engine — no system-library dependency (ADR Decision 4).
 rusqlite = { version = "0.32", features = ["bundled"] }
+# mlua with vendored Lua 5.4 (compiled from source via cc, like rusqlite `bundled`) — the embedded
+# plugin runtime (RR13). MIT-licensed (Lua itself is MIT) → AGPL-compatible (check-licenses.sh).
+mlua = { version = "0.10", features = ["lua54", "vendored"] }
 
 [profile.release]
 # A reader on a battery e-ink device: optimize for size + speed, strip symbols.
