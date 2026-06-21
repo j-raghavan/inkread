@@ -117,6 +117,18 @@ pub struct ReaderSession {
     /// Per-page content-bbox memo for auto-crop (recomputed when the page changes). Interior-mutable
     /// so the `&self` render path can cache the probe render.
     crop_cache: std::cell::RefCell<Option<(usize, Option<NormRect>)>>,
+    /// Render quality (RR4 — KOReader): `0` = low (sub-sample), `1` = default, `2` = high
+    /// (supersample then downscale → smoother e-ink text).
+    render_quality: u8,
+}
+
+/// Render-quality step → render-scale factor (RR4): low `0.75×`, default `1.0×`, high `1.5×`.
+fn render_quality_factor(q: u8) -> f32 {
+    match q {
+        0 => 0.75,
+        2 => 1.5,
+        _ => 1.0,
+    }
 }
 
 impl ReaderSession {
@@ -209,6 +221,7 @@ impl ReaderSession {
             crop_auto: false,
             crop_margin: 0,
             crop_cache: std::cell::RefCell::new(None),
+            render_quality: 1,
         }
     }
 
@@ -346,44 +359,31 @@ impl ReaderSession {
                 self.viewport.height
             )));
         }
-        if self.zoom <= 1.0 + 1e-3 {
-            // At fit (no pinch-zoom): aspect-preserving fit per the chosen mode (RR4). With
-            // auto-crop on, trim the white margins to the detected content box first. PDF honors
-            // both; reflowable backends fall back to a full-buffer render.
-            match self
-                .crop_auto
-                .then(|| self.cached_crop_bbox(self.page))
-                .flatten()
-            {
-                Some(b) => {
-                    let crop = self.expand_crop(b);
-                    self.document.render_cropped(
-                        self.page,
-                        buf,
-                        crop,
-                        self.fit_mode,
-                        self.pan_x,
-                        self.pan_y,
-                    )?;
-                }
-                None => {
-                    self.document.render_fit(
-                        self.page,
-                        buf,
-                        self.fit_mode,
-                        self.pan_x,
-                        self.pan_y,
-                    )?;
-                }
-            }
-        } else {
+        if self.zoom > 1.0 + 1e-3 {
             // Magnified view: content is buf*zoom; show a buf-sized window panned over the overscan.
+            // (Render quality is not applied during a transient pinch-zoom.)
             let bw = self.viewport.width as f32;
             let bh = self.viewport.height as f32;
             let off_x = (self.pan_x * bw * (self.zoom - 1.0)).round() as i32;
             let off_y = (self.pan_y * bh * (self.zoom - 1.0)).round() as i32;
             self.document
                 .render_zoom(self.page, buf, self.zoom, off_x, off_y)?;
+        } else {
+            let q = render_quality_factor(self.render_quality);
+            if (q - 1.0).abs() < 1e-3 {
+                self.render_fit_or_crop(buf)?;
+            } else {
+                // Render at q× the panel resolution, then bilinear-resample down/up to the panel —
+                // supersampling (high) smooths e-ink text; sub-sampling (low) is faster/softer.
+                let qw = ((self.viewport.width as f32 * q).round() as u32).clamp(1, 8000);
+                let qh = ((self.viewport.height as f32 * q).round() as u32).clamp(1, 8000);
+                let mut tmp = vec![0u8; (qw as usize) * (qh as usize) * 4];
+                {
+                    let mut tbuf = PixelBuffer::from_rgba(&mut tmp, qw, qh)?;
+                    self.render_fit_or_crop(&mut tbuf)?;
+                }
+                crate::render::resample::resample_bilinear(&tmp, qw, qh, buf);
+            }
         }
         // Display enhancement (RR4): remap pixels for contrast after the backend renders.
         crate::render::contrast::apply_contrast(
@@ -391,6 +391,32 @@ impl ReaderSession {
             crate::render::contrast::step_to_gamma(self.contrast),
         );
         Ok(())
+    }
+
+    /// Render the current page fit (or auto-cropped) into `buf` (RR4). With auto-crop on, the white
+    /// margins are trimmed to the detected content box; otherwise an aspect-preserving fit. PDF
+    /// honors both; reflowable backends fall back to a full-buffer render.
+    fn render_fit_or_crop(&self, buf: &mut PixelBuffer<'_>) -> CoreResult<()> {
+        match self
+            .crop_auto
+            .then(|| self.cached_crop_bbox(self.page))
+            .flatten()
+        {
+            Some(b) => {
+                let crop = self.expand_crop(b);
+                self.document.render_cropped(
+                    self.page,
+                    buf,
+                    crop,
+                    self.fit_mode,
+                    self.pan_x,
+                    self.pan_y,
+                )
+            }
+            None => self
+                .document
+                .render_fit(self.page, buf, self.fit_mode, self.pan_x, self.pan_y),
+        }
     }
 
     /// Set the contrast/display-enhancement step (`0` = off, clamped to
@@ -436,6 +462,17 @@ impl ReaderSession {
     #[must_use]
     pub fn crop_margin(&self) -> u8 {
         self.crop_margin
+    }
+
+    /// Set render quality (`0` = low, `1` = default, `2` = high; clamped) — RR4. Re-render to apply.
+    pub fn set_render_quality(&mut self, q: u8) {
+        self.render_quality = q.min(2);
+    }
+
+    /// The current render quality step.
+    #[must_use]
+    pub fn render_quality(&self) -> u8 {
+        self.render_quality
     }
 
     /// The content bounding box for `page`, memoized per page (recomputed on a page change).

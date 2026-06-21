@@ -530,6 +530,23 @@ pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeSetFit<'loc
     .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
 }
 
+// nativeSetRenderQuality(handle, q) — render quality (0=low, 1=default, 2=high; RR4). High
+// supersamples then downscales for smoother e-ink text. Re-render after. Never throws (clamped).
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeSetRenderQuality<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+    q: jint,
+) {
+    env.with_env(|env| -> jni::errors::Result<()> {
+        let session = unsafe { session_mut(handle) }.map_err(|e| throw(env, &e))?;
+        session.set_render_quality(u8::try_from(q.max(0)).unwrap_or(u8::MAX));
+        Ok(())
+    })
+    .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
+}
+
 // nativeSetCrop(handle, auto, marginStep) — auto-crop white margins (RR4). auto!=0 enables it;
 // marginStep (0..8, 1%-of-page each) keeps a margin around the detected content. Re-render after.
 #[unsafe(no_mangle)]

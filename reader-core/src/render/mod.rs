@@ -6,6 +6,7 @@ pub mod cache;
 pub mod contrast;
 pub mod gray;
 pub mod pixel_buffer;
+pub mod resample;
 pub mod viewport;
 
 pub use cache::{ByteLru, PageHash, RenderCache};

@@ -148,6 +148,10 @@ object NativeBridge {
      *  keeps a margin around the detected content. PDF only; re-render after. */
     external fun nativeSetCrop(handle: Long, auto: Int, marginStep: Int)
 
+    /** Render quality (0=low, 1=default, 2=high; RR4). High supersamples for smoother text.
+     *  Re-render after calling. */
+    external fun nativeSetRenderQuality(handle: Long, quality: Int)
+
     // ---- ink annotation, persisted by the core to a sidecar (RR6/RR10 / ADR-INKREAD-0010) ----
 
     /** Attach a `.inkread` sidecar store for the open document so strokes persist (RR10). */

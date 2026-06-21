@@ -586,6 +586,8 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             try { NativeBridge.nativeSetFit(docHandle, fitPref()) } catch (e: RuntimeException) {}
             // Re-apply the saved auto-crop + margin (RR4); default off.
             try { NativeBridge.nativeSetCrop(docHandle, if (cropAutoPref()) 1 else 0, cropMarginPref()) } catch (e: RuntimeException) {}
+            // Re-apply the saved render quality (RR4); default 1.
+            try { NativeBridge.nativeSetRenderQuality(docHandle, renderQualityPref()) } catch (e: RuntimeException) {}
             pageCount = NativeBridge.nativePageCount(docHandle)
             Books.pushRecent(this, bookId, path)
             Log.i(
@@ -2805,15 +2807,31 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
     }
 
     private fun displayPanel(): View {
-        return settingRow("Contrast", cellBar(CONTRAST_MAX, contrastPref()) { level ->
+        val container = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        container.addView(settingRow("Contrast", cellBar(CONTRAST_MAX, contrastPref()) { level ->
             setContrastPref(level)
             Log.i(TAG, "DIAG contrast step=$level")
             engine.execute {
                 try { NativeBridge.nativeSetContrast(docHandle, level) } catch (e: RuntimeException) {}
                 renderAndBlit(); adapter.refreshFull()
             }
-        })
+        }))
+        container.addView(settingRow("Quality", segmented(listOf("Low", "Default", "High"), renderQualityPref()) { which ->
+            setRenderQualityPref(which)
+            Log.i(TAG, "DIAG render quality=$which")
+            engine.execute {
+                try { NativeBridge.nativeSetRenderQuality(docHandle, which) } catch (e: RuntimeException) {}
+                renderAndBlit(); adapter.refreshFull()
+            }
+        }))
+        return container
     }
+
+    private fun renderQualityPref(): Int =
+        getSharedPreferences("display", MODE_PRIVATE).getInt("render_quality", 1).coerceIn(0, 2)
+
+    private fun setRenderQualityPref(q: Int) =
+        getSharedPreferences("display", MODE_PRIVATE).edit().putInt("render_quality", q).apply()
 
     private fun fontPanel(): View {
         val d = resources.displayMetrics.density
