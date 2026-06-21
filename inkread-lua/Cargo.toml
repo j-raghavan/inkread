@@ -1,0 +1,15 @@
+[package]
+name = "inkread-lua"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+# Embedded Lua plugin runtime (RR13 / ADR-INKREAD-0006 Decision 2). mlua with the `vendored`
+# feature compiles Lua 5.4 from source via `cc` (same hermetic, cross-compiling pattern as
+# rusqlite `bundled`), so the host build needs no system Lua and the Android cdylib builds the
+# same engine. No device/JNI types here (IR-4) — the runtime reaches the core only via services.
+[dependencies]
+mlua = { workspace = true }

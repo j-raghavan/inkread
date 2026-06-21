@@ -8,7 +8,7 @@ pub mod fixed;
 pub mod reflow;
 pub mod text_select;
 
-pub use text_select::{CharBox, NormRect, TextSelection};
+pub use text_select::{CharBox, NormRect, SearchMatch, TextSelection};
 
 use crate::error::CoreResult;
 use crate::render::PixelBuffer;
@@ -222,6 +222,36 @@ pub fn encode_selection_wire(sel: &TextSelection) -> Vec<u8> {
     out
 }
 
+/// Wire-format version for a page's [`SearchMatch`]es the JNI bridge ships to the shell (RR2 search).
+const SEARCH_WIRE_VERSION: u8 = 0x01;
+
+/// Encode one page's search matches for the shell — pure marshaling (no device/JNI types), so it is
+/// host-tested. Layout (little-endian): `[ver=1][match_count: u16]` then, per match,
+/// `[snippet_len: u16][snippet: utf-8 × snippet_len][box_count: u16]` followed by `box_count` ×
+/// `[x0 f32][y0 f32][x1 f32][y1 f32]`. Counts/lengths saturate rather than panic (RR21-FR3).
+#[must_use]
+pub fn encode_search_wire(matches: &[SearchMatch]) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.push(SEARCH_WIRE_VERSION);
+    let count = u16::try_from(matches.len()).unwrap_or(u16::MAX);
+    out.extend_from_slice(&count.to_le_bytes());
+    for m in matches.iter().take(count as usize) {
+        let bytes = m.snippet.as_bytes();
+        let slen = u16::try_from(bytes.len()).unwrap_or(u16::MAX);
+        out.extend_from_slice(&slen.to_le_bytes());
+        out.extend_from_slice(&bytes[..slen as usize]);
+        let bcount = u16::try_from(m.boxes.len()).unwrap_or(u16::MAX);
+        out.extend_from_slice(&bcount.to_le_bytes());
+        for b in m.boxes.iter().take(bcount as usize) {
+            out.extend_from_slice(&b.x0.to_le_bytes());
+            out.extend_from_slice(&b.y0.to_le_bytes());
+            out.extend_from_slice(&b.x1.to_le_bytes());
+            out.extend_from_slice(&b.y1.to_le_bytes());
+        }
+    }
+    out
+}
+
 /// The core trait every format implements (M0 subset).
 ///
 /// Render targets a borrowed [`PixelBuffer`] (Fork 4); the backend white-fills before
@@ -348,6 +378,14 @@ pub trait Document {
     /// D1). Default: an empty selection.
     fn text_in_rect(&self, _page: usize, _rect: NormRect) -> TextSelection {
         TextSelection::default()
+    }
+
+    /// Find `query` on `page` (case-insensitive, whitespace-normalized substring) — RR2 in-document
+    /// search. Returns one [`SearchMatch`] per occurrence (highlight boxes + context snippet) in
+    /// reading order. The shell drives this page-by-page so the scan stays memory-bounded (RR19).
+    /// Default: empty — a format with no text layer is not searchable (never panics, RR21-FR3).
+    fn search_page(&self, _page: usize, _query: &str) -> Vec<SearchMatch> {
+        Vec::new()
     }
 
     /// Write `page_ink` into the document and save it to `out_path` (ADR-INKREAD-0005). [`ExportMode`]
@@ -570,5 +608,67 @@ mod tests {
         let w = encode_selection_wire(&TextSelection::default());
         // ver + text_len(0) + box_count(0)
         assert_eq!(w, vec![SELECTION_WIRE_VERSION, 0, 0, 0, 0]);
+    }
+
+    // RR2 search: a page's matches encode snippet + boxes, decoded here the way the Kotlin shell does.
+    #[test]
+    fn encode_search_wire_roundtrips_matches() {
+        let matches = vec![
+            SearchMatch {
+                boxes: vec![NormRect {
+                    x0: 0.1,
+                    y0: 0.2,
+                    x1: 0.4,
+                    y1: 0.25,
+                }],
+                snippet: "…the needle here…".into(),
+            },
+            SearchMatch {
+                boxes: vec![
+                    NormRect {
+                        x0: 0.0,
+                        y0: 0.5,
+                        x1: 0.3,
+                        y1: 0.55,
+                    },
+                    NormRect {
+                        x0: 0.0,
+                        y0: 0.56,
+                        x1: 0.2,
+                        y1: 0.61,
+                    },
+                ],
+                snippet: "two-line match".into(),
+            },
+        ];
+        let b = encode_search_wire(&matches);
+        assert_eq!(b[0], SEARCH_WIRE_VERSION);
+        assert_eq!(u16::from_le_bytes([b[1], b[2]]), 2);
+
+        let mut off = 3usize;
+        let read_f32 = |b: &[u8], o: usize| f32::from_le_bytes(b[o..o + 4].try_into().unwrap());
+        // match 0
+        let slen = u16::from_le_bytes([b[off], b[off + 1]]) as usize;
+        off += 2;
+        assert_eq!(
+            String::from_utf8(b[off..off + slen].to_vec()).unwrap(),
+            "…the needle here…"
+        );
+        off += slen;
+        assert_eq!(u16::from_le_bytes([b[off], b[off + 1]]), 1);
+        off += 2;
+        assert!((read_f32(&b, off) - 0.1).abs() < 1e-6);
+        off += 16;
+        // match 1: 2 boxes
+        let slen = u16::from_le_bytes([b[off], b[off + 1]]) as usize;
+        off += 2 + slen;
+        assert_eq!(u16::from_le_bytes([b[off], b[off + 1]]), 2);
+        off += 2 + 32;
+        assert_eq!(off, b.len(), "no trailing bytes");
+    }
+
+    #[test]
+    fn encode_search_wire_empty_is_header_only() {
+        assert_eq!(encode_search_wire(&[]), vec![SEARCH_WIRE_VERSION, 0, 0]);
     }
 }

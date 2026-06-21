@@ -632,6 +632,10 @@ impl Document for PdfBackend {
     fn text_in_rect(&self, page: usize, rect: NormRect) -> TextSelection {
         text_select::text_in_rect(&self.page_chars(page), rect)
     }
+
+    fn search_page(&self, page: usize, query: &str) -> Vec<crate::document::SearchMatch> {
+        text_select::find_matches(&self.page_chars(page), query)
+    }
 }
 
 /// The aspect-preserving render size for `aspect` (w/h) inside a `bw`×`bh` buffer under [`FitMode`]

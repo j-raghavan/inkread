@@ -13,10 +13,11 @@
 use std::cell::{Cell, RefCell};
 
 use inkread_epub::layout::{paginate, Align, LayoutOpts, Page};
-use inkread_epub::render::{render_page as raster_page, AbFont, GrayCanvas};
+use inkread_epub::render::{page_glyphs, render_page as raster_page, AbFont, GrayCanvas};
 use inkread_epub::{parse_blocks, Block, EpubPackage, NavPoint};
 
-use crate::document::{Document, DocumentMetadata, TocEntry};
+use crate::document::text_select::{self, CharBox, NormRect, TextSelection};
+use crate::document::{Document, DocumentMetadata, SearchMatch, TocEntry};
 use crate::error::{CoreError, CoreResult};
 use crate::render::PixelBuffer;
 
@@ -145,6 +146,30 @@ impl EpubBackend {
         Some(target)
     }
 
+    /// The page's glyphs as normalized [`CharBox`]es — the input to the pure selection + search
+    /// logic (RR11 / RR2). Mirrors the PDF backend's `page_chars`: the layout's positioned glyphs
+    /// (pixel space) normalized to `[0,1]`. An out-of-range page contributes nothing (RR21-FR3).
+    fn page_chars(&self, index: usize) -> Vec<CharBox> {
+        let laid = self.laid.borrow();
+        let Some(page) = laid.pages.get(index) else {
+            return Vec::new();
+        };
+        let pw = laid.opts.page_w.max(1.0);
+        let ph = laid.opts.page_h.max(1.0);
+        page_glyphs(page, &laid.opts, &self.font)
+            .into_iter()
+            .map(|g| CharBox {
+                ch: g.ch,
+                rect: NormRect {
+                    x0: (g.x0 / pw).clamp(0.0, 1.0),
+                    y0: (g.y0 / ph).clamp(0.0, 1.0),
+                    x1: (g.x1 / pw).clamp(0.0, 1.0),
+                    y1: (g.y1 / ph).clamp(0.0, 1.0),
+                },
+            })
+            .collect()
+    }
+
     /// The chapter index that global `page` falls in (the last chapter whose start ≤ page).
     fn chapter_of(&self, page: usize) -> usize {
         let laid = self.laid.borrow();
@@ -192,6 +217,18 @@ impl Document for EpubBackend {
             .iter()
             .map(|n| resolve_nav(n, &self.chapter_keys, &laid.chapter_start))
             .collect()
+    }
+
+    fn word_at(&self, page: usize, x: f32, y: f32) -> Option<TextSelection> {
+        text_select::word_at(&self.page_chars(page), x, y)
+    }
+
+    fn text_in_rect(&self, page: usize, rect: NormRect) -> TextSelection {
+        text_select::text_in_rect(&self.page_chars(page), rect)
+    }
+
+    fn search_page(&self, page: usize, query: &str) -> Vec<SearchMatch> {
+        text_select::find_matches(&self.page_chars(page), query)
     }
 
     fn set_text_scale(&self, scale: f32, current_page: usize) -> Option<usize> {
@@ -362,6 +399,39 @@ mod tests {
         assert_eq!(new_page, b.toc()[1].target_page.unwrap());
         // PDF-style fixed layout would return None; EPUB returns Some.
         assert!(b.set_text_scale(1.0, 0).is_some());
+    }
+
+    #[test]
+    fn page_chars_recovers_words_for_selection() {
+        let b = EpubBackend::open(SAMPLE.to_vec(), vp(400, 600)).unwrap();
+        let _ = render(&b, 0, 400, 600); // settle layout at this viewport
+        let chars = b.page_chars(0);
+        assert!(!chars.is_empty(), "first page exposes glyphs");
+        let text: String = chars.iter().map(|c| c.ch).collect();
+        assert!(
+            text.contains(' '),
+            "inter-word spaces are synthesized: {text:?}"
+        );
+        // Every box is on-page and non-degenerate horizontally for non-space glyphs.
+        assert!(chars.iter().all(|c| c.rect.x0 >= 0.0 && c.rect.x1 <= 1.0));
+    }
+
+    #[test]
+    fn search_finds_text_on_the_page_it_lives_on() {
+        let b = EpubBackend::open(SAMPLE.to_vec(), vp(400, 600)).unwrap();
+        let _ = render(&b, 0, 400, 600);
+        // Pull a real word off page 0 and search for it.
+        let text: String = b.page_chars(0).iter().map(|c| c.ch).collect();
+        let word = text
+            .split_whitespace()
+            .find(|w| w.chars().all(|c| c.is_alphabetic()) && w.len() >= 4)
+            .expect("a searchable word on page 0")
+            .to_string();
+        let hits = b.search_page(0, &word);
+        assert!(!hits.is_empty(), "found {word:?} on page 0");
+        assert!(hits[0].boxes.iter().all(|bx| bx.x1 >= bx.x0));
+        // The same query in a wildly different case still matches (case-insensitive).
+        assert!(!b.search_page(0, &word.to_uppercase()).is_empty());
     }
 
     #[test]

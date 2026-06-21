@@ -96,6 +96,13 @@ object NativeBridge {
     /** The text within the normalized rect on `page`; decode with [WireCodec.decodeSelection]. */
     external fun nativeTextInRect(handle: Long, page: Int, x0: Float, y0: Float, x1: Float, y1: Float): ByteArray
 
+    /**
+     * Find [query] on `page` (RR2 in-document search), case-insensitive. Returns the search wire
+     * (decode with [WireCodec.decodeSearch]): one match per occurrence with a snippet + highlight
+     * boxes. Call page-by-page so the scan stays memory-bounded.
+     */
+    external fun nativeSearchPage(handle: Long, page: Int, query: String): ByteArray
+
     /** Open the dictionary corpus at [path]; returns an opaque handle (0 on failure → throws). */
     external fun nativeDictOpen(path: String): Long
 
@@ -264,6 +271,12 @@ data class SelBox(val x0: Float, val y0: Float, val x1: Float, val y1: Float)
 data class Selection(val text: String, val boxes: List<SelBox>) {
     val isEmpty: Boolean get() = text.isEmpty()
 }
+
+/** One in-document search match on a page (RR2): highlight [boxes] + a context [snippet]. */
+data class SearchMatch(val boxes: List<SelBox>, val snippet: String)
+
+/** A search match resolved to its [page] (the shell pairs a page index with each [SearchMatch]). */
+data class SearchHit(val page: Int, val match: SearchMatch)
 
 /** A dictionary lookup result (RR12 / D3); [found] is false on a miss (try online next). */
 data class WordDefinition(
@@ -453,6 +466,39 @@ object WireCodec {
             off += 16
         }
         return Selection(text, boxes)
+    }
+
+    /**
+     * Decode the search wire from [NativeBridge.nativeSearchPage] (RR2): `[ver][matchCount u16]`
+     * then per match `[snippetLen u16][snippet][boxCount u16]` then per box `[x0,y0,x1,y1 f32]`.
+     * Mirrors `encode_search_wire` in `reader-core/document`.
+     */
+    fun decodeSearch(bytes: ByteArray): List<SearchMatch> {
+        require(bytes.size >= 3) { "search stream truncated" }
+        require(bytes[0] == WIRE_VERSION) { "bad search wire version ${bytes[0]}" }
+        val buf = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
+        val matchCount = buf.getShort(1).toInt() and 0xFFFF
+        var off = 3
+        val out = ArrayList<SearchMatch>(matchCount)
+        repeat(matchCount) {
+            require(bytes.size >= off + 2) { "snippet length truncated" }
+            val slen = buf.getShort(off).toInt() and 0xFFFF
+            off += 2
+            require(bytes.size >= off + slen) { "snippet overruns" }
+            val snippet = String(bytes, off, slen, Charsets.UTF_8)
+            off += slen
+            require(bytes.size >= off + 2) { "box count truncated" }
+            val count = buf.getShort(off).toInt() and 0xFFFF
+            off += 2
+            val boxes = ArrayList<SelBox>(count)
+            repeat(count) {
+                require(bytes.size >= off + 16) { "search box truncated" }
+                boxes.add(SelBox(buf.getFloat(off), buf.getFloat(off + 4), buf.getFloat(off + 8), buf.getFloat(off + 12)))
+                off += 16
+            }
+            out.add(SearchMatch(boxes, snippet))
+        }
+        return out
     }
 
     /**
