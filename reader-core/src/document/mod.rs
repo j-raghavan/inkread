@@ -46,6 +46,31 @@ pub enum ExportMode {
     Flatten,
 }
 
+/// How a fixed-layout page is fit to the viewport (RR4 — KOReader's "Fit"). All modes preserve the
+/// page's aspect ratio (unlike a raw stretch); the difference is which dimension is filled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FitMode {
+    /// Fit the whole page within the viewport (contain), centered with white letterbox. Default.
+    #[default]
+    Page,
+    /// Scale so the page **width** fills the viewport; taller pages overflow vertically (pannable).
+    Width,
+    /// Scale so the page **height** fills the viewport; wider pages overflow horizontally (pannable).
+    Height,
+}
+
+impl FitMode {
+    /// Decode the wire integer (`0=Page, 1=Width, 2=Height`); unknown → `Page`.
+    #[must_use]
+    pub fn from_code(code: i32) -> FitMode {
+        match code {
+            1 => FitMode::Width,
+            2 => FitMode::Height,
+            _ => FitMode::Page,
+        }
+    }
+}
+
 /// Document metadata (title/author) — the M0 subset (RR5-FR2).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DocumentMetadata {
@@ -261,6 +286,45 @@ pub trait Document {
         self.render_page(index, buf)
     }
 
+    /// Render page `index` fit to `buf` per [`FitMode`], preserving the page aspect ratio (RR4).
+    /// `pan_x`/`pan_y` are normalized `[0,1]` scroll positions used only when a mode overflows the
+    /// viewport (e.g. `Width` on a tall page); centered when the page fits. Default: ignores fit and
+    /// falls back to [`Self::render_page`] — correct for reflowable backends (EPUB), which already
+    /// fill the viewport. Fixed-layout backends (PDF) override this.
+    fn render_fit(
+        &self,
+        index: usize,
+        buf: &mut PixelBuffer<'_>,
+        _mode: FitMode,
+        _pan_x: f32,
+        _pan_y: f32,
+    ) -> CoreResult<()> {
+        self.render_page(index, buf)
+    }
+
+    /// The page's **content bounding box** in normalized page coords `[0,1]` (RR4 — KOReader's
+    /// auto Crop): the tight rectangle around the non-white content, used to trim white margins.
+    /// `None` if undetectable or not applicable (blank page / reflowable backend). Never panics.
+    fn content_bbox(&self, _index: usize) -> Option<NormRect> {
+        None
+    }
+
+    /// Render the normalized `crop` sub-rect of page `index` fit to `buf` per [`FitMode`] (RR4 —
+    /// Crop). Like [`Self::render_fit`] but only the cropped region is shown (margins trimmed), so
+    /// the content fills the screen. `pan_x`/`pan_y` scroll an overflowing axis. Default: ignores
+    /// the crop and falls back to [`Self::render_fit`] (reflowable backends don't crop).
+    fn render_cropped(
+        &self,
+        index: usize,
+        buf: &mut PixelBuffer<'_>,
+        _crop: NormRect,
+        mode: FitMode,
+        pan_x: f32,
+        pan_y: f32,
+    ) -> CoreResult<()> {
+        self.render_fit(index, buf, mode, pan_x, pan_y)
+    }
+
     /// Adjust the reflow **text scale** (`1.0` = the backend default size) and repaginate (RR2-FR5
     /// font-size control). `current_page` is the page the reader is on *before* the change; the
     /// backend returns `Some(new_page)` to jump to so the reading position is preserved across the
@@ -268,6 +332,20 @@ pub trait Document {
     /// (PDF — the shell leaves the page unchanged). Default: unsupported (`None`). Interior
     /// mutability lets this stay `&self` like the render path.
     fn set_text_scale(&self, _scale: f32, _current_page: usize) -> Option<usize> {
+        None
+    }
+
+    /// Set the reflow **line spacing** multiplier (e.g. `1.2`/`1.4`/`1.7`) and repaginate, preserving
+    /// the chapter (RR4 — KOReader's "Line Spacing"). Returns the new page, or `None` for a
+    /// fixed-layout format (PDF). Default: unsupported.
+    fn set_line_spacing(&self, _mult: f32, _current_page: usize) -> Option<usize> {
+        None
+    }
+
+    /// Set the reflow **alignment** (`0=Left, 1=Justify, 2=Center, 3=Right`) and repaginate,
+    /// preserving the chapter (RR4 — KOReader's "Alignment"). Returns the new page, or `None` for a
+    /// fixed-layout format (PDF). Default: unsupported.
+    fn set_alignment(&self, _align_code: i32, _current_page: usize) -> Option<usize> {
         None
     }
 

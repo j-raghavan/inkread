@@ -601,3 +601,63 @@ fn lasso_rejects_an_unknown_mode_code() {
     let s = session(1, DeviceCapabilities::supernote_full());
     assert!(s.ink_select_in_polygon(&centre_box(), 9).is_err());
 }
+
+// RR4: contrast is a post-render pixel remap. A gray page renders darker (below mid-gray) at a
+// higher contrast step; step 0 is identity. Uses a gray-filling doc so the effect is visible.
+struct GrayDoc(u8);
+impl Document for GrayDoc {
+    fn page_count(&self) -> usize {
+        1
+    }
+    fn metadata(&self) -> DocumentMetadata {
+        DocumentMetadata::default()
+    }
+    fn render_page(&self, _index: usize, buf: &mut PixelBuffer<'_>) -> CoreResult<()> {
+        for px in buf.bytes_mut().chunks_exact_mut(4) {
+            px[0] = self.0;
+            px[1] = self.0;
+            px[2] = self.0;
+            px[3] = 0xFF;
+        }
+        Ok(())
+    }
+}
+
+#[test]
+fn contrast_step_clamps_and_round_trips() {
+    let mut s = session(1, DeviceCapabilities::supernote_full());
+    assert_eq!(s.contrast(), 0);
+    s.set_contrast(99); // clamps to MAX
+    assert_eq!(s.contrast(), crate::render::contrast::MAX_CONTRAST_STEP);
+    s.set_contrast(3);
+    assert_eq!(s.contrast(), 3);
+}
+
+#[test]
+fn contrast_darkens_a_gray_page_after_render() {
+    let mut s = ReaderSession::with_document(
+        Box::new(GrayDoc(80)), // below mid-gray → contrast pushes it darker
+        DeviceCapabilities::supernote_full(),
+        Viewport::new(8, 8, 226),
+    );
+    let mut bytes = vec![0u8; 8 * 8 * 4];
+
+    s.set_contrast(0);
+    {
+        let mut buf = PixelBuffer::from_rgba(&mut bytes, 8, 8).unwrap();
+        s.render_current(&mut buf).unwrap();
+    }
+    assert_eq!(bytes[0], 80, "step 0 is identity");
+
+    s.set_contrast(crate::render::contrast::MAX_CONTRAST_STEP);
+    {
+        let mut buf = PixelBuffer::from_rgba(&mut bytes, 8, 8).unwrap();
+        s.render_current(&mut buf).unwrap();
+    }
+    assert!(
+        bytes[0] < 80,
+        "higher contrast darkened the gray page: {}",
+        bytes[0]
+    );
+    assert_eq!(bytes[3], 0xFF, "alpha preserved");
+}

@@ -498,6 +498,98 @@ pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeSetZoom<'lo
     .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
 }
 
+// nativeSetContrast(handle, step) — display-enhancement contrast (0 = off; RR4). Applied as a
+// post-render pixel remap; the shell re-renders afterward. Never throws (clamped in the core).
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeSetContrast<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+    step: jint,
+) {
+    env.with_env(|env| -> jni::errors::Result<()> {
+        let session = unsafe { session_mut(handle) }.map_err(|e| throw(env, &e))?;
+        session.set_contrast(u8::try_from(step.max(0)).unwrap_or(u8::MAX));
+        Ok(())
+    })
+    .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
+}
+
+// nativeSetFit(handle, mode) — page fit mode (0=Page/contain, 1=Width, 2=Height; RR4). Aspect-
+// preserving; the shell re-renders afterward. Never throws (mode decoded leniently).
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeSetFit<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+    mode: jint,
+) {
+    env.with_env(|env| -> jni::errors::Result<()> {
+        let session = unsafe { session_mut(handle) }.map_err(|e| throw(env, &e))?;
+        session.set_fit(crate::document::FitMode::from_code(mode));
+        Ok(())
+    })
+    .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
+}
+
+// nativeSetRenderQuality(handle, q) — render quality (0=low, 1=default, 2=high; RR4). High
+// supersamples then downscales for smoother e-ink text. Re-render after. Never throws (clamped).
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeSetRenderQuality<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+    q: jint,
+) {
+    env.with_env(|env| -> jni::errors::Result<()> {
+        let session = unsafe { session_mut(handle) }.map_err(|e| throw(env, &e))?;
+        session.set_render_quality(u8::try_from(q.max(0)).unwrap_or(u8::MAX));
+        Ok(())
+    })
+    .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
+}
+
+// nativeSetCrop(handle, auto, marginStep) — auto-crop white margins (RR4). auto!=0 enables it;
+// marginStep (0..8, 1%-of-page each) keeps a margin around the detected content. Re-render after.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeSetCrop<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+    auto: jint,
+    margin_step: jint,
+) {
+    env.with_env(|env| -> jni::errors::Result<()> {
+        let session = unsafe { session_mut(handle) }.map_err(|e| throw(env, &e))?;
+        session.set_crop_auto(auto != 0);
+        session.set_crop_margin(u8::try_from(margin_step.max(0)).unwrap_or(u8::MAX));
+        Ok(())
+    })
+    .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
+}
+
+// nativeSetViewport(handle, width, height, dpi) — update the render viewport after a surface
+// resize / screen rotation (RR21-FR4). Without this the core keeps the open-time viewport and a
+// render into the new (resized) buffer is rejected as a size mismatch. PDF re-renders at the new
+// size; EPUB repaginates on the next render. The shell re-renders afterward.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeSetViewport<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+    width: jint,
+    height: jint,
+    dpi: jint,
+) {
+    env.with_env(|env| -> jni::errors::Result<()> {
+        let session = unsafe { session_mut(handle) }.map_err(|e| throw(env, &e))?;
+        let viewport = read_viewport(env, width, height, dpi)?;
+        session.set_viewport(viewport);
+        Ok(())
+    })
+    .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
+}
+
 // nativeSetTextScale(handle, scale) : int — set reflow font size (1.0 = default) for an EPUB;
 // repaginates, preserving the chapter. Returns the new current page index, or -1 for a fixed-layout
 // document (PDF) that does not reflow. The shell re-renders afterward (RR2-FR5).
@@ -511,6 +603,46 @@ pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeSetTextScal
     env.with_env(|env| -> jni::errors::Result<jint> {
         let session = unsafe { session_mut(handle) }.map_err(|e| throw(env, &e))?;
         if session.set_text_scale(scale) {
+            Ok(session.current_page() as jint)
+        } else {
+            Ok(-1)
+        }
+    })
+    .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
+}
+
+// nativeSetLineSpacing(handle, mult) : int — reflow line spacing (RR4); repaginates EPUB. Returns
+// the new page index, or -1 for a fixed-layout PDF. Re-render after.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeSetLineSpacing<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+    mult: jfloat,
+) -> jint {
+    env.with_env(|env| -> jni::errors::Result<jint> {
+        let session = unsafe { session_mut(handle) }.map_err(|e| throw(env, &e))?;
+        if session.set_line_spacing(mult) {
+            Ok(session.current_page() as jint)
+        } else {
+            Ok(-1)
+        }
+    })
+    .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
+}
+
+// nativeSetAlignment(handle, code) : int — reflow alignment (0=Left,1=Justify,2=Center,3=Right; RR4);
+// repaginates EPUB. Returns the new page index, or -1 for a fixed-layout PDF. Re-render after.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeSetAlignment<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+    code: jint,
+) -> jint {
+    env.with_env(|env| -> jni::errors::Result<jint> {
+        let session = unsafe { session_mut(handle) }.map_err(|e| throw(env, &e))?;
+        if session.set_alignment(code) {
             Ok(session.current_page() as jint)
         } else {
             Ok(-1)

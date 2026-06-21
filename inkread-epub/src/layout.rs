@@ -27,6 +27,33 @@ pub trait Metrics {
 }
 
 /// Viewport + typography for a layout pass (all pixels). Repagination on a font-size or margin
+/// Horizontal text alignment for reflowed lines (RR4 — KOReader's "Alignment").
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Align {
+    /// Flush left, ragged right (default).
+    #[default]
+    Left,
+    /// Stretch inter-word gaps to fill the line (last line of a block stays left).
+    Justify,
+    /// Centered.
+    Center,
+    /// Flush right.
+    Right,
+}
+
+impl Align {
+    /// Decode the wire integer (`0=Left, 1=Justify, 2=Center, 3=Right`); unknown → `Left`.
+    #[must_use]
+    pub fn from_code(code: i32) -> Align {
+        match code {
+            1 => Align::Justify,
+            2 => Align::Center,
+            3 => Align::Right,
+            _ => Align::Left,
+        }
+    }
+}
+
 /// change just reruns [`paginate`] with new opts.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LayoutOpts {
@@ -42,6 +69,8 @@ pub struct LayoutOpts {
     pub line_spacing: f32,
     /// Vertical gap inserted after each block.
     pub para_gap: f32,
+    /// Horizontal alignment of reflowed lines (RR4).
+    pub align: Align,
 }
 
 impl LayoutOpts {
@@ -55,6 +84,7 @@ impl LayoutOpts {
             font_px,
             line_spacing: 1.4,
             para_gap: font_px * 0.7,
+            align: Align::Left,
         }
     }
 
@@ -224,7 +254,15 @@ impl<'o> Pager<'o> {
     ) {
         let lines = break_lines(inlines, size, indent, self.opts.content_w(), bold_all, m);
         let line_h = size * self.opts.line_spacing;
-        for runs in lines {
+        let n = lines.len();
+        for (i, mut runs) in lines.into_iter().enumerate() {
+            align_line(
+                &mut runs,
+                self.opts.align,
+                self.opts.content_w(),
+                i + 1 == n,
+                m,
+            );
             self.emit(runs, line_h, false);
         }
     }
@@ -317,6 +355,46 @@ fn tokenize(inlines: &[Inline], bold_all: bool) -> Vec<Tok<'_>> {
         }
     }
     toks
+}
+
+/// Re-position a line's runs for `align` (RR4). Runs come from [`break_lines`] flush-left; this
+/// shifts them (Center/Right) or distributes the slack across inter-word gaps (Justify). The last
+/// line of a block (`is_last`) stays left under Justify, as in normal typography.
+fn align_line(
+    runs: &mut [PlacedRun],
+    align: Align,
+    content_w: f32,
+    is_last: bool,
+    m: &dyn Metrics,
+) {
+    if runs.is_empty() || align == Align::Left {
+        return;
+    }
+    let left = runs[0].x; // the line's left edge (indent)
+    let right = runs
+        .iter()
+        .map(|r| r.x + m.advance(&r.text, r.size_px, r.bold, r.italic))
+        .fold(0.0f32, f32::max);
+    let slack = (content_w - right).max(0.0);
+    if slack <= 0.0 {
+        return;
+    }
+    match align {
+        Align::Left => {}
+        Align::Center => runs.iter_mut().for_each(|r| r.x += slack * 0.5),
+        Align::Right => runs.iter_mut().for_each(|r| r.x += slack),
+        Align::Justify => {
+            // Spread the slack across the N-1 word gaps; skip the block's last line.
+            if is_last || runs.len() < 2 {
+                let _ = left;
+                return;
+            }
+            let per = slack / (runs.len() - 1) as f32;
+            for (k, r) in runs.iter_mut().enumerate() {
+                r.x += per * k as f32;
+            }
+        }
+    }
 }
 
 /// Greedy line-break: returns each line as its positioned runs (x relative to content origin; the
@@ -423,6 +501,7 @@ mod tests {
             font_px: 10.0,
             line_spacing: 1.0,
             para_gap: 0.0,
+            align: Align::Left,
         };
         let words = "aaaa ".repeat(12); // 12 words of 4 chars → ~ wraps
         let pages = paginate(&[para(words.trim())], &opts, &Mono);
@@ -451,6 +530,7 @@ mod tests {
             font_px: 10.0,
             line_spacing: 1.0,
             para_gap: 0.0,
+            align: Align::Left,
         };
         let blocks: Vec<Block> = (0..7).map(|_| para("x")).collect();
         let pages = paginate(&blocks, &opts, &Mono);
@@ -468,6 +548,7 @@ mod tests {
             font_px: 10.0,
             line_spacing: 1.0,
             para_gap: 0.0,
+            align: Align::Left,
         };
         let pages = paginate(
             &[Block::Heading {

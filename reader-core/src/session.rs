@@ -16,7 +16,7 @@ use std::sync::Arc;
 use crate::budget::{Caches, ResourceBudget, TrimLevel};
 use crate::document::fixed::PdfBackend;
 use crate::document::{
-    Document, DocumentMetadata, ExportMode, ExportStroke, NormRect, PageInk, PageLink,
+    Document, DocumentMetadata, ExportMode, ExportStroke, FitMode, NormRect, PageInk, PageLink,
     TextSelection, TocEntry,
 };
 use crate::error::{CoreError, CoreResult};
@@ -105,6 +105,30 @@ pub struct ReaderSession {
     /// The opened document's content identity (RR10-FR6), computed from its bytes at open. `None`
     /// for a byte-less test session ([`Self::with_document`]). Used to stamp/verify the sidecar.
     identity: Option<DocIdentity>,
+    /// Contrast/display-enhancement step (`0` = off; RR4 — KOReader's "Contrast"). Applied as a
+    /// per-pixel remap after render so faint scans read better on e-ink.
+    contrast: u8,
+    /// How a fixed-layout page is fit to the viewport (RR4 — KOReader's "Fit"). Default: contain.
+    fit_mode: FitMode,
+    /// Auto-crop the page's white margins (RR4 — KOReader Crop = auto). `false` = full page.
+    crop_auto: bool,
+    /// Margin kept around the auto-crop, in 1%-of-page steps (RR4 — KOReader Margin).
+    crop_margin: u8,
+    /// Per-page content-bbox memo for auto-crop (recomputed when the page changes). Interior-mutable
+    /// so the `&self` render path can cache the probe render.
+    crop_cache: std::cell::RefCell<Option<(usize, Option<NormRect>)>>,
+    /// Render quality (RR4 — KOReader): `0` = low (sub-sample), `1` = default, `2` = high
+    /// (supersample then downscale → smoother e-ink text).
+    render_quality: u8,
+}
+
+/// Render-quality step → render-scale factor (RR4): low `0.75×`, default `1.0×`, high `1.5×`.
+fn render_quality_factor(q: u8) -> f32 {
+    match q {
+        0 => 0.75,
+        2 => 1.5,
+        _ => 1.0,
+    }
 }
 
 impl ReaderSession {
@@ -192,6 +216,12 @@ impl ReaderSession {
             erase_changed: false,
             clipboard: Vec::new(),
             identity,
+            contrast: 0,
+            fit_mode: FitMode::Page,
+            crop_auto: false,
+            crop_margin: 0,
+            crop_cache: std::cell::RefCell::new(None),
+            render_quality: 1,
         }
     }
 
@@ -329,16 +359,143 @@ impl ReaderSession {
                 self.viewport.height
             )));
         }
-        if self.zoom <= 1.0 + 1e-3 {
-            return self.document.render_page(self.page, buf);
+        if self.zoom > 1.0 + 1e-3 {
+            // Magnified view: content is buf*zoom; show a buf-sized window panned over the overscan.
+            // (Render quality is not applied during a transient pinch-zoom.)
+            let bw = self.viewport.width as f32;
+            let bh = self.viewport.height as f32;
+            let off_x = (self.pan_x * bw * (self.zoom - 1.0)).round() as i32;
+            let off_y = (self.pan_y * bh * (self.zoom - 1.0)).round() as i32;
+            self.document
+                .render_zoom(self.page, buf, self.zoom, off_x, off_y)?;
+        } else {
+            let q = render_quality_factor(self.render_quality);
+            if (q - 1.0).abs() < 1e-3 {
+                self.render_fit_or_crop(buf)?;
+            } else {
+                // Render at q× the panel resolution, then bilinear-resample down/up to the panel —
+                // supersampling (high) smooths e-ink text; sub-sampling (low) is faster/softer.
+                let qw = ((self.viewport.width as f32 * q).round() as u32).clamp(1, 8000);
+                let qh = ((self.viewport.height as f32 * q).round() as u32).clamp(1, 8000);
+                let mut tmp = vec![0u8; (qw as usize) * (qh as usize) * 4];
+                {
+                    let mut tbuf = PixelBuffer::from_rgba(&mut tmp, qw, qh)?;
+                    self.render_fit_or_crop(&mut tbuf)?;
+                }
+                crate::render::resample::resample_bilinear(&tmp, qw, qh, buf);
+            }
         }
-        // Magnified view: the content is buf*zoom; show a buf-sized window panned over the overscan.
-        let bw = self.viewport.width as f32;
-        let bh = self.viewport.height as f32;
-        let off_x = (self.pan_x * bw * (self.zoom - 1.0)).round() as i32;
-        let off_y = (self.pan_y * bh * (self.zoom - 1.0)).round() as i32;
-        self.document
-            .render_zoom(self.page, buf, self.zoom, off_x, off_y)
+        // Display enhancement (RR4): remap pixels for contrast after the backend renders.
+        crate::render::contrast::apply_contrast(
+            buf,
+            crate::render::contrast::step_to_gamma(self.contrast),
+        );
+        Ok(())
+    }
+
+    /// Render the current page fit (or auto-cropped) into `buf` (RR4). With auto-crop on, the white
+    /// margins are trimmed to the detected content box; otherwise an aspect-preserving fit. PDF
+    /// honors both; reflowable backends fall back to a full-buffer render.
+    fn render_fit_or_crop(&self, buf: &mut PixelBuffer<'_>) -> CoreResult<()> {
+        match self
+            .crop_auto
+            .then(|| self.cached_crop_bbox(self.page))
+            .flatten()
+        {
+            Some(b) => {
+                let crop = self.expand_crop(b);
+                self.document.render_cropped(
+                    self.page,
+                    buf,
+                    crop,
+                    self.fit_mode,
+                    self.pan_x,
+                    self.pan_y,
+                )
+            }
+            None => self
+                .document
+                .render_fit(self.page, buf, self.fit_mode, self.pan_x, self.pan_y),
+        }
+    }
+
+    /// Set the contrast/display-enhancement step (`0` = off, clamped to
+    /// [`MAX_CONTRAST_STEP`](crate::render::contrast::MAX_CONTRAST_STEP)) — RR4. Re-render to apply.
+    pub fn set_contrast(&mut self, step: u8) {
+        self.contrast = step.min(crate::render::contrast::MAX_CONTRAST_STEP);
+    }
+
+    /// The current contrast step (`0` = off).
+    #[must_use]
+    pub fn contrast(&self) -> u8 {
+        self.contrast
+    }
+
+    /// Set the page fit mode (RR4 — KOReader's "Fit"). Re-render to apply.
+    pub fn set_fit(&mut self, mode: FitMode) {
+        self.fit_mode = mode;
+    }
+
+    /// The current page fit mode.
+    #[must_use]
+    pub fn fit_mode(&self) -> FitMode {
+        self.fit_mode
+    }
+
+    /// Enable/disable auto-crop of the page's white margins (RR4). Re-render to apply.
+    pub fn set_crop_auto(&mut self, auto: bool) {
+        self.crop_auto = auto;
+    }
+
+    /// Whether auto-crop is on.
+    #[must_use]
+    pub fn crop_auto(&self) -> bool {
+        self.crop_auto
+    }
+
+    /// Set the margin kept around the auto-crop (1%-of-page steps, clamped 0..=8). Re-render to apply.
+    pub fn set_crop_margin(&mut self, step: u8) {
+        self.crop_margin = step.min(8);
+    }
+
+    /// The current crop margin step.
+    #[must_use]
+    pub fn crop_margin(&self) -> u8 {
+        self.crop_margin
+    }
+
+    /// Set render quality (`0` = low, `1` = default, `2` = high; clamped) — RR4. Re-render to apply.
+    pub fn set_render_quality(&mut self, q: u8) {
+        self.render_quality = q.min(2);
+    }
+
+    /// The current render quality step.
+    #[must_use]
+    pub fn render_quality(&self) -> u8 {
+        self.render_quality
+    }
+
+    /// The content bounding box for `page`, memoized per page (recomputed on a page change).
+    fn cached_crop_bbox(&self, page: usize) -> Option<NormRect> {
+        if let Some((p, b)) = self.crop_cache.borrow().as_ref() {
+            if *p == page {
+                return *b;
+            }
+        }
+        let b = self.document.content_bbox(page);
+        *self.crop_cache.borrow_mut() = Some((page, b));
+        b
+    }
+
+    /// Expand a content box by the current margin (kept within the page).
+    fn expand_crop(&self, b: NormRect) -> NormRect {
+        let m = f32::from(self.crop_margin) * 0.01;
+        NormRect {
+            x0: (b.x0 - m).clamp(0.0, 1.0),
+            y0: (b.y0 - m).clamp(0.0, 1.0),
+            x1: (b.x1 + m).clamp(0.0, 1.0),
+            y1: (b.y1 + m).clamp(0.0, 1.0),
+        }
     }
 
     /// Set the pinch-zoom factor (clamped to `[1.0, MAX_ZOOM]`) and normalized pan `[0,1]`
@@ -365,6 +522,32 @@ impl ReaderSession {
     /// the (possibly new) current page afterward.
     pub fn set_text_scale(&mut self, scale: f32) -> bool {
         match self.document.set_text_scale(scale, self.page) {
+            Some(new_page) => {
+                self.page = new_page.min(self.page_count().saturating_sub(1));
+                self.load_ink_for_current_page();
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Set the reflow line-spacing multiplier (RR4); repaginates EPUB preserving the chapter.
+    /// `false` for a fixed-layout PDF. Re-render after.
+    pub fn set_line_spacing(&mut self, mult: f32) -> bool {
+        match self.document.set_line_spacing(mult, self.page) {
+            Some(new_page) => {
+                self.page = new_page.min(self.page_count().saturating_sub(1));
+                self.load_ink_for_current_page();
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Set the reflow alignment (`0=Left,1=Justify,2=Center,3=Right`; RR4); repaginates EPUB
+    /// preserving the chapter. `false` for a fixed-layout PDF. Re-render after.
+    pub fn set_alignment(&mut self, align_code: i32) -> bool {
+        match self.document.set_alignment(align_code, self.page) {
             Some(new_page) => {
                 self.page = new_page.min(self.page_count().saturating_sub(1));
                 self.load_ink_for_current_page();

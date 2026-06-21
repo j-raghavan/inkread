@@ -480,3 +480,82 @@ fn zoom_z1_matches_render_page_orientation() {
         "render_zoom(z=1) differs from render_page / is flipped (same={same} flipped={flipped})"
     );
 }
+
+// RR4 Fit: Page mode preserves aspect and letterboxes — a portrait/letter page rendered into a
+// WIDE buffer is centered with white left/right margins (not stretched edge-to-edge).
+#[test]
+fn render_fit_page_letterboxes_and_preserves_aspect() {
+    let _g = pdfium_serial();
+    if !host_pdfium_available() {
+        eprintln!("SKIP render_fit_page_letterboxes: host libpdfium UNVERIFIED");
+        return;
+    }
+    let bytes = std::fs::read(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/minimal.pdf"
+    ))
+    .expect("fixture present");
+    let doc = PdfBackend::open(bytes).unwrap();
+    let (w, h) = (400u32, 100u32); // wide buffer; a portrait/letter page must letterbox L/R
+    let mut pixels = vec![0u8; (w * h * 4) as usize];
+    let mut pb = PixelBuffer::from_rgba(&mut pixels, w, h).unwrap();
+    doc.render_fit(0, &mut pb, FitMode::Page, 0.0, 0.0).unwrap();
+
+    let px = pb.bytes();
+    let col_white = |x: u32| {
+        (0..h).all(|y| {
+            let o = ((y * w + x) * 4) as usize;
+            px[o] == 255 && px[o + 1] == 255 && px[o + 2] == 255
+        })
+    };
+    assert!(
+        col_white(0),
+        "left edge is white letterbox (page centered, not stretched)"
+    );
+    assert!(col_white(w - 1), "right edge is white letterbox");
+    assert!(
+        px.chunks_exact(4)
+            .any(|p| p[0] < 200 || p[1] < 200 || p[2] < 200),
+        "the page actually rendered (some ink)"
+    );
+    assert!(px.chunks_exact(4).all(|p| p[3] == 0xFF), "opaque");
+}
+
+// RR4 Crop: content_bbox finds a box tighter than the full page (text doesn't fill the sheet),
+// and render_cropped renders that region without error.
+#[test]
+fn content_bbox_is_tighter_than_full_page_and_crops() {
+    let _g = pdfium_serial();
+    if !host_pdfium_available() {
+        eprintln!("SKIP content_bbox: host libpdfium UNVERIFIED");
+        return;
+    }
+    let bytes = std::fs::read(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/minimal.pdf"
+    ))
+    .expect("fixture present");
+    let doc = PdfBackend::open(bytes).unwrap();
+    let bbox = doc
+        .content_bbox(0)
+        .expect("content detected on a non-blank page");
+    assert!(bbox.x0 >= 0.0 && bbox.y0 >= 0.0 && bbox.x1 <= 1.0 && bbox.y1 <= 1.0);
+    assert!(
+        (bbox.x1 - bbox.x0) < 1.0 || (bbox.y1 - bbox.y0) < 1.0,
+        "crop box is tighter than the whole page: {bbox:?}"
+    );
+
+    // Rendering the cropped region produces ink (the content fills the buffer), no error.
+    let (w, h) = (200u32, 260u32);
+    let mut pixels = vec![0u8; (w * h * 4) as usize];
+    let mut pb = PixelBuffer::from_rgba(&mut pixels, w, h).unwrap();
+    doc.render_cropped(0, &mut pb, bbox, FitMode::Page, 0.0, 0.0)
+        .unwrap();
+    assert!(
+        pb.bytes()
+            .chunks_exact(4)
+            .any(|p| p[0] < 200 || p[1] < 200 || p[2] < 200),
+        "cropped render shows content"
+    );
+    assert!(pb.bytes().chunks_exact(4).all(|p| p[3] == 0xFF), "opaque");
+}

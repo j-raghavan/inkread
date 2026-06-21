@@ -139,6 +139,34 @@ object NativeBridge {
      *  fixed-layout document (PDF) that does not reflow. Re-render after calling. */
     external fun nativeSetTextScale(handle: Long, scale: Float): Int
 
+    /** Set the display-enhancement contrast [step] (0 = off; RR4). Applied as a post-render pixel
+     *  remap (works on PDF + EPUB); re-render after calling. */
+    external fun nativeSetContrast(handle: Long, step: Int)
+
+    /** Update the render viewport after a surface resize / screen rotation (RR21-FR4). Required so
+     *  the core renders into the new buffer size (PDF re-renders, EPUB repaginates). Re-render after. */
+    external fun nativeSetViewport(handle: Long, width: Int, height: Int, dpi: Int)
+
+    /** Set the page fit mode (0=Page/contain, 1=Width, 2=Height; RR4). Aspect-preserving (PDF);
+     *  EPUB ignores it. Re-render after calling. */
+    external fun nativeSetFit(handle: Long, mode: Int)
+
+    /** Auto-crop white margins (RR4). [auto] != 0 enables it; [marginStep] (0..8, 1%-of-page each)
+     *  keeps a margin around the detected content. PDF only; re-render after. */
+    external fun nativeSetCrop(handle: Long, auto: Int, marginStep: Int)
+
+    /** Render quality (0=low, 1=default, 2=high; RR4). High supersamples for smoother text.
+     *  Re-render after calling. */
+    external fun nativeSetRenderQuality(handle: Long, quality: Int)
+
+    /** Reflow line-spacing multiplier (RR4); repaginates EPUB. Returns the new page, or -1 for a
+     *  fixed-layout PDF. Re-render after. */
+    external fun nativeSetLineSpacing(handle: Long, mult: Float): Int
+
+    /** Reflow alignment (0=Left, 1=Justify, 2=Center, 3=Right; RR4); repaginates EPUB. Returns the
+     *  new page, or -1 for a fixed-layout PDF. Re-render after. */
+    external fun nativeSetAlignment(handle: Long, code: Int): Int
+
     // ---- ink annotation, persisted by the core to a sidecar (RR6/RR10 / ADR-INKREAD-0010) ----
 
     /** Attach a `.inkread` sidecar store for the open document so strokes persist (RR10). */

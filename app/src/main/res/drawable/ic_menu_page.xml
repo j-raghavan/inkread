@@ -1,0 +1,9 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp" android:height="24dp"
+    android:viewportWidth="24" android:viewportHeight="24">
+    <!-- A page with text lines (reflow/page layout). -->
+    <path android:strokeColor="@android:color/black" android:strokeWidth="1.6"
+        android:fillColor="#00000000" android:pathData="M6,3 H18 V21 H6 Z"/>
+    <path android:fillColor="@android:color/black"
+        android:pathData="M8.5,7 h7 v1.4 h-7 z M8.5,10.3 h7 v1.4 h-7 z M8.5,13.6 h7 v1.4 h-7 z M8.5,16.9 h4.5 v1.4 h-4.5 z"/>
+</vector>
