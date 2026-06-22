@@ -43,7 +43,7 @@ serde_json = "1"
 rusqlite = { version = "0.32", features = ["bundled"] }
 # mlua with vendored Lua 5.4 (compiled from source via cc, like rusqlite `bundled`) — the embedded
 # plugin runtime (RR13). MIT-licensed (Lua itself is MIT) → AGPL-compatible (check-licenses.sh).
-mlua = { version = "0.10", features = ["lua54", "vendored"] }
+mlua = { version = "0.11", features = ["lua54", "vendored"] }
 
 [profile.release]
 # A reader on a battery e-ink device: optimize for size + speed, strip symbols.
