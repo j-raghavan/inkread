@@ -11,6 +11,14 @@
          Granted via Settings → All files access (Android 11+); sideloaded-app scope. -->
     <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
 
+    <!-- Supernote Digest ("Knowledge") write-through (ADR-INKREAD-0010): a lasso selection can be
+         saved into the firmware Digest app via its exported ContentProvider
+         (content://com.ratta.supernote.knowledge.provider). Both permissions are protectionLevel
+         "normal", so they are auto-granted to this sideloaded app at install — no platform signature
+         or system UID required. Vendor specifics stay in DigestController (IR-7). -->
+    <uses-permission android:name="com.ratta.supernote.knowledge.permission.READ_KNOWLEDGE" />
+    <uses-permission android:name="com.ratta.supernote.knowledge.permission.WRITE_KNOWLEDGE" />
+
     <application
         android:allowBackup="false"
         android:icon="@mipmap/ic_launcher"

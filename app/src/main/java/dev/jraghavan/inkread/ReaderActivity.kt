@@ -126,6 +126,15 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         override fun engineExecute(block: () -> Unit) { engine.execute(block) }
     })
 
+    // ---- Supernote Digest write-through (ADR-INKREAD-0010) — saves a lasso selection into the
+    //      firmware Digest app via its "Knowledge" provider; owns the vendor surface (IR-7). ----
+    private val digest = DigestController(object : DigestController.Host {
+        override val activity get() = this@ReaderActivity
+        override val docHandle get() = this@ReaderActivity.docHandle
+        override val currentDocPath get() = this@ReaderActivity.currentDocPath
+        override fun engineExecute(block: () -> Unit) { engine.execute(block) }
+    })
+
     // ---- tool model (ADR-INKREAD-0010) ----
     /** The active annotation tool. [Tool.PEN] inks via firmware; the rest capture the stylus. */
     @Volatile private var tool: Tool = Tool.PEN
@@ -1968,7 +1977,8 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         val snippet = sel.text.trim().replace(Regex("\\s+"), " ")
         // Define is a per-word action — it makes no sense for a multi-line selection, so a multi-line
         // catch (more than one line box) offers only Copy + Highlight.
-        val items = if (sel.boxes.size > 1) arrayOf("Copy", "Highlight") else arrayOf("Define", "Copy", "Highlight")
+        val items = if (sel.boxes.size > 1) arrayOf("Copy", "Highlight", "Add to Digest")
+        else arrayOf("Define", "Copy", "Highlight", "Add to Digest")
         AlertDialog.Builder(this, R.style.InkDialog)
             .setTitle(if (snippet.length > 42) snippet.take(42) + "…" else snippet)
             .setItems(items) { _, which ->
@@ -1976,6 +1986,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
                     "Define" -> dict.defineSelectionText(snippet)
                     "Copy" -> copyTextToClipboard(snippet)
                     "Highlight" -> engine.execute { highlightTextBoxes(sel) }
+                    "Add to Digest" -> digest.addDigestText(currentPage, sel.text)
                 }
             }
             // Any dismissal (action chosen or cancelled) clears the box overlay; a Highlight redraws
@@ -2086,6 +2097,8 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
                 val newIds = try { NativeBridge.nativeInkPaste(docHandle, PASTE_OFFSET, PASTE_OFFSET) } catch (e: RuntimeException) { IntArray(0) }
                 if (newIds.isNotEmpty()) setSelection(newIds) else runOnUiThread { showSelectionToolbar() }
             }
+            // Save the PDF text under the selection into the Supernote Digest; keep the selection up.
+            SelAction.DIGEST -> if (ids.isNotEmpty()) digest.addDigest(currentPage, selectionBounds.copyOf())
         }
     }
 
