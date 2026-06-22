@@ -32,7 +32,7 @@ reader-core = { path = "reader-core" }
 # thread-safe) so a process-global `Pdfium` can back PdfDocument<'static> and be
 # reached from the JNI reader thread soundly.
 pdfium-render = { version = "0.9.1", features = ["thread_safe"] }
-tiny-skia = "0.11"
+tiny-skia = "0.12"
 jni = "0.22.4"
 # serde + serde_json (both MIT/Apache, AGPL-compatible — auto-passes check-licenses.sh) back the
 # portable sidecar `metadata.json` (RR10-FR5 JSON interop). Pure Rust; the host build stays hermetic.
