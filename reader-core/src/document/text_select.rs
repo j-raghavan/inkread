@@ -276,13 +276,22 @@ pub fn text_line_span(chars: &[CharBox], start: (f32, f32), end: (f32, f32)) -> 
     if chars.is_empty() {
         return TextSelection::default();
     }
-    // Group every glyph into reading-order line runs (backends emit glyphs in reading order).
+    // Group glyphs into reading-order line runs (backends emit glyphs in reading order), skipping
+    // DEGENERATE glyphs — zero-width/height boxes the backend emits at the right margin (line-break
+    // hyphen artifacts). They are invisible, but if grouped they fragment the lines and, sitting
+    // between two real lines with a smaller `y`, defeat the gap-fill below — leaving the stripes.
     let mut lines: Vec<Vec<&CharBox>> = Vec::new();
-    for c in chars {
+    for c in chars
+        .iter()
+        .filter(|c| c.rect.x1 > c.rect.x0 && c.rect.y1 > c.rect.y0)
+    {
         match lines.last_mut() {
             Some(line) if same_line(&line[0].rect, &c.rect) => line.push(c),
             _ => lines.push(vec![c]),
         }
+    }
+    if lines.is_empty() {
+        return TextSelection::default();
     }
     // The line index nearest a y: the line whose vertical span contains it, else the closest center.
     let line_at = |y: f32| -> usize {
@@ -553,6 +562,35 @@ mod tests {
             sel.boxes[1].y1 >= sel.boxes[2].y0 - 1e-6,
             "no gap between lines 2 and 3"
         );
+    }
+
+    #[test]
+    fn text_line_span_skips_degenerate_margin_glyphs() {
+        // A real PDF emits zero-width glyphs at the right margin (line-break hyphen artifacts). They
+        // must not fragment the lines or defeat the gap-fill (the on-device "stripes" bug).
+        let mut chars = line("first line one", 0.0, 0.8, 0.10, 0.03);
+        // Zero-width artifact at the margin, at a y between the two lines.
+        chars.push(CharBox {
+            ch: '\u{00AD}',
+            rect: NormRect {
+                x0: 0.81,
+                y0: 0.12,
+                x1: 0.81,
+                y1: 0.13,
+            },
+        });
+        chars.extend(line("second line two", 0.0, 0.8, 0.16, 0.03));
+        let sel = text_line_span(&chars, (0.1, 0.115), (0.9, 0.175));
+        assert_eq!(
+            sel.boxes.len(),
+            2,
+            "degenerate glyph must not become its own box"
+        );
+        assert!(
+            sel.boxes[0].y1 >= sel.boxes[1].y0 - 1e-6,
+            "inter-line gap filled (not striped)"
+        );
+        assert_eq!(sel.text, "first line one second line two");
     }
 
     #[test]

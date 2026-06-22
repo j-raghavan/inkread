@@ -1912,6 +1912,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
      */
     private fun presentLineSpanSelection(sx: Float, sy: Float, ex: Float, ey: Float, emptyMsg: String) {
         if (docHandle == 0L) return
+        diag { "DIAG lineSpan start=(%.3f,%.3f) lift=(%.3f,%.3f) page=$currentPage".format(sx, sy, ex, ey) }
         val sel = try {
             WireCodec.decodeSelection(NativeBridge.nativeTextLineSpan(docHandle, currentPage, sx, sy, ex, ey))
         } catch (e: RuntimeException) {
@@ -1923,7 +1924,10 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
     /** Render the caught selection's boxes and offer the action sheet — shared by the bbox and
      *  line-span selection paths (engine thread). A drag is a *selection*, never an auto-lookup. */
     private fun showSelectionResult(sel: Selection, emptyMsg: String) {
-        diag { "DIAG text selection: '${sel.text.take(40)}' (${sel.boxes.size} boxes)" }
+        diag { "DIAG text selection: '${sel.text.take(60)}' boxes=${sel.boxes.size}" }
+        sel.boxes.forEachIndexed { i, b ->
+            diag { "DIAG   box[$i]=[%.3f,%.3f,%.3f,%.3f] viewport=${viewW}x$viewH".format(b.x0, b.y0, b.x1, b.y1) }
+        }
         clearFirmwareInk() // wipe the firmware ink the select gesture left behind
         renderAndBlit()
         if (sel.isEmpty) {
