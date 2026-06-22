@@ -21,6 +21,25 @@ updates:
     open-pull-requests-limit: 5
     commit-message:
       prefix: "build(deps)"
+    # Major bumps of the Android Gradle Plugin are breaking migrations (AGP 9 conflicts with the
+    # standalone kotlin-android plugin and broke the release build). Pin majors out of Dependabot —
+    # those upgrades are done deliberately, with the matching Gradle + Kotlin versions.
+    ignore:
+      - dependency-name: "com.android.application"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "com.android.library"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "org.jetbrains.kotlin.android"
+        update-types: ["version-update:semver-major"]
+      # The Gradle wrapper itself: AGP 8.5 needs Gradle 8.x; bump it deliberately with AGP.
+      - dependency-name: "gradle"
+        update-types: ["version-update:semver-major"]
+      # androidx.core 1.16+ / appcompat 1.7.1+ require compileSdk 35–37 + AGP 9.1+. Allow only patch
+      # bumps until compileSdk + AGP are migrated deliberately (otherwise CheckAarMetadata fails).
+      - dependency-name: "androidx.core:core-ktx"
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
+      - dependency-name: "androidx.appcompat:appcompat"
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
     groups:
       gradle-minor-patch:
         update-types: ["minor", "patch"]
