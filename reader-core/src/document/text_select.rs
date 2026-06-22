@@ -265,6 +265,137 @@ pub fn text_in_rect(chars: &[CharBox], rect: NormRect) -> TextSelection {
     }
 }
 
+/// Select the text a **drag** sweeps from `start` to `end` (normalized points), the reading-order
+/// multi-line selection (RR11). Mirrors how a desktop selection reads, with the project's twist:
+/// the line the drag *starts* on and every line through to the one *before* the lift are taken
+/// **whole** (complete characters, full line width); the **last** line (where the pen lifted) is
+/// taken only up to the word under `end.x`. Consecutive line boxes are grown to meet the next
+/// line's top so the highlight is one continuous block (no inter-line gaps). Word-less edge lines
+/// are dropped. Direction-agnostic: the lift point's line is the partial one either way.
+pub fn text_line_span(chars: &[CharBox], start: (f32, f32), end: (f32, f32)) -> TextSelection {
+    if chars.is_empty() {
+        return TextSelection::default();
+    }
+    // Group glyphs into reading-order line runs (backends emit glyphs in reading order), skipping
+    // DEGENERATE glyphs — zero-width/height boxes the backend emits at the right margin (line-break
+    // hyphen artifacts). They are invisible, but if grouped they fragment the lines and, sitting
+    // between two real lines with a smaller `y`, defeat the gap-fill below — leaving the stripes.
+    let mut lines: Vec<Vec<&CharBox>> = Vec::new();
+    for c in chars
+        .iter()
+        .filter(|c| c.rect.x1 > c.rect.x0 && c.rect.y1 > c.rect.y0)
+    {
+        match lines.last_mut() {
+            Some(line) if same_line(&line[0].rect, &c.rect) => line.push(c),
+            _ => lines.push(vec![c]),
+        }
+    }
+    if lines.is_empty() {
+        return TextSelection::default();
+    }
+    // A line's vertical span (min y0 / max y1 over its glyphs).
+    let line_span = |line: &[&CharBox]| -> (f32, f32) {
+        let (mut y0, mut y1) = (line[0].rect.y0, line[0].rect.y1);
+        for c in &line[1..] {
+            y0 = y0.min(c.rect.y0);
+            y1 = y1.max(c.rect.y1);
+        }
+        (y0, y1)
+    };
+    // Select the lines the drag's vertical range actually OVERLAPS — never the merely-nearest line.
+    // A lift that lands in the blank gap below the last line (above the next paragraph/heading)
+    // overlaps the last line but not the next one, so the selection can't overshoot into it.
+    let y_top = start.1.min(end.1);
+    let y_bot = start.1.max(end.1);
+    let downward = end.1 >= start.1;
+    let ex = end.0;
+    let sel: Vec<usize> = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| {
+            let (y0, y1) = line_span(line);
+            y1 >= y_top && y0 <= y_bot
+        })
+        .map(|(i, _)| i)
+        .collect();
+    if sel.is_empty() {
+        return TextSelection::default(); // both endpoints in gaps — no line truly covered
+    }
+    // The lift line (the candidate for clipping) is the bottom-most overlap for a downward drag,
+    // the top-most for an upward one.
+    let focus = if downward {
+        *sel.last().unwrap()
+    } else {
+        sel[0]
+    };
+    // Clip that line to the lift word ONLY when the pen lifted *on* it (lift y inside the line). If
+    // the pen lifted in the gap PAST the line (dragged beyond it), the whole line was meant — taking
+    // it whole, not clipped. (This is the "too little" case: lifting just below the last line.)
+    let (fy0, fy1) = line_span(&lines[focus]);
+    let clip_focus = sel.len() > 1 && end.1 >= fy0 && end.1 <= fy1;
+
+    let mut parts: Vec<String> = Vec::new();
+    let mut boxes: Vec<NormRect> = Vec::new();
+    for &idx in &sel {
+        let line = &lines[idx];
+        // The pen-lift line is clipped to the word under `end.x` only when the pen lifted on it;
+        // every other line (and a lift past the end) is taken whole.
+        let take: &[&CharBox] = if idx == focus && clip_focus {
+            // Last glyph whose box starts at/before the lift x, then extend to the word's end.
+            let mut last = 0usize;
+            for (j, c) in line.iter().enumerate() {
+                if c.rect.x0 <= ex {
+                    last = j;
+                }
+            }
+            while last + 1 < line.len() && joins(line[last], line[last + 1]) {
+                last += 1;
+            }
+            &line[..=last]
+        } else {
+            &line[..]
+        };
+        if take.is_empty() {
+            continue;
+        }
+        let mut bx = take[0].rect;
+        for c in &take[1..] {
+            bx = bx.union(&c.rect);
+        }
+        parts.push(
+            take.iter()
+                .map(|c| c.ch)
+                .collect::<String>()
+                .trim()
+                .to_string(),
+        );
+        boxes.push(bx);
+    }
+    // Drop word-less edge lines (a stray blank line clipped at an end).
+    while parts.last().is_some_and(String::is_empty) {
+        parts.pop();
+        boxes.pop();
+    }
+    while parts.first().is_some_and(String::is_empty) {
+        parts.remove(0);
+        boxes.remove(0);
+    }
+    if parts.is_empty() {
+        return TextSelection::default();
+    }
+    // Grow each box down to the next line's top so the highlight is one continuous block (fills the
+    // inter-line gaps the per-line glyph boxes leave). Boxes are already ordered top to bottom.
+    for i in 0..boxes.len().saturating_sub(1) {
+        if boxes[i + 1].y0 > boxes[i].y1 {
+            boxes[i].y1 = boxes[i + 1].y0;
+        }
+    }
+    TextSelection {
+        text: parts.join(" ").trim().to_string(),
+        boxes,
+    }
+}
+
 /// The glyph at `(x, y)`: the one whose box contains it, else the nearest on the same line within
 /// [`HIT_TOLERANCE`] (so a tap landing just off a glyph still selects it).
 fn hit_char(chars: &[CharBox], x: f32, y: f32) -> Option<usize> {
@@ -416,6 +547,88 @@ mod tests {
         );
         assert_eq!(sel.boxes.len(), 2, "two lines → two highlight boxes");
         assert!(sel.text.contains("first") && sel.text.contains("second"));
+    }
+
+    #[test]
+    fn text_line_span_full_lines_then_partial_last_line() {
+        // Three lines; a diagonal drag that starts mid-line-1 and lifts partway through line-3.
+        let mut chars = line("the first line here", 0.0, 0.8, 0.10, 0.03);
+        chars.extend(line("the middle line two", 0.0, 0.8, 0.16, 0.03));
+        chars.extend(line("the last line three", 0.0, 0.8, 0.22, 0.03));
+        // Start mid-line-1; lift over "line" on line-3 (x ≈ 0.45, before "three").
+        let sel = text_line_span(&chars, (0.30, 0.115), (0.45, 0.235));
+        assert_eq!(sel.boxes.len(), 3, "three line boxes");
+        // Lines 1 and 2 are taken WHOLE (full text), regardless of the start x.
+        assert!(sel.text.contains("the first line here"));
+        assert!(sel.text.contains("the middle line two"));
+        // Line 3 is clipped at the lift point: "the last line" but NOT "three".
+        assert!(sel.text.contains("the last line"));
+        assert!(
+            !sel.text.contains("three"),
+            "last line clipped to the lift word"
+        );
+        // Whole lines span the full width; consecutive boxes touch (gaps filled).
+        assert!(sel.boxes[0].x0 <= 0.01 && sel.boxes[0].x1 >= 0.79);
+        assert!(
+            sel.boxes[0].y1 >= sel.boxes[1].y0 - 1e-6,
+            "no gap between lines 1 and 2"
+        );
+        assert!(
+            sel.boxes[1].y1 >= sel.boxes[2].y0 - 1e-6,
+            "no gap between lines 2 and 3"
+        );
+    }
+
+    #[test]
+    fn text_line_span_skips_degenerate_margin_glyphs() {
+        // A real PDF emits zero-width glyphs at the right margin (line-break hyphen artifacts). They
+        // must not fragment the lines or defeat the gap-fill (the on-device "stripes" bug).
+        let mut chars = line("first line one", 0.0, 0.8, 0.10, 0.03);
+        // Zero-width artifact at the margin, at a y between the two lines.
+        chars.push(CharBox {
+            ch: '\u{00AD}',
+            rect: NormRect {
+                x0: 0.81,
+                y0: 0.12,
+                x1: 0.81,
+                y1: 0.13,
+            },
+        });
+        chars.extend(line("second line two", 0.0, 0.8, 0.16, 0.03));
+        let sel = text_line_span(&chars, (0.1, 0.115), (0.9, 0.175));
+        assert_eq!(
+            sel.boxes.len(),
+            2,
+            "degenerate glyph must not become its own box"
+        );
+        assert!(
+            sel.boxes[0].y1 >= sel.boxes[1].y0 - 1e-6,
+            "inter-line gap filled (not striped)"
+        );
+        assert_eq!(sel.text, "first line one second line two");
+    }
+
+    #[test]
+    fn text_line_span_lift_past_the_last_line_takes_it_whole() {
+        // Lift lands in the gap BELOW line 2 (the pen dragged past it) — line 2 must be taken whole,
+        // not clipped to the lift x (the "too little" bug: last line cut short).
+        let mut chars = line("line one alpha", 0.0, 0.7, 0.10, 0.03);
+        chars.extend(line("line two omega", 0.0, 0.7, 0.16, 0.03));
+        let sel = text_line_span(&chars, (0.1, 0.115), (0.2, 0.22)); // lift y=0.22 is below line 2 (..0.19)
+        assert_eq!(sel.boxes.len(), 2);
+        assert_eq!(
+            sel.text, "line one alpha line two omega",
+            "whole last line, not clipped at x=0.2"
+        );
+    }
+
+    #[test]
+    fn text_line_span_single_line_drag_takes_the_whole_line() {
+        let chars = line("alpha beta gamma", 0.0, 0.6, 0.10, 0.03);
+        // Start and lift on the same line (lo == hi) → one whole-line box, no clip.
+        let sel = text_line_span(&chars, (0.1, 0.115), (0.4, 0.115));
+        assert_eq!(sel.boxes.len(), 1);
+        assert_eq!(sel.text, "alpha beta gamma");
     }
 
     #[test]

@@ -28,6 +28,15 @@ pub const INKBIN_VERSION: u8 = 1;
 const FLAG_TILT_X: u8 = 0b0000_0001;
 const FLAG_TILT_Y: u8 = 0b0000_0010;
 
+/// Hard ceiling on the declared stroke count for one page (RR21-FR3 hardening). The bounds-checked
+/// cursor already caps total work at the input length, but rejecting an absurd declared count up
+/// front turns a hostile sidecar into a fast `BadEncoding` instead of a long allocate-then-fail
+/// loop. A real annotated page is in the low thousands of strokes; this is generously above that.
+const MAX_STROKES_PER_PAGE: u32 = 1_000_000;
+/// Hard ceiling on the declared point count for one stroke (RR21-FR3). Same rationale as
+/// [`MAX_STROKES_PER_PAGE`]; even a long, dense stroke is far under this.
+const MAX_POINTS_PER_STROKE: u32 = 10_000_000;
+
 /// Encode a layer's committed strokes to `.inkbin` bytes (RR10-FR4). Pure; never panics.
 #[must_use]
 pub fn encode_layer(layer: &InkLayer) -> Vec<u8> {
@@ -83,6 +92,11 @@ pub fn decode_layer(bytes: &[u8]) -> InkResult<InkLayer> {
         return Err(InkError::BadEncoding(format!("unsupported version {ver}")));
     }
     let stroke_count = c.u32()?;
+    if stroke_count > MAX_STROKES_PER_PAGE {
+        return Err(InkError::BadEncoding(format!(
+            "stroke count {stroke_count} exceeds the limit {MAX_STROKES_PER_PAGE}"
+        )));
+    }
     let mut strokes = Vec::new();
     let mut seen_ids = HashSet::new();
     for _ in 0..stroke_count {
@@ -104,6 +118,11 @@ pub fn decode_layer(bytes: &[u8]) -> InkResult<InkLayer> {
         let point_count = c.u32()?;
         if point_count == 0 {
             return Err(InkError::BadEncoding("stroke has no points".into()));
+        }
+        if point_count > MAX_POINTS_PER_STROKE {
+            return Err(InkError::BadEncoding(format!(
+                "point count {point_count} exceeds the limit {MAX_POINTS_PER_STROKE}"
+            )));
         }
         let mut points = Vec::new();
         for _ in 0..point_count {
@@ -300,6 +319,32 @@ mod tests {
     fn trailing_bytes_are_rejected() {
         let mut bytes = encode_layer(&sample_layer());
         bytes.extend_from_slice(b"TRAILING-JUNK");
+        assert!(matches!(
+            decode_layer(&bytes),
+            Err(InkError::BadEncoding(_))
+        ));
+    }
+
+    #[test]
+    fn absurd_stroke_count_is_rejected_without_allocating() {
+        // A header that declares a billions-of-strokes count but carries no stroke bytes must be
+        // rejected up front (RR21-FR3), never attempting to allocate/parse that many.
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(MAGIC);
+        bytes.push(INKBIN_VERSION);
+        bytes.extend_from_slice(&u32::MAX.to_le_bytes());
+        assert!(matches!(
+            decode_layer(&bytes),
+            Err(InkError::BadEncoding(_))
+        ));
+    }
+
+    #[test]
+    fn absurd_point_count_is_rejected_without_allocating() {
+        // Take a valid blob and overwrite the first stroke's point_count with u32::MAX. The
+        // point_count u32 sits after the header(9) + id(4)+tool(1)+rgba(4)+width(4)+created(8) = 30.
+        let mut bytes = encode_layer(&sample_layer());
+        bytes[30..34].copy_from_slice(&u32::MAX.to_le_bytes());
         assert!(matches!(
             decode_layer(&bytes),
             Err(InkError::BadEncoding(_))

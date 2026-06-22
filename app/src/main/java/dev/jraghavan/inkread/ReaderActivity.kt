@@ -110,9 +110,20 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
      *  (the fixed page is the faithful view; reflow is an opt-in toggle on the Page tab). */
     @Volatile private var reflowOn = false
 
-    // ---- dictionary (RR12 / D4) ----
-    /** Open `Dict` handle (0 = not opened). Engine-thread only. */
-    private var dictHandle = 0L
+    // ---- dictionary (RR12 / D4) — owns the corpus handle + lookup/define/manage UI (SRP) ----
+    private val dict = DictController(object : DictController.Host {
+        override val activity get() = this@ReaderActivity
+        override val docHandle get() = this@ReaderActivity.docHandle
+        override fun engineExecute(block: () -> Unit) { engine.execute(block) }
+    })
+
+    // ---- PDF annotation export (ADR-INKREAD-0005) — owns the chooser + engine-thread write (SRP) ----
+    private val export = ExportController(object : ExportController.Host {
+        override val activity get() = this@ReaderActivity
+        override val docHandle get() = this@ReaderActivity.docHandle
+        override val currentDocPath get() = this@ReaderActivity.currentDocPath
+        override fun engineExecute(block: () -> Unit) { engine.execute(block) }
+    })
 
     // ---- tool model (ADR-INKREAD-0010) ----
     /** The active annotation tool. [Tool.PEN] inks via firmware; the rest capture the stylus. */
@@ -148,14 +159,17 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
     private var moveStartX = 0f
     private var moveStartY = 0f
     private var movingSelection = false
-    /** In-document search (RR2): the current query's hits across the doc, and the index of the
-     *  one we're parked on. `searchBoxes` are the active hit's highlight boxes, drawn while the
-     *  reader is on `searchBoxesPage`. Read on both threads. */
-    @Volatile private var searchHits: List<SearchHit> = emptyList()
-    @Volatile private var searchIndex = -1
-    @Volatile private var searchQuery = ""
-    @Volatile private var searchBoxes: List<SelBox> = emptyList()
-    @Volatile private var searchBoxesPage = -1
+    /** In-document search (RR2) — owns its own query/hit state + dialogs (SRP). The shell only
+     *  draws the active hit's highlight (see [drawSearchHighlight]) for the current page. */
+    private val search = SearchController(object : SearchController.Host {
+        override val activity get() = this@ReaderActivity
+        override val docHandle get() = this@ReaderActivity.docHandle
+        override val pageCount get() = this@ReaderActivity.pageCount
+        override fun engineExecute(block: () -> Unit) { engine.execute(block) }
+        override fun jumpToPage(page: Int) = postJump(page)
+        override fun repaintPanel() = this@ReaderActivity.repaintPanel()
+        override fun openPicker() = this@ReaderActivity.openPicker()
+    })
 
     /** The in-progress stroke as interleaved view-px x,y; UI-thread only. */
     private val strokeBuf = ArrayList<Float>()
@@ -174,10 +188,10 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         if (viewW == 0 || viewH == 0) return@Runnable
         val nx = vToNx(lpDownX); val ny = vToNy(lpDownY)
         val page = currentPage
-        Log.i(TAG, "DIAG long-press lookup @($nx,$ny) page=$page")
+        diag { "DIAG long-press lookup @($nx,$ny) page=$page" }
         engine.execute {
-            clearFirmwareInk(); renderAndBlit(); adapter.refreshFull() // wipe the pen dot the hold left
-            defineWord(page, nx, ny)
+            clearFirmwareInk(); repaintPanel() // wipe the pen dot the hold left
+            dict.defineWord(page, nx, ny)
         }
     }
 
@@ -195,7 +209,8 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         // swipe). Mark it a long-press FIRST so the eventual UP never falls through to a page flip —
         // even if the lookup finds no word. (No "recent MOVE" gate: the held-finger MOVE stream has
         // gaps, and finger UP is reliable here, so the gate only caused false page flips.)
-        if (fingerMoved) return@Runnable
+        // A pinch-zoom in flight is never a word lookup, even if a finger sat still long enough.
+        if (fingerMoved || scaleDetector.isInProgress) return@Runnable
         fingerLookupFired = true // suppresses the tap/page-flip on the upcoming UP
         if (SystemClock.uptimeMillis() - lastStylusMs <= PALM_REJECT_MS || strokeBuf.isNotEmpty()) return@Runnable
         lookupWordAtView(fingerDownX, fingerDownY)
@@ -205,8 +220,8 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
     private fun lookupWordAtView(vx: Float, vy: Float) {
         if (viewW == 0 || viewH == 0) return
         val nx = vToNx(vx); val ny = vToNy(vy); val page = currentPage
-        Log.i(TAG, "DIAG long-press lookup @($nx,$ny) page=$page")
-        engine.execute { defineWord(page, nx, ny) }
+        diag { "DIAG long-press lookup @($nx,$ny) page=$page" }
+        engine.execute { dict.defineWord(page, nx, ny) }
     }
 
     // ---- launch intent (from HomeActivity), read on the UI thread, consumed on the engine thread ----
@@ -322,7 +337,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
                 mainHandler.removeCallbacks(fingerLongPress) // a stylus event ⇒ that finger was a palm
                 val a = event.actionMasked
                 if (a == MotionEvent.ACTION_DOWN || a == MotionEvent.ACTION_UP) {
-                    Log.i(TAG, "DIAG stylus action=$a tool=$tool type=$toolType hist=${event.historySize}")
+                    diag { "DIAG stylus action=$a tool=$tool type=$toolType hist=${event.historySize}" }
                 }
                 when (tool) {
                     Tool.DEFINE -> captureSelection(event)
@@ -332,6 +347,14 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
                 }
             } else if (toolType == MotionEvent.TOOL_TYPE_FINGER) {
                 scaleDetector.onTouchEvent(event)
+                // A second finger means a pinch-zoom, not a tap/long-press. The single-finger DOWN
+                // armed the word-lookup timer; cancel it the instant a 2nd pointer appears (or the
+                // scale gesture engages) and neutralise this gesture, so a held pinch never triggers
+                // a Dict lookup. (onFingerMove/Up can't do this — they're gated to pointerCount==1.)
+                if (event.pointerCount > 1 || scaleDetector.isInProgress) {
+                    mainHandler.removeCallbacks(fingerLongPress)
+                    fingerMoved = true
+                }
                 // While a pinch is in progress (2 fingers), don't run tap/pan/long-press logic.
                 if (!scaleDetector.isInProgress && event.pointerCount == 1) {
                     // The zoom minimap (when shown) is an interactive navigator + zoom control;
@@ -362,7 +385,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             onToolSelected = { chosen -> onToolChosen(chosen) },
             // After the pill is moved/collapsed, repaint the page + force a panel refresh so the
             // EPD reflects its new position (the earlier puck "vanished" for lack of this refresh).
-            onChrome = { engine.execute { renderAndBlit(); adapter.refreshFull() } },
+            onChrome = { engine.execute { repaintPanel() } },
             onUndo = { inkUndo() },
             onRedo = { inkRedo() },
         )
@@ -444,6 +467,26 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         }
     }
 
+    /**
+     * Shed bounded native caches under platform memory pressure (RR24-FR3). Posted to the engine
+     * thread because the session — and [docHandle] — are engine-thread-only and the render path
+     * mutates the cache. `RUNNING_CRITICAL` and any backgrounded/hidden level map to *critical*
+     * (drop all caches); lighter running pressure maps to *moderate* (drop the least-critical).
+     */
+    override fun onTrimMemory(level: Int) {
+        super.onTrimMemory(level)
+        val code = if (level >= android.content.ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL) 1 else 0
+        engine.execute {
+            if (docHandle != 0L) {
+                try {
+                    NativeBridge.nativeOnTrimMemory(docHandle, code)
+                } catch (e: RuntimeException) {
+                    Log.e(TAG, "trim memory failed: ${e.message}")
+                }
+            }
+        }
+    }
+
     /** Launch the system file picker for a PDF (RR22). */
     private fun openPicker() {
         // PDF (fixed-layout) + EPUB (reflowable). The core dispatches by file extension; some
@@ -481,7 +524,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
     override fun onDestroy() {
         engine.execute {
             closeDocument()
-            closeDict()
+            dict.close()
         }
         engine.shutdown() // lets the queued close run, then stops the worker
         super.onDestroy()
@@ -506,8 +549,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
                 Log.e(TAG, "setViewport failed: ${e.message}")
             }
         }
-        renderAndBlit()
-        adapter.refreshFull() // first page carries no command stream → refresh the panel (RR2-FR4)
+        repaintPanel() // first page carries no command stream → refresh the panel (RR2-FR4)
     }
 
     private fun openDocumentIfNeeded() {
@@ -583,7 +625,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             // (RR6/RR10 / ADR-INKREAD-0010). Attach the store so strokes save + reload.
             try {
                 NativeBridge.nativeAttachInkStore(docHandle, path)
-                Log.i(TAG, "DIAG ink store attached for $path")
+                diag { "DIAG ink store attached for $path" }
             } catch (e: RuntimeException) {
                 Log.e(TAG, "attach ink store failed: ${e.message}")
             }
@@ -643,8 +685,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         closeDocument() // saves + closes the previous book before swapping
         drawLoading()
         openBook(path, id)
-        renderAndBlit()
-        adapter.refreshFull() // the new book's first page has no command stream → refresh
+        repaintPanel() // the new book's first page has no command stream → refresh
     }
 
     /** Open a Library book in place (invoked from the reader popup; engine thread). */
@@ -674,13 +715,14 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         } catch (e: RuntimeException) {
             Log.e(TAG, "ink fetch failed: ${e.message}"); emptyList()
         }
-        Log.i(TAG, "DIAG baked ${pageStrokes.size} core strokes on page $currentPage")
+        diag { "DIAG baked ${pageStrokes.size} core strokes on page $currentPage" }
         val cv = Canvas(bmp)
         for (s in pageStrokes) drawStroke(cv, s)
         // The active lasso selection's bounding box (ADR-INKREAD-0010).
         if (selectedIds.isNotEmpty() && selectionBounds.size == 4) drawSelectionBox(cv)
         // The active in-document search hit's highlight boxes (RR2), if it lives on this page.
-        if (searchBoxesPage == currentPage) drawSearchHighlight(cv)
+        val searchHl = search.highlightForPage(currentPage)
+        if (searchHl.isNotEmpty()) drawSearchHighlight(cv, searchHl)
         // Keep a small full-page thumbnail from the fit render to drive the zoom minimap.
         if (zoom <= 1f) updateFitThumb(bmp)
         // Zoom minimap (top-right): full page + the current viewport window (RR5-FR3).
@@ -699,7 +741,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             Log.e(TAG, "links fetch failed: ${e.message}")
             emptyList()
         }
-        Log.i(TAG, "DIAG page $currentPage: ${currentLinks.size} links ${currentLinks.take(3).map { it.targetPage ?: it.uri }}")
+        diag { "DIAG page $currentPage: ${currentLinks.size} links ${currentLinks.take(3).map { it.targetPage ?: it.uri }}" }
     }
 
     /** Draw a centered "Loading…" frame so the open doesn't look like a freeze. */
@@ -725,6 +767,33 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         } finally {
             runCatching { holder.unlockCanvasAndPost(canvas) }
         }
+    }
+
+    /** Verbose diagnostic log, gated by [DIAG]. Inline + lambda so the message is not even built
+     *  when tracing is off (these run on render/stroke/tap paths). */
+    private inline fun diag(msg: () -> String) {
+        if (DIAG) Log.i(TAG, msg())
+    }
+
+    // ---- panel repaint (RR2-FR4 / RR15): the single choke point for pushing to the EPD ----
+
+    /**
+     * Request a full-screen panel refresh — the ONE place a full EPD refresh is asked for outside
+     * the policy's page-turn command stream. Routing every chrome/dialog/selection refresh through
+     * here gives a single audit + extension point: the adapter coalesces bursts
+     * (see [dev.jraghavan.inkread.eink.EinkAdapter.refreshFull]), and future partial-refresh logic
+     * lands here, not at ~two dozen call sites.
+     */
+    private fun refreshPanel() {
+        adapter.refreshFull()
+    }
+
+    /** Re-render the current page into the surface, then refresh the panel — the common "something
+     *  changed, show it" path (engine thread). Page turns instead drive the policy's command
+     *  stream via [dev.jraghavan.inkread.eink.EinkAdapter.executeAll]. */
+    private fun repaintPanel() {
+        renderAndBlit()
+        refreshPanel()
     }
 
     // ---- input (UI thread) → engine ----
@@ -779,7 +848,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
 
     /** Hand the captured stroke to the engine thread for persistence (UI thread). */
     private fun finalizeStroke() {
-        Log.i(TAG, "DIAG finalizeStroke buf=${strokeBuf.size / 2} pts")
+        diag { "DIAG finalizeStroke buf=${strokeBuf.size / 2} pts" }
         if (strokeBuf.size < 2) { strokeBuf.clear(); return }
         val raw = strokeBuf.toFloatArray()
         strokeBuf.clear()
@@ -803,13 +872,13 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
                 i += 2
             }
             NativeBridge.nativeInkEndStroke(docHandle)
-            Log.i(TAG, "DIAG commitStroke OK ${raw.size / 2} pts tool=$tool → core page $currentPage")
+            diag { "DIAG commitStroke OK ${raw.size / 2} pts tool=$tool → core page $currentPage" }
         } catch (e: RuntimeException) {
             Log.e(TAG, "ink commit failed: ${e.message}")
         }
         // Highlighter's firmware EMR ink is suppressed (we drew the live band ourselves), so bake it
         // from the core now. Pen rides the firmware overlay and bakes on the next full render.
-        if (isHl) { clearFirmwareInk(); renderAndBlit(); adapter.refreshFull(); return }
+        if (isHl) { clearFirmwareInk(); repaintPanel(); return }
         // The firmware overlay already shows this stroke live; it bakes from the core on the next
         // full render (page turn / revisit), so no immediate re-blit is needed here.
     }
@@ -969,17 +1038,44 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
      * active stroke); otherwise arm the long-press → lookup timer. The tap itself is decided on UP
      * (the panel delivers finger UP reliably), so "rest the hand, then write" never turns a page.
      */
-    private fun onFingerDown(e: MotionEvent) {
-        val recentStylus = SystemClock.uptimeMillis() - lastStylusMs <= PALM_REJECT_MS
-        val major = e.getTouchMajor(0)
+    /**
+     * Heuristic palm / stray-touch test shared by the reading surface AND the chrome dialogs
+     * (RR19 palm rejection): a **finger** touch is treated as a palm when it is multi-pointer, lands
+     * within [PALM_REJECT_MS] of pen activity, arrives mid-stroke, or has a large contact major
+     * (≥ [PALM_TOUCH_MAJOR_FRAC] of the panel height). A stylus/eraser touch is never a palm.
+     */
+    private fun isPalmTouch(e: MotionEvent): Boolean {
+        val toolType = e.getToolType(0)
+        if (toolType == MotionEvent.TOOL_TYPE_STYLUS || toolType == MotionEvent.TOOL_TYPE_ERASER) return false
+        if (e.pointerCount > 1) return true
+        if (SystemClock.uptimeMillis() - lastStylusMs <= PALM_REJECT_MS) return true
+        if (strokeBuf.isNotEmpty()) return true
         val vh = surfaceView.height
-        val largeContact = vh > 0 && major >= vh * PALM_TOUCH_MAJOR_FRAC
-        if (e.pointerCount != 1 || recentStylus || largeContact || strokeBuf.isNotEmpty()) {
-            Log.i(
-                TAG,
-                "DIAG palm-reject down pc=${e.pointerCount} recent=$recentStylus " +
-                    "major=$major large=$largeContact stroke=${strokeBuf.isNotEmpty()}",
-            )
+        return vh > 0 && e.getTouchMajor(0) >= vh * PALM_TOUCH_MAJOR_FRAC
+    }
+
+    /**
+     * Wrap a chrome view (bottom bar, sheets) so a resting palm can't press its controls — the
+     * single biggest palm-rejection gap, since dialog buttons bypass the reading surface's filter.
+     * A palm-like DOWN is intercepted (swallowed) before it reaches any child; a real finger/stylus
+     * tap passes straight through.
+     */
+    private fun palmGuard(content: View): View =
+        object : FrameLayout(this) {
+            override fun onInterceptTouchEvent(ev: MotionEvent): Boolean {
+                if (ev.actionMasked == MotionEvent.ACTION_DOWN && isPalmTouch(ev)) {
+                    diag { "DIAG chrome palm-reject major=${ev.getTouchMajor(0)} pc=${ev.pointerCount}" }
+                    return true // consume here; children (buttons) never see it
+                }
+                return super.onInterceptTouchEvent(ev)
+            }
+        }.apply {
+            addView(content, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        }
+
+    private fun onFingerDown(e: MotionEvent) {
+        if (isPalmTouch(e)) {
+            diag { "DIAG palm-reject down pc=${e.pointerCount} major=${e.getTouchMajor(0)}" }
             fingerMoved = true // neutralise any later MOVE/UP from this rejected touch
             return
         }
@@ -1026,7 +1122,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         if (SystemClock.uptimeMillis() - lastStylusMs > PALM_REJECT_MS && strokeBuf.isEmpty()) {
             handleTap(fingerDownX, fingerDownY)
         } else {
-            Log.i(TAG, "DIAG tap suppressed (stylus active → palm)")
+            diag { "DIAG tap suppressed (stylus active → palm)" }
         }
     }
 
@@ -1036,7 +1132,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         if (w > 0f && h > 0f) {
             val link = currentLinks.firstOrNull { it.contains(vToNx(x), vToNy(y)) }
             if (link != null) {
-                Log.i(TAG, "DIAG handleTap link hit -> ${link.targetPage ?: link.uri}")
+                diag { "DIAG handleTap link hit -> ${link.targetPage ?: link.uri}" }
                 followLink(link)
                 return
             }
@@ -1048,7 +1144,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         }
         val third = w / 3f
         val zone = if (x < third) "PREV" else if (x > 2 * third) "NEXT" else "TOC"
-        Log.i(TAG, "DIAG handleTap x=$x w=$w -> $zone (${currentLinks.size} links, no hit)")
+        diag { "DIAG handleTap x=$x w=$w -> $zone (${currentLinks.size} links, no hit)" }
         when (zone) {
             "PREV" -> postGesture(Gesture.PREV_PAGE)
             "NEXT" -> postGesture(Gesture.NEXT_PAGE)
@@ -1128,180 +1224,14 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
 
     // ---- in-document search (RR2) ----
 
-    /** Draw the active search hit's highlight boxes on the page (a light fill + crisp outline). */
-    private fun drawSearchHighlight(canvas: Canvas) {
-        for (b in searchBoxes) {
+    /** Draw the search hit's highlight [boxes] on the page (a light fill + crisp outline). The
+     *  active boxes for the current page come from [SearchController.highlightForPage]. */
+    private fun drawSearchHighlight(canvas: Canvas, boxes: List<SelBox>) {
+        for (b in boxes) {
             val l = nToVx(b.x0); val t = nToVy(b.y0); val r = nToVx(b.x1); val btm = nToVy(b.y1)
             canvas.drawRect(l, t, r, btm, searchFillPaint)
             canvas.drawRect(l, t, r, btm, searchBoxPaint)
         }
-    }
-
-    /**
-     * Prompt for a query, then scan the whole document on the engine thread (case-insensitive,
-     * PDF + EPUB). On hits, jump to the first and offer the results list; on none, a toast. The
-     * "Results" button reopens the last query's results without rescanning.
-     */
-    private fun showSearchDialog() {
-        if (docHandle == 0L) { openPicker(); return }
-        val d = resources.displayMetrics.density
-        fun dp(v: Int) = (v * d).toInt()
-        val input = EditText(this).apply {
-            inputType = InputType.TYPE_CLASS_TEXT
-            imeOptions = android.view.inputmethod.EditorInfo.IME_ACTION_SEARCH
-            setSingleLine(true)
-            hint = "Find in document"
-            setText(searchQuery)
-            setSelection(text?.length ?: 0)
-        }
-        val pad = dp(20)
-        val wrap = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(pad, dp(8), pad, 0)
-            addView(input, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
-        }
-        val builder = AlertDialog.Builder(this)
-            .setTitle("Search")
-            .setView(wrap)
-            .setPositiveButton("Search") { _, _ -> runSearch(input.text.toString()) }
-            .setNegativeButton("Cancel", null)
-        if (searchHits.isNotEmpty()) builder.setNeutralButton("Results") { _, _ -> showSearchResults() }
-        val dialog = builder.create()
-        input.setOnEditorActionListener { _, actionId, _ ->
-            if (actionId == android.view.inputmethod.EditorInfo.IME_ACTION_SEARCH) {
-                dialog.dismiss(); runSearch(input.text.toString()); true
-            } else false
-        }
-        dialog.show()
-    }
-
-    /** Scan every page for [raw] on the engine thread, collecting hits (capped). Bails if the open
-     *  document changes mid-scan. Jumps to the first hit and reports the count on the UI thread. */
-    private fun runSearch(raw: String) {
-        val query = raw.trim()
-        if (query.isEmpty()) { clearSearch(); return }
-        val handle = docHandle
-        if (handle == 0L) return
-        Toast.makeText(this, "Searching…", Toast.LENGTH_SHORT).show()
-        engine.execute {
-            if (docHandle != handle) return@execute
-            val total = pageCount.coerceAtLeast(1)
-            val hits = ArrayList<SearchHit>()
-            var page = 0
-            while (page < total && hits.size < MAX_SEARCH_HITS) {
-                if (docHandle != handle) return@execute
-                val matches = try {
-                    WireCodec.decodeSearch(NativeBridge.nativeSearchPage(handle, page, query))
-                } catch (e: RuntimeException) {
-                    Log.e(TAG, "search p$page failed: ${e.message}"); emptyList()
-                }
-                for (m in matches) {
-                    hits.add(SearchHit(page, m))
-                    if (hits.size >= MAX_SEARCH_HITS) break
-                }
-                page++
-            }
-            searchQuery = query
-            searchHits = hits
-            searchIndex = -1
-            runOnUiThread {
-                if (hits.isEmpty()) {
-                    Toast.makeText(this, "No matches for \"$query\"", Toast.LENGTH_SHORT).show()
-                } else {
-                    val capped = if (hits.size >= MAX_SEARCH_HITS) " (first $MAX_SEARCH_HITS)" else ""
-                    val plural = if (hits.size == 1) "" else "es"
-                    Toast.makeText(this, "${hits.size} match$plural$capped", Toast.LENGTH_SHORT).show()
-                    gotoSearchHit(0)
-                }
-            }
-        }
-    }
-
-    /** Park on search hit [i]: set its highlight boxes and jump to its page (the highlight draws
-     *  in [renderAndBlit] once the reader is on that page). */
-    private fun gotoSearchHit(i: Int) {
-        val hits = searchHits
-        if (i < 0 || i >= hits.size) return
-        val hit = hits[i]
-        searchIndex = i
-        searchBoxes = hit.match.boxes
-        searchBoxesPage = hit.page
-        postJump(hit.page)
-    }
-
-    /** Step to the next/previous hit (wrapping). With no active search, reopens the search dialog. */
-    private fun searchStep(delta: Int) {
-        val hits = searchHits
-        if (hits.isEmpty()) { showSearchDialog(); return }
-        val n = hits.size
-        val next = (((searchIndex + delta) % n) + n) % n
-        gotoSearchHit(next)
-        Toast.makeText(this, "${next + 1} / $n", Toast.LENGTH_SHORT).show()
-    }
-
-    /** A bottom sheet listing the current query's hits (page + snippet); tap a row to jump. */
-    private fun showSearchResults() {
-        val hits = searchHits
-        if (hits.isEmpty()) { showSearchDialog(); return }
-        val d = resources.displayMetrics.density
-        fun dp(v: Int) = (v * d).toInt()
-        val dialog = Dialog(this).apply { requestWindowFeature(Window.FEATURE_NO_TITLE) }
-        val list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        hits.forEachIndexed { i, hit ->
-            list.addView(LinearLayout(this).apply {
-                orientation = LinearLayout.VERTICAL
-                setPadding(dp(18), dp(12), dp(18), dp(12))
-                isClickable = true
-                setOnClickListener { dialog.dismiss(); gotoSearchHit(i) }
-                addView(TextView(this@ReaderActivity).apply {
-                    text = "p. ${hit.page + 1}"; setTextColor(Color.parseColor("#666666")); textSize = 11f
-                })
-                addView(TextView(this@ReaderActivity).apply {
-                    text = hit.match.snippet; setTextColor(Color.BLACK); textSize = 14f; setPadding(0, dp(2), 0, 0)
-                })
-            })
-            list.addView(View(this).apply { setBackgroundColor(Color.parseColor("#22000000")) },
-                LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 1))
-        }
-        // Header: a count label flanked by Prev/Next steppers (step renders behind the sheet).
-        fun stepper(label: String, delta: Int) = TextView(this).apply {
-            text = label; setTextColor(Color.BLACK); textSize = 18f; gravity = Gravity.CENTER
-            setPadding(dp(16), dp(8), dp(16), dp(8)); isClickable = true
-            setOnClickListener { searchStep(delta) }
-        }
-        val header = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            addView(stepper("◀", -1))
-            addView(TextView(this@ReaderActivity).apply {
-                text = "${hits.size} results for \"$searchQuery\""
-                setTextColor(Color.BLACK); textSize = 13f; gravity = Gravity.CENTER
-                setPadding(dp(8), dp(12), dp(8), dp(8))
-            }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-            addView(stepper("▶", +1))
-        }
-        val container = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setBackgroundColor(Color.WHITE)
-            addView(header)
-            addView(ScrollView(this@ReaderActivity).apply { addView(list) },
-                LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
-        }
-        dialog.setContentView(container)
-        dialog.window?.apply {
-            setLayout(ViewGroup.LayoutParams.MATCH_PARENT, (resources.displayMetrics.heightPixels * 0.7f).toInt())
-            setGravity(Gravity.BOTTOM)
-            setBackgroundDrawable(android.graphics.drawable.ColorDrawable(Color.WHITE))
-        }
-        dialog.show()
-    }
-
-    /** Clear the active search and wipe its on-page highlight. */
-    private fun clearSearch() {
-        searchHits = emptyList(); searchIndex = -1; searchQuery = ""; searchBoxes = emptyList()
-        val hadBoxes = searchBoxesPage >= 0
-        searchBoxesPage = -1
-        if (hadBoxes) engine.execute { renderAndBlit(); adapter.refreshFull() }
     }
 
     /**
@@ -1410,115 +1340,25 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         // (Bookmark toggle moved to the top-right corner dog-ear; "Marks" lists them.)
         control(R.drawable.ic_menu_marks, "Marks") { showBookmarks() }
         control(R.drawable.ic_menu_contents, "Contents") { showContentsLazy() }
-        control(R.drawable.ic_menu_search, "Search") { showSearchDialog() }
+        control(R.drawable.ic_menu_search, "Search") { search.showSearchDialog() }
         // Quick zoom (circle −/+ icons — not magnifiers, which are reserved for Search). Also in Adjust → Zoom.
         control(R.drawable.ic_menu_zoom_out, "Zoom −") { zoomBy(1f / ZOOM_STEP) }
         control(R.drawable.ic_menu_zoom_in, "Zoom +") { zoomBy(ZOOM_STEP) }
-        control(R.drawable.ic_menu_export, "Export") { showExportDialog() }
-        control(R.drawable.ic_menu_dict, "Dicts") { showDictionariesDialog() }
+        control(R.drawable.ic_menu_export, "Export") { export.showExportDialog() }
+        control(R.drawable.ic_menu_dict, "Dicts") { dict.showDictionariesDialog() }
         // Document controls consolidated into one KOReader-style tabbed sheet (Rotate/Fit/Font/Display).
         control(R.drawable.ic_menu_adjust, "Adjust") { showAdjustSheet() }
         control(R.drawable.ic_menu_open, "Open") { openPicker() }
         container.addView(controls)
 
-        dialog.setContentView(container)
+        // Palm guard: a hand resting on the bottom-anchored bar must not press a control (esp. Home).
+        dialog.setContentView(palmGuard(container))
         dialog.window?.apply {
             setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
             setGravity(Gravity.BOTTOM)
             setBackgroundDrawable(android.graphics.drawable.ColorDrawable(Color.WHITE))
         }
         dialog.show()
-    }
-
-    /**
-     * Export the annotations into the PDF (ADR-INKREAD-0005). Lets the user pick editable PDF
-     * annotations vs. flattened (baked-in) content, then writes it back in place. Writing modifies
-     * the original file, so confirm first; the heavy lifting is on the engine thread.
-     */
-    private fun showExportDialog() {
-        val path = currentDocPath
-        if (path == null || docHandle == 0L) {
-            Toast.makeText(this, "No open document to export", Toast.LENGTH_SHORT).show()
-            return
-        }
-        // inkread reads a PRIVATE copy of the PDF; to make the export visible on the desktop it must
-        // land in a Partner-synced PUBLIC folder, which needs all-files access (Android 11+).
-        if (!Environment.isExternalStorageManager()) {
-            AlertDialog.Builder(this, R.style.InkDialog)
-                .setTitle("Allow file access to export")
-                .setMessage("To save annotated PDFs into your synced $EXPORT_DIR_NAME folder (so they appear on your computer), inkread needs \"All files access\". Grant it on the next screen, then export again.")
-                .setPositiveButton("Open settings") { _, _ ->
-                    val uri = Uri.parse("package:$packageName")
-                    runCatching {
-                        startActivity(Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION, uri))
-                    }.onFailure {
-                        startActivity(Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION))
-                    }
-                }
-                .setNegativeButton("Cancel", null)
-                .show()
-            return
-        }
-        // NOTE: AlertDialog shows EITHER a message OR an items list, not both — choices go in labels.
-        AlertDialog.Builder(this, R.style.InkDialog)
-            .setTitle("Export annotated PDF to $EXPORT_DIR_NAME")
-            .setItems(
-                arrayOf(
-                    "Editable annotations (Adobe / Preview)",
-                    "Flatten — shows everywhere (incl. Partner app)",
-                ),
-            ) { _, which ->
-                val flatten = which == 1
-                Toast.makeText(this, "Exporting…", Toast.LENGTH_SHORT).show()
-                engine.execute { runExport(path, flatten) }
-            }
-            .setNegativeButton("Cancel", null)
-            .show()
-    }
-
-    /**
-     * Write the annotated PDF to public storage (engine thread). inkread only holds a private copy
-     * of the source (opened via the picker), so it can't overwrite the original in place — instead
-     * it saves a `-annotated.pdf` **beside the original** if that file can be found in the synced
-     * folders, else into [EXPORT_DIR_NAME]. Either way it lands in a Partner-synced location.
-     */
-    private fun runExport(srcPath: String, flatten: Boolean) {
-        val srcName = File(srcPath).name
-        val baseName = srcName.removeSuffix(".pdf").removeSuffix(".PDF")
-        val outDir = findOriginalParent(srcName)
-            ?: File(Environment.getExternalStorageDirectory(), EXPORT_DIR_NAME)
-        outDir.mkdirs()
-        val outFile = File(outDir, "$baseName-annotated.pdf")
-        val ok = try {
-            NativeBridge.nativeExportPdf(docHandle, outFile.absolutePath, flatten)
-            Log.i(TAG, "DIAG export OK → ${outFile.absolutePath} (flatten=$flatten)")
-            true
-        } catch (e: RuntimeException) {
-            Log.e(TAG, "export failed: ${e.message}"); false
-        }
-        val rel = outFile.absolutePath
-            .removePrefix(Environment.getExternalStorageDirectory().absolutePath + "/")
-        runOnUiThread {
-            Toast.makeText(
-                this,
-                if (ok) "Saved to $rel — sync to see it" else "Export failed",
-                Toast.LENGTH_LONG,
-            ).show()
-        }
-    }
-
-    /** Find the folder holding the original PDF (so the export lands beside it). Searches the
-     *  Supernote-synced roots a few levels deep; null if not found (then the caller uses a default). */
-    private fun findOriginalParent(fileName: String): File? {
-        val root = Environment.getExternalStorageDirectory()
-        for (dir in SYNCED_DIRS) {
-            val r = File(root, dir)
-            if (!r.isDirectory) continue
-            val hit = r.walkTopDown().maxDepth(5)
-                .firstOrNull { it.isFile && it.name == fileName }
-            if (hit != null) return hit.parentFile
-        }
-        return null
     }
 
     /** A "go to page" text-entry dialog (RR11-FR1): type a 1-based page number to jump. */
@@ -1552,8 +1392,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
                 val msg = if (now) "Bookmarked page ${page + 1}" else "Bookmark removed"
                 Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
             }
-            renderAndBlit()
-            adapter.refreshFull()
+            repaintPanel()
         }
     }
 
@@ -1716,14 +1555,13 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         // the page while you lasso/erase/define (the real strokes are baked from the core).
         engine.execute {
             if (chosen != Tool.PEN) clearFirmwareInk()
-            renderAndBlit()
-            adapter.refreshFull()
+            repaintPanel()
         }
         val hint = when (chosen) {
             Tool.PEN -> "Pen — write with the stylus"
             Tool.HIGHLIGHTER -> "Highlighter — drag over text; tap again to change shade"
             Tool.ERASER -> "Eraser — drag the stylus over ink to remove it"
-            Tool.DEFINE -> "Define — tap a word (or drag over text) to look it up"
+            Tool.DEFINE -> "Define — tap a word to look it up; drag over text to select it"
             Tool.LASSO -> "Lasso — circle strokes to select; tap Lasso again for Freehand"
             else -> chosen.label
         }
@@ -1758,8 +1596,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             if (docHandle != 0L) {
                 try { NativeBridge.nativeSetZoom(docHandle, zoom, panX, panY) } catch (e: RuntimeException) {}
             }
-            renderAndBlit()
-            adapter.refreshFull()
+            repaintPanel()
         }
     }
 
@@ -1902,8 +1739,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             Log.e(TAG, "erase failed: ${e.message}"); return
         }
         clearFirmwareInk() // wipe the firmware ink left by the eraser drag
-        renderAndBlit()
-        adapter.refreshFull()
+        repaintPanel()
     }
 
     // ===== Lasso selection (ADR-INKREAD-0010) =====
@@ -1990,10 +1826,10 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
 
     /** Close the loop and ask the core which strokes it selects (engine thread). */
     private fun finalizeLasso() {
-        Log.i(TAG, "DIAG finalizeLasso buf=${lassoBuf.size / 2} pts mode=$lassoMode")
+        diag { "DIAG finalizeLasso buf=${lassoBuf.size / 2} pts mode=$lassoMode" }
         if (lassoBuf.size < 6) { // need ≥3 points for a polygon
             lassoBuf.clear()
-            engine.execute { clearFirmwareInk(); renderAndBlit(); adapter.refreshFull() }
+            engine.execute { clearFirmwareInk(); repaintPanel() }
             return
         }
         val raw = lassoBuf.toFloatArray()
@@ -2014,7 +1850,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             } catch (e: RuntimeException) {
                 Log.e(TAG, "lasso select failed: ${e.message}"); return@execute
             }
-            Log.i(TAG, "DIAG lasso selected ${ids.size} strokes from ${poly.size / 2}-pt loop")
+            diag { "DIAG lasso selected ${ids.size} strokes from ${poly.size / 2}-pt loop" }
             // No ink under the loop → fall back to selecting the PRINTED words inside it (the user
             // circled book text, not handwriting). Lasso thus selects ink OR text — circle anything.
             if (ids.isEmpty()) selectTextInLoop(poly) else setSelection(ids)
@@ -2022,16 +1858,19 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
     }
 
     /**
-     * Lasso text fallback (engine thread): the loop found no ink, so select the printed text within
-     * the loop's bounding box via the core's text seam ([NativeBridge.nativeTextInRect]) and offer
-     * Define / Copy / Highlight. A polygon's bbox over a hand-drawn circle comfortably covers the
-     * words the user meant; per-vertex containment is a future refinement.
+     * Lasso text fallback (engine thread): the gesture found no ink, so select printed text. An
+     * **open diagonal drag** across lines (start far from lift, spanning >1 line) is a reading-order
+     * line span — start line through the line before the lift taken whole, the lift line clipped to
+     * its word, gaps filled ([NativeBridge.nativeTextLineSpan]). A **closed loop** around a few words
+     * uses the polygon's bounding box ([NativeBridge.nativeTextInRect]). Then offer the actions.
      */
     private fun selectTextInLoop(poly: FloatArray) {
         if (docHandle == 0L || poly.size < 6) {
             runOnUiThread { Toast.makeText(this, "Nothing under the loop", Toast.LENGTH_SHORT).show() }
             return
         }
+        val sx = poly[0]; val sy = poly[1]
+        val ex = poly[poly.size - 2]; val ey = poly[poly.size - 1]
         var x0 = Float.MAX_VALUE; var y0 = Float.MAX_VALUE; var x1 = -Float.MAX_VALUE; var y1 = -Float.MAX_VALUE
         var i = 0
         while (i + 1 < poly.size) {
@@ -2039,23 +1878,62 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             y0 = minOf(y0, poly[i + 1]); y1 = maxOf(y1, poly[i + 1])
             i += 2
         }
+        // Open drag (lift far from start) spanning multiple lines → reading-order line span; a closed
+        // loop (lift returns near the start) → the bounding box of what was circled.
+        val openDrag = kotlin.math.hypot(ex - sx, ey - sy) > OPEN_DRAG_FRAC
+        val multiLine = (y1 - y0) > MULTILINE_DRAG_FRAC
+        if (openDrag && multiLine) {
+            presentLineSpanSelection(sx, sy, ex, ey, "No text under the selection")
+        } else {
+            presentTextSelection(x0, y0, x1, y1, "Nothing under the loop — circle ink or printed words")
+        }
+    }
+
+    /**
+     * Select the printed text in a normalized rect, shade the caught boxes, and offer
+     * Define / Copy / Highlight (engine thread). Shared by the lasso text fallback and a Define-tool
+     * drag. [emptyMsg] is toasted when the rect holds no text. A drag is a *selection*, never an
+     * auto-lookup — the user picks Define from the action sheet if they want a definition.
+     */
+    private fun presentTextSelection(x0: Float, y0: Float, x1: Float, y1: Float, emptyMsg: String) {
+        if (docHandle == 0L) return
         val sel = try {
             WireCodec.decodeSelection(NativeBridge.nativeTextInRect(docHandle, currentPage, x0, y0, x1, y1))
         } catch (e: RuntimeException) {
-            Log.e(TAG, "lasso text-in-rect failed: ${e.message}"); Selection("", emptyList())
+            Log.e(TAG, "text-in-rect failed: ${e.message}"); Selection("", emptyList())
         }
-        Log.i(TAG, "DIAG lasso text fallback: '${sel.text.take(40)}' (${sel.boxes.size} boxes)")
-        clearFirmwareInk() // wipe the firmware ink left by drawing the lasso loop
+        showSelectionResult(sel, emptyMsg)
+    }
+
+    /**
+     * Multi-line drag (engine thread): the reading-order selection the core sweeps from the drag's
+     * start point to its lift point — whole lines through to the line before the lift, the lift line
+     * clipped to the word under it, inter-line gaps filled (see [NativeBridge.nativeTextLineSpan]).
+     */
+    private fun presentLineSpanSelection(sx: Float, sy: Float, ex: Float, ey: Float, emptyMsg: String) {
+        if (docHandle == 0L) return
+        diag { "DIAG lineSpan start=(%.3f,%.3f) lift=(%.3f,%.3f) page=$currentPage".format(sx, sy, ex, ey) }
+        val sel = try {
+            WireCodec.decodeSelection(NativeBridge.nativeTextLineSpan(docHandle, currentPage, sx, sy, ex, ey))
+        } catch (e: RuntimeException) {
+            Log.e(TAG, "text-line-span failed: ${e.message}"); Selection("", emptyList())
+        }
+        showSelectionResult(sel, emptyMsg)
+    }
+
+    /** Render the caught selection's boxes and offer the action sheet — shared by the bbox and
+     *  line-span selection paths (engine thread). A drag is a *selection*, never an auto-lookup. */
+    private fun showSelectionResult(sel: Selection, emptyMsg: String) {
+        diag { "DIAG text selection: '${sel.text.take(60)}' boxes=${sel.boxes.size}" }
+        clearFirmwareInk() // wipe the firmware ink the select gesture left behind
         renderAndBlit()
         if (sel.isEmpty) {
-            adapter.refreshFull()
-            runOnUiThread {
-                Toast.makeText(this, "Nothing under the loop — circle ink or printed words", Toast.LENGTH_SHORT).show()
-            }
+            refreshPanel()
+            runOnUiThread { Toast.makeText(this, emptyMsg, Toast.LENGTH_SHORT).show() }
             return
         }
         drawTextSelectionBoxes(sel.boxes) // show what was caught, then offer actions
-        adapter.refreshFull()
+        refreshPanel()
         runOnUiThread { showTextSelectionActions(sel) }
     }
 
@@ -2072,25 +1950,22 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
     /** Action sheet for circled printed text: Define · Copy · Highlight (UI thread). */
     private fun showTextSelectionActions(sel: Selection) {
         val snippet = sel.text.trim().replace(Regex("\\s+"), " ")
+        // Define is a per-word action — it makes no sense for a multi-line selection, so a multi-line
+        // catch (more than one line box) offers only Copy + Highlight.
+        val items = if (sel.boxes.size > 1) arrayOf("Copy", "Highlight") else arrayOf("Define", "Copy", "Highlight")
         AlertDialog.Builder(this, R.style.InkDialog)
             .setTitle(if (snippet.length > 42) snippet.take(42) + "…" else snippet)
-            .setItems(arrayOf("Define", "Copy", "Highlight")) { _, which ->
-                when (which) {
-                    0 -> defineSelectionText(snippet)
-                    1 -> copyTextToClipboard(snippet)
-                    2 -> engine.execute { highlightTextBoxes(sel) }
+            .setItems(items) { _, which ->
+                when (items[which]) {
+                    "Define" -> dict.defineSelectionText(snippet)
+                    "Copy" -> copyTextToClipboard(snippet)
+                    "Highlight" -> engine.execute { highlightTextBoxes(sel) }
                 }
             }
             // Any dismissal (action chosen or cancelled) clears the box overlay; a Highlight redraws
             // it with the real annotation, a Define opens the dict card over the cleared page.
-            .setOnDismissListener { engine.execute { renderAndBlit(); adapter.refreshFull() } }
+            .setOnDismissListener { engine.execute { repaintPanel() } }
             .show()
-    }
-
-    /** Define the first word-like token of a printed-text selection (lookup is per-word). */
-    private fun defineSelectionText(text: String) {
-        val word = text.split(Regex("\\s+")).firstOrNull { it.any(Char::isLetter) } ?: return
-        engine.execute { lookupAndShow(word) }
     }
 
     /** Copy printed-text selection to the system clipboard. */
@@ -2118,11 +1993,11 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
                 NativeBridge.nativeInkAddPoint(docHandle, b.x1, midY, 1.0f, Float.NaN, Float.NaN, 0)
                 NativeBridge.nativeInkEndStroke(docHandle)
             }
-            Log.i(TAG, "DIAG highlighted ${sel.boxes.size} text boxes")
+            diag { "DIAG highlighted ${sel.boxes.size} text boxes" }
         } catch (e: RuntimeException) {
             Log.e(TAG, "text highlight failed: ${e.message}")
         }
-        clearFirmwareInk(); renderAndBlit(); adapter.refreshFull()
+        clearFirmwareInk(); repaintPanel()
     }
 
     /** Adopt `ids` as the selection, refresh the box, and show/update the selection toolbar (engine). */
@@ -2134,8 +2009,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             FloatArray(0)
         }
         clearFirmwareInk() // wipe the firmware ink left by drawing the lasso loop
-        renderAndBlit()
-        adapter.refreshFull()
+        repaintPanel()
         updateLassoHint() // hide the hint once something is selected; re-show if selection emptied
         runOnUiThread {
             if (selectedIds.isEmpty()) {
@@ -2226,8 +2100,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
     private fun clearSelectionAndRender() {
         selectedIds = IntArray(0)
         selectionBounds = FloatArray(0)
-        renderAndBlit()
-        adapter.refreshFull()
+        repaintPanel()
         updateLassoHint() // re-show the hint if still on the Lasso tool with nothing selected
         runOnUiThread { selectionToolbar.dismiss() }
     }
@@ -2282,460 +2155,27 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             i += 2
         }
         val dragged = (maxX - minX) > w * 0.03f || (maxY - minY) > h * 0.02f
-        val page = currentPage
         if (dragged) {
-            val r = floatArrayOf(vToNx(minX), vToNy(minY), vToNx(maxX), vToNy(maxY))
-            engine.execute { defineRect(page, r) }
-        } else {
-            engine.execute { defineWord(page, vToNx(pts[0]), vToNy(pts[1])) }
-        }
-        // Wipe the firmware ink the define gesture left behind (it never becomes an annotation).
-        engine.execute { clearFirmwareInk(); renderAndBlit(); adapter.refreshFull() }
-    }
-
-    /** Resolve the word under a normalized point and look it up (engine thread). */
-    private fun defineWord(page: Int, nx: Float, ny: Float) {
-        if (docHandle == 0L) return
-        val sel = try {
-            WireCodec.decodeSelection(NativeBridge.nativeWordAt(docHandle, page, nx, ny))
-        } catch (e: RuntimeException) {
-            Log.e(TAG, "wordAt failed: ${e.message}"); return
-        }
-        if (sel.isEmpty) {
-            runOnUiThread { Toast.makeText(this, "No word there", Toast.LENGTH_SHORT).show() }
-            return
-        }
-        lookupAndShow(sel.text)
-    }
-
-    /** Resolve the text within a highlighted rect and look up its first word (engine thread). */
-    private fun defineRect(page: Int, r: FloatArray) {
-        if (docHandle == 0L) return
-        val sel = try {
-            WireCodec.decodeSelection(NativeBridge.nativeTextInRect(docHandle, page, r[0], r[1], r[2], r[3]))
-        } catch (e: RuntimeException) {
-            Log.e(TAG, "textInRect failed: ${e.message}"); return
-        }
-        val word = sel.text.split(Regex("\\s+")).firstOrNull().orEmpty()
-        if (word.isBlank()) {
-            runOnUiThread { Toast.makeText(this, "No text selected", Toast.LENGTH_SHORT).show() }
-            return
-        }
-        lookupAndShow(word)
-    }
-
-    /** On-device lookup → online fallback (cached) → show the popup (engine thread). */
-    private fun lookupAndShow(rawWord: String) {
-        val word = rawWord.trim().trim { !it.isLetter() && it != '\'' && it != '-' }
-        if (word.isEmpty()) return
-        if (!ensureDictOpen()) {
-            runOnUiThread { Toast.makeText(this, "Dictionary not available", Toast.LENGTH_SHORT).show() }
-            return
-        }
-        var def = try {
-            WireCodec.decodeDefinition(NativeBridge.nativeDefine(dictHandle, word, "en"))
-        } catch (e: RuntimeException) {
-            WordDefinition(false, "", "", emptyList(), emptyList())
-        }
-        if (!def.found) {
-            onlineLookup(word)?.let { online ->
-                try {
-                    NativeBridge.nativeDictPut(dictHandle, online.lang, online.headword, online.senses.joinToString("\n"))
-                } catch (e: RuntimeException) {
-                    Log.w(TAG, "dict cache failed: ${e.message}")
-                }
-                def = online
-            }
-        }
-        val result = def
-        runOnUiThread {
-            if (result.found) showDictPopup(word, result)
-            else Toast.makeText(this, "\"$word\" not found", Toast.LENGTH_SHORT).show()
-        }
-    }
-
-    /** Best-effort online lookup via Wiktionary's REST API (RR12; opt-in network). Engine thread. */
-    private fun onlineLookup(word: String): WordDefinition? {
-        return try {
-            val url = URL("https://en.wiktionary.org/api/rest_v1/page/definition/${Uri.encode(word)}")
-            val conn = (url.openConnection() as HttpURLConnection).apply {
-                connectTimeout = 4000
-                readTimeout = 6000
-                setRequestProperty("User-Agent", "InkRead/0.1 (offline e-ink reader)")
-            }
-            if (conn.responseCode != 200) return null
-            val body = conn.inputStream.bufferedReader().use { it.readText() }
-            val root = JSONObject(body)
-            val lang = if (root.has("en")) "en" else root.keys().asSequence().firstOrNull() ?: return null
-            val arr = root.getJSONArray(lang)
-            val senses = ArrayList<String>()
-            outer@ for (i in 0 until arr.length()) {
-                val group = arr.getJSONObject(i)
-                val pos = group.optString("partOfSpeech", "")
-                val defs = group.optJSONArray("definitions") ?: continue
-                for (j in 0 until defs.length()) {
-                    val d = stripHtmlTags(defs.getJSONObject(j).optString("definition", ""))
-                    if (d.isNotBlank()) senses.add(if (pos.isNotEmpty()) "($pos) $d" else d)
-                    if (senses.size >= 6) break@outer
-                }
-            }
-            if (senses.isEmpty()) null else WordDefinition(true, word, lang, senses, emptyList())
-        } catch (e: Exception) {
-            Log.w(TAG, "online lookup failed: ${e.message}")
-            null
-        }
-    }
-
-    private fun stripHtmlTags(s: String): String =
-        s.replace(Regex("<[^>]*>"), "").replace("&amp;", "&").replace("&#39;", "'").trim()
-
-    /** Copy the bundled corpus out of assets (once) and open it; returns true if usable. */
-    private fun ensureDictOpen(): Boolean {
-        if (dictHandle != 0L) return true
-        val dest = File(filesDir, "dict.db")
-        if (!dest.exists() || dest.length() == 0L) {
-            runOnUiThread { Toast.makeText(this, "Preparing dictionary…", Toast.LENGTH_SHORT).show() }
-            try {
-                assets.open("dict.db").use { input -> dest.outputStream().use { input.copyTo(it) } }
-            } catch (e: Exception) {
-                Log.e(TAG, "dict copy failed: ${e.message}")
-                return false
-            }
-        }
-        dictHandle = try {
-            NativeBridge.nativeDictOpen(dest.absolutePath)
-        } catch (e: RuntimeException) {
-            Log.e(TAG, "dict open failed: ${e.message}"); 0L
-        }
-        return dictHandle != 0L
-    }
-
-    private fun closeDict() {
-        val h = dictHandle
-        dictHandle = 0L
-        if (h != 0L) {
-            try { NativeBridge.nativeDictClose(h) } catch (e: RuntimeException) { /* ignore */ }
-        }
-    }
-
-    /**
-     * The definition card (RR12 / ADR-INKREAD-0009 D3) — a bottom sheet styled after the Supernote
-     * dictionary plugin: the headword (with the *looked-up* word bracketed when it differs, e.g.
-     * `run ⟨running⟩`), a **WordNet** source label, a **Definition / Thesaurus** toggle, and senses
-     * grouped by part of speech with numbered glosses, examples in curly quotes, and per-sense
-     * synonyms. WordNet ships no phonetics/audio, so none are shown (no faux IPA). On-device
-     * results parse via [WordNet]; non-WordNet online hits fall back to plain numbered glosses.
-     */
-    private fun showDictPopup(word: String, def: WordDefinition) {
-        val d = resources.displayMetrics.density
-        fun dp(v: Int) = (v * d).toInt()
-        val grey = Color.parseColor("#6B6B6B")
-        val faint = Color.parseColor("#9E9E9E")
-        val serif = Typeface.create("serif", Typeface.NORMAL)
-        val serifBold = Typeface.create("serif", Typeface.BOLD)
-
-        val parsed = WordNet.parse(def.senses)
-        val headword = def.headword.ifEmpty { word }
-        // Thesaurus = the synonyms table plus every per-sense [syn:] set, deduped, headword removed.
-        val thesaurus = (def.synonyms + parsed.senses.flatMap { it.synonyms })
-            .map { it.trim() }.filter { it.isNotEmpty() && !it.equals(headword, ignoreCase = true) }
-            .distinct()
-
-        val dialog = Dialog(this).apply { requestWindowFeature(Window.FEATURE_NO_TITLE) }
-        val root = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            background = GradientDrawable().apply {
-                setColor(Color.WHITE)
-                cornerRadii = floatArrayOf(dp(18).toFloat(), dp(18).toFloat(), dp(18).toFloat(), dp(18).toFloat(), 0f, 0f, 0f, 0f)
-            }
-            setPadding(dp(24), dp(12), dp(24), dp(20))
-        }
-
-        // ── grab handle (calm sheet affordance) ──────────────────────────────────
-        root.addView(View(this).apply {
-            background = GradientDrawable().apply { setColor(Color.parseColor("#D8D8D8")); cornerRadius = dp(2).toFloat() }
-            layoutParams = LinearLayout.LayoutParams(dp(36), dp(4)).apply {
-                gravity = Gravity.CENTER_HORIZONTAL; bottomMargin = dp(12)
-            }
-        })
-
-        // ── header: headword + looked-up chip · WordNet source ───────────────────
-        val header = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
-        header.addView(TextView(this).apply {
-            text = headword; setTextColor(Color.BLACK); textSize = 27f; typeface = serifBold
-        })
-        if (!word.equals(headword, ignoreCase = true) && word.isNotEmpty()) {
-            header.addView(TextView(this).apply {
-                text = "⟨ $word ⟩"; setTextColor(grey); textSize = 14f; typeface = serif
-                setPadding(dp(10), dp(8), 0, 0)
-            })
-        }
-        header.addView(View(this), LinearLayout.LayoutParams(0, 0, 1f)) // spacer
-        header.addView(TextView(this).apply {
-            text = if (def.lang.isNotEmpty() && def.lang != "en") "WordNet · ${def.lang}" else "WordNet"
-            setTextColor(faint); textSize = 11f; letterSpacing = 0.06f
-        })
-        root.addView(header)
-
-        // ── Definition / Thesaurus toggle ────────────────────────────────────────
-        val body = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(0, dp(14), 0, 0) }
-        lateinit var tabDef: TextView
-        lateinit var tabThe: TextView
-        fun styleTab(tab: TextView, active: Boolean) {
-            tab.setTextColor(if (active) Color.BLACK else faint)
-            tab.typeface = if (active) Typeface.DEFAULT_BOLD else Typeface.DEFAULT
-            tab.paintFlags = if (active) tab.paintFlags or android.graphics.Paint.UNDERLINE_TEXT_FLAG
-            else tab.paintFlags and android.graphics.Paint.UNDERLINE_TEXT_FLAG.inv()
-        }
-        fun renderDefinition() {
-            body.removeAllViews()
-            if (parsed.parseFailed) {
-                for ((i, s) in def.senses.filter { it.isNotBlank() }.take(8).withIndex()) {
-                    body.addView(senseRow(i + 1, s, dp(0)))
-                }
-                return
-            }
-            var lastPos: String? = "?" // sentinel so the first group always prints its badge
-            for (sense in parsed.senses) {
-                if (sense.pos != lastPos) {
-                    lastPos = sense.pos
-                    body.addView(posBadge(WordNet.labelForPos(sense.pos)))
-                }
-                body.addView(senseRow(sense.index, sense.definition, dp(2)))
-                for (ex in sense.examples) {
-                    body.addView(TextView(this).apply {
-                        text = "“$ex”"; setTextColor(grey); textSize = 14f
-                        typeface = Typeface.create(Typeface.DEFAULT, Typeface.ITALIC)
-                        setPadding(dp(22), dp(3), 0, 0)
-                    })
-                }
-                if (sense.synonyms.isNotEmpty()) {
-                    body.addView(TextView(this).apply {
-                        text = "≈ ${sense.synonyms.joinToString(", ")}"
-                        setTextColor(faint); textSize = 13f; setPadding(dp(22), dp(3), 0, 0)
-                    })
-                }
-            }
-        }
-        fun renderThesaurus() {
-            body.removeAllViews()
-            if (thesaurus.isEmpty()) {
-                body.addView(TextView(this).apply {
-                    text = "No thesaurus entries for this word."
-                    setTextColor(grey); textSize = 15f; setPadding(0, dp(4), 0, 0)
-                })
-                return
-            }
-            body.addView(posBadge("synonyms"))
-            body.addView(TextView(this).apply {
-                text = thesaurus.joinToString(" · ")
-                setTextColor(Color.BLACK); textSize = 16f; setLineSpacing(dp(4).toFloat(), 1f)
-                setPadding(0, dp(4), 0, 0)
-            })
-        }
-        val tabs = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; setPadding(0, dp(10), 0, 0) }
-        tabDef = TextView(this).apply {
-            text = "Definition"; textSize = 14f; setPadding(0, dp(4), dp(22), dp(4)); isClickable = true
-            setOnClickListener { styleTab(tabDef, true); styleTab(tabThe, false); renderDefinition() }
-        }
-        tabThe = TextView(this).apply {
-            text = "Thesaurus"; textSize = 14f; setPadding(0, dp(4), 0, dp(4)); isClickable = true
-            setOnClickListener { styleTab(tabThe, true); styleTab(tabDef, false); renderThesaurus() }
-        }
-        tabs.addView(tabDef); tabs.addView(tabThe)
-        root.addView(tabs)
-        root.addView(View(this).apply {
-            setBackgroundColor(Color.parseColor("#ECECEC"))
-            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, maxOf(1, dp(1))).apply {
-                topMargin = dp(8)
-            }
-        })
-        root.addView(ScrollView(this).apply {
-            isVerticalScrollBarEnabled = false
-            addView(body)
-            layoutParams = LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                (resources.displayMetrics.heightPixels * 0.5f).toInt(),
-            )
-        })
-
-        styleTab(tabDef, true); styleTab(tabThe, false); renderDefinition()
-        dialog.setContentView(root)
-        dialog.window?.apply {
-            setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
-            setGravity(Gravity.BOTTOM)
-            setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
-        }
-        dialog.show()
-    }
-
-    /** A part-of-speech badge (a small dark-outlined pill) heading a group of senses. */
-    private fun posBadge(label: String): TextView {
-        val d = resources.displayMetrics.density
-        fun dp(v: Int) = (v * d).toInt()
-        return TextView(this).apply {
-            text = label; setTextColor(Color.BLACK); textSize = 12f; typeface = Typeface.DEFAULT_BOLD
-            letterSpacing = 0.04f
-            setPadding(dp(10), dp(3), dp(10), dp(4))
-            background = GradientDrawable().apply {
-                setColor(Color.parseColor("#F0F0F0"))
-                setStroke(maxOf(1, dp(1)), Color.parseColor("#C9C9C9"))
-                cornerRadius = dp(10).toFloat()
-            }
-            layoutParams = LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
-            ).apply { topMargin = dp(14); bottomMargin = dp(2) }
-        }
-    }
-
-    /** A numbered sense line: a fixed-width index gutter and the gloss filling the rest. */
-    private fun senseRow(index: Int, text: String, topPad: Int): View {
-        val d = resources.displayMetrics.density
-        fun dp(v: Int) = (v * d).toInt()
-        return LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            setPadding(0, maxOf(topPad, dp(7)), 0, 0)
-            addView(TextView(this@ReaderActivity).apply {
-                this.text = "$index."; setTextColor(Color.parseColor("#6B6B6B")); textSize = 15f
-                typeface = Typeface.DEFAULT_BOLD
-                layoutParams = LinearLayout.LayoutParams(dp(22), ViewGroup.LayoutParams.WRAP_CONTENT)
-            })
-            addView(TextView(this@ReaderActivity).apply {
-                this.text = text; setTextColor(Color.BLACK); textSize = 15f
-                setLineSpacing(dp(3).toFloat(), 1f)
-                layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
-            })
-        }
-    }
-
-    /**
-     * Manage user-installed dictionaries (RR12 / ADR-INKREAD-0009 D2) — the KOReader-style "install
-     * your own dictionary" surface. Lists StarDict folders found under [Dictionaries.roots] with an
-     * Install / Remove action each; install compiles the bundle into the writable corpus via
-     * [NativeBridge.nativeDictImport] on the engine thread. Reading the public folders needs
-     * all-files access (same gate as export).
-     */
-    private fun showDictionariesDialog() {
-        if (!Environment.isExternalStorageManager()) {
-            AlertDialog.Builder(this, R.style.InkDialog)
-                .setTitle("Allow file access for dictionaries")
-                .setMessage("To find dictionaries you've copied to the device, inkread needs \"All files access\". Grant it on the next screen, then open Dicts again.")
-                .setPositiveButton("Open settings") { _, _ ->
-                    val uri = Uri.parse("package:$packageName")
-                    runCatching {
-                        startActivity(Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION, uri))
-                    }.onFailure { startActivity(Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION)) }
-                }
-                .setNegativeButton("Cancel", null)
-                .show()
-            return
-        }
-        val d = resources.displayMetrics.density
-        fun dp(v: Int) = (v * d).toInt()
-        val home = Dictionaries.homeRoot()
-        val list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(20), dp(8), dp(20), dp(8)) }
-
-        val dialog = AlertDialog.Builder(this, R.style.InkDialog)
-            .setTitle("Dictionaries")
-            .setView(ScrollView(this).apply { addView(list) })
-            .setPositiveButton("Done", null)
-            .create()
-
-        fun refresh() {
-            list.removeAllViews()
-            val bundles = Dictionaries.discover(this)
-            if (bundles.isEmpty()) {
-                list.addView(TextView(this).apply {
-                    text = "No dictionaries found.\n\nCopy a StarDict folder (its .ifo, .idx and .dict/.dict.dz files) into:\n${home.absolutePath}\n\nthen reopen this screen."
-                    setTextColor(Color.parseColor("#555555")); textSize = 14f; setLineSpacing(dp(3).toFloat(), 1f)
-                })
-                return
-            }
-            for (b in bundles) {
-                val row = LinearLayout(this).apply {
-                    orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
-                    setPadding(0, dp(10), 0, dp(10))
-                }
-                row.addView(LinearLayout(this).apply {
-                    orientation = LinearLayout.VERTICAL
-                    layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
-                    addView(TextView(this@ReaderActivity).apply {
-                        text = b.name; setTextColor(Color.BLACK); textSize = 16f
-                    })
-                    addView(TextView(this@ReaderActivity).apply {
-                        text = if (b.installed) "Installed" else "Not installed"
-                        setTextColor(Color.parseColor("#9E9E9E")); textSize = 12f
-                    })
-                })
-                row.addView(TextView(this).apply {
-                    text = if (b.installed) "Remove" else "Install"
-                    setTextColor(Color.BLACK); textSize = 14f; typeface = Typeface.DEFAULT_BOLD
-                    setPadding(dp(14), dp(6), dp(14), dp(6))
-                    background = GradientDrawable().apply {
-                        setColor(Color.WHITE); setStroke(maxOf(1, dp(1)), Color.BLACK); cornerRadius = dp(16).toFloat()
-                    }
-                    isClickable = true
-                    setOnClickListener {
-                        if (b.installed) removeDictionary(b) { refresh() }
-                        else installDictionary(b) { refresh() }
-                    }
-                })
-                list.addView(row)
-                list.addView(View(this).apply {
-                    setBackgroundColor(Color.parseColor("#EEEEEE"))
-                    layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, maxOf(1, dp(1)))
-                })
-            }
-        }
-        refresh()
-        dialog.show()
-    }
-
-    /** Compile a StarDict bundle into the corpus on the engine thread, with a blocking progress note. */
-    private fun installDictionary(b: Dictionaries.Bundle, onDone: () -> Unit) {
-        val progress = AlertDialog.Builder(this, R.style.InkDialog)
-            .setTitle("Installing ${b.name}")
-            .setMessage("Large dictionaries can take a while. Please keep inkread open.")
-            .setCancelable(false)
-            .create()
-        progress.show()
-        engine.execute {
-            val ok = ensureDictOpen()
-            val result = if (ok) {
-                try {
-                    val n = NativeBridge.nativeDictImport(dictHandle, b.dir.absolutePath, b.sourceTag, false)
-                    Dictionaries.markInstalled(this, b.sourceTag)
-                    "Installed ${b.name} ($n entries)"
-                } catch (e: RuntimeException) {
-                    Log.e(TAG, "dict import failed: ${e.message}")
-                    "Couldn't install ${b.name}"
-                }
+            // A drag is a text *selection*, not a one-word lookup: show the caught text + the
+            // Copy/Highlight (and Define for one line) sheet, never an auto dict card.
+            val multiLine = (maxY - minY) > h * MULTILINE_DRAG_FRAC
+            if (multiLine) {
+                // The core sweeps from the drag's start point to its lift point: whole lines through
+                // to the line before the lift, the lift line clipped to its word, gaps filled.
+                val sx = vToNx(pts[0]); val sy = vToNy(pts[1])
+                val ex = vToNx(pts[pts.size - 2]); val ey = vToNy(pts[pts.size - 1])
+                engine.execute { presentLineSpanSelection(sx, sy, ex, ey, "No text under the selection") }
             } else {
-                "Dictionary store unavailable"
+                // Single-line drag: the dragged horizontal span on that one line.
+                val r = floatArrayOf(vToNx(minX), vToNy(minY), vToNx(maxX), vToNy(maxY))
+                engine.execute { presentTextSelection(r[0], r[1], r[2], r[3], "No text under the selection") }
             }
-            runOnUiThread {
-                progress.dismiss()
-                Toast.makeText(this, result, Toast.LENGTH_SHORT).show()
-                onDone()
-            }
-        }
-    }
-
-    /** Drop every entry for a user dictionary's source tag (the inverse of install). */
-    private fun removeDictionary(b: Dictionaries.Bundle, onDone: () -> Unit) {
-        engine.execute {
-            if (ensureDictOpen()) {
-                try {
-                    NativeBridge.nativeDictForget(dictHandle, b.sourceTag)
-                } catch (e: RuntimeException) {
-                    Log.e(TAG, "dict forget failed: ${e.message}")
-                }
-            }
-            Dictionaries.markRemoved(this, b.sourceTag)
-            runOnUiThread {
-                Toast.makeText(this, "Removed ${b.name}", Toast.LENGTH_SHORT).show()
-                onDone()
-            }
+        } else {
+            // A single still tap is a word lookup (the dict card).
+            val page = currentPage
+            engine.execute { dict.defineWord(page, vToNx(pts[0]), vToNy(pts[1])) }
+            // Wipe the firmware ink the define gesture left behind (it never becomes an annotation).
+            engine.execute { clearFirmwareInk(); repaintPanel() }
         }
     }
 
@@ -2828,7 +2268,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             addView(tabRow)
         }
         select(0)
-        dialog.setContentView(container)
+        dialog.setContentView(palmGuard(container)) // same palm guard as the bottom bar
         dialog.window?.apply {
             setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
             setGravity(Gravity.BOTTOM)
@@ -2929,7 +2369,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         )
         val sel = orients.indexOf(orientationPref()).coerceAtLeast(0)
         return settingRow("Rotation", segmented(listOf("0°", "90°", "180°", "270°"), sel) { which ->
-            Log.i(TAG, "DIAG rotation -> $which")
+            diag { "DIAG rotation -> $which" }
             applyOrientation(orients[which])
         })
     }
@@ -2938,10 +2378,10 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         val sel = fitPref().coerceIn(0, 2) // index = core FitMode code
         return settingRow("Fit", segmented(listOf("Full", "Width", "Height"), sel) { which ->
             setFitPref(which)
-            Log.i(TAG, "DIAG fit -> mode=$which")
+            diag { "DIAG fit -> mode=$which" }
             engine.execute {
                 try { NativeBridge.nativeSetFit(docHandle, which) } catch (e: RuntimeException) {}
-                renderAndBlit(); adapter.refreshFull()
+                repaintPanel()
             }
         })
     }
@@ -2951,18 +2391,18 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         val container = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         container.addView(settingRow("Page Crop", segmented(listOf("None", "Auto"), if (cropAutoPref()) 1 else 0) { which ->
             setCropAutoPref(which == 1)
-            Log.i(TAG, "DIAG crop auto=${which == 1}")
+            diag { "DIAG crop auto=${which == 1}" }
             engine.execute {
                 try { NativeBridge.nativeSetCrop(docHandle, which, cropMarginPref()) } catch (e: RuntimeException) {}
-                renderAndBlit(); adapter.refreshFull()
+                repaintPanel()
             }
         }))
         container.addView(settingRow("Margin", cellBar(8, cropMarginPref()) { level ->
             setCropMarginPref(level)
-            Log.i(TAG, "DIAG crop margin=$level")
+            diag { "DIAG crop margin=$level" }
             engine.execute {
                 try { NativeBridge.nativeSetCrop(docHandle, if (cropAutoPref()) 1 else 0, level) } catch (e: RuntimeException) {}
-                renderAndBlit(); adapter.refreshFull()
+                repaintPanel()
             }
         }))
         return container
@@ -2987,7 +2427,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
                 val np = try { call() } catch (e: RuntimeException) { -1 }
                 if (np >= 0) {
                     pageCount = NativeBridge.nativePageCount(docHandle)
-                    renderAndBlit(); adapter.refreshFull()
+                    repaintPanel()
                 } else {
                     runOnUiThread { Toast.makeText(this, "Page layout adjusts reflowable books (EPUB)", Toast.LENGTH_SHORT).show() }
                 }
@@ -2999,18 +2439,18 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         val supportsReflow = try { NativeBridge.nativeSupportsReflow(docHandle) } catch (e: RuntimeException) { false }
         if (supportsReflow) {
             container.addView(settingRow("Reflow", segmented(listOf("Off", "On"), if (reflowOn) 1 else 0) { which ->
-                Log.i(TAG, "DIAG reflow=${which == 1}")
+                diag { "DIAG reflow=${which == 1}" }
                 setReflowMode(which == 1)
             }))
         }
         container.addView(settingRow("Line Spacing", segmented(listOf("Small", "Medium", "Large"), lineSpacingPref()) { which ->
             setLineSpacingPref(which)
-            Log.i(TAG, "DIAG line spacing=$which")
+            diag { "DIAG line spacing=$which" }
             applyReflow { NativeBridge.nativeSetLineSpacing(docHandle, LINE_SPACINGS[which]) }
         }))
         container.addView(settingRow("Alignment", segmented(listOf("Left", "Justify", "Center", "Right"), alignmentPref()) { which ->
             setAlignmentPref(which)
-            Log.i(TAG, "DIAG alignment=$which")
+            diag { "DIAG alignment=$which" }
             applyReflow { NativeBridge.nativeSetAlignment(docHandle, which) }
         }))
         return container
@@ -3036,7 +2476,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
                     }
                 }
                 pageCount = NativeBridge.nativePageCount(docHandle)
-                renderAndBlit(); adapter.refreshFull()
+                repaintPanel()
             } else {
                 runOnUiThread { Toast.makeText(this, "This PDF has no text layer to reflow", Toast.LENGTH_SHORT).show() }
             }
@@ -3091,18 +2531,18 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         val container = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         container.addView(settingRow("Contrast", cellBar(CONTRAST_MAX, contrastPref()) { level ->
             setContrastPref(level)
-            Log.i(TAG, "DIAG contrast step=$level")
+            diag { "DIAG contrast step=$level" }
             engine.execute {
                 try { NativeBridge.nativeSetContrast(docHandle, level) } catch (e: RuntimeException) {}
-                renderAndBlit(); adapter.refreshFull()
+                repaintPanel()
             }
         }))
         container.addView(settingRow("Quality", segmented(listOf("Low", "Default", "High"), renderQualityPref()) { which ->
             setRenderQualityPref(which)
-            Log.i(TAG, "DIAG render quality=$which")
+            diag { "DIAG render quality=$which" }
             engine.execute {
                 try { NativeBridge.nativeSetRenderQuality(docHandle, which) } catch (e: RuntimeException) {}
-                renderAndBlit(); adapter.refreshFull()
+                repaintPanel()
             }
         }))
         return container
@@ -3127,7 +2567,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             setTextScalePref(TEXT_SCALES[idx]); refresh()
             engine.execute {
                 val np = try { NativeBridge.nativeSetTextScale(docHandle, TEXT_SCALES[idx]) } catch (e: RuntimeException) { -1 }
-                if (np >= 0) { pageCount = NativeBridge.nativePageCount(docHandle); renderAndBlit(); adapter.refreshFull() }
+                if (np >= 0) { pageCount = NativeBridge.nativePageCount(docHandle); repaintPanel() }
                 else runOnUiThread { Toast.makeText(this, "Font size adjusts reflowable books (EPUB)", Toast.LENGTH_SHORT).show() }
             }
         }
@@ -3218,6 +2658,10 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
 
     companion object {
         const val TAG = "ReaderActivity"
+
+        /** Gate for verbose `DIAG` tracing. Off by default: these logs run on render/stroke/tap
+         *  paths and can leak reading behavior to logcat on a shared device. Flip when debugging. */
+        const val DIAG = false
         const val DPI = 226 // Supernote-class panel density (approx); refined per device.
         const val REQ_OPEN_DOC = 1 // startActivityForResult request code for the PDF picker.
         const val PREFS = "inkread"
@@ -3229,13 +2673,11 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         const val MAX_ZOOM_UI = 5f // matches the core's MAX_ZOOM clamp (RR5-FR3).
         const val PREVIEW_MS = 50L // min interval between live zoom/pan preview blits (e-ink cadence).
         const val ZOOM_STEP = 1.4f // +/- button zoom multiplier.
-        const val EXPORT_DIR_NAME = "Document"
-        // Supernote folders the Partner app syncs — searched to place the export beside the original.
-        val SYNCED_DIRS = arrayOf("Document", "EXPORT", "Note", "INBOX", "MyStyle", "Download")
         const val SELECTION_HANDLE_PX = 8f // half-size of the square corner handles on the selection box.
+        const val MULTILINE_DRAG_FRAC = 0.045f // drag vertical span (frac of height) above which it's a multi-line → line-span select.
+        const val OPEN_DRAG_FRAC = 0.08f // lasso: start-to-lift distance (normalized) above which the gesture is an open drag (vs a closed loop).
         const val CONTRAST_MAX = 8 // mirrors reader-core render::contrast::MAX_CONTRAST_STEP (RR4).
         val LINE_SPACINGS = floatArrayOf(1.2f, 1.4f, 1.7f) // Small / Medium / Large (RR4).
-        const val MAX_SEARCH_HITS = 1000 // cap a query's collected hits to bound memory + scan time (RR2/RR19).
         const val HIGHLIGHT_WIDTH_PX = 30f // wide marker band (vs INK_STROKE_WIDTH for the pen).
         const val STROKE_PAUSE_MS = 600L // commit a stroke after this pen-pause (swallowed-UP net).
         const val LONG_PRESS_MS = 500L // hold the pen this long (≈still) on a word → look it up.

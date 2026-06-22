@@ -532,6 +532,56 @@ impl Document for PdfBackend {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)] // mirrors the render params + the crop window
+    fn page_fit_transform(
+        &self,
+        index: usize,
+        vw: u32,
+        vh: u32,
+        mode: FitMode,
+        pan_x: f32,
+        pan_y: f32,
+        crop: Option<NormRect>,
+    ) -> Option<(f32, f32, f32, f32)> {
+        // Reflowed text fills the viewport — page coords already equal viewport coords.
+        if self.reflow_on() {
+            return None;
+        }
+        let page = i32::try_from(index)
+            .ok()
+            .and_then(|i| self.document.pages().get(i).ok())?;
+        let (pw, ph) = (page.width().value, page.height().value);
+        let (bw, bh) = (i32::try_from(vw).ok()?, i32::try_from(vh).ok()?);
+        if pw <= 0.0 || ph <= 0.0 || bw <= 0 || bh <= 0 {
+            return None;
+        }
+        // The visible page-normalized window: the auto-crop region (render_cropped) or the whole
+        // page (render_fit). Degenerate crop → whole page (matches the renderers' fallback).
+        let (cx0, cy0, cx1, cy1) = match crop {
+            Some(c) if (c.x1 - c.x0) > f32::EPSILON && (c.y1 - c.y0) > f32::EPSILON => (
+                c.x0.clamp(0.0, 1.0),
+                c.y0.clamp(0.0, 1.0),
+                c.x1.clamp(0.0, 1.0),
+                c.y1.clamp(0.0, 1.0),
+            ),
+            _ => (0.0, 0.0, 1.0, 1.0),
+        };
+        let (cw, ch) = (cx1 - cx0, cy1 - cy0);
+        // Replicate render_fit/render_cropped EXACTLY: the crop window (points cw·pw × ch·ph) is
+        // aspect-fit to (tw, th), then centered/letterboxed (or pan-offset) by fit_place. A page
+        // point px maps to buffer pixel `((px - cx0)/cw)·tw + (dx - sx)`, so in viewport-norm:
+        //   scale = tw / (cw·bw),  offset = (-cx0/cw·tw + (dx - sx)) / bw.
+        let (tw, th) = fit_dims((cw * pw) / (ch * ph), bw, bh, mode);
+        let (sx, dx, _) = fit_place(tw, bw, pan_x);
+        let (sy, dy, _) = fit_place(th, bh, pan_y);
+        Some((
+            tw as f32 / (cw * bw as f32),
+            (-cx0 / cw * tw as f32 + (dx - sx) as f32) / bw as f32,
+            th as f32 / (ch * bh as f32),
+            (-cy0 / ch * th as f32 + (dy - sy) as f32) / bh as f32,
+        ))
+    }
+
     fn content_bbox(&self, index: usize) -> Option<NormRect> {
         // Reflowed text fills the viewport with no white margins — nothing to crop.
         if self.reflow_on() {
@@ -753,6 +803,13 @@ impl Document for PdfBackend {
         match &*self.reflow.borrow() {
             Some(v) => text_select::text_in_rect(&v.page_chars(page), rect),
             None => text_select::text_in_rect(&self.page_chars(page), rect),
+        }
+    }
+
+    fn text_line_span(&self, page: usize, start: (f32, f32), end: (f32, f32)) -> TextSelection {
+        match &*self.reflow.borrow() {
+            Some(v) => text_select::text_line_span(&v.page_chars(page), start, end),
+            None => text_select::text_line_span(&self.page_chars(page), start, end),
         }
     }
 

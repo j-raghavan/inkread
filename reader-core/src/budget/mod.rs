@@ -67,6 +67,20 @@ pub enum TrimLevel {
     Critical,
 }
 
+impl TrimLevel {
+    /// Decode the JNI severity code: `0` → `Moderate`, anything `>= 1` → `Critical`. The Kotlin
+    /// shell maps Android's `onTrimMemory` constants onto this; an unknown/higher value is treated
+    /// as the more aggressive shed, which is the safe default under memory pressure.
+    #[must_use]
+    pub fn from_code(code: i32) -> TrimLevel {
+        if code >= 1 {
+            TrimLevel::Critical
+        } else {
+            TrimLevel::Moderate
+        }
+    }
+}
+
 /// The session's cache governor (RR24): owns the render + cover caches, sized by a
 /// [`ResourceBudget`], and trims them on memory pressure.
 pub struct Caches {
@@ -215,6 +229,15 @@ mod tests {
         assert!(c.bytes() <= 8);
         c.clear();
         assert!(c.is_empty());
+    }
+
+    // RR24-FR3: the JNI severity code decodes to the matching trim level (unknown → Critical).
+    #[test]
+    fn trim_level_from_code_maps_severity() {
+        assert_eq!(TrimLevel::from_code(0), TrimLevel::Moderate);
+        assert_eq!(TrimLevel::from_code(1), TrimLevel::Critical);
+        assert_eq!(TrimLevel::from_code(99), TrimLevel::Critical);
+        assert_eq!(TrimLevel::from_code(-5), TrimLevel::Moderate);
     }
 
     // RR24-FR3: trim sheds caches by severity — Moderate drops covers, Critical drops all.

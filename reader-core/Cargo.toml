@@ -12,9 +12,9 @@ description = "The inkread engine cdylib (libreader.so): document parsing/render
 [lib]
 # Output name `reader` → `libreader.so` so the cdylib matches the Android
 # `System.loadLibrary("reader")` seam (NativeBridge.kt). The Rust import path is unchanged
-# (`use reader_core::...`, derived from the package name), so reader-desktop/tests still link.
+# (`use reader_core::...`, derived from the package name), so the host tests still link.
 name = "reader"
-# rlib for host tests + reader-desktop; cdylib for libreader.so via cargo-ndk (RR1-FR1).
+# rlib for host tests; cdylib for libreader.so via cargo-ndk (RR1-FR1).
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]

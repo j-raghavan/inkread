@@ -9,7 +9,11 @@
 use crate::render::gray::DitherMode;
 use std::collections::HashMap;
 
-/// The render-cache key (RR4-FR6): page + zoom + rotation + invert + dither + gamma.
+/// The render-cache key (RR4-FR6): every parameter that changes the rendered bytes. Two axes:
+/// the pixel pipeline (page + zoom + rotation + invert + dither + gamma) and the page-view
+/// settings (fit/crop/quality/contrast — see [`Self::with_view`]). A buffer may be served from
+/// the cache only for an identical key, so the key MUST capture all of it — otherwise a fit or
+/// contrast change would silently reuse a stale buffer.
 ///
 /// Floats are integerized (×1000) so the key is `Hash`/`Eq` — a raw `f32` must never enter a
 /// hash key (NaN is not `Eq`; precision noise would split logically-equal keys).
@@ -27,10 +31,22 @@ pub struct PageHash {
     pub dither: DitherMode,
     /// Gamma ×1000.
     pub gamma_milli: u32,
+    /// Fit-mode code the buffer was produced with (`0`=Page, `1`=Width, `2`=Height; RR4).
+    pub fit_code: u8,
+    /// Whether auto-crop was applied (RR4).
+    pub crop_auto: bool,
+    /// Crop margin step the buffer was produced with (RR4).
+    pub crop_margin: u8,
+    /// Render-quality step the buffer was produced with (`0`=low, `1`=default, `2`=high; RR4).
+    pub quality: u8,
+    /// Contrast/display-enhancement step baked into the buffer (`0`=off; RR4).
+    pub contrast: u8,
 }
 
 impl PageHash {
-    /// Build a key, integerizing the float params. Negative/NaN zoom or gamma clamp to 0.
+    /// Build a key, integerizing the float params. Negative/NaN zoom or gamma clamp to 0. The
+    /// page-view settings default to "plain" (fit=Page, no crop, default quality, no contrast) —
+    /// set them with [`Self::with_view`] when they are in play.
     #[must_use]
     pub fn new(
         page: u32,
@@ -47,7 +63,31 @@ impl PageHash {
             invert,
             dither,
             gamma_milli: to_milli(gamma),
+            fit_code: 0,
+            crop_auto: false,
+            crop_margin: 0,
+            quality: 1,
+            contrast: 0,
         }
+    }
+
+    /// Fold the page-view settings (RR4) into the key so a fit/crop/quality/contrast change keys a
+    /// distinct buffer. Chained after [`Self::new`].
+    #[must_use]
+    pub fn with_view(
+        mut self,
+        fit_code: u8,
+        crop_auto: bool,
+        crop_margin: u8,
+        quality: u8,
+        contrast: u8,
+    ) -> Self {
+        self.fit_code = fit_code;
+        self.crop_auto = crop_auto;
+        self.crop_margin = crop_margin;
+        self.quality = quality;
+        self.contrast = contrast;
+        self
     }
 }
 

@@ -34,6 +34,7 @@ use std::sync::Arc;
 
 use inkread_ink::{InkColor, Tool};
 
+use crate::budget::TrimLevel;
 use crate::dict::{encode_definition_wire, Dict};
 use crate::document::{
     encode_links_wire, encode_search_wire, encode_selection_wire, encode_toc_wire, NormRect,
@@ -140,9 +141,7 @@ pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeOpenDocumen
         let caps = read_caps(env, &caps_bytes)?;
         let viewport = read_viewport(env, width, height, dpi)?;
 
-        let bytes = std::fs::read(&path)
-            .map_err(|e| CoreError::InvalidArgument(format!("read {path}: {e}")))
-            .map_err(|e| throw(env, &e))?;
+        let bytes = read_document_file(&path).map_err(|e| throw(env, &e))?;
 
         let opened = if is_epub(&path) {
             ReaderSession::open_epub(bytes, caps, viewport)
@@ -155,6 +154,35 @@ pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeOpenDocumen
         }
     })
     .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
+}
+
+/// Hard ceiling on a document file opened over the JNI boundary (RR21-FR3 / RR22). A multi-GB or
+/// decompression-bomb file would OOM the process if read whole; we stat first and reject before the
+/// read. 2 GiB is far above any real PDF/EPUB while still bounding the allocation.
+const MAX_DOCUMENT_BYTES: u64 = 2 << 30;
+
+/// Read a document file for open, defensively (RR21-FR3): resolve the path (canonicalize, so `..`
+/// and symlinks can't redirect us), require a **regular file** (reject `/dev/*`, FIFOs, and
+/// directories), and **cap the size** before pulling the bytes into RAM. The shell still owns which
+/// roots it hands us (scoped storage / SAF, RR22); this closes the native boundary against a
+/// malformed path and an oversized/streaming file.
+fn read_document_file(path: &str) -> CoreResult<Vec<u8>> {
+    let resolved = std::fs::canonicalize(path)
+        .map_err(|e| CoreError::InvalidArgument(format!("resolve {path}: {e}")))?;
+    let meta = std::fs::metadata(&resolved)
+        .map_err(|e| CoreError::InvalidArgument(format!("stat {path}: {e}")))?;
+    if !meta.is_file() {
+        return Err(CoreError::InvalidArgument(format!(
+            "{path} is not a regular file"
+        )));
+    }
+    if meta.len() > MAX_DOCUMENT_BYTES {
+        return Err(CoreError::InvalidArgument(format!(
+            "{path} is {} bytes, over the {MAX_DOCUMENT_BYTES}-byte open limit",
+            meta.len()
+        )));
+    }
+    std::fs::read(&resolved).map_err(|e| CoreError::InvalidArgument(format!("read {path}: {e}")))
 }
 
 /// Pick the backend by file extension: `.epub` (case-insensitive) → reflowable EPUB, else PDF.
@@ -192,9 +220,7 @@ pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeOpenDocumen
         let caps = read_caps(env, &caps_bytes)?;
         let viewport = read_viewport(env, width, height, dpi)?;
 
-        let bytes = std::fs::read(&path)
-            .map_err(|e| CoreError::InvalidArgument(format!("read {path}: {e}")))
-            .map_err(|e| throw(env, &e))?;
+        let bytes = read_document_file(&path).map_err(|e| throw(env, &e))?;
 
         let book = BookId::new(book_id).map_err(|e| throw(env, &e))?;
         let store = SqliteStore::open(Path::new(&db_path)).map_err(|e| throw(env, &e))?;
@@ -238,6 +264,29 @@ pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeCloseDocume
 }
 
 // =====================================================================================
+// nativeOnTrimMemory(handle, level) — shed bounded caches under memory pressure (RR24-FR3).
+// `level` is the core severity code (0 = moderate, >=1 = critical). Best-effort: a null/closed
+// handle is a silent no-op (onTrimMemory can fire after the reader tore down its document).
+// =====================================================================================
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeOnTrimMemory<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+    level: jint,
+) {
+    env.with_env(|_env| -> jni::errors::Result<()> {
+        if handle != 0 {
+            // SAFETY: borrowed, not owned (Amendment 2).
+            let session = unsafe { &mut *(handle as *mut ReaderSession) };
+            session.on_trim_memory(TrimLevel::from_code(level));
+        }
+        Ok(())
+    })
+    .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
+}
+
+// =====================================================================================
 // nativePageCount(handle) : int
 // =====================================================================================
 #[unsafe(no_mangle)]
@@ -257,6 +306,9 @@ pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativePageCount<'
 // =====================================================================================
 // nativeRenderPage(handle, directBuffer) — render the current page into the direct
 // ByteBuffer the shell locked. The PixelBuffer borrow never outlives this call (Amendment 5).
+// NOTE: this is NOT a read-only render — it serves/populates the session's render cache
+// (RR4-FR6), so it mutates session state and must run on the engine thread like every other
+// handle-taking call (the session is not thread-safe).
 // =====================================================================================
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeRenderPage<'local>(
@@ -1108,6 +1160,31 @@ pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeTextInRect<
         let session = unsafe { session_mut(handle) }.map_err(|e| throw(env, &e))?;
         let target = if page < 0 { 0usize } else { page as usize };
         let sel = session.text_in_rect(target, NormRect { x0, y0, x1, y1 });
+        env.byte_array_from_slice(&encode_selection_wire(&sel))
+    })
+    .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
+}
+
+// nativeTextLineSpan(handle, page, sx,sy, ex,ey) : bytes — reading-order selection a drag sweeps
+// from the start point (sx,sy) to the lift point (ex,ey), the multi-line drag. Whole lines from the
+// start line through the line before the lift; the lift line clipped to the word under ex; gaps
+// between line boxes filled. Decode with WireCodec.decodeSelection.
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeTextLineSpan<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+    page: jint,
+    sx: jfloat,
+    sy: jfloat,
+    ex: jfloat,
+    ey: jfloat,
+) -> JByteArray<'local> {
+    env.with_env(|env| -> jni::errors::Result<JByteArray<'local>> {
+        let session = unsafe { session_mut(handle) }.map_err(|e| throw(env, &e))?;
+        let target = if page < 0 { 0usize } else { page as usize };
+        let sel = session.text_line_span(target, (sx, sy), (ex, ey));
         env.byte_array_from_slice(&encode_selection_wire(&sel))
     })
     .resolve::<jni::errors::ThrowRuntimeExAndDefault>()

@@ -58,6 +58,13 @@ object NativeBridge {
     /** Free the session. Null-safe + double-close tolerant (Amendment 2). */
     external fun nativeCloseDocument(handle: Long)
 
+    /**
+     * Shed bounded caches under platform memory pressure (RR24-FR3 / `onTrimMemory`). [level] is the
+     * core severity code: 0 = moderate (drop the least-critical caches), 1 = critical (drop all).
+     * Null/closed-handle safe — never throws.
+     */
+    external fun nativeOnTrimMemory(handle: Long, level: Int)
+
     /** Page count of the open document. */
     external fun nativePageCount(handle: Long): Int
 
@@ -95,6 +102,12 @@ object NativeBridge {
 
     /** The text within the normalized rect on `page`; decode with [WireCodec.decodeSelection]. */
     external fun nativeTextInRect(handle: Long, page: Int, x0: Float, y0: Float, x1: Float, y1: Float): ByteArray
+
+    /** Reading-order selection a drag sweeps from the start point (sx,sy) to the lift point (ex,ey)
+     *  on `page` — the multi-line drag. Whole lines from the start line through the line before the
+     *  lift; the lift line clipped to the word under ex; inter-line gaps filled. Decode with
+     *  [WireCodec.decodeSelection]. */
+    external fun nativeTextLineSpan(handle: Long, page: Int, sx: Float, sy: Float, ex: Float, ey: Float): ByteArray
 
     /**
      * Find [query] on `page` (RR2 in-document search), case-insensitive. Returns the search wire

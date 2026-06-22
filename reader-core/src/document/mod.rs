@@ -70,6 +70,16 @@ impl FitMode {
             _ => FitMode::Page,
         }
     }
+
+    /// The wire integer for this mode (inverse of [`Self::from_code`]) — used to key the render cache.
+    #[must_use]
+    pub fn code(self) -> u8 {
+        match self {
+            FitMode::Page => 0,
+            FitMode::Width => 1,
+            FitMode::Height => 2,
+        }
+    }
 }
 
 /// Document metadata (title/author) — the M0 subset (RR5-FR2).
@@ -310,6 +320,28 @@ pub trait Document {
         None
     }
 
+    /// The affine map from **page-normalized** coords to **viewport-normalized** coords for how
+    /// [`Self::render_fit`] actually places the page in a `vw`×`vh` buffer under `mode`
+    /// (RR4 / RR11): the page is scaled aspect-correct and centered with letterbox, so a page
+    /// point `(px, py)` lands at `(px·sx + ox, py·sy + oy)`. Returns `(sx, ox, sy, oy)`, or `None`
+    /// when the page fills the viewport with no transform (reflowable backends, unknown aspect) —
+    /// then page coords already equal viewport coords. Used to align text-layer boxes (page-space)
+    /// with the rendered pixels (viewport-space). `crop` is the page-normalized auto-crop region
+    /// when active (matching [`Self::render_cropped`]); `None` = the whole page ([`Self::render_fit`]).
+    #[allow(clippy::too_many_arguments)] // mirrors the render params + the crop window
+    fn page_fit_transform(
+        &self,
+        _index: usize,
+        _vw: u32,
+        _vh: u32,
+        _mode: FitMode,
+        _pan_x: f32,
+        _pan_y: f32,
+        _crop: Option<NormRect>,
+    ) -> Option<(f32, f32, f32, f32)> {
+        None
+    }
+
     /// Render the normalized `crop` sub-rect of page `index` fit to `buf` per [`FitMode`] (RR4 —
     /// Crop). Like [`Self::render_fit`] but only the cropped region is shown (margins trimmed), so
     /// the content fills the screen. `pan_x`/`pan_y` scroll an overflowing axis. Default: ignores
@@ -396,6 +428,14 @@ pub trait Document {
     /// The text whose glyphs fall within the normalized `rect` on `page` (RR11 / drag-highlight,
     /// D1). Default: an empty selection.
     fn text_in_rect(&self, _page: usize, _rect: NormRect) -> TextSelection {
+        TextSelection::default()
+    }
+
+    /// Reading-order selection a drag sweeps from `start` to `end` (normalized points) on `page` —
+    /// the multi-line drag (RR11). Unlike [`Self::text_in_rect`], the start line through the line
+    /// before the lift are taken WHOLE; the lift line is clipped to the word under `end.x`; line
+    /// boxes are grown to fill the inter-line gaps. Default: an empty selection.
+    fn text_line_span(&self, _page: usize, _start: (f32, f32), _end: (f32, f32)) -> TextSelection {
         TextSelection::default()
     }
 
