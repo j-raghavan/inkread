@@ -110,9 +110,12 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
      *  (the fixed page is the faithful view; reflow is an opt-in toggle on the Page tab). */
     @Volatile private var reflowOn = false
 
-    // ---- dictionary (RR12 / D4) ----
-    /** Open `Dict` handle (0 = not opened). Engine-thread only. */
-    private var dictHandle = 0L
+    // ---- dictionary (RR12 / D4) — owns the corpus handle + lookup/define/manage UI (SRP) ----
+    private val dict = DictController(object : DictController.Host {
+        override val activity get() = this@ReaderActivity
+        override val docHandle get() = this@ReaderActivity.docHandle
+        override fun engineExecute(block: () -> Unit) { engine.execute(block) }
+    })
 
     // ---- tool model (ADR-INKREAD-0010) ----
     /** The active annotation tool. [Tool.PEN] inks via firmware; the rest capture the stylus. */
@@ -180,7 +183,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         Log.i(TAG, "DIAG long-press lookup @($nx,$ny) page=$page")
         engine.execute {
             clearFirmwareInk(); repaintPanel() // wipe the pen dot the hold left
-            defineWord(page, nx, ny)
+            dict.defineWord(page, nx, ny)
         }
     }
 
@@ -209,7 +212,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         if (viewW == 0 || viewH == 0) return
         val nx = vToNx(vx); val ny = vToNy(vy); val page = currentPage
         Log.i(TAG, "DIAG long-press lookup @($nx,$ny) page=$page")
-        engine.execute { defineWord(page, nx, ny) }
+        engine.execute { dict.defineWord(page, nx, ny) }
     }
 
     // ---- launch intent (from HomeActivity), read on the UI thread, consumed on the engine thread ----
@@ -504,7 +507,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
     override fun onDestroy() {
         engine.execute {
             closeDocument()
-            closeDict()
+            dict.close()
         }
         engine.shutdown() // lets the queued close run, then stops the worker
         super.onDestroy()
@@ -1292,7 +1295,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         control(R.drawable.ic_menu_zoom_out, "Zoom −") { zoomBy(1f / ZOOM_STEP) }
         control(R.drawable.ic_menu_zoom_in, "Zoom +") { zoomBy(ZOOM_STEP) }
         control(R.drawable.ic_menu_export, "Export") { showExportDialog() }
-        control(R.drawable.ic_menu_dict, "Dicts") { showDictionariesDialog() }
+        control(R.drawable.ic_menu_dict, "Dicts") { dict.showDictionariesDialog() }
         // Document controls consolidated into one KOReader-style tabbed sheet (Rotate/Fit/Font/Display).
         control(R.drawable.ic_menu_adjust, "Adjust") { showAdjustSheet() }
         control(R.drawable.ic_menu_open, "Open") { openPicker() }
@@ -1949,7 +1952,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             .setTitle(if (snippet.length > 42) snippet.take(42) + "…" else snippet)
             .setItems(arrayOf("Define", "Copy", "Highlight")) { _, which ->
                 when (which) {
-                    0 -> defineSelectionText(snippet)
+                    0 -> dict.defineSelectionText(snippet)
                     1 -> copyTextToClipboard(snippet)
                     2 -> engine.execute { highlightTextBoxes(sel) }
                 }
@@ -1958,12 +1961,6 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             // it with the real annotation, a Define opens the dict card over the cleared page.
             .setOnDismissListener { engine.execute { repaintPanel() } }
             .show()
-    }
-
-    /** Define the first word-like token of a printed-text selection (lookup is per-word). */
-    private fun defineSelectionText(text: String) {
-        val word = text.split(Regex("\\s+")).firstOrNull { it.any(Char::isLetter) } ?: return
-        engine.execute { lookupAndShow(word) }
     }
 
     /** Copy printed-text selection to the system clipboard. */
@@ -2156,458 +2153,12 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         val page = currentPage
         if (dragged) {
             val r = floatArrayOf(vToNx(minX), vToNy(minY), vToNx(maxX), vToNy(maxY))
-            engine.execute { defineRect(page, r) }
+            engine.execute { dict.defineRect(page, r) }
         } else {
-            engine.execute { defineWord(page, vToNx(pts[0]), vToNy(pts[1])) }
+            engine.execute { dict.defineWord(page, vToNx(pts[0]), vToNy(pts[1])) }
         }
         // Wipe the firmware ink the define gesture left behind (it never becomes an annotation).
         engine.execute { clearFirmwareInk(); repaintPanel() }
-    }
-
-    /** Resolve the word under a normalized point and look it up (engine thread). */
-    private fun defineWord(page: Int, nx: Float, ny: Float) {
-        if (docHandle == 0L) return
-        val sel = try {
-            WireCodec.decodeSelection(NativeBridge.nativeWordAt(docHandle, page, nx, ny))
-        } catch (e: RuntimeException) {
-            Log.e(TAG, "wordAt failed: ${e.message}"); return
-        }
-        if (sel.isEmpty) {
-            runOnUiThread { Toast.makeText(this, "No word there", Toast.LENGTH_SHORT).show() }
-            return
-        }
-        lookupAndShow(sel.text)
-    }
-
-    /** Resolve the text within a highlighted rect and look up its first word (engine thread). */
-    private fun defineRect(page: Int, r: FloatArray) {
-        if (docHandle == 0L) return
-        val sel = try {
-            WireCodec.decodeSelection(NativeBridge.nativeTextInRect(docHandle, page, r[0], r[1], r[2], r[3]))
-        } catch (e: RuntimeException) {
-            Log.e(TAG, "textInRect failed: ${e.message}"); return
-        }
-        val word = sel.text.split(Regex("\\s+")).firstOrNull().orEmpty()
-        if (word.isBlank()) {
-            runOnUiThread { Toast.makeText(this, "No text selected", Toast.LENGTH_SHORT).show() }
-            return
-        }
-        lookupAndShow(word)
-    }
-
-    /** On-device lookup → online fallback (cached) → show the popup (engine thread). */
-    private fun lookupAndShow(rawWord: String) {
-        val word = rawWord.trim().trim { !it.isLetter() && it != '\'' && it != '-' }
-        if (word.isEmpty()) return
-        if (!ensureDictOpen()) {
-            runOnUiThread { Toast.makeText(this, "Dictionary not available", Toast.LENGTH_SHORT).show() }
-            return
-        }
-        var def = try {
-            WireCodec.decodeDefinition(NativeBridge.nativeDefine(dictHandle, word, "en"))
-        } catch (e: RuntimeException) {
-            WordDefinition(false, "", "", emptyList(), emptyList())
-        }
-        if (!def.found) {
-            onlineLookup(word)?.let { online ->
-                try {
-                    NativeBridge.nativeDictPut(dictHandle, online.lang, online.headword, online.senses.joinToString("\n"))
-                } catch (e: RuntimeException) {
-                    Log.w(TAG, "dict cache failed: ${e.message}")
-                }
-                def = online
-            }
-        }
-        val result = def
-        runOnUiThread {
-            if (result.found) showDictPopup(word, result)
-            else Toast.makeText(this, "\"$word\" not found", Toast.LENGTH_SHORT).show()
-        }
-    }
-
-    /** Best-effort online lookup via Wiktionary's REST API (RR12; opt-in network). Engine thread. */
-    private fun onlineLookup(word: String): WordDefinition? {
-        return try {
-            val url = URL("https://en.wiktionary.org/api/rest_v1/page/definition/${Uri.encode(word)}")
-            val conn = (url.openConnection() as HttpURLConnection).apply {
-                connectTimeout = 4000
-                readTimeout = 6000
-                setRequestProperty("User-Agent", "InkRead/0.1 (offline e-ink reader)")
-            }
-            if (conn.responseCode != 200) return null
-            val body = conn.inputStream.bufferedReader().use { it.readText() }
-            val root = JSONObject(body)
-            val lang = if (root.has("en")) "en" else root.keys().asSequence().firstOrNull() ?: return null
-            val arr = root.getJSONArray(lang)
-            val senses = ArrayList<String>()
-            outer@ for (i in 0 until arr.length()) {
-                val group = arr.getJSONObject(i)
-                val pos = group.optString("partOfSpeech", "")
-                val defs = group.optJSONArray("definitions") ?: continue
-                for (j in 0 until defs.length()) {
-                    val d = stripHtmlTags(defs.getJSONObject(j).optString("definition", ""))
-                    if (d.isNotBlank()) senses.add(if (pos.isNotEmpty()) "($pos) $d" else d)
-                    if (senses.size >= 6) break@outer
-                }
-            }
-            if (senses.isEmpty()) null else WordDefinition(true, word, lang, senses, emptyList())
-        } catch (e: Exception) {
-            Log.w(TAG, "online lookup failed: ${e.message}")
-            null
-        }
-    }
-
-    private fun stripHtmlTags(s: String): String =
-        s.replace(Regex("<[^>]*>"), "").replace("&amp;", "&").replace("&#39;", "'").trim()
-
-    /** Copy the bundled corpus out of assets (once) and open it; returns true if usable. */
-    private fun ensureDictOpen(): Boolean {
-        if (dictHandle != 0L) return true
-        val dest = File(filesDir, "dict.db")
-        if (!dest.exists() || dest.length() == 0L) {
-            runOnUiThread { Toast.makeText(this, "Preparing dictionary…", Toast.LENGTH_SHORT).show() }
-            try {
-                assets.open("dict.db").use { input -> dest.outputStream().use { input.copyTo(it) } }
-            } catch (e: Exception) {
-                Log.e(TAG, "dict copy failed: ${e.message}")
-                return false
-            }
-        }
-        dictHandle = try {
-            NativeBridge.nativeDictOpen(dest.absolutePath)
-        } catch (e: RuntimeException) {
-            Log.e(TAG, "dict open failed: ${e.message}"); 0L
-        }
-        return dictHandle != 0L
-    }
-
-    private fun closeDict() {
-        val h = dictHandle
-        dictHandle = 0L
-        if (h != 0L) {
-            try { NativeBridge.nativeDictClose(h) } catch (e: RuntimeException) { /* ignore */ }
-        }
-    }
-
-    /**
-     * The definition card (RR12 / ADR-INKREAD-0009 D3) — a bottom sheet styled after the Supernote
-     * dictionary plugin: the headword (with the *looked-up* word bracketed when it differs, e.g.
-     * `run ⟨running⟩`), a **WordNet** source label, a **Definition / Thesaurus** toggle, and senses
-     * grouped by part of speech with numbered glosses, examples in curly quotes, and per-sense
-     * synonyms. WordNet ships no phonetics/audio, so none are shown (no faux IPA). On-device
-     * results parse via [WordNet]; non-WordNet online hits fall back to plain numbered glosses.
-     */
-    private fun showDictPopup(word: String, def: WordDefinition) {
-        val d = resources.displayMetrics.density
-        fun dp(v: Int) = (v * d).toInt()
-        val grey = Color.parseColor("#6B6B6B")
-        val faint = Color.parseColor("#9E9E9E")
-        val serif = Typeface.create("serif", Typeface.NORMAL)
-        val serifBold = Typeface.create("serif", Typeface.BOLD)
-
-        val parsed = WordNet.parse(def.senses)
-        val headword = def.headword.ifEmpty { word }
-        // Thesaurus = the synonyms table plus every per-sense [syn:] set, deduped, headword removed.
-        val thesaurus = (def.synonyms + parsed.senses.flatMap { it.synonyms })
-            .map { it.trim() }.filter { it.isNotEmpty() && !it.equals(headword, ignoreCase = true) }
-            .distinct()
-
-        val dialog = Dialog(this).apply { requestWindowFeature(Window.FEATURE_NO_TITLE) }
-        val root = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            background = GradientDrawable().apply {
-                setColor(Color.WHITE)
-                cornerRadii = floatArrayOf(dp(18).toFloat(), dp(18).toFloat(), dp(18).toFloat(), dp(18).toFloat(), 0f, 0f, 0f, 0f)
-            }
-            setPadding(dp(24), dp(12), dp(24), dp(20))
-        }
-
-        // ── grab handle (calm sheet affordance) ──────────────────────────────────
-        root.addView(View(this).apply {
-            background = GradientDrawable().apply { setColor(Color.parseColor("#D8D8D8")); cornerRadius = dp(2).toFloat() }
-            layoutParams = LinearLayout.LayoutParams(dp(36), dp(4)).apply {
-                gravity = Gravity.CENTER_HORIZONTAL; bottomMargin = dp(12)
-            }
-        })
-
-        // ── header: headword + looked-up chip · WordNet source ───────────────────
-        val header = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
-        header.addView(TextView(this).apply {
-            text = headword; setTextColor(Color.BLACK); textSize = 27f; typeface = serifBold
-        })
-        if (!word.equals(headword, ignoreCase = true) && word.isNotEmpty()) {
-            header.addView(TextView(this).apply {
-                text = "⟨ $word ⟩"; setTextColor(grey); textSize = 14f; typeface = serif
-                setPadding(dp(10), dp(8), 0, 0)
-            })
-        }
-        header.addView(View(this), LinearLayout.LayoutParams(0, 0, 1f)) // spacer
-        header.addView(TextView(this).apply {
-            text = if (def.lang.isNotEmpty() && def.lang != "en") "WordNet · ${def.lang}" else "WordNet"
-            setTextColor(faint); textSize = 11f; letterSpacing = 0.06f
-        })
-        root.addView(header)
-
-        // ── Definition / Thesaurus toggle ────────────────────────────────────────
-        val body = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(0, dp(14), 0, 0) }
-        lateinit var tabDef: TextView
-        lateinit var tabThe: TextView
-        fun styleTab(tab: TextView, active: Boolean) {
-            tab.setTextColor(if (active) Color.BLACK else faint)
-            tab.typeface = if (active) Typeface.DEFAULT_BOLD else Typeface.DEFAULT
-            tab.paintFlags = if (active) tab.paintFlags or android.graphics.Paint.UNDERLINE_TEXT_FLAG
-            else tab.paintFlags and android.graphics.Paint.UNDERLINE_TEXT_FLAG.inv()
-        }
-        fun renderDefinition() {
-            body.removeAllViews()
-            if (parsed.parseFailed) {
-                for ((i, s) in def.senses.filter { it.isNotBlank() }.take(8).withIndex()) {
-                    body.addView(senseRow(i + 1, s, dp(0)))
-                }
-                return
-            }
-            var lastPos: String? = "?" // sentinel so the first group always prints its badge
-            for (sense in parsed.senses) {
-                if (sense.pos != lastPos) {
-                    lastPos = sense.pos
-                    body.addView(posBadge(WordNet.labelForPos(sense.pos)))
-                }
-                body.addView(senseRow(sense.index, sense.definition, dp(2)))
-                for (ex in sense.examples) {
-                    body.addView(TextView(this).apply {
-                        text = "“$ex”"; setTextColor(grey); textSize = 14f
-                        typeface = Typeface.create(Typeface.DEFAULT, Typeface.ITALIC)
-                        setPadding(dp(22), dp(3), 0, 0)
-                    })
-                }
-                if (sense.synonyms.isNotEmpty()) {
-                    body.addView(TextView(this).apply {
-                        text = "≈ ${sense.synonyms.joinToString(", ")}"
-                        setTextColor(faint); textSize = 13f; setPadding(dp(22), dp(3), 0, 0)
-                    })
-                }
-            }
-        }
-        fun renderThesaurus() {
-            body.removeAllViews()
-            if (thesaurus.isEmpty()) {
-                body.addView(TextView(this).apply {
-                    text = "No thesaurus entries for this word."
-                    setTextColor(grey); textSize = 15f; setPadding(0, dp(4), 0, 0)
-                })
-                return
-            }
-            body.addView(posBadge("synonyms"))
-            body.addView(TextView(this).apply {
-                text = thesaurus.joinToString(" · ")
-                setTextColor(Color.BLACK); textSize = 16f; setLineSpacing(dp(4).toFloat(), 1f)
-                setPadding(0, dp(4), 0, 0)
-            })
-        }
-        val tabs = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; setPadding(0, dp(10), 0, 0) }
-        tabDef = TextView(this).apply {
-            text = "Definition"; textSize = 14f; setPadding(0, dp(4), dp(22), dp(4)); isClickable = true
-            setOnClickListener { styleTab(tabDef, true); styleTab(tabThe, false); renderDefinition() }
-        }
-        tabThe = TextView(this).apply {
-            text = "Thesaurus"; textSize = 14f; setPadding(0, dp(4), 0, dp(4)); isClickable = true
-            setOnClickListener { styleTab(tabThe, true); styleTab(tabDef, false); renderThesaurus() }
-        }
-        tabs.addView(tabDef); tabs.addView(tabThe)
-        root.addView(tabs)
-        root.addView(View(this).apply {
-            setBackgroundColor(Color.parseColor("#ECECEC"))
-            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, maxOf(1, dp(1))).apply {
-                topMargin = dp(8)
-            }
-        })
-        root.addView(ScrollView(this).apply {
-            isVerticalScrollBarEnabled = false
-            addView(body)
-            layoutParams = LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                (resources.displayMetrics.heightPixels * 0.5f).toInt(),
-            )
-        })
-
-        styleTab(tabDef, true); styleTab(tabThe, false); renderDefinition()
-        dialog.setContentView(root)
-        dialog.window?.apply {
-            setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
-            setGravity(Gravity.BOTTOM)
-            setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
-        }
-        dialog.show()
-    }
-
-    /** A part-of-speech badge (a small dark-outlined pill) heading a group of senses. */
-    private fun posBadge(label: String): TextView {
-        val d = resources.displayMetrics.density
-        fun dp(v: Int) = (v * d).toInt()
-        return TextView(this).apply {
-            text = label; setTextColor(Color.BLACK); textSize = 12f; typeface = Typeface.DEFAULT_BOLD
-            letterSpacing = 0.04f
-            setPadding(dp(10), dp(3), dp(10), dp(4))
-            background = GradientDrawable().apply {
-                setColor(Color.parseColor("#F0F0F0"))
-                setStroke(maxOf(1, dp(1)), Color.parseColor("#C9C9C9"))
-                cornerRadius = dp(10).toFloat()
-            }
-            layoutParams = LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
-            ).apply { topMargin = dp(14); bottomMargin = dp(2) }
-        }
-    }
-
-    /** A numbered sense line: a fixed-width index gutter and the gloss filling the rest. */
-    private fun senseRow(index: Int, text: String, topPad: Int): View {
-        val d = resources.displayMetrics.density
-        fun dp(v: Int) = (v * d).toInt()
-        return LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            setPadding(0, maxOf(topPad, dp(7)), 0, 0)
-            addView(TextView(this@ReaderActivity).apply {
-                this.text = "$index."; setTextColor(Color.parseColor("#6B6B6B")); textSize = 15f
-                typeface = Typeface.DEFAULT_BOLD
-                layoutParams = LinearLayout.LayoutParams(dp(22), ViewGroup.LayoutParams.WRAP_CONTENT)
-            })
-            addView(TextView(this@ReaderActivity).apply {
-                this.text = text; setTextColor(Color.BLACK); textSize = 15f
-                setLineSpacing(dp(3).toFloat(), 1f)
-                layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
-            })
-        }
-    }
-
-    /**
-     * Manage user-installed dictionaries (RR12 / ADR-INKREAD-0009 D2) — the KOReader-style "install
-     * your own dictionary" surface. Lists StarDict folders found under [Dictionaries.roots] with an
-     * Install / Remove action each; install compiles the bundle into the writable corpus via
-     * [NativeBridge.nativeDictImport] on the engine thread. Reading the public folders needs
-     * all-files access (same gate as export).
-     */
-    private fun showDictionariesDialog() {
-        if (!Environment.isExternalStorageManager()) {
-            AlertDialog.Builder(this, R.style.InkDialog)
-                .setTitle("Allow file access for dictionaries")
-                .setMessage("To find dictionaries you've copied to the device, inkread needs \"All files access\". Grant it on the next screen, then open Dicts again.")
-                .setPositiveButton("Open settings") { _, _ ->
-                    val uri = Uri.parse("package:$packageName")
-                    runCatching {
-                        startActivity(Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION, uri))
-                    }.onFailure { startActivity(Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION)) }
-                }
-                .setNegativeButton("Cancel", null)
-                .show()
-            return
-        }
-        val d = resources.displayMetrics.density
-        fun dp(v: Int) = (v * d).toInt()
-        val home = Dictionaries.homeRoot()
-        val list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(20), dp(8), dp(20), dp(8)) }
-
-        val dialog = AlertDialog.Builder(this, R.style.InkDialog)
-            .setTitle("Dictionaries")
-            .setView(ScrollView(this).apply { addView(list) })
-            .setPositiveButton("Done", null)
-            .create()
-
-        fun refresh() {
-            list.removeAllViews()
-            val bundles = Dictionaries.discover(this)
-            if (bundles.isEmpty()) {
-                list.addView(TextView(this).apply {
-                    text = "No dictionaries found.\n\nCopy a StarDict folder (its .ifo, .idx and .dict/.dict.dz files) into:\n${home.absolutePath}\n\nthen reopen this screen."
-                    setTextColor(Color.parseColor("#555555")); textSize = 14f; setLineSpacing(dp(3).toFloat(), 1f)
-                })
-                return
-            }
-            for (b in bundles) {
-                val row = LinearLayout(this).apply {
-                    orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
-                    setPadding(0, dp(10), 0, dp(10))
-                }
-                row.addView(LinearLayout(this).apply {
-                    orientation = LinearLayout.VERTICAL
-                    layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
-                    addView(TextView(this@ReaderActivity).apply {
-                        text = b.name; setTextColor(Color.BLACK); textSize = 16f
-                    })
-                    addView(TextView(this@ReaderActivity).apply {
-                        text = if (b.installed) "Installed" else "Not installed"
-                        setTextColor(Color.parseColor("#9E9E9E")); textSize = 12f
-                    })
-                })
-                row.addView(TextView(this).apply {
-                    text = if (b.installed) "Remove" else "Install"
-                    setTextColor(Color.BLACK); textSize = 14f; typeface = Typeface.DEFAULT_BOLD
-                    setPadding(dp(14), dp(6), dp(14), dp(6))
-                    background = GradientDrawable().apply {
-                        setColor(Color.WHITE); setStroke(maxOf(1, dp(1)), Color.BLACK); cornerRadius = dp(16).toFloat()
-                    }
-                    isClickable = true
-                    setOnClickListener {
-                        if (b.installed) removeDictionary(b) { refresh() }
-                        else installDictionary(b) { refresh() }
-                    }
-                })
-                list.addView(row)
-                list.addView(View(this).apply {
-                    setBackgroundColor(Color.parseColor("#EEEEEE"))
-                    layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, maxOf(1, dp(1)))
-                })
-            }
-        }
-        refresh()
-        dialog.show()
-    }
-
-    /** Compile a StarDict bundle into the corpus on the engine thread, with a blocking progress note. */
-    private fun installDictionary(b: Dictionaries.Bundle, onDone: () -> Unit) {
-        val progress = AlertDialog.Builder(this, R.style.InkDialog)
-            .setTitle("Installing ${b.name}")
-            .setMessage("Large dictionaries can take a while. Please keep inkread open.")
-            .setCancelable(false)
-            .create()
-        progress.show()
-        engine.execute {
-            val ok = ensureDictOpen()
-            val result = if (ok) {
-                try {
-                    val n = NativeBridge.nativeDictImport(dictHandle, b.dir.absolutePath, b.sourceTag, false)
-                    Dictionaries.markInstalled(this, b.sourceTag)
-                    "Installed ${b.name} ($n entries)"
-                } catch (e: RuntimeException) {
-                    Log.e(TAG, "dict import failed: ${e.message}")
-                    "Couldn't install ${b.name}"
-                }
-            } else {
-                "Dictionary store unavailable"
-            }
-            runOnUiThread {
-                progress.dismiss()
-                Toast.makeText(this, result, Toast.LENGTH_SHORT).show()
-                onDone()
-            }
-        }
-    }
-
-    /** Drop every entry for a user dictionary's source tag (the inverse of install). */
-    private fun removeDictionary(b: Dictionaries.Bundle, onDone: () -> Unit) {
-        engine.execute {
-            if (ensureDictOpen()) {
-                try {
-                    NativeBridge.nativeDictForget(dictHandle, b.sourceTag)
-                } catch (e: RuntimeException) {
-                    Log.e(TAG, "dict forget failed: ${e.message}")
-                }
-            }
-            Dictionaries.markRemoved(this, b.sourceTag)
-            runOnUiThread {
-                Toast.makeText(this, "Removed ${b.name}", Toast.LENGTH_SHORT).show()
-                onDone()
-            }
-        }
     }
 
     private fun contrastPref(): Int =
