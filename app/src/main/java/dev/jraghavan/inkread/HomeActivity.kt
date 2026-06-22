@@ -11,22 +11,48 @@ import android.view.View
 import android.view.ViewGroup
 import android.widget.ImageView
 import android.widget.LinearLayout
+import android.widget.ScrollView
 import android.widget.TextView
 
 /**
- * The InkRead home / launcher (RR16/RR17/RR26). A calm "title-page" layout: the brand (logo · name ·
- * version) up top like a book title, the **top 3 recent books** as covers with a read-percentage in
- * the middle, and an inspirational tagline pinned at the bottom. Plain framework Activity,
- * programmatic UI to match the shell.
+ * The InkRead home / launcher — the "Inkwell" home screen (RR16/RR17/RR26). A calm, 1-bit
+ * stationery layout: the brand (inkwell mark · script name · version) like a book title page, a
+ * **Continue where you left off** hero for the most-recent book, a **Recently on your shelf** row of
+ * staggered covers with read-percentages, an *Open a Document* action, and a closing flourish.
+ *
+ * Plain framework Activity with programmatic Views, to match the shell. The design (claude.ai/design
+ * "Inkwell") leans on three faces: Pinyon Script (bundled) for the brand, a serif for body, and a
+ * mono for the small uppercase eyebrows. Only the script is bundled (offline e-ink), so body/eyebrow
+ * fall back to the platform serif/monospace. Every figure shown is real device data — the design's
+ * decorative streak/stats/author/page-count chrome is omitted rather than faked.
  */
 class HomeActivity : Activity() {
 
     private val density get() = resources.displayMetrics.density
     private fun dp(v: Int) = (v * density).toInt()
     private val phi = 1.618f
+
     /** Spencerian-inspired script (Pinyon Script, OFL); bold = synthetic (single-weight font). */
     private val script by lazy { Typeface.createFromAsset(assets, "fonts/pinyon_script.ttf") }
     private val scriptBold by lazy { Typeface.create(script, Typeface.BOLD) }
+    /** Body serif (Crimson Pro in the design → platform serif offline). */
+    private val serif = Typeface.SERIF
+    /** Eyebrow / label face (Space Mono in the design → platform monospace offline). */
+    private val mono = Typeface.MONOSPACE
+
+    private val ink = Color.BLACK
+    private val inkSoft = Color.parseColor("#3A3A3A")
+    private val textSecondary = Color.parseColor("#333333")
+    private val textMuted = Color.parseColor("#757575")
+
+    /**
+     * Width-driven scale so the one screen reads well on both the 10" tablet (primary) and the 7"
+     * reader (the design's two frames are the same layout at two sizes). Set per build; design values
+     * below are expressed in the artboard's ~716-unit content column.
+     */
+    private var scale = 1f
+    private fun dim(designUnits: Number) = dp((designUnits.toFloat() * scale).toInt()).coerceAtLeast(1)
+    private fun fs(designUnits: Number) = designUnits.toFloat() * scale
 
     /** Enlarge the capital letters (swash initials) for a Spencerian flourish. */
     private fun swashCaps(text: String, factor: Float = 1.45f): CharSequence {
@@ -50,152 +76,274 @@ class HomeActivity : Activity() {
     }
 
     private fun buildView(): View {
-        // Golden-ratio composition: side margins = W/φ⁴ band; the page splits brand · library ·
-        // tagline with weighted spacers in φ proportion (1 : φ), so the library lands on the
-        // upper golden line and the whole height is used (not ~50%).
         val w = resources.displayMetrics.widthPixels
-        // Slim golden margin (W/φ⁵ ≈ 0.09·W) so the covers fill ~82% of the width, not ~50%.
-        val side = (w / (phi * phi * phi * phi * phi)).toInt().coerceIn(dp(20), dp(48))
-        val root = LinearLayout(this).apply {
+        // Slim golden margin (≈ W/φ⁵) so content fills the width rather than ~half of it.
+        val side = (w / (phi * phi * phi * phi * phi)).toInt().coerceIn(dp(20), dp(52))
+        val contentW = (w - 2 * side).coerceAtLeast(dp(280))
+        scale = (contentW.toFloat() / dp(716)).coerceIn(0.62f, 1.15f)
+
+        val column = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER_HORIZONTAL
-            setBackgroundColor(Color.WHITE)
-            setPadding(side, (side / phi).toInt(), side, (side / phi).toInt())
-            layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
+            setPadding(side, dim(40), side, dim(40))
+            // fillViewport stretches us to the screen; weighted spacers then centre short content
+            // and the closing flourish settles toward the bottom.
+            layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
         }
 
-        // ── Brand, presented like a book title page ──────────────────────────────
-        val logo = (w / (phi * phi * phi)).toInt().coerceIn(dp(72), dp(140)) // ≈ golden of the margin
-        root.addView(ImageView(this).apply { setImageResource(R.mipmap.ic_launcher) }, LinearLayout.LayoutParams(logo, logo))
-        root.addView(TextView(this).apply {
-            text = swashCaps("InkRead"); setTextColor(Color.BLACK); textSize = 56f
-            typeface = scriptBold; paint.isFakeBoldText = true; gravity = Gravity.CENTER
-            setPadding(0, dp(16), 0, 0)
-        })
-        root.addView(TextView(this).apply {
-            text = "v${versionName()}"; setTextColor(Color.parseColor("#9E9E9E"))
-            textSize = 13f; gravity = Gravity.CENTER; letterSpacing = 0.12f
-            setPadding(0, dp(6), 0, 0)
-        })
+        column.addView(brandBlock())
 
-        // ── Upper golden spacer (weight 1) ───────────────────────────────────────
-        root.addView(View(this), LinearLayout.LayoutParams(0, 0, 1f))
-
-        // ── Library: the top 3 books with covers + read % ────────────────────────
-        val recents = Books.recents(this).take(3)
+        val recents = Books.recents(this)
+        column.addView(spacerWeighted(1f))
         if (recents.isEmpty()) {
-            root.addView(TextView(this).apply {
+            column.addView(TextView(this).apply {
                 text = "Open a document to start your library."
-                setTextColor(Color.parseColor("#757575")); textSize = 15f; gravity = Gravity.CENTER
-                setPadding(0, 0, 0, dp(18))
+                setTextColor(textMuted); textSize = fs(16f); gravity = Gravity.CENTER
+                typeface = serif; setPadding(0, 0, 0, dim(20))
             })
-            root.addView(pillButton("＋ Open Document") { openPicker() })
+            column.addView(openButton())
         } else {
-            root.addView(TextView(this).apply {
-                text = swashCaps("Library"); setTextColor(Color.BLACK); textSize = 48f
-                typeface = scriptBold; gravity = Gravity.CENTER // Spencerian-inspired script heading
-                paint.isFakeBoldText = true
-                setPadding(0, 0, 0, dp(16))
-            })
-            root.addView(libraryRow(recents, w, side))
-            root.addView(spacer(dp(22)))
-            root.addView(pillButton("＋ Open Document") { openPicker() })
-        }
-
-        // ── Lower golden spacer (weight φ → library sits on the upper golden line) ─
-        root.addView(View(this), LinearLayout.LayoutParams(0, 0, phi))
-        root.addView(TextView(this).apply {
-            text = swashCaps("Super Reader for a Super You")
-            setTextColor(Color.parseColor("#3A3A3A")); textSize = 32f
-            typeface = scriptBold; paint.isFakeBoldText = true; gravity = Gravity.CENTER
-        })
-        return root
-    }
-
-    /** A centered row of up to three book covers (golden-ratio aspect, filling the content width),
-     *  each with a read-percentage bar beneath it. */
-    private fun libraryRow(recents: List<Books.Recent>, w: Int, side: Int): View {
-        val gap = (side / phi).toInt().coerceAtLeast(dp(10))
-        val cellW = ((w - 2 * side - 2 * gap) / 3).coerceAtLeast(dp(80))
-        val coverH = (cellW * phi).toInt() // golden cover: height = width · φ
-        return LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER
-            recents.forEachIndexed { i, r ->
-                addView(bookTile(r, cellW, coverH), LinearLayout.LayoutParams(cellW, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
-                    marginStart = if (i == 0) 0 else gap
-                })
+            column.addView(heroCard(recents.first(), contentW))
+            if (recents.size >= 2) {
+                column.addView(spacer(dim(28)))
+                column.addView(eyebrowItalic("Recently on your shelf"))
+                column.addView(spacer(dim(16)))
+                column.addView(shelf(recents.take(3), contentW))
             }
+            column.addView(spacer(dim(28)))
+            column.addView(openButton())
+        }
+        column.addView(spacerWeighted(phi))
+        column.addView(closingMark())
+
+        return ScrollView(this).apply {
+            isFillViewport = true
+            setBackgroundColor(Color.WHITE)
+            isVerticalScrollBarEnabled = false
+            addView(column)
         }
     }
 
-    private fun bookTile(r: Books.Recent, cellW: Int, coverH: Int): View = LinearLayout(this).apply {
+    // ── Brand: inkwell mark · script name · version, like a title page ────────────────────────────
+
+    private fun brandBlock(): View = LinearLayout(this).apply {
         orientation = LinearLayout.VERTICAL
         gravity = Gravity.CENTER_HORIZONTAL
-        isClickable = true
-        setOnClickListener { open(r) }
-        addView(cover(r, cellW, coverH))
+        val logo = dim(56)
+        addView(ImageView(this@HomeActivity).apply { setImageResource(R.mipmap.ic_launcher) }, LinearLayout.LayoutParams(logo, logo).apply { bottomMargin = dim(8) })
         addView(TextView(this@HomeActivity).apply {
-            text = r.title; setTextColor(Color.parseColor("#333333")); textSize = 12f
-            gravity = Gravity.CENTER; maxLines = 2; setPadding(0, dp(8), 0, dp(6))
-            layoutParams = LinearLayout.LayoutParams(cellW, ViewGroup.LayoutParams.WRAP_CONTENT)
+            text = swashCaps("InkRead"); setTextColor(ink); textSize = fs(58f)
+            typeface = scriptBold; paint.isFakeBoldText = true; gravity = Gravity.CENTER
+            includeFontPadding = false
         })
-        addView(progressBar(Books.progress(this@HomeActivity, r.id), cellW))
+        addView(eyebrow("·  Super Reader  ·  v${versionName()}  ·").apply { setPadding(0, dim(10), 0, 0) })
+    }
+
+    // ── Continue where you left off (the most-recent book) ───────────────────────────────────────
+
+    private fun heroCard(r: Books.Recent, contentW: Int): View {
+        val coverW = dim(114)
+        val coverH = dim(162)
+        val pad = dim(20)
+        val gap = dim(20)
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(pad, pad, pad, pad)
+            background = outlined(dim(12))
+            isClickable = true
+            setOnClickListener { open(r) }
+            layoutParams = LinearLayout.LayoutParams(contentW, ViewGroup.LayoutParams.WRAP_CONTENT)
+
+            addView(cover(r, coverW, coverH, spine = true))
+
+            addView(LinearLayout(this@HomeActivity).apply {
+                orientation = LinearLayout.VERTICAL
+                addView(TextView(this@HomeActivity).apply {
+                    text = "Continue where you left off"; setTextColor(inkSoft); textSize = fs(15f)
+                    typeface = Typeface.create(serif, Typeface.ITALIC)
+                })
+                addView(TextView(this@HomeActivity).apply {
+                    text = r.title; setTextColor(ink); textSize = fs(26f); typeface = serif
+                    maxLines = 3; setLineSpacing(0f, 1.1f); setPadding(0, dim(7), 0, 0)
+                })
+                addView(spacerWeighted(1f))
+                val percent = Books.progress(this@HomeActivity, r.id)
+                addView(LinearLayout(this@HomeActivity).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    setPadding(0, dim(14), 0, 0)
+                    addView(eyebrow("$percent% complete"))
+                    addView(spacerWeighted(1f))
+                    addView(TextView(this@HomeActivity).apply {
+                        text = "Resume →"; setTextColor(ink); textSize = fs(15f); typeface = serif
+                        paintFlags = paintFlags or android.graphics.Paint.UNDERLINE_TEXT_FLAG
+                    })
+                })
+                addView(progressBar(percent).apply {
+                    (layoutParams as LinearLayout.LayoutParams).topMargin = dim(8)
+                })
+            }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f).apply { marginStart = gap })
+        }
+    }
+
+    // ── Recently on your shelf: staggered covers on a shelf, read-% beneath ──────────────────────
+
+    /** Per-cover height multipliers (of cell width) — the design's 226/242/220-on-148 stagger. */
+    private val shelfRatios = floatArrayOf(1.50f, 1.62f, 1.46f)
+
+    private fun shelf(recents: List<Books.Recent>, contentW: Int): View {
+        val gap = dim(22)
+        val cells = recents.size.coerceAtMost(3)
+        val cellW = ((contentW - (cells - 1) * gap) / cells).coerceAtLeast(dp(72))
+
+        val covers = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
+            recents.take(3).forEachIndexed { i, r ->
+                val h = (cellW * shelfRatios[i % shelfRatios.size]).toInt()
+                addView(cover(r, cellW, h, spine = true).apply {
+                    isClickable = true; setOnClickListener { open(r) }
+                }, LinearLayout.LayoutParams(cellW, h).apply { marginStart = if (i == 0) 0 else gap })
+            }
+        }
+        val shelfBar = View(this).apply {
+            background = GradientDrawable().apply { setColor(ink); cornerRadius = dim(2).toFloat() }
+            layoutParams = LinearLayout.LayoutParams(contentW, dim(5)).apply { topMargin = dim(1) }
+        }
+        val labels = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_HORIZONTAL
+            setPadding(0, dim(10), 0, 0)
+            recents.take(3).forEachIndexed { i, r ->
+                addView(eyebrow("${Books.progress(this@HomeActivity, r.id)}% read").apply {
+                    gravity = Gravity.CENTER
+                }, LinearLayout.LayoutParams(cellW, ViewGroup.LayoutParams.WRAP_CONTENT).apply { marginStart = if (i == 0) 0 else gap })
+            }
+        }
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_HORIZONTAL
+            addView(covers)
+            addView(shelfBar)
+            addView(labels)
+        }
+    }
+
+    // ── Closing flourish: script line · inkwell mark between rules ────────────────────────────────
+
+    private fun closingMark(): View = LinearLayout(this).apply {
+        orientation = LinearLayout.VERTICAL
+        gravity = Gravity.CENTER_HORIZONTAL
         addView(TextView(this@HomeActivity).apply {
-            text = "${Books.progress(this@HomeActivity, r.id)}% read"
-            setTextColor(Color.parseColor("#757575")); textSize = 11f
-            gravity = Gravity.CENTER; setPadding(0, dp(4), 0, 0)
+            text = swashCaps("Super Reader for a Super You")
+            setTextColor(inkSoft); textSize = fs(31f); typeface = scriptBold
+            paint.isFakeBoldText = true; gravity = Gravity.CENTER; includeFontPadding = false
+        })
+        addView(LinearLayout(this@HomeActivity).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, dim(6), 0, 0)
+            addView(rule())
+            addView(ImageView(this@HomeActivity).apply { setImageResource(R.mipmap.ic_launcher) },
+                LinearLayout.LayoutParams(dim(20), dim(20)).apply { marginStart = dim(12); marginEnd = dim(12) })
+            addView(rule())
         })
     }
 
-    /** A thin read-progress bar (filled portion black, remainder light grey). */
-    private fun progressBar(percent: Int, width: Int): View {
+    private fun rule(): View = View(this).apply {
+        setBackgroundColor(ink)
+        layoutParams = LinearLayout.LayoutParams(dim(40), maxOf(1, dp(1)))
+    }
+
+    // ── Shared pieces ────────────────────────────────────────────────────────────────────────────
+
+    /** A book cover: cached first-page thumbnail, else a black "spine" (or bordered) placeholder. */
+    private fun cover(r: Books.Recent, w: Int, h: Int, spine: Boolean): View {
+        val bmp = Books.loadThumbnail(this, r.id)
+        if (bmp != null) {
+            return ImageView(this).apply {
+                scaleType = ImageView.ScaleType.CENTER_CROP
+                setImageBitmap(bmp)
+                background = GradientDrawable().apply { setStroke(maxOf(1, dp(1)), ink) }
+                layoutParams = LinearLayout.LayoutParams(w, h)
+            }
+        }
+        if (!spine) {
+            return TextView(this).apply {
+                text = r.title; setTextColor(textSecondary); textSize = fs(12f); typeface = serif
+                gravity = Gravity.CENTER; setPadding(dim(8), dim(8), dim(8), dim(8))
+                background = GradientDrawable().apply {
+                    setColor(Color.parseColor("#EFEFEF")); setStroke(maxOf(1, dp(1)), ink)
+                }
+                layoutParams = LinearLayout.LayoutParams(w, h)
+            }
+        }
+        // Black book spine with a white page-edge and the title set in white, bottom-aligned.
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            background = GradientDrawable().apply { setColor(ink); cornerRadius = dim(5).toFloat() }
+            layoutParams = LinearLayout.LayoutParams(w, h)
+            addView(View(this@HomeActivity).apply { setBackgroundColor(Color.WHITE) },
+                LinearLayout.LayoutParams(dim(4), ViewGroup.LayoutParams.MATCH_PARENT))
+            addView(TextView(this@HomeActivity).apply {
+                text = r.title; setTextColor(Color.WHITE); textSize = fs(15f); typeface = serif
+                gravity = Gravity.BOTTOM; setLineSpacing(0f, 1.12f)
+                setPadding(dim(12), dim(12), dim(12), dim(12))
+                layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f)
+            })
+        }
+    }
+
+    /** A thin read-progress bar inside a black-outlined capsule (filled portion solid black). */
+    private fun progressBar(percent: Int): View {
         val p = percent.coerceIn(0, 100)
         return LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
-            background = GradientDrawable().apply { setColor(Color.parseColor("#E0E0E0")); cornerRadius = dp(2).toFloat() }
-            layoutParams = LinearLayout.LayoutParams(width, dp(4))
+            background = GradientDrawable().apply {
+                setColor(Color.WHITE); setStroke(maxOf(1, dp(1)), ink); cornerRadius = dim(6).toFloat()
+            }
+            val padInner = maxOf(1, dp(1))
+            setPadding(padInner, padInner, padInner, padInner)
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dim(11))
             if (p > 0) addView(View(this@HomeActivity).apply {
-                background = GradientDrawable().apply { setColor(Color.BLACK); cornerRadius = dp(2).toFloat() }
+                background = GradientDrawable().apply { setColor(ink); cornerRadius = dim(4).toFloat() }
             }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, p.toFloat()))
             if (p < 100) addView(View(this@HomeActivity), LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, (100 - p).toFloat()))
         }
     }
 
-    /** A cover image: the cached first-page thumbnail, or a bordered placeholder. */
-    private fun cover(r: Books.Recent, w: Int, h: Int): View {
-        val bmp = Books.loadThumbnail(this, r.id)
-        return if (bmp != null) {
-            ImageView(this).apply {
-                scaleType = ImageView.ScaleType.CENTER_CROP
-                setImageBitmap(bmp)
-                background = GradientDrawable().apply { setStroke(maxOf(1, dp(1)), Color.parseColor("#D0D0D0")) }
-                layoutParams = LinearLayout.LayoutParams(w, h)
-            }
-        } else {
-            TextView(this).apply {
-                text = r.title; setTextColor(Color.parseColor("#555555")); textSize = 12f
-                gravity = Gravity.CENTER; setPadding(dp(8), dp(8), dp(8), dp(8))
-                background = GradientDrawable().apply {
-                    setColor(Color.parseColor("#EFEFEF")); setStroke(maxOf(1, dp(1)), Color.parseColor("#D0D0D0"))
-                }
-                layoutParams = LinearLayout.LayoutParams(w, h)
-            }
+    private fun openButton(): View = TextView(this).apply {
+        text = "＋  Open a Document"; setTextColor(ink); textSize = fs(16f); typeface = serif
+        gravity = Gravity.CENTER
+        setPadding(dim(30), dim(13), dim(30), dim(13))
+        background = GradientDrawable().apply {
+            setColor(Color.WHITE); setStroke(maxOf(1, dp(1)), ink); cornerRadius = dim(40).toFloat()
         }
+        isClickable = true; setOnClickListener { openPicker() }
+        layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT)
     }
 
-    private fun pillButton(label: String, onClick: () -> Unit): View = TextView(this).apply {
-        text = label; setTextColor(Color.BLACK); textSize = 15f; gravity = Gravity.CENTER
-        setPadding(dp(24), dp(10), dp(24), dp(10))
-        background = GradientDrawable().apply {
-            setColor(Color.WHITE); setStroke(maxOf(1, dp(1)), Color.BLACK); cornerRadius = dp(22).toFloat()
-        }
-        isClickable = true; setOnClickListener { onClick() }
-        layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+    /** A small uppercase, letter-spaced mono eyebrow (the design's Space Mono labels). */
+    private fun eyebrow(text: String): TextView = TextView(this).apply {
+        this.text = text.uppercase(); setTextColor(ink); textSize = fs(12f)
+        typeface = mono; letterSpacing = 0.12f
+    }
+
+    private fun eyebrowItalic(text: String): TextView = TextView(this).apply {
+        this.text = text; setTextColor(inkSoft); textSize = fs(16f); gravity = Gravity.CENTER
+        typeface = Typeface.create(serif, Typeface.ITALIC)
+    }
+
+    private fun outlined(radius: Int): GradientDrawable = GradientDrawable().apply {
+        setColor(Color.WHITE); setStroke(maxOf(1, (1.5f * density).toInt()), ink); cornerRadius = radius.toFloat()
     }
 
     private fun spacer(h: Int): View = View(this).apply {
         layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, h)
+    }
+
+    private fun spacerWeighted(weight: Float): View = View(this).apply {
+        layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, weight)
     }
 
     private fun openPicker() = openReader(Intent().putExtra(ReaderActivity.EXTRA_PICK, true))
