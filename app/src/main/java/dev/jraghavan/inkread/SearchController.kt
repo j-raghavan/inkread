@@ -193,18 +193,20 @@ class SearchController(private val host: Host) {
                 isClickable = true
                 setOnClickListener { dialog.dismiss(); gotoHit(i) }
                 addView(TextView(activity).apply {
-                    text = "p. ${hit.page + 1}"; setTextColor(Color.parseColor("#666666")); textSize = 11f
+                    text = "P. ${hit.page + 1}"; setTextColor(Ink.muted); textSize = 10f
+                    typeface = Ink.mono; letterSpacing = 0.08f
                 })
                 addView(TextView(activity).apply {
-                    text = hit.match.snippet; setTextColor(Color.BLACK); textSize = 14f; setPadding(0, dp(2), 0, 0)
+                    text = hit.match.snippet; setTextColor(Ink.ink); textSize = 15f
+                    typeface = Ink.serif; setPadding(0, dp(3), 0, 0)
                 })
             })
-            list.addView(View(activity).apply { setBackgroundColor(Color.parseColor("#22000000")) },
-                LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 1))
+            list.addView(View(activity).apply { setBackgroundColor(Ink.hairline) },
+                LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, Ink.hair()))
         }
         // Header: a count label flanked by Prev/Next steppers (step renders behind the sheet).
         fun stepper(label: String, delta: Int) = TextView(activity).apply {
-            text = label; setTextColor(Color.BLACK); textSize = 18f; gravity = Gravity.CENTER
+            text = label; setTextColor(Ink.ink); textSize = 18f; gravity = Gravity.CENTER
             setPadding(dp(16), dp(8), dp(16), dp(8)); isClickable = true
             setOnClickListener { step(delta) }
         }
@@ -213,16 +215,20 @@ class SearchController(private val host: Host) {
             gravity = Gravity.CENTER_VERTICAL
             addView(stepper("◀", -1))
             addView(TextView(activity).apply {
-                text = "${h.size} results for \"$query\""
-                setTextColor(Color.BLACK); textSize = 13f; gravity = Gravity.CENTER
-                setPadding(dp(8), dp(12), dp(8), dp(8))
+                text = "${h.size} results · “$query”"
+                setTextColor(Ink.muted); textSize = 12f; typeface = Ink.mono; gravity = Gravity.CENTER
+                setPadding(dp(8), dp(14), dp(8), dp(10))
             }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
             addView(stepper("▶", +1))
         }
         val container = LinearLayout(activity).apply {
             orientation = LinearLayout.VERTICAL
-            setBackgroundColor(Color.WHITE)
+            setBackgroundColor(Ink.paper)
+            addView(View(activity).apply { setBackgroundColor(Ink.ink) },
+                LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, Ink.hair())) // docked-surface keyline
             addView(header)
+            addView(View(activity).apply { setBackgroundColor(Ink.hairline) },
+                LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, Ink.hair()))
             addView(ScrollView(activity).apply { addView(list) },
                 LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
         }
@@ -230,7 +236,7 @@ class SearchController(private val host: Host) {
         dialog.window?.apply {
             setLayout(ViewGroup.LayoutParams.MATCH_PARENT, (activity.resources.displayMetrics.heightPixels * 0.7f).toInt())
             setGravity(Gravity.BOTTOM)
-            setBackgroundDrawable(android.graphics.drawable.ColorDrawable(Color.WHITE))
+            setBackgroundDrawable(android.graphics.drawable.ColorDrawable(Ink.paper))
         }
         dialog.show()
     }

@@ -89,7 +89,7 @@ class ToolPalette(
     /** A hairline separator between the handle, the tools, and the undo/redo actions. */
     private fun divider(): View = View(activity).apply {
         setBackgroundColor(Ink.hairline)
-        layoutParams = LinearLayout.LayoutParams(dp(28), Ink.hair()).apply {
+        layoutParams = LinearLayout.LayoutParams(dp(42), Ink.hair()).apply {
             gravity = Gravity.CENTER_HORIZONTAL
             val v = dp(4); setMargins(0, v, 0, v)
         }
@@ -100,8 +100,8 @@ class ToolPalette(
         ImageView(activity).apply {
             setImageResource(iconRes)
             setColorFilter(Ink.ink)
-            val pad = dp(9); setPadding(pad, pad, pad, pad)
-            val side = dp(40)
+            val pad = dp(14); setPadding(pad, pad, pad, pad)
+            val side = dp(60)
             layoutParams = LinearLayout.LayoutParams(side, side).apply { val m = dp(2); setMargins(m, m, m, m) }
             isClickable = true
             contentDescription = desc
@@ -112,9 +112,9 @@ class ToolPalette(
     private fun handle(): ImageView = ImageView(activity).apply {
         setImageResource(R.drawable.ic_tool_handle)
         setColorFilter(Ink.ink)
-        val pad = dp(9)
+        val pad = dp(14)
         setPadding(pad, pad, pad, pad)
-        val side = dp(40)
+        val side = dp(60)
         layoutParams = LinearLayout.LayoutParams(side, side).apply {
             val m = dp(2); setMargins(m, m, m, m)
         }
@@ -154,15 +154,15 @@ class ToolPalette(
         val active = tool == current
         setColorFilter(if (active) Ink.paper else Ink.ink)
         alpha = if (tool.phase2) 0.35f else 1f
-        val pad = dp(9)
+        val pad = dp(14)
         setPadding(pad, pad, pad, pad)
-        val side = dp(40)
+        val side = dp(60)
         layoutParams = LinearLayout.LayoutParams(side, side).apply {
             val m = dp(2); setMargins(m, m, m, m)
         }
         if (active) {
             background = GradientDrawable().apply {
-                setColor(Ink.ink); cornerRadius = Ink.dpf(Ink.RADIUS_CHIP)
+                setColor(Ink.ink); cornerRadius = Ink.dpf(Ink.RADIUS)
             }
         }
         isClickable = true
