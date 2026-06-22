@@ -321,21 +321,26 @@ pub fn text_line_span(chars: &[CharBox], start: (f32, f32), end: (f32, f32)) -> 
     if sel.is_empty() {
         return TextSelection::default(); // both endpoints in gaps — no line truly covered
     }
-    // The lift line (the only clipped one) is the bottom-most overlap for a downward drag, the
-    // top-most for an upward one.
+    // The lift line (the candidate for clipping) is the bottom-most overlap for a downward drag,
+    // the top-most for an upward one.
     let focus = if downward {
         *sel.last().unwrap()
     } else {
         sel[0]
     };
+    // Clip that line to the lift word ONLY when the pen lifted *on* it (lift y inside the line). If
+    // the pen lifted in the gap PAST the line (dragged beyond it), the whole line was meant — taking
+    // it whole, not clipped. (This is the "too little" case: lifting just below the last line.)
+    let (fy0, fy1) = line_span(&lines[focus]);
+    let clip_focus = sel.len() > 1 && end.1 >= fy0 && end.1 <= fy1;
 
     let mut parts: Vec<String> = Vec::new();
     let mut boxes: Vec<NormRect> = Vec::new();
     for &idx in &sel {
         let line = &lines[idx];
-        // The pen-lift line (when the drag spans >1 line) is clipped to the word under `end.x`;
-        // every other line in the span is taken whole.
-        let take: &[&CharBox] = if idx == focus && sel.len() > 1 {
+        // The pen-lift line is clipped to the word under `end.x` only when the pen lifted on it;
+        // every other line (and a lift past the end) is taken whole.
+        let take: &[&CharBox] = if idx == focus && clip_focus {
             // Last glyph whose box starts at/before the lift x, then extend to the word's end.
             let mut last = 0usize;
             for (j, c) in line.iter().enumerate() {
@@ -601,6 +606,20 @@ mod tests {
             "inter-line gap filled (not striped)"
         );
         assert_eq!(sel.text, "first line one second line two");
+    }
+
+    #[test]
+    fn text_line_span_lift_past_the_last_line_takes_it_whole() {
+        // Lift lands in the gap BELOW line 2 (the pen dragged past it) — line 2 must be taken whole,
+        // not clipped to the lift x (the "too little" bug: last line cut short).
+        let mut chars = line("line one alpha", 0.0, 0.7, 0.10, 0.03);
+        chars.extend(line("line two omega", 0.0, 0.7, 0.16, 0.03));
+        let sel = text_line_span(&chars, (0.1, 0.115), (0.2, 0.22)); // lift y=0.22 is below line 2 (..0.19)
+        assert_eq!(sel.boxes.len(), 2);
+        assert_eq!(
+            sel.text, "line one alpha line two omega",
+            "whole last line, not clipped at x=0.2"
+        );
     }
 
     #[test]
