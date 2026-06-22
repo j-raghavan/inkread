@@ -148,14 +148,17 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
     private var moveStartX = 0f
     private var moveStartY = 0f
     private var movingSelection = false
-    /** In-document search (RR2): the current query's hits across the doc, and the index of the
-     *  one we're parked on. `searchBoxes` are the active hit's highlight boxes, drawn while the
-     *  reader is on `searchBoxesPage`. Read on both threads. */
-    @Volatile private var searchHits: List<SearchHit> = emptyList()
-    @Volatile private var searchIndex = -1
-    @Volatile private var searchQuery = ""
-    @Volatile private var searchBoxes: List<SelBox> = emptyList()
-    @Volatile private var searchBoxesPage = -1
+    /** In-document search (RR2) — owns its own query/hit state + dialogs (SRP). The shell only
+     *  draws the active hit's highlight (see [drawSearchHighlight]) for the current page. */
+    private val search = SearchController(object : SearchController.Host {
+        override val activity get() = this@ReaderActivity
+        override val docHandle get() = this@ReaderActivity.docHandle
+        override val pageCount get() = this@ReaderActivity.pageCount
+        override fun engineExecute(block: () -> Unit) { engine.execute(block) }
+        override fun jumpToPage(page: Int) = postJump(page)
+        override fun repaintPanel() = this@ReaderActivity.repaintPanel()
+        override fun openPicker() = this@ReaderActivity.openPicker()
+    })
 
     /** The in-progress stroke as interleaved view-px x,y; UI-thread only. */
     private val strokeBuf = ArrayList<Float>()
@@ -698,7 +701,8 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         // The active lasso selection's bounding box (ADR-INKREAD-0010).
         if (selectedIds.isNotEmpty() && selectionBounds.size == 4) drawSelectionBox(cv)
         // The active in-document search hit's highlight boxes (RR2), if it lives on this page.
-        if (searchBoxesPage == currentPage) drawSearchHighlight(cv)
+        val searchHl = search.highlightForPage(currentPage)
+        if (searchHl.isNotEmpty()) drawSearchHighlight(cv, searchHl)
         // Keep a small full-page thumbnail from the fit render to drive the zoom minimap.
         if (zoom <= 1f) updateFitThumb(bmp)
         // Zoom minimap (top-right): full page + the current viewport window (RR5-FR3).
@@ -1167,180 +1171,14 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
 
     // ---- in-document search (RR2) ----
 
-    /** Draw the active search hit's highlight boxes on the page (a light fill + crisp outline). */
-    private fun drawSearchHighlight(canvas: Canvas) {
-        for (b in searchBoxes) {
+    /** Draw the search hit's highlight [boxes] on the page (a light fill + crisp outline). The
+     *  active boxes for the current page come from [SearchController.highlightForPage]. */
+    private fun drawSearchHighlight(canvas: Canvas, boxes: List<SelBox>) {
+        for (b in boxes) {
             val l = nToVx(b.x0); val t = nToVy(b.y0); val r = nToVx(b.x1); val btm = nToVy(b.y1)
             canvas.drawRect(l, t, r, btm, searchFillPaint)
             canvas.drawRect(l, t, r, btm, searchBoxPaint)
         }
-    }
-
-    /**
-     * Prompt for a query, then scan the whole document on the engine thread (case-insensitive,
-     * PDF + EPUB). On hits, jump to the first and offer the results list; on none, a toast. The
-     * "Results" button reopens the last query's results without rescanning.
-     */
-    private fun showSearchDialog() {
-        if (docHandle == 0L) { openPicker(); return }
-        val d = resources.displayMetrics.density
-        fun dp(v: Int) = (v * d).toInt()
-        val input = EditText(this).apply {
-            inputType = InputType.TYPE_CLASS_TEXT
-            imeOptions = android.view.inputmethod.EditorInfo.IME_ACTION_SEARCH
-            setSingleLine(true)
-            hint = "Find in document"
-            setText(searchQuery)
-            setSelection(text?.length ?: 0)
-        }
-        val pad = dp(20)
-        val wrap = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(pad, dp(8), pad, 0)
-            addView(input, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
-        }
-        val builder = AlertDialog.Builder(this)
-            .setTitle("Search")
-            .setView(wrap)
-            .setPositiveButton("Search") { _, _ -> runSearch(input.text.toString()) }
-            .setNegativeButton("Cancel", null)
-        if (searchHits.isNotEmpty()) builder.setNeutralButton("Results") { _, _ -> showSearchResults() }
-        val dialog = builder.create()
-        input.setOnEditorActionListener { _, actionId, _ ->
-            if (actionId == android.view.inputmethod.EditorInfo.IME_ACTION_SEARCH) {
-                dialog.dismiss(); runSearch(input.text.toString()); true
-            } else false
-        }
-        dialog.show()
-    }
-
-    /** Scan every page for [raw] on the engine thread, collecting hits (capped). Bails if the open
-     *  document changes mid-scan. Jumps to the first hit and reports the count on the UI thread. */
-    private fun runSearch(raw: String) {
-        val query = raw.trim()
-        if (query.isEmpty()) { clearSearch(); return }
-        val handle = docHandle
-        if (handle == 0L) return
-        Toast.makeText(this, "Searching…", Toast.LENGTH_SHORT).show()
-        engine.execute {
-            if (docHandle != handle) return@execute
-            val total = pageCount.coerceAtLeast(1)
-            val hits = ArrayList<SearchHit>()
-            var page = 0
-            while (page < total && hits.size < MAX_SEARCH_HITS) {
-                if (docHandle != handle) return@execute
-                val matches = try {
-                    WireCodec.decodeSearch(NativeBridge.nativeSearchPage(handle, page, query))
-                } catch (e: RuntimeException) {
-                    Log.e(TAG, "search p$page failed: ${e.message}"); emptyList()
-                }
-                for (m in matches) {
-                    hits.add(SearchHit(page, m))
-                    if (hits.size >= MAX_SEARCH_HITS) break
-                }
-                page++
-            }
-            searchQuery = query
-            searchHits = hits
-            searchIndex = -1
-            runOnUiThread {
-                if (hits.isEmpty()) {
-                    Toast.makeText(this, "No matches for \"$query\"", Toast.LENGTH_SHORT).show()
-                } else {
-                    val capped = if (hits.size >= MAX_SEARCH_HITS) " (first $MAX_SEARCH_HITS)" else ""
-                    val plural = if (hits.size == 1) "" else "es"
-                    Toast.makeText(this, "${hits.size} match$plural$capped", Toast.LENGTH_SHORT).show()
-                    gotoSearchHit(0)
-                }
-            }
-        }
-    }
-
-    /** Park on search hit [i]: set its highlight boxes and jump to its page (the highlight draws
-     *  in [renderAndBlit] once the reader is on that page). */
-    private fun gotoSearchHit(i: Int) {
-        val hits = searchHits
-        if (i < 0 || i >= hits.size) return
-        val hit = hits[i]
-        searchIndex = i
-        searchBoxes = hit.match.boxes
-        searchBoxesPage = hit.page
-        postJump(hit.page)
-    }
-
-    /** Step to the next/previous hit (wrapping). With no active search, reopens the search dialog. */
-    private fun searchStep(delta: Int) {
-        val hits = searchHits
-        if (hits.isEmpty()) { showSearchDialog(); return }
-        val n = hits.size
-        val next = (((searchIndex + delta) % n) + n) % n
-        gotoSearchHit(next)
-        Toast.makeText(this, "${next + 1} / $n", Toast.LENGTH_SHORT).show()
-    }
-
-    /** A bottom sheet listing the current query's hits (page + snippet); tap a row to jump. */
-    private fun showSearchResults() {
-        val hits = searchHits
-        if (hits.isEmpty()) { showSearchDialog(); return }
-        val d = resources.displayMetrics.density
-        fun dp(v: Int) = (v * d).toInt()
-        val dialog = Dialog(this).apply { requestWindowFeature(Window.FEATURE_NO_TITLE) }
-        val list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        hits.forEachIndexed { i, hit ->
-            list.addView(LinearLayout(this).apply {
-                orientation = LinearLayout.VERTICAL
-                setPadding(dp(18), dp(12), dp(18), dp(12))
-                isClickable = true
-                setOnClickListener { dialog.dismiss(); gotoSearchHit(i) }
-                addView(TextView(this@ReaderActivity).apply {
-                    text = "p. ${hit.page + 1}"; setTextColor(Color.parseColor("#666666")); textSize = 11f
-                })
-                addView(TextView(this@ReaderActivity).apply {
-                    text = hit.match.snippet; setTextColor(Color.BLACK); textSize = 14f; setPadding(0, dp(2), 0, 0)
-                })
-            })
-            list.addView(View(this).apply { setBackgroundColor(Color.parseColor("#22000000")) },
-                LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 1))
-        }
-        // Header: a count label flanked by Prev/Next steppers (step renders behind the sheet).
-        fun stepper(label: String, delta: Int) = TextView(this).apply {
-            text = label; setTextColor(Color.BLACK); textSize = 18f; gravity = Gravity.CENTER
-            setPadding(dp(16), dp(8), dp(16), dp(8)); isClickable = true
-            setOnClickListener { searchStep(delta) }
-        }
-        val header = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            addView(stepper("◀", -1))
-            addView(TextView(this@ReaderActivity).apply {
-                text = "${hits.size} results for \"$searchQuery\""
-                setTextColor(Color.BLACK); textSize = 13f; gravity = Gravity.CENTER
-                setPadding(dp(8), dp(12), dp(8), dp(8))
-            }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-            addView(stepper("▶", +1))
-        }
-        val container = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setBackgroundColor(Color.WHITE)
-            addView(header)
-            addView(ScrollView(this@ReaderActivity).apply { addView(list) },
-                LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
-        }
-        dialog.setContentView(container)
-        dialog.window?.apply {
-            setLayout(ViewGroup.LayoutParams.MATCH_PARENT, (resources.displayMetrics.heightPixels * 0.7f).toInt())
-            setGravity(Gravity.BOTTOM)
-            setBackgroundDrawable(android.graphics.drawable.ColorDrawable(Color.WHITE))
-        }
-        dialog.show()
-    }
-
-    /** Clear the active search and wipe its on-page highlight. */
-    private fun clearSearch() {
-        searchHits = emptyList(); searchIndex = -1; searchQuery = ""; searchBoxes = emptyList()
-        val hadBoxes = searchBoxesPage >= 0
-        searchBoxesPage = -1
-        if (hadBoxes) engine.execute { repaintPanel() }
     }
 
     /**
@@ -1449,7 +1287,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         // (Bookmark toggle moved to the top-right corner dog-ear; "Marks" lists them.)
         control(R.drawable.ic_menu_marks, "Marks") { showBookmarks() }
         control(R.drawable.ic_menu_contents, "Contents") { showContentsLazy() }
-        control(R.drawable.ic_menu_search, "Search") { showSearchDialog() }
+        control(R.drawable.ic_menu_search, "Search") { search.showSearchDialog() }
         // Quick zoom (circle −/+ icons — not magnifiers, which are reserved for Search). Also in Adjust → Zoom.
         control(R.drawable.ic_menu_zoom_out, "Zoom −") { zoomBy(1f / ZOOM_STEP) }
         control(R.drawable.ic_menu_zoom_in, "Zoom +") { zoomBy(ZOOM_STEP) }
@@ -3268,7 +3106,6 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         const val SELECTION_HANDLE_PX = 8f // half-size of the square corner handles on the selection box.
         const val CONTRAST_MAX = 8 // mirrors reader-core render::contrast::MAX_CONTRAST_STEP (RR4).
         val LINE_SPACINGS = floatArrayOf(1.2f, 1.4f, 1.7f) // Small / Medium / Large (RR4).
-        const val MAX_SEARCH_HITS = 1000 // cap a query's collected hits to bound memory + scan time (RR2/RR19).
         const val HIGHLIGHT_WIDTH_PX = 30f // wide marker band (vs INK_STROKE_WIDTH for the pen).
         const val STROKE_PAUSE_MS = 600L // commit a stroke after this pen-pause (swallowed-UP net).
         const val LONG_PRESS_MS = 500L // hold the pen this long (≈still) on a word → look it up.
