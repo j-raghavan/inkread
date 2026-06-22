@@ -101,6 +101,22 @@ jobs:
           echo "ANDROID_NDK_HOME=$ndk" >> "$GITHUB_ENV"
           echo "Using NDK: $ndk"
 
+      # --- Stamp the crate version from the tag (build-time only, not committed) ---
+      # reader-core reports CARGO_PKG_VERSION over JNI (jni.rs nativeHello), and env!() bakes
+      # it at compile time — so the workspace version must be set BEFORE cargo-ndk runs.
+      # All member crates inherit version.workspace, so the single root line drives everything.
+      - name: Stamp crate version from tag
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          set -euo pipefail
+          # Anchored at line start: dependency versions are inline tables (`x = { version = … }`)
+          # and won't match, so only [workspace.package].version is rewritten.
+          n="$(grep -c '^version = ' Cargo.toml)"
+          test "$n" -eq 1 || { echo "::error::expected exactly 1 workspace version line, found $n"; exit 1; }
+          sed -i "s/^version = \".*\"/version = \"$VERSION\"/" Cargo.toml
+          echo "reader-core crate version → $(grep '^version = ' Cargo.toml)"
+
       # --- Build the APK via the canonical script (Rust core + pdfium + dict + Gradle) ---
       # Gradle reads ORG_GRADLE_PROJECT_<name> env vars as project properties, so the tag's
       # version lands in the APK's versionName/versionCode (see app/build.gradle.kts) — no
