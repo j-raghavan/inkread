@@ -293,39 +293,49 @@ pub fn text_line_span(chars: &[CharBox], start: (f32, f32), end: (f32, f32)) -> 
     if lines.is_empty() {
         return TextSelection::default();
     }
-    // The line index nearest a y: the line whose vertical span contains it, else the closest center.
-    let line_at = |y: f32| -> usize {
-        let mut best = 0usize;
-        let mut best_d = f32::MAX;
-        for (i, line) in lines.iter().enumerate() {
-            let (mut y0, mut y1) = (line[0].rect.y0, line[0].rect.y1);
-            for c in &line[1..] {
-                y0 = y0.min(c.rect.y0);
-                y1 = y1.max(c.rect.y1);
-            }
-            if y >= y0 && y <= y1 {
-                return i;
-            }
-            let d = ((y0 + y1) * 0.5 - y).abs();
-            if d < best_d {
-                best_d = d;
-                best = i;
-            }
+    // A line's vertical span (min y0 / max y1 over its glyphs).
+    let line_span = |line: &[&CharBox]| -> (f32, f32) {
+        let (mut y0, mut y1) = (line[0].rect.y0, line[0].rect.y1);
+        for c in &line[1..] {
+            y0 = y0.min(c.rect.y0);
+            y1 = y1.max(c.rect.y1);
         }
-        best
+        (y0, y1)
     };
-    let a = line_at(start.1);
-    let b = line_at(end.1);
-    let (lo, hi) = (a.min(b), a.max(b));
-    let focus = b; // the line where the pen lifted — the only partial line
+    // Select the lines the drag's vertical range actually OVERLAPS — never the merely-nearest line.
+    // A lift that lands in the blank gap below the last line (above the next paragraph/heading)
+    // overlaps the last line but not the next one, so the selection can't overshoot into it.
+    let y_top = start.1.min(end.1);
+    let y_bot = start.1.max(end.1);
+    let downward = end.1 >= start.1;
     let ex = end.0;
+    let sel: Vec<usize> = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| {
+            let (y0, y1) = line_span(line);
+            y1 >= y_top && y0 <= y_bot
+        })
+        .map(|(i, _)| i)
+        .collect();
+    if sel.is_empty() {
+        return TextSelection::default(); // both endpoints in gaps — no line truly covered
+    }
+    // The lift line (the only clipped one) is the bottom-most overlap for a downward drag, the
+    // top-most for an upward one.
+    let focus = if downward {
+        *sel.last().unwrap()
+    } else {
+        sel[0]
+    };
 
     let mut parts: Vec<String> = Vec::new();
     let mut boxes: Vec<NormRect> = Vec::new();
-    for (idx, line) in lines.iter().enumerate().take(hi + 1).skip(lo) {
+    for &idx in &sel {
+        let line = &lines[idx];
         // The pen-lift line (when the drag spans >1 line) is clipped to the word under `end.x`;
         // every other line in the span is taken whole.
-        let take: &[&CharBox] = if idx == focus && lo != hi {
+        let take: &[&CharBox] = if idx == focus && sel.len() > 1 {
             // Last glyph whose box starts at/before the lift x, then extend to the word's end.
             let mut last = 0usize;
             for (j, c) in line.iter().enumerate() {
