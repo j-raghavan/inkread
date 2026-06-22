@@ -56,5 +56,5 @@ dependencies {
     // (1.16+) demands compileSdk 35+ and AGP 9.1+, which is a deliberate migration — see dependabot
     // ignores. Bump these together with compileSdk + AGP, not piecemeal.
     implementation("androidx.core:core-ktx:1.13.1")
-    implementation("androidx.appcompat:appcompat:1.7.0")
+    implementation("androidx.appcompat:appcompat:1.7.1")
 }
