@@ -263,6 +263,60 @@ fn render_current_into_matching_buffer_ok() {
 
 // RR4-FR6 / RR24: a revisited page (same view-settings) is served from the render cache without
 // re-rasterizing; a settings change keys a fresh render; a repagination/viewport change drops it.
+// RR11: a letterboxed page (page coords ≠ viewport coords) must have its text-selection boxes
+// mapped from page space up to viewport space, so the highlight lands on the rendered text.
+#[test]
+fn text_selection_boxes_are_mapped_page_to_viewport() {
+    use crate::document::NormRect;
+
+    /// A doc whose page is letterboxed: page→viewport is y' = y*0.9746 + 0.0125 (x unchanged),
+    /// matching a ~0.77-aspect page fit-to-width in a 0.75 viewport. text_line_span returns one
+    /// PAGE-space box spanning the page; the session must map it to viewport space.
+    struct LetterboxDoc;
+    impl Document for LetterboxDoc {
+        fn page_count(&self) -> usize {
+            1
+        }
+        fn metadata(&self) -> DocumentMetadata {
+            DocumentMetadata::default()
+        }
+        fn render_page(&self, _i: usize, buf: &mut PixelBuffer<'_>) -> CoreResult<()> {
+            buf.fill_white();
+            Ok(())
+        }
+        fn page_fit_transform(
+            &self,
+            _i: usize,
+            _vw: u32,
+            _vh: u32,
+            _m: crate::document::FitMode,
+            _px: f32,
+            _py: f32,
+        ) -> Option<(f32, f32, f32, f32)> {
+            Some((1.0, 0.0, 0.9746, 0.0125))
+        }
+        fn text_line_span(&self, _i: usize, _s: (f32, f32), _e: (f32, f32)) -> TextSelection {
+            TextSelection {
+                text: "hello".into(),
+                boxes: vec![NormRect { x0: 0.10, y0: 0.20, x1: 0.80, y1: 0.24 }],
+            }
+        }
+    }
+
+    let s = ReaderSession::with_document(
+        Box::new(LetterboxDoc),
+        DeviceCapabilities::supernote_full(),
+        Viewport::new(1920, 2560, 226),
+    );
+    let sel = s.text_line_span(0, (0.1, 0.2), (0.8, 0.24));
+    assert_eq!(sel.boxes.len(), 1);
+    let b = sel.boxes[0];
+    // x unchanged (page fills width); y mapped through the letterbox affine.
+    assert!((b.x0 - 0.10).abs() < 1e-4 && (b.x1 - 0.80).abs() < 1e-4);
+    assert!((b.y0 - (0.20 * 0.9746 + 0.0125)).abs() < 1e-4, "y0 mapped, got {}", b.y0);
+    assert!((b.y1 - (0.24 * 0.9746 + 0.0125)).abs() < 1e-4, "y1 mapped, got {}", b.y1);
+}
+
 #[test]
 fn render_cache_serves_revisits_and_invalidates_on_change() {
     use std::cell::Cell;

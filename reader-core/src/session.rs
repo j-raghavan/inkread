@@ -697,24 +697,69 @@ impl ReaderSession {
     }
 
     /// The word under the normalized point `(x, y)` on `page` (RR11 / dictionary tap) — a
-    /// pass-through to [`Document::word_at`].
+    /// pass-through to [`Document::word_at`]. The shell speaks **viewport-normalized** coords (where
+    /// it renders + reads touch); the text layer speaks **page-normalized** coords. When the page is
+    /// letterboxed in the viewport these differ, so map the input down to page space and the result
+    /// boxes back up to viewport space (RR11 — see [`Self::view_transform`]).
     #[must_use]
     pub fn word_at(&self, page: usize, x: f32, y: f32) -> Option<TextSelection> {
-        self.document.word_at(page, x, y)
+        match self.view_transform() {
+            Some(t) => {
+                let (px, py) = view_to_page_pt((x, y), t);
+                self.document
+                    .word_at(page, px, py)
+                    .map(|s| map_selection_to_view(s, t))
+            }
+            None => self.document.word_at(page, x, y),
+        }
     }
 
-    /// The text within the normalized `rect` on `page` (RR11 / drag-highlight) — a pass-through to
-    /// [`Document::text_in_rect`].
+    /// The text within the normalized `rect` on `page` (RR11 / drag-highlight) — viewport↔page mapped
+    /// like [`Self::word_at`].
     #[must_use]
     pub fn text_in_rect(&self, page: usize, rect: NormRect) -> TextSelection {
-        self.document.text_in_rect(page, rect)
+        match self.view_transform() {
+            Some(t) => map_selection_to_view(
+                self.document.text_in_rect(page, view_to_page_rect(rect, t)),
+                t,
+            ),
+            None => self.document.text_in_rect(page, rect),
+        }
     }
 
     /// Reading-order selection a drag sweeps from `start` to `end` on `page` (RR11 / multi-line
-    /// drag) — a pass-through to [`Document::text_line_span`]. Whole lines except the clipped lift line.
+    /// drag) — viewport↔page mapped like [`Self::word_at`].
     #[must_use]
     pub fn text_line_span(&self, page: usize, start: (f32, f32), end: (f32, f32)) -> TextSelection {
-        self.document.text_line_span(page, start, end)
+        match self.view_transform() {
+            Some(t) => map_selection_to_view(
+                self.document.text_line_span(
+                    page,
+                    view_to_page_pt(start, t),
+                    view_to_page_pt(end, t),
+                ),
+                t,
+            ),
+            None => self.document.text_line_span(page, start, end),
+        }
+    }
+
+    /// The page→viewport affine `(sx, ox, sy, oy)` for the current fit render (RR11), or `None` when
+    /// text coords already equal viewport coords. Returns `None` for the render paths this fit map
+    /// doesn't model — pinch-zoom (`zoom > 1`, uses `render_zoom`) and auto-crop (uses
+    /// `render_cropped`) — so those fall back to the untransformed pass-through.
+    fn view_transform(&self) -> Option<(f32, f32, f32, f32)> {
+        if self.zoom > 1.0 + 1e-3 || self.crop_auto {
+            return None;
+        }
+        self.document.page_fit_transform(
+            self.page,
+            self.viewport.width,
+            self.viewport.height,
+            self.fit_mode,
+            self.pan_x,
+            self.pan_y,
+        )
     }
 
     /// Find `query` on `page` (RR2 in-document search) — a pass-through to
@@ -1044,6 +1089,50 @@ impl ReaderSession {
             }
             Err(_) => InkLayer::new(),
         }
+    }
+}
+
+/// Map a **viewport-normalized** point to **page-normalized** using the affine `(sx, ox, sy, oy)`
+/// (the inverse of the page→viewport fit map). A zero scale (degenerate) leaves the axis unchanged.
+fn view_to_page_pt(p: (f32, f32), t: (f32, f32, f32, f32)) -> (f32, f32) {
+    let (sx, ox, sy, oy) = t;
+    let px = if sx.abs() > f32::EPSILON {
+        (p.0 - ox) / sx
+    } else {
+        p.0
+    };
+    let py = if sy.abs() > f32::EPSILON {
+        (p.1 - oy) / sy
+    } else {
+        p.1
+    };
+    (px, py)
+}
+
+/// Map a viewport-normalized rect to page-normalized (corner-wise inverse fit map).
+fn view_to_page_rect(r: NormRect, t: (f32, f32, f32, f32)) -> NormRect {
+    let (x0, y0) = view_to_page_pt((r.x0, r.y0), t);
+    let (x1, y1) = view_to_page_pt((r.x1, r.y1), t);
+    NormRect { x0, y0, x1, y1 }
+}
+
+/// Map a page-space [`TextSelection`]'s boxes up to viewport space via the affine `(sx, ox, sy, oy)`
+/// so they align with the rendered pixels; the text is unchanged.
+fn map_selection_to_view(sel: TextSelection, t: (f32, f32, f32, f32)) -> TextSelection {
+    let (sx, ox, sy, oy) = t;
+    let boxes = sel
+        .boxes
+        .into_iter()
+        .map(|b| NormRect {
+            x0: b.x0 * sx + ox,
+            y0: b.y0 * sy + oy,
+            x1: b.x1 * sx + ox,
+            y1: b.y1 * sy + oy,
+        })
+        .collect();
+    TextSelection {
+        text: sel.text,
+        boxes,
     }
 }
 

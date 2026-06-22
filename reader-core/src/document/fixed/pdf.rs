@@ -532,6 +532,41 @@ impl Document for PdfBackend {
         Ok(())
     }
 
+    fn page_fit_transform(
+        &self,
+        index: usize,
+        vw: u32,
+        vh: u32,
+        mode: FitMode,
+        pan_x: f32,
+        pan_y: f32,
+    ) -> Option<(f32, f32, f32, f32)> {
+        // Reflowed text fills the viewport — page coords already equal viewport coords.
+        if self.reflow_on() {
+            return None;
+        }
+        let page = i32::try_from(index)
+            .ok()
+            .and_then(|i| self.document.pages().get(i).ok())?;
+        let (pw, ph) = (page.width().value, page.height().value);
+        let (bw, bh) = (i32::try_from(vw).ok()?, i32::try_from(vh).ok()?);
+        if pw <= 0.0 || ph <= 0.0 || bw <= 0 || bh <= 0 {
+            return None;
+        }
+        // Replicate render_fit EXACTLY: aspect-fit to (tw, th), then centered/letterboxed (or
+        // pan-offset when an axis overflows) by fit_place. A page point px maps to buffer pixel
+        // `px·tw + (dx - sx)`, so the viewport-normalized scale/offset are tw/bw and (dx-sx)/bw.
+        let (tw, th) = fit_dims(pw / ph, bw, bh, mode);
+        let (sx, dx, _) = fit_place(tw, bw, pan_x);
+        let (sy, dy, _) = fit_place(th, bh, pan_y);
+        Some((
+            tw as f32 / bw as f32,
+            (dx - sx) as f32 / bw as f32,
+            th as f32 / bh as f32,
+            (dy - sy) as f32 / bh as f32,
+        ))
+    }
+
     fn content_bbox(&self, index: usize) -> Option<NormRect> {
         // Reflowed text fills the viewport with no white margins — nothing to crop.
         if self.reflow_on() {

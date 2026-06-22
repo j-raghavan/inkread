@@ -320,6 +320,25 @@ pub trait Document {
         None
     }
 
+    /// The affine map from **page-normalized** coords to **viewport-normalized** coords for how
+    /// [`Self::render_fit`] actually places the page in a `vw`×`vh` buffer under `mode`
+    /// (RR4 / RR11): the page is scaled aspect-correct and centered with letterbox, so a page
+    /// point `(px, py)` lands at `(px·sx + ox, py·sy + oy)`. Returns `(sx, ox, sy, oy)`, or `None`
+    /// when the page fills the viewport with no transform (reflowable backends, unknown aspect) —
+    /// then page coords already equal viewport coords. Used to align text-layer boxes (page-space)
+    /// with the rendered pixels (viewport-space).
+    fn page_fit_transform(
+        &self,
+        _index: usize,
+        _vw: u32,
+        _vh: u32,
+        _mode: FitMode,
+        _pan_x: f32,
+        _pan_y: f32,
+    ) -> Option<(f32, f32, f32, f32)> {
+        None
+    }
+
     /// Render the normalized `crop` sub-rect of page `index` fit to `buf` per [`FitMode`] (RR4 —
     /// Crop). Like [`Self::render_fit`] but only the cropped region is shown (margins trimmed), so
     /// the content fills the screen. `pan_x`/`pan_y` scroll an overflowing axis. Default: ignores
