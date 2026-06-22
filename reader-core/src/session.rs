@@ -749,9 +749,17 @@ impl ReaderSession {
     /// doesn't model — pinch-zoom (`zoom > 1`, uses `render_zoom`) and auto-crop (uses
     /// `render_cropped`) — so those fall back to the untransformed pass-through.
     fn view_transform(&self) -> Option<(f32, f32, f32, f32)> {
-        if self.zoom > 1.0 + 1e-3 || self.crop_auto {
+        // Pinch-zoom renders via render_zoom (different geometry) — skip; fit + auto-crop are both
+        // handled by passing the active crop region (matching render_fit_or_crop's choice).
+        if self.zoom > 1.0 + 1e-3 {
             return None;
         }
+        let crop = if self.crop_auto {
+            self.cached_crop_bbox(self.page)
+                .map(|b| self.expand_crop(b))
+        } else {
+            None
+        };
         self.document.page_fit_transform(
             self.page,
             self.viewport.width,
@@ -759,6 +767,7 @@ impl ReaderSession {
             self.fit_mode,
             self.pan_x,
             self.pan_y,
+            crop,
         )
     }
 

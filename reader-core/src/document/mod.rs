@@ -326,7 +326,9 @@ pub trait Document {
     /// point `(px, py)` lands at `(px·sx + ox, py·sy + oy)`. Returns `(sx, ox, sy, oy)`, or `None`
     /// when the page fills the viewport with no transform (reflowable backends, unknown aspect) —
     /// then page coords already equal viewport coords. Used to align text-layer boxes (page-space)
-    /// with the rendered pixels (viewport-space).
+    /// with the rendered pixels (viewport-space). `crop` is the page-normalized auto-crop region
+    /// when active (matching [`Self::render_cropped`]); `None` = the whole page ([`Self::render_fit`]).
+    #[allow(clippy::too_many_arguments)] // mirrors the render params + the crop window
     fn page_fit_transform(
         &self,
         _index: usize,
@@ -335,6 +337,7 @@ pub trait Document {
         _mode: FitMode,
         _pan_x: f32,
         _pan_y: f32,
+        _crop: Option<NormRect>,
     ) -> Option<(f32, f32, f32, f32)> {
         None
     }

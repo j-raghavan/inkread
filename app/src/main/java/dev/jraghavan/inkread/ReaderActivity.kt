@@ -1925,9 +1925,6 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
      *  line-span selection paths (engine thread). A drag is a *selection*, never an auto-lookup. */
     private fun showSelectionResult(sel: Selection, emptyMsg: String) {
         diag { "DIAG text selection: '${sel.text.take(60)}' boxes=${sel.boxes.size}" }
-        sel.boxes.forEachIndexed { i, b ->
-            diag { "DIAG   box[$i]=[%.3f,%.3f,%.3f,%.3f] viewport=${viewW}x$viewH".format(b.x0, b.y0, b.x1, b.y1) }
-        }
         clearFirmwareInk() // wipe the firmware ink the select gesture left behind
         renderAndBlit()
         if (sel.isEmpty) {
@@ -1944,14 +1941,9 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
     private fun drawTextSelectionBoxes(boxes: List<SelBox>) {
         val bmp = bitmap ?: return
         val fill = Paint().apply { color = Color.argb(60, 0, 0, 0); style = Paint.Style.FILL }
-        diag { "DIAG drawBoxes n=${boxes.size} viewW=$viewW viewH=$viewH surf=${surfaceView.width}x${surfaceView.height} bmp=${bmp.width}x${bmp.height} zoom=$zoom" }
         blit { canvas ->
             canvas.drawBitmap(bmp, 0f, 0f, null)
-            for (b in boxes) {
-                val l = nToVx(b.x0); val t = nToVy(b.y0); val r = nToVx(b.x1); val btm = nToVy(b.y1)
-                diag { "DIAG   drawRect [%.0f,%.0f,%.0f,%.0f] canvas=${canvas.width}x${canvas.height}".format(l, t, r, btm) }
-                canvas.drawRect(l, t, r, btm, fill)
-            }
+            for (b in boxes) canvas.drawRect(nToVx(b.x0), nToVy(b.y0), nToVx(b.x1), nToVy(b.y1), fill)
         }
     }
 

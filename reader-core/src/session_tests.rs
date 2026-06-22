@@ -284,6 +284,7 @@ fn text_selection_boxes_are_mapped_page_to_viewport() {
             buf.fill_white();
             Ok(())
         }
+        #[allow(clippy::too_many_arguments)]
         fn page_fit_transform(
             &self,
             _i: usize,
@@ -292,13 +293,19 @@ fn text_selection_boxes_are_mapped_page_to_viewport() {
             _m: crate::document::FitMode,
             _px: f32,
             _py: f32,
+            _crop: Option<crate::document::NormRect>,
         ) -> Option<(f32, f32, f32, f32)> {
             Some((1.0, 0.0, 0.9746, 0.0125))
         }
         fn text_line_span(&self, _i: usize, _s: (f32, f32), _e: (f32, f32)) -> TextSelection {
             TextSelection {
                 text: "hello".into(),
-                boxes: vec![NormRect { x0: 0.10, y0: 0.20, x1: 0.80, y1: 0.24 }],
+                boxes: vec![NormRect {
+                    x0: 0.10,
+                    y0: 0.20,
+                    x1: 0.80,
+                    y1: 0.24,
+                }],
             }
         }
     }
@@ -313,8 +320,16 @@ fn text_selection_boxes_are_mapped_page_to_viewport() {
     let b = sel.boxes[0];
     // x unchanged (page fills width); y mapped through the letterbox affine.
     assert!((b.x0 - 0.10).abs() < 1e-4 && (b.x1 - 0.80).abs() < 1e-4);
-    assert!((b.y0 - (0.20 * 0.9746 + 0.0125)).abs() < 1e-4, "y0 mapped, got {}", b.y0);
-    assert!((b.y1 - (0.24 * 0.9746 + 0.0125)).abs() < 1e-4, "y1 mapped, got {}", b.y1);
+    assert!(
+        (b.y0 - (0.20 * 0.9746 + 0.0125)).abs() < 1e-4,
+        "y0 mapped, got {}",
+        b.y0
+    );
+    assert!(
+        (b.y1 - (0.24 * 0.9746 + 0.0125)).abs() < 1e-4,
+        "y1 mapped, got {}",
+        b.y1
+    );
 }
 
 #[test]
