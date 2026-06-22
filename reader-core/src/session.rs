@@ -710,11 +710,11 @@ impl ReaderSession {
         self.document.text_in_rect(page, rect)
     }
 
-    /// Whole-line selection over the vertical span of `rect` on `page` (RR11 / multi-line drag) — a
-    /// pass-through to [`Document::text_lines_in_rect`]. Selects complete lines, not the diagonal clip.
+    /// Reading-order selection a drag sweeps from `start` to `end` on `page` (RR11 / multi-line
+    /// drag) — a pass-through to [`Document::text_line_span`]. Whole lines except the clipped lift line.
     #[must_use]
-    pub fn text_lines_in_rect(&self, page: usize, rect: NormRect) -> TextSelection {
-        self.document.text_lines_in_rect(page, rect)
+    pub fn text_line_span(&self, page: usize, start: (f32, f32), end: (f32, f32)) -> TextSelection {
+        self.document.text_line_span(page, start, end)
     }
 
     /// Find `query` on `page` (RR2 in-document search) — a pass-through to

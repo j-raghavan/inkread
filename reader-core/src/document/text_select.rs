@@ -265,15 +265,14 @@ pub fn text_in_rect(chars: &[CharBox], rect: NormRect) -> TextSelection {
     }
 }
 
-/// Select **whole lines** overlapped by `rect`'s vertical span — the multi-line drag (RR11). Unlike
-/// [`text_in_rect`] (which keeps only the glyphs geometrically inside the rect, clipping the first
-/// and last lines along a diagonal drag), this takes every glyph of every line the band meaningfully
-/// covers, so complete characters are selected: each line becomes one full-width box and the overall
-/// selection spans the full height of all lines by the widest line's width. `rect.x` is ignored
-/// (lines are taken whole). A line is included when the band covers more than a third of its height,
-/// so a band edge that merely grazes the neighbouring line doesn't pull it in. Trailing/leading
-/// word-less lines (e.g. a band edge clipping a blank line) are dropped.
-pub fn text_lines_in_rect(chars: &[CharBox], rect: NormRect) -> TextSelection {
+/// Select the text a **drag** sweeps from `start` to `end` (normalized points), the reading-order
+/// multi-line selection (RR11). Mirrors how a desktop selection reads, with the project's twist:
+/// the line the drag *starts* on and every line through to the one *before* the lift are taken
+/// **whole** (complete characters, full line width); the **last** line (where the pen lifted) is
+/// taken only up to the word under `end.x`. Consecutive line boxes are grown to meet the next
+/// line's top so the highlight is one continuous block (no inter-line gaps). Word-less edge lines
+/// are dropped. Direction-agnostic: the lift point's line is the partial one either way.
+pub fn text_line_span(chars: &[CharBox], start: (f32, f32), end: (f32, f32)) -> TextSelection {
     if chars.is_empty() {
         return TextSelection::default();
     }
@@ -285,28 +284,70 @@ pub fn text_lines_in_rect(chars: &[CharBox], rect: NormRect) -> TextSelection {
             _ => lines.push(vec![c]),
         }
     }
+    // The line index nearest a y: the line whose vertical span contains it, else the closest center.
+    let line_at = |y: f32| -> usize {
+        let mut best = 0usize;
+        let mut best_d = f32::MAX;
+        for (i, line) in lines.iter().enumerate() {
+            let (mut y0, mut y1) = (line[0].rect.y0, line[0].rect.y1);
+            for c in &line[1..] {
+                y0 = y0.min(c.rect.y0);
+                y1 = y1.max(c.rect.y1);
+            }
+            if y >= y0 && y <= y1 {
+                return i;
+            }
+            let d = ((y0 + y1) * 0.5 - y).abs();
+            if d < best_d {
+                best_d = d;
+                best = i;
+            }
+        }
+        best
+    };
+    let a = line_at(start.1);
+    let b = line_at(end.1);
+    let (lo, hi) = (a.min(b), a.max(b));
+    let focus = b; // the line where the pen lifted — the only partial line
+    let ex = end.0;
+
     let mut parts: Vec<String> = Vec::new();
     let mut boxes: Vec<NormRect> = Vec::new();
-    for line in &lines {
-        // The line's full vertical span + box (union of all its glyphs — the whole line, not a clip).
-        let mut b = line[0].rect;
-        for c in &line[1..] {
-            b = b.union(&c.rect);
+    for (idx, line) in lines.iter().enumerate().take(hi + 1).skip(lo) {
+        // The pen-lift line (when the drag spans >1 line) is clipped to the word under `end.x`;
+        // every other line in the span is taken whole.
+        let take: &[&CharBox] = if idx == focus && lo != hi {
+            // Last glyph whose box starts at/before the lift x, then extend to the word's end.
+            let mut last = 0usize;
+            for (j, c) in line.iter().enumerate() {
+                if c.rect.x0 <= ex {
+                    last = j;
+                }
+            }
+            while last + 1 < line.len() && joins(line[last], line[last + 1]) {
+                last += 1;
+            }
+            &line[..=last]
+        } else {
+            &line[..]
+        };
+        if take.is_empty() {
+            continue;
         }
-        let overlap = b.y1.min(rect.y1) - b.y0.max(rect.y0);
-        if overlap <= 0.3 * b.height().max(1e-4) {
-            continue; // the band only grazes this line — don't pull it in
+        let mut bx = take[0].rect;
+        for c in &take[1..] {
+            bx = bx.union(&c.rect);
         }
         parts.push(
-            line.iter()
+            take.iter()
                 .map(|c| c.ch)
                 .collect::<String>()
                 .trim()
                 .to_string(),
         );
-        boxes.push(b);
+        boxes.push(bx);
     }
-    // Drop word-less edge lines (a band edge clipping a blank line shows as an empty trailing line).
+    // Drop word-less edge lines (a stray blank line clipped at an end).
     while parts.last().is_some_and(String::is_empty) {
         parts.pop();
         boxes.pop();
@@ -317,6 +358,13 @@ pub fn text_lines_in_rect(chars: &[CharBox], rect: NormRect) -> TextSelection {
     }
     if parts.is_empty() {
         return TextSelection::default();
+    }
+    // Grow each box down to the next line's top so the highlight is one continuous block (fills the
+    // inter-line gaps the per-line glyph boxes leave). Boxes are already ordered top to bottom.
+    for i in 0..boxes.len().saturating_sub(1) {
+        if boxes[i + 1].y0 > boxes[i].y1 {
+            boxes[i].y1 = boxes[i + 1].y0;
+        }
     }
     TextSelection {
         text: parts.join(" ").trim().to_string(),
@@ -478,44 +526,42 @@ mod tests {
     }
 
     #[test]
-    fn text_lines_in_rect_takes_whole_lines_from_a_diagonal_band() {
-        // Three lines; a diagonal drag band that starts mid-line-1 and ends mid-line-3 with a narrow
-        // x-range must still select the FULL text of all three lines (not the clipped sub-rect).
+    fn text_line_span_full_lines_then_partial_last_line() {
+        // Three lines; a diagonal drag that starts mid-line-1 and lifts partway through line-3.
         let mut chars = line("the first line here", 0.0, 0.8, 0.10, 0.03);
         chars.extend(line("the middle line two", 0.0, 0.8, 0.16, 0.03));
         chars.extend(line("the last line three", 0.0, 0.8, 0.22, 0.03));
-        // Narrow x; starts mid-line-1 (0.10..0.13) and ends mid-line-3 (0.22..0.25).
-        let band = NormRect {
-            x0: 0.30,
-            y0: 0.115,
-            x1: 0.55,
-            y1: 0.235,
-        };
-        let sel = text_lines_in_rect(&chars, band);
-        assert_eq!(sel.boxes.len(), 3, "three lines → three full-line boxes");
-        // Every line's complete text is present (full chars, not the diagonal clip).
+        // Start mid-line-1; lift over "line" on line-3 (x ≈ 0.45, before "three").
+        let sel = text_line_span(&chars, (0.30, 0.115), (0.45, 0.235));
+        assert_eq!(sel.boxes.len(), 3, "three line boxes");
+        // Lines 1 and 2 are taken WHOLE (full text), regardless of the start x.
         assert!(sel.text.contains("the first line here"));
         assert!(sel.text.contains("the middle line two"));
-        assert!(sel.text.contains("the last line three"));
-        // Each box spans the full line width, not the narrow band x.
+        // Line 3 is clipped at the lift point: "the last line" but NOT "three".
+        assert!(sel.text.contains("the last line"));
+        assert!(
+            !sel.text.contains("three"),
+            "last line clipped to the lift word"
+        );
+        // Whole lines span the full width; consecutive boxes touch (gaps filled).
         assert!(sel.boxes[0].x0 <= 0.01 && sel.boxes[0].x1 >= 0.79);
+        assert!(
+            sel.boxes[0].y1 >= sel.boxes[1].y0 - 1e-6,
+            "no gap between lines 1 and 2"
+        );
+        assert!(
+            sel.boxes[1].y1 >= sel.boxes[2].y0 - 1e-6,
+            "no gap between lines 2 and 3"
+        );
     }
 
     #[test]
-    fn text_lines_in_rect_ignores_a_barely_grazed_neighbour_and_drops_blank_edge() {
-        let mut chars = line("alpha beta", 0.0, 0.5, 0.10, 0.03);
-        chars.extend(line("gamma delta", 0.0, 0.5, 0.16, 0.03));
-        chars.extend(line("   ", 0.0, 0.5, 0.22, 0.03)); // a whitespace-only line below
-                                                         // Band covers line 1 fully, line 2 fully, and only grazes the blank line's top (<30%).
-        let band = NormRect {
-            x0: 0.0,
-            y0: 0.10,
-            x1: 1.0,
-            y1: 0.225,
-        };
-        let sel = text_lines_in_rect(&chars, band);
-        assert_eq!(sel.boxes.len(), 2, "blank/grazed trailing line dropped");
-        assert_eq!(sel.text, "alpha beta gamma delta");
+    fn text_line_span_single_line_drag_takes_the_whole_line() {
+        let chars = line("alpha beta gamma", 0.0, 0.6, 0.10, 0.03);
+        // Start and lift on the same line (lo == hi) → one whole-line box, no clip.
+        let sel = text_line_span(&chars, (0.1, 0.115), (0.4, 0.115));
+        assert_eq!(sel.boxes.len(), 1);
+        assert_eq!(sel.text, "alpha beta gamma");
     }
 
     #[test]

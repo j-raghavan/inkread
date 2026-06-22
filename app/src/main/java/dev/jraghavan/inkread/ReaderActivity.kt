@@ -1858,16 +1858,19 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
     }
 
     /**
-     * Lasso text fallback (engine thread): the loop found no ink, so select the printed text within
-     * the loop's bounding box via the core's text seam ([NativeBridge.nativeTextInRect]) and offer
-     * Define / Copy / Highlight. A polygon's bbox over a hand-drawn circle comfortably covers the
-     * words the user meant; per-vertex containment is a future refinement.
+     * Lasso text fallback (engine thread): the gesture found no ink, so select printed text. An
+     * **open diagonal drag** across lines (start far from lift, spanning >1 line) is a reading-order
+     * line span — start line through the line before the lift taken whole, the lift line clipped to
+     * its word, gaps filled ([NativeBridge.nativeTextLineSpan]). A **closed loop** around a few words
+     * uses the polygon's bounding box ([NativeBridge.nativeTextInRect]). Then offer the actions.
      */
     private fun selectTextInLoop(poly: FloatArray) {
         if (docHandle == 0L || poly.size < 6) {
             runOnUiThread { Toast.makeText(this, "Nothing under the loop", Toast.LENGTH_SHORT).show() }
             return
         }
+        val sx = poly[0]; val sy = poly[1]
+        val ex = poly[poly.size - 2]; val ey = poly[poly.size - 1]
         var x0 = Float.MAX_VALUE; var y0 = Float.MAX_VALUE; var x1 = -Float.MAX_VALUE; var y1 = -Float.MAX_VALUE
         var i = 0
         while (i + 1 < poly.size) {
@@ -1875,7 +1878,15 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             y0 = minOf(y0, poly[i + 1]); y1 = maxOf(y1, poly[i + 1])
             i += 2
         }
-        presentTextSelection(x0, y0, x1, y1, "Nothing under the loop — circle ink or printed words")
+        // Open drag (lift far from start) spanning multiple lines → reading-order line span; a closed
+        // loop (lift returns near the start) → the bounding box of what was circled.
+        val openDrag = kotlin.math.hypot(ex - sx, ey - sy) > OPEN_DRAG_FRAC
+        val multiLine = (y1 - y0) > MULTILINE_DRAG_FRAC
+        if (openDrag && multiLine) {
+            presentLineSpanSelection(sx, sy, ex, ey, "No text under the selection")
+        } else {
+            presentTextSelection(x0, y0, x1, y1, "Nothing under the loop — circle ink or printed words")
+        }
     }
 
     /**
@@ -1884,18 +1895,34 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
      * drag. [emptyMsg] is toasted when the rect holds no text. A drag is a *selection*, never an
      * auto-lookup — the user picks Define from the action sheet if they want a definition.
      */
-    private fun presentTextSelection(x0: Float, y0: Float, x1: Float, y1: Float, emptyMsg: String, lineBased: Boolean = false) {
+    private fun presentTextSelection(x0: Float, y0: Float, x1: Float, y1: Float, emptyMsg: String) {
         if (docHandle == 0L) return
         val sel = try {
-            val wire = if (lineBased) {
-                NativeBridge.nativeTextLinesInRect(docHandle, currentPage, x0, y0, x1, y1)
-            } else {
-                NativeBridge.nativeTextInRect(docHandle, currentPage, x0, y0, x1, y1)
-            }
-            WireCodec.decodeSelection(wire)
+            WireCodec.decodeSelection(NativeBridge.nativeTextInRect(docHandle, currentPage, x0, y0, x1, y1))
         } catch (e: RuntimeException) {
             Log.e(TAG, "text-in-rect failed: ${e.message}"); Selection("", emptyList())
         }
+        showSelectionResult(sel, emptyMsg)
+    }
+
+    /**
+     * Multi-line drag (engine thread): the reading-order selection the core sweeps from the drag's
+     * start point to its lift point — whole lines through to the line before the lift, the lift line
+     * clipped to the word under it, inter-line gaps filled (see [NativeBridge.nativeTextLineSpan]).
+     */
+    private fun presentLineSpanSelection(sx: Float, sy: Float, ex: Float, ey: Float, emptyMsg: String) {
+        if (docHandle == 0L) return
+        val sel = try {
+            WireCodec.decodeSelection(NativeBridge.nativeTextLineSpan(docHandle, currentPage, sx, sy, ex, ey))
+        } catch (e: RuntimeException) {
+            Log.e(TAG, "text-line-span failed: ${e.message}"); Selection("", emptyList())
+        }
+        showSelectionResult(sel, emptyMsg)
+    }
+
+    /** Render the caught selection's boxes and offer the action sheet — shared by the bbox and
+     *  line-span selection paths (engine thread). A drag is a *selection*, never an auto-lookup. */
+    private fun showSelectionResult(sel: Selection, emptyMsg: String) {
         diag { "DIAG text selection: '${sel.text.take(40)}' (${sel.boxes.size} boxes)" }
         clearFirmwareInk() // wipe the firmware ink the select gesture left behind
         renderAndBlit()
@@ -2129,18 +2156,19 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         val dragged = (maxX - minX) > w * 0.03f || (maxY - minY) > h * 0.02f
         if (dragged) {
             // A drag is a text *selection*, not a one-word lookup: show the caught text + the
-            // Define/Copy/Highlight sheet (same UX as the lasso), never an auto dict card.
-            // A multi-line drag selects FULL lines — from the start of the line where the drag began
-            // through the end of the line where it stopped — so widen the band to the full page
-            // width; a single-line drag keeps the dragged horizontal span.
+            // Copy/Highlight (and Define for one line) sheet, never an auto dict card.
             val multiLine = (maxY - minY) > h * MULTILINE_DRAG_FRAC
-            // Multi-line: let the core take WHOLE lines over the drag's vertical span (complete
-            // characters, full-width per-line boxes) — x is irrelevant there. Single-line: the
-            // dragged horizontal span on that one line.
-            val x0 = if (multiLine) 0f else vToNx(minX)
-            val x1 = if (multiLine) 1f else vToNx(maxX)
-            val y0 = vToNy(minY); val y1 = vToNy(maxY)
-            engine.execute { presentTextSelection(x0, y0, x1, y1, "No text under the selection", lineBased = multiLine) }
+            if (multiLine) {
+                // The core sweeps from the drag's start point to its lift point: whole lines through
+                // to the line before the lift, the lift line clipped to its word, gaps filled.
+                val sx = vToNx(pts[0]); val sy = vToNy(pts[1])
+                val ex = vToNx(pts[pts.size - 2]); val ey = vToNy(pts[pts.size - 1])
+                engine.execute { presentLineSpanSelection(sx, sy, ex, ey, "No text under the selection") }
+            } else {
+                // Single-line drag: the dragged horizontal span on that one line.
+                val r = floatArrayOf(vToNx(minX), vToNy(minY), vToNx(maxX), vToNy(maxY))
+                engine.execute { presentTextSelection(r[0], r[1], r[2], r[3], "No text under the selection") }
+            }
         } else {
             // A single still tap is a word lookup (the dict card).
             val page = currentPage
@@ -2645,7 +2673,8 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         const val PREVIEW_MS = 50L // min interval between live zoom/pan preview blits (e-ink cadence).
         const val ZOOM_STEP = 1.4f // +/- button zoom multiplier.
         const val SELECTION_HANDLE_PX = 8f // half-size of the square corner handles on the selection box.
-        const val MULTILINE_DRAG_FRAC = 0.045f // Define-drag vertical span (frac of height) above which it's treated as multi-line → full-line select.
+        const val MULTILINE_DRAG_FRAC = 0.045f // drag vertical span (frac of height) above which it's a multi-line → line-span select.
+        const val OPEN_DRAG_FRAC = 0.08f // lasso: start-to-lift distance (normalized) above which the gesture is an open drag (vs a closed loop).
         const val CONTRAST_MAX = 8 // mirrors reader-core render::contrast::MAX_CONTRAST_STEP (RR4).
         val LINE_SPACINGS = floatArrayOf(1.2f, 1.4f, 1.7f) // Small / Medium / Large (RR4).
         const val HIGHLIGHT_WIDTH_PX = 30f // wide marker band (vs INK_STROKE_WIDTH for the pen).

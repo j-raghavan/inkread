@@ -756,10 +756,10 @@ impl Document for PdfBackend {
         }
     }
 
-    fn text_lines_in_rect(&self, page: usize, rect: NormRect) -> TextSelection {
+    fn text_line_span(&self, page: usize, start: (f32, f32), end: (f32, f32)) -> TextSelection {
         match &*self.reflow.borrow() {
-            Some(v) => text_select::text_lines_in_rect(&v.page_chars(page), rect),
-            None => text_select::text_lines_in_rect(&self.page_chars(page), rect),
+            Some(v) => text_select::text_line_span(&v.page_chars(page), start, end),
+            None => text_select::text_line_span(&self.page_chars(page), start, end),
         }
     }
 

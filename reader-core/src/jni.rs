@@ -1165,25 +1165,26 @@ pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeTextInRect<
     .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
 }
 
-// nativeTextLinesInRect(handle, page, x0,y0,x1,y1) : bytes — whole-line selection over the rect's
-// vertical span (the multi-line drag). Selects complete lines (full chars, full-width per-line
-// boxes), not the diagonal clip nativeTextInRect would give. Decode with WireCodec.decodeSelection.
+// nativeTextLineSpan(handle, page, sx,sy, ex,ey) : bytes — reading-order selection a drag sweeps
+// from the start point (sx,sy) to the lift point (ex,ey), the multi-line drag. Whole lines from the
+// start line through the line before the lift; the lift line clipped to the word under ex; gaps
+// between line boxes filled. Decode with WireCodec.decodeSelection.
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
-pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeTextLinesInRect<'local>(
+pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeTextLineSpan<'local>(
     mut env: EnvUnowned<'local>,
     _class: JClass<'local>,
     handle: jlong,
     page: jint,
-    x0: jfloat,
-    y0: jfloat,
-    x1: jfloat,
-    y1: jfloat,
+    sx: jfloat,
+    sy: jfloat,
+    ex: jfloat,
+    ey: jfloat,
 ) -> JByteArray<'local> {
     env.with_env(|env| -> jni::errors::Result<JByteArray<'local>> {
         let session = unsafe { session_mut(handle) }.map_err(|e| throw(env, &e))?;
         let target = if page < 0 { 0usize } else { page as usize };
-        let sel = session.text_lines_in_rect(target, NormRect { x0, y0, x1, y1 });
+        let sel = session.text_line_span(target, (sx, sy), (ex, ey));
         env.byte_array_from_slice(&encode_selection_wire(&sel))
     })
     .resolve::<jni::errors::ThrowRuntimeExAndDefault>()

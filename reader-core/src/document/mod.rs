@@ -409,10 +409,11 @@ pub trait Document {
         TextSelection::default()
     }
 
-    /// Whole-line selection over the vertical span of `rect` on `page` — the multi-line drag (RR11).
-    /// Unlike [`Self::text_in_rect`], every glyph of each line the band covers is selected (complete
-    /// characters, full-width per-line boxes), not the diagonal clip. Default: an empty selection.
-    fn text_lines_in_rect(&self, _page: usize, _rect: NormRect) -> TextSelection {
+    /// Reading-order selection a drag sweeps from `start` to `end` (normalized points) on `page` —
+    /// the multi-line drag (RR11). Unlike [`Self::text_in_rect`], the start line through the line
+    /// before the lift are taken WHOLE; the lift line is clipped to the word under `end.x`; line
+    /// boxes are grown to fill the inter-line gaps. Default: an empty selection.
+    fn text_line_span(&self, _page: usize, _start: (f32, f32), _end: (f32, f32)) -> TextSelection {
         TextSelection::default()
     }
 
