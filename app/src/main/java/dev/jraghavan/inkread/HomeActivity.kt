@@ -9,6 +9,7 @@ import android.os.Bundle
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
+import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ScrollView
@@ -116,11 +117,23 @@ class HomeActivity : Activity() {
         column.addView(spacerWeighted(phi))
         column.addView(closingMark())
 
-        return ScrollView(this).apply {
+        val scroll = ScrollView(this).apply {
             isFillViewport = true
-            setBackgroundColor(Color.WHITE)
             isVerticalScrollBarEnabled = false
             addView(column)
+        }
+        // A subtle top-corner gear → app Settings (export behaviour, help, about).
+        return FrameLayout(this).apply {
+            setBackgroundColor(Color.WHITE)
+            addView(scroll, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+            addView(ImageView(this@HomeActivity).apply {
+                setImageResource(R.drawable.ic_settings)
+                val p = dp(8); setPadding(p, p, p, p)
+                isClickable = true
+                setOnClickListener { startActivity(Intent(this@HomeActivity, SettingsActivity::class.java)) }
+            }, FrameLayout.LayoutParams(dp(40), dp(40), Gravity.TOP or Gravity.END).apply {
+                topMargin = dp(10); marginEnd = dp(10)
+            })
         }
     }
 
@@ -136,7 +149,7 @@ class HomeActivity : Activity() {
             typeface = scriptBold; paint.isFakeBoldText = true; gravity = Gravity.CENTER
             includeFontPadding = false
         })
-        addView(eyebrow("·  Super Reader  ·  v${versionName()}  ·").apply { setPadding(0, dim(10), 0, 0) })
+        addView(eyebrow("·  v${versionName()}  ·").apply { gravity = Gravity.CENTER; setPadding(0, dim(10), 0, 0) })
     }
 
     // ── Continue where you left off (the most-recent book) ───────────────────────────────────────
@@ -241,7 +254,7 @@ class HomeActivity : Activity() {
         })
         addView(LinearLayout(this@HomeActivity).apply {
             orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
+            gravity = Gravity.CENTER
             setPadding(0, dim(6), 0, 0)
             addView(rule())
             addView(ImageView(this@HomeActivity).apply { setImageResource(R.mipmap.ic_launcher) },
