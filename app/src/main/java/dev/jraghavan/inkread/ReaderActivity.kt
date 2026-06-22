@@ -106,6 +106,9 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
     @Volatile private var pageCount = 0
     /** Stable id of the open book (its file name); keys thumbnails + the bookmarks file. */
     @Volatile private var currentBookId = ""
+    /** Whether PDF reflow mode is on (ADR-INKREAD-0011). Session-scoped: defaults off on each open
+     *  (the fixed page is the faithful view; reflow is an opt-in toggle on the Page tab). */
+    @Volatile private var reflowOn = false
 
     // ---- dictionary (RR12 / D4) ----
     /** Open `Dict` handle (0 = not opened). Engine-thread only. */
@@ -587,6 +590,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             // Bookmarks remain a Kotlin sidecar (RR16), keyed by the book id.
             bookmarks = Bookmarks(File(filesDir, "bookmarks/${bookId.hashCode()}.json")).also { it.load() }
             currentBookId = bookId
+            reflowOn = false // a fresh document opens in fixed-layout view (ADR-INKREAD-0011)
             // Re-apply the saved reflow text scale (EPUB); a no-op (-1) on fixed-layout PDF.
             val savedScale = textScalePref()
             if (savedScale != 1.0f) {
@@ -2990,6 +2994,15 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             }
         }
         val container = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        // Reflow toggle — only for a text-layer PDF (EPUB is always reflowable; a scanned PDF can't).
+        // It gates whether the Line Spacing / Alignment / Font Size controls take effect on a PDF.
+        val supportsReflow = try { NativeBridge.nativeSupportsReflow(docHandle) } catch (e: RuntimeException) { false }
+        if (supportsReflow) {
+            container.addView(settingRow("Reflow", segmented(listOf("Off", "On"), if (reflowOn) 1 else 0) { which ->
+                Log.i(TAG, "DIAG reflow=${which == 1}")
+                setReflowMode(which == 1)
+            }))
+        }
         container.addView(settingRow("Line Spacing", segmented(listOf("Small", "Medium", "Large"), lineSpacingPref()) { which ->
             setLineSpacingPref(which)
             Log.i(TAG, "DIAG line spacing=$which")
@@ -3001,6 +3014,33 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             applyReflow { NativeBridge.nativeSetAlignment(docHandle, which) }
         }))
         return container
+    }
+
+    /** Toggle PDF reflow (ADR-INKREAD-0011). On enable, re-apply the saved typography so the
+     *  reflowed PDF respects the user's font size / spacing / alignment; the page count and position
+     *  change across the toggle, so refresh both. A `-1` means no text layer (scanned PDF). */
+    private fun setReflowMode(on: Boolean) {
+        engine.execute {
+            val np = try { NativeBridge.nativeSetReflow(docHandle, on) } catch (e: RuntimeException) { -1 }
+            if (np >= 0) {
+                reflowOn = on
+                if (on) {
+                    if (textScalePref() != 1.0f) {
+                        try { NativeBridge.nativeSetTextScale(docHandle, textScalePref()) } catch (e: RuntimeException) {}
+                    }
+                    if (lineSpacingPref() != 1) {
+                        try { NativeBridge.nativeSetLineSpacing(docHandle, LINE_SPACINGS[lineSpacingPref()]) } catch (e: RuntimeException) {}
+                    }
+                    if (alignmentPref() != 0) {
+                        try { NativeBridge.nativeSetAlignment(docHandle, alignmentPref()) } catch (e: RuntimeException) {}
+                    }
+                }
+                pageCount = NativeBridge.nativePageCount(docHandle)
+                renderAndBlit(); adapter.refreshFull()
+            } else {
+                runOnUiThread { Toast.makeText(this, "This PDF has no text layer to reflow", Toast.LENGTH_SHORT).show() }
+            }
+        }
     }
 
     private fun lineSpacingPref(): Int =

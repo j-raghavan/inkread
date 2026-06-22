@@ -6,6 +6,7 @@
 
 pub mod fixed;
 pub mod reflow;
+pub(crate) mod reflow_view;
 pub mod text_select;
 
 pub use text_select::{CharBox, NormRect, SearchMatch, TextSelection};
@@ -346,6 +347,24 @@ pub trait Document {
     /// preserving the chapter (RR4 — KOReader's "Alignment"). Returns the new page, or `None` for a
     /// fixed-layout format (PDF). Default: unsupported.
     fn set_alignment(&self, _align_code: i32, _current_page: usize) -> Option<usize> {
+        None
+    }
+
+    /// Whether this document can be **reflowed** — true for a fixed-layout PDF that carries a text
+    /// layer (ADR-INKREAD-0011), false for one without (a pure scan: needs OCR, out of scope) and
+    /// false for already-reflowable formats (EPUB is always reflowed; the toggle is meaningless).
+    /// The shell uses this to enable/disable the Reflow control. Default: not reflow-able.
+    fn supports_reflow(&self) -> bool {
+        false
+    }
+
+    /// Toggle **reflow mode** on a fixed-layout PDF (ADR-INKREAD-0011): when `on`, the page's text is
+    /// reconstructed and laid out like a reflowable book so the font-size/line-spacing/alignment
+    /// controls take effect; when off, the original fixed page is shown. `current_page` is the page
+    /// the reader is on before the toggle; the backend returns `Some(new_page)` to jump to so the
+    /// reading position is preserved across the (changing) page count, or `None` if reflow is
+    /// unavailable (no text layer) or the format doesn't support the toggle. Default: unsupported.
+    fn set_reflow(&self, _on: bool, _current_page: usize) -> Option<usize> {
         None
     }
 

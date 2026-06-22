@@ -559,3 +559,145 @@ fn content_bbox_is_tighter_than_full_page_and_crops() {
     );
     assert!(pb.bytes().chunks_exact(4).all(|p| p[3] == 0xFF), "opaque");
 }
+
+// ADR-INKREAD-0011 — PDF reflow end-to-end through the PdfBackend reflow mode.
+#[test]
+fn pdf_reflow_toggles_and_reflows_text() {
+    let _s = pdfium_serial();
+    if !host_pdfium_available() {
+        eprintln!("SKIP pdf_reflow_toggles_and_reflows_text: host libpdfium UNVERIFIED");
+        return;
+    }
+    let bytes = std::fs::read(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/minimal.pdf"
+    ))
+    .expect("fixture present");
+    let doc = PdfBackend::open(bytes).expect("open fixture");
+
+    // The fixture draws real text ("inkread M0") → it carries a reflow-able text layer.
+    assert!(doc.supports_reflow(), "minimal.pdf has a text layer");
+
+    let (w, h) = (300u32, 400u32);
+    let mut warm = vec![0u8; (w * h * 4) as usize];
+    // A fixed render first records the viewport the reflow pagination is built against.
+    doc.render_page(0, &mut PixelBuffer::from_rgba(&mut warm, w, h).unwrap())
+        .expect("fixed render");
+
+    // Fixed-layout: the typesetting setters are inert (RR4 — PDF returns None).
+    assert!(doc.set_text_scale(1.5, 0).is_none(), "no reflow while off");
+    let source_pages = doc.page_count();
+
+    // Enable reflow → lands on the reflowed page for source page 0.
+    let target = doc
+        .set_reflow(true, 0)
+        .expect("reflow enables with a text layer");
+    assert!(target < doc.page_count());
+
+    // The reflowed page renders the reconstructed text via the EPUB layout engine.
+    let mut rp = vec![0u8; (w * h * 4) as usize];
+    let mut rpb = PixelBuffer::from_rgba(&mut rp, w, h).unwrap();
+    doc.render_page(target, &mut rpb).expect("reflow render");
+    let inked = rpb.bytes().chunks_exact(4).filter(|p| p[0] < 200).count();
+    assert!(inked > 20, "reflowed page shows text: {inked} inked px");
+
+    // With reflow on, the typesetting setters are live and preserve position.
+    let p = doc
+        .set_text_scale(1.5, target)
+        .expect("reflow honors font size");
+    let p = doc
+        .set_line_spacing(1.8, p)
+        .expect("reflow honors line spacing");
+    let p = doc.set_alignment(1, p).expect("reflow honors alignment");
+
+    // The reflowed text is searchable through the shared text path.
+    assert!(
+        !doc.search_page(p, "inkread").is_empty(),
+        "search finds reflowed text"
+    );
+
+    // Disable → maps back to the source page and restores the fixed page count.
+    let back = doc.set_reflow(false, p).expect("reflow disables");
+    assert_eq!(back, 0, "reflowed page maps back to source page 0");
+    assert_eq!(doc.page_count(), source_pages, "fixed page count restored");
+    assert!(doc.set_text_scale(1.0, 0).is_none(), "setters inert again");
+}
+
+/// Visual gate (ADR-INKREAD-0011): render the first reflowed pages of a real text PDF to BMPs for
+/// human inspection — the black-screencap Supernote can't self-verify, so we eyeball on the host.
+/// Run on demand: `INKREAD_REFLOW_PDF=/path/book.pdf cargo test -p reader-core
+/// pdf_reflow_visual_dump -- --ignored --nocapture` → writes `target/reflow-bmp/reflow-NNN.bmp`.
+#[test]
+#[ignore = "visual gate: needs INKREAD_REFLOW_PDF=<text pdf>; run with --ignored --nocapture"]
+fn pdf_reflow_visual_dump() {
+    let _s = pdfium_serial();
+    let Ok(path) = std::env::var("INKREAD_REFLOW_PDF") else {
+        eprintln!("SKIP pdf_reflow_visual_dump: set INKREAD_REFLOW_PDF to a text PDF path");
+        return;
+    };
+    if !host_pdfium_available() {
+        eprintln!("SKIP pdf_reflow_visual_dump: host libpdfium UNVERIFIED");
+        return;
+    }
+    let bytes = std::fs::read(&path).expect("pdf readable");
+    let doc = PdfBackend::open(bytes).expect("open pdf");
+    assert!(doc.supports_reflow(), "no extractable text layer in {path}");
+
+    let (w, h) = (1404u32, 1872u32); // a Supernote-class portrait panel
+    let mut warm = vec![0u8; (w * h * 4) as usize];
+    doc.render_page(0, &mut PixelBuffer::from_rgba(&mut warm, w, h).unwrap())
+        .ok(); // records the viewport for pagination
+    let start = doc.set_reflow(true, 0).expect("reflow enables");
+    let pages = doc.page_count();
+
+    let out_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../target/reflow-bmp");
+    std::fs::create_dir_all(&out_dir).expect("create out dir");
+    for i in start..(start + 6).min(pages) {
+        let mut px = vec![0u8; (w * h * 4) as usize];
+        doc.render_page(i, &mut PixelBuffer::from_rgba(&mut px, w, h).unwrap())
+            .expect("render reflow page");
+        let path = out_dir.join(format!("reflow-{i:03}.bmp"));
+        write_bmp(&path, &px, w, h);
+        eprintln!("wrote {}", path.display());
+    }
+}
+
+/// Write an RGBA buffer as a 24-bit BMP (bottom-up, BGR) — dependency-free, Preview-openable, and
+/// `sips`-convertible to PNG. Used only by the visual gate.
+#[cfg(test)]
+fn write_bmp(path: &std::path::Path, rgba: &[u8], w: u32, h: u32) {
+    use std::io::Write;
+    let row_bytes = (w * 3).div_ceil(4) * 4; // each row padded to a 4-byte boundary
+    let pad = row_bytes - w * 3;
+    let pixels = row_bytes * h;
+    let file_size = 54 + pixels;
+    let mut out = Vec::with_capacity(file_size as usize);
+    out.extend_from_slice(b"BM");
+    out.extend_from_slice(&file_size.to_le_bytes());
+    out.extend_from_slice(&0u32.to_le_bytes()); // reserved
+    out.extend_from_slice(&54u32.to_le_bytes()); // pixel data offset
+    out.extend_from_slice(&40u32.to_le_bytes()); // DIB header size
+    out.extend_from_slice(&(w as i32).to_le_bytes());
+    out.extend_from_slice(&(h as i32).to_le_bytes()); // positive → bottom-up
+    out.extend_from_slice(&1u16.to_le_bytes()); // planes
+    out.extend_from_slice(&24u16.to_le_bytes()); // bpp
+    out.extend_from_slice(&0u32.to_le_bytes()); // no compression
+    out.extend_from_slice(&pixels.to_le_bytes());
+    out.extend_from_slice(&2835i32.to_le_bytes()); // x ppm
+    out.extend_from_slice(&2835i32.to_le_bytes()); // y ppm
+    out.extend_from_slice(&0u32.to_le_bytes()); // palette colors
+    out.extend_from_slice(&0u32.to_le_bytes()); // important colors
+    for y in (0..h).rev() {
+        let row = (y * w * 4) as usize;
+        for x in 0..w as usize {
+            let o = row + x * 4;
+            out.push(rgba[o + 2]); // B
+            out.push(rgba[o + 1]); // G
+            out.push(rgba[o]); // R
+        }
+        out.extend(std::iter::repeat_n(0u8, pad as usize));
+    }
+    std::fs::File::create(path)
+        .and_then(|mut f| f.write_all(&out))
+        .expect("write bmp");
+}
