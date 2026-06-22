@@ -1,7 +1,6 @@
 package dev.jraghavan.inkread
 
 import android.app.Activity
-import android.graphics.Color
 import android.graphics.drawable.GradientDrawable
 import android.view.Gravity
 import android.view.MotionEvent
@@ -70,12 +69,8 @@ class ToolPalette(
         render()
     }
 
-    /** Rounded white pill with a black ring — high contrast on e-ink. */
-    private fun pill() = GradientDrawable().apply {
-        setColor(Color.WHITE)
-        setStroke(maxOf(2, dp(1)), Color.BLACK)
-        cornerRadius = dp(22).toFloat()
-    }
+    /** Rounded white pill with a black keyline — high contrast on e-ink (Inkwell card language). */
+    private fun pill() = Ink.cardBg(22)
 
     private fun render() {
         container.background = pill()
@@ -93,8 +88,8 @@ class ToolPalette(
 
     /** A hairline separator between the handle, the tools, and the undo/redo actions. */
     private fun divider(): View = View(activity).apply {
-        setBackgroundColor(Color.parseColor("#E0E0E0"))
-        layoutParams = LinearLayout.LayoutParams(dp(28), maxOf(1, dp(1))).apply {
+        setBackgroundColor(Ink.hairline)
+        layoutParams = LinearLayout.LayoutParams(dp(28), Ink.hair()).apply {
             gravity = Gravity.CENTER_HORIZONTAL
             val v = dp(4); setMargins(0, v, 0, v)
         }
@@ -104,7 +99,7 @@ class ToolPalette(
     private fun actionButton(iconRes: Int, desc: String, onTap: () -> Unit): ImageView =
         ImageView(activity).apply {
             setImageResource(iconRes)
-            setColorFilter(Color.BLACK)
+            setColorFilter(Ink.ink)
             val pad = dp(9); setPadding(pad, pad, pad, pad)
             val side = dp(40)
             layoutParams = LinearLayout.LayoutParams(side, side).apply { val m = dp(2); setMargins(m, m, m, m) }
@@ -116,7 +111,7 @@ class ToolPalette(
     /** First icon: a grip that drags the pill (move) and, on a tap, collapses/expands it. */
     private fun handle(): ImageView = ImageView(activity).apply {
         setImageResource(R.drawable.ic_tool_handle)
-        setColorFilter(Color.BLACK)
+        setColorFilter(Ink.ink)
         val pad = dp(9)
         setPadding(pad, pad, pad, pad)
         val side = dp(40)
@@ -157,7 +152,7 @@ class ToolPalette(
     private fun iconButton(tool: Tool): ImageView = ImageView(activity).apply {
         setImageResource(tool.iconRes)
         val active = tool == current
-        setColorFilter(if (active) Color.WHITE else Color.BLACK)
+        setColorFilter(if (active) Ink.paper else Ink.ink)
         alpha = if (tool.phase2) 0.35f else 1f
         val pad = dp(9)
         setPadding(pad, pad, pad, pad)
@@ -167,7 +162,7 @@ class ToolPalette(
         }
         if (active) {
             background = GradientDrawable().apply {
-                setColor(Color.BLACK); cornerRadius = dp(16).toFloat()
+                setColor(Ink.ink); cornerRadius = Ink.dpf(Ink.RADIUS_CHIP)
             }
         }
         isClickable = true

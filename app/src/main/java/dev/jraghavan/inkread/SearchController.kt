@@ -89,7 +89,7 @@ class SearchController(private val host: Host) {
             setPadding(pad, dp(8), pad, 0)
             addView(input, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
         }
-        val builder = AlertDialog.Builder(activity)
+        val builder = AlertDialog.Builder(activity, R.style.InkDialog)
             .setTitle("Search")
             .setView(wrap)
             .setPositiveButton("Search") { _, _ -> runSearch(input.text.toString()) }
@@ -115,7 +115,7 @@ class SearchController(private val host: Host) {
         // The scan blocks the engine thread, but the UI thread is free — so a cancelable progress
         // dialog lets the user abort a long full-document scan (the Cancel flips the volatile flag
         // the loop polls each page). Non-cancelable via back so the only exit is an explicit choice.
-        val progress = AlertDialog.Builder(host.activity)
+        val progress = AlertDialog.Builder(host.activity, R.style.InkDialog)
             .setTitle("Searching…")
             .setMessage("Scanning the document for “$q”.")
             .setNegativeButton("Cancel") { _, _ -> searchCancelled = true }
