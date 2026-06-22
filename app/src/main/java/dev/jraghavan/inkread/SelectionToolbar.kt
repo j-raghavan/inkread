@@ -19,6 +19,7 @@ enum class SelAction(val label: String, val iconRes: Int) {
     COPY("Copy", R.drawable.ic_sel_copy),
     PASTE("Paste", R.drawable.ic_sel_paste),
     SELECT_ALL("Select all", R.drawable.ic_sel_all),
+    DIGEST("Add to Digest", R.drawable.ic_sel_digest),
     DONE("Done", R.drawable.ic_sel_done),
 }
 
