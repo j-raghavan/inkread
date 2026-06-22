@@ -1605,22 +1605,30 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             Toast.makeText(this, "$name (tap Lasso again to switch)", Toast.LENGTH_SHORT).show()
             return true
         }
-        // Re-tapping the active Highlighter / Pen opens its colour palette (stored true; grey on mono).
+        // Re-tapping the active Pen/Highlighter shows (or restyles, in place) its colour column — an
+        // in-window view (see ColorPalette), so it never steals focus and the firmware keeps the
+        // live-ink overlay (the only thing that displays committed strokes on the current page). The
+        // column is PERSISTENT: it is never collapsed/removed while the tool stays active, because
+        // removing the overlay view disturbs that firmware overlay and a sideloaded app cannot force
+        // a same-page refresh to repaint it (verified on-device — only page turns refresh). It closes
+        // only on a tool switch (a deliberate context change). No Toast on pick: a Toast is a separate
+        // window that steals focus and drops the overlay — the ringed swatch is the feedback.
         if (chosen == Tool.HIGHLIGHTER && tool == Tool.HIGHLIGHTER) {
-            colorPalette.show("Highlighter colour", HIGHLIGHT_COLORS, HIGHLIGHT_COLOR_NAMES, hlColorIdx) { idx ->
+            if (colorPalette.isShowing()) collapseColorPalette()
+            else colorPalette.show("Highlighter", HIGHLIGHT_COLORS, HIGHLIGHT_COLOR_NAMES, hlColorIdx) { idx ->
                 hlColorIdx = idx
-                Toast.makeText(this, "Highlighter: ${HIGHLIGHT_COLOR_NAMES[idx]}", Toast.LENGTH_SHORT).show()
             }
             return true
         }
         if (chosen == Tool.PEN && tool == Tool.PEN) {
-            colorPalette.show("Pen colour", PEN_COLORS, PEN_COLOR_NAMES, penColorIdx) { idx ->
+            if (colorPalette.isShowing()) collapseColorPalette()
+            else colorPalette.show("Pen", PEN_COLORS, PEN_COLOR_NAMES, penColorIdx) { idx ->
                 penColorIdx = idx
-                Toast.makeText(this, "Pen: ${PEN_COLOR_NAMES[idx]}", Toast.LENGTH_SHORT).show()
             }
             return true
         }
         if (chosen == tool) return true
+        colorPalette.dismiss() // close the colour column when switching tools
         tool = chosen
         applyToolInkState("tool")
         // A tool switch ends any lasso selection (it's page- and tool-specific).
@@ -1644,6 +1652,18 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         Toast.makeText(this, hint, Toast.LENGTH_SHORT).show()
         updateLassoHint()
         return true
+    }
+
+    /**
+     * Collapse the colour column. Removing the overlay view disturbs the firmware ink overlay, so we
+     * must repaint the page afterwards — and the ONLY repaint this firmware honours on the current
+     * page is the policy page-render path (the same one a page turn uses, proven to produce a real
+     * EPD frame-done). [postJump] of the current page runs clearAll + renderAndBlit(baked ink) +
+     * executeAll(refresh command stream), which re-displays the committed strokes.
+     */
+    private fun collapseColorPalette() {
+        colorPalette.dismiss()
+        postJump(currentPage)
     }
 
     /**
