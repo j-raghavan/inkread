@@ -176,7 +176,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         val page = currentPage
         Log.i(TAG, "DIAG long-press lookup @($nx,$ny) page=$page")
         engine.execute {
-            clearFirmwareInk(); renderAndBlit(); adapter.refreshFull() // wipe the pen dot the hold left
+            clearFirmwareInk(); repaintPanel() // wipe the pen dot the hold left
             defineWord(page, nx, ny)
         }
     }
@@ -362,7 +362,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             onToolSelected = { chosen -> onToolChosen(chosen) },
             // After the pill is moved/collapsed, repaint the page + force a panel refresh so the
             // EPD reflects its new position (the earlier puck "vanished" for lack of this refresh).
-            onChrome = { engine.execute { renderAndBlit(); adapter.refreshFull() } },
+            onChrome = { engine.execute { repaintPanel() } },
             onUndo = { inkUndo() },
             onRedo = { inkRedo() },
         )
@@ -526,8 +526,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
                 Log.e(TAG, "setViewport failed: ${e.message}")
             }
         }
-        renderAndBlit()
-        adapter.refreshFull() // first page carries no command stream → refresh the panel (RR2-FR4)
+        repaintPanel() // first page carries no command stream → refresh the panel (RR2-FR4)
     }
 
     private fun openDocumentIfNeeded() {
@@ -663,8 +662,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         closeDocument() // saves + closes the previous book before swapping
         drawLoading()
         openBook(path, id)
-        renderAndBlit()
-        adapter.refreshFull() // the new book's first page has no command stream → refresh
+        repaintPanel() // the new book's first page has no command stream → refresh
     }
 
     /** Open a Library book in place (invoked from the reader popup; engine thread). */
@@ -745,6 +743,27 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         } finally {
             runCatching { holder.unlockCanvasAndPost(canvas) }
         }
+    }
+
+    // ---- panel repaint (RR2-FR4 / RR15): the single choke point for pushing to the EPD ----
+
+    /**
+     * Request a full-screen panel refresh — the ONE place a full EPD refresh is asked for outside
+     * the policy's page-turn command stream. Routing every chrome/dialog/selection refresh through
+     * here gives a single audit + extension point: the adapter coalesces bursts
+     * (see [dev.jraghavan.inkread.eink.EinkAdapter.refreshFull]), and future partial-refresh logic
+     * lands here, not at ~two dozen call sites.
+     */
+    private fun refreshPanel() {
+        adapter.refreshFull()
+    }
+
+    /** Re-render the current page into the surface, then refresh the panel — the common "something
+     *  changed, show it" path (engine thread). Page turns instead drive the policy's command
+     *  stream via [dev.jraghavan.inkread.eink.EinkAdapter.executeAll]. */
+    private fun repaintPanel() {
+        renderAndBlit()
+        refreshPanel()
     }
 
     // ---- input (UI thread) → engine ----
@@ -829,7 +848,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         }
         // Highlighter's firmware EMR ink is suppressed (we drew the live band ourselves), so bake it
         // from the core now. Pen rides the firmware overlay and bakes on the next full render.
-        if (isHl) { clearFirmwareInk(); renderAndBlit(); adapter.refreshFull(); return }
+        if (isHl) { clearFirmwareInk(); repaintPanel(); return }
         // The firmware overlay already shows this stroke live; it bakes from the core on the next
         // full render (page turn / revisit), so no immediate re-blit is needed here.
     }
@@ -1321,7 +1340,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         searchHits = emptyList(); searchIndex = -1; searchQuery = ""; searchBoxes = emptyList()
         val hadBoxes = searchBoxesPage >= 0
         searchBoxesPage = -1
-        if (hadBoxes) engine.execute { renderAndBlit(); adapter.refreshFull() }
+        if (hadBoxes) engine.execute { repaintPanel() }
     }
 
     /**
@@ -1572,8 +1591,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
                 val msg = if (now) "Bookmarked page ${page + 1}" else "Bookmark removed"
                 Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
             }
-            renderAndBlit()
-            adapter.refreshFull()
+            repaintPanel()
         }
     }
 
@@ -1736,8 +1754,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         // the page while you lasso/erase/define (the real strokes are baked from the core).
         engine.execute {
             if (chosen != Tool.PEN) clearFirmwareInk()
-            renderAndBlit()
-            adapter.refreshFull()
+            repaintPanel()
         }
         val hint = when (chosen) {
             Tool.PEN -> "Pen — write with the stylus"
@@ -1778,8 +1795,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             if (docHandle != 0L) {
                 try { NativeBridge.nativeSetZoom(docHandle, zoom, panX, panY) } catch (e: RuntimeException) {}
             }
-            renderAndBlit()
-            adapter.refreshFull()
+            repaintPanel()
         }
     }
 
@@ -1922,8 +1938,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             Log.e(TAG, "erase failed: ${e.message}"); return
         }
         clearFirmwareInk() // wipe the firmware ink left by the eraser drag
-        renderAndBlit()
-        adapter.refreshFull()
+        repaintPanel()
     }
 
     // ===== Lasso selection (ADR-INKREAD-0010) =====
@@ -2013,7 +2028,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         Log.i(TAG, "DIAG finalizeLasso buf=${lassoBuf.size / 2} pts mode=$lassoMode")
         if (lassoBuf.size < 6) { // need ≥3 points for a polygon
             lassoBuf.clear()
-            engine.execute { clearFirmwareInk(); renderAndBlit(); adapter.refreshFull() }
+            engine.execute { clearFirmwareInk(); repaintPanel() }
             return
         }
         val raw = lassoBuf.toFloatArray()
@@ -2068,14 +2083,14 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         clearFirmwareInk() // wipe the firmware ink left by drawing the lasso loop
         renderAndBlit()
         if (sel.isEmpty) {
-            adapter.refreshFull()
+            refreshPanel()
             runOnUiThread {
                 Toast.makeText(this, "Nothing under the loop — circle ink or printed words", Toast.LENGTH_SHORT).show()
             }
             return
         }
         drawTextSelectionBoxes(sel.boxes) // show what was caught, then offer actions
-        adapter.refreshFull()
+        refreshPanel()
         runOnUiThread { showTextSelectionActions(sel) }
     }
 
@@ -2103,7 +2118,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             }
             // Any dismissal (action chosen or cancelled) clears the box overlay; a Highlight redraws
             // it with the real annotation, a Define opens the dict card over the cleared page.
-            .setOnDismissListener { engine.execute { renderAndBlit(); adapter.refreshFull() } }
+            .setOnDismissListener { engine.execute { repaintPanel() } }
             .show()
     }
 
@@ -2142,7 +2157,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         } catch (e: RuntimeException) {
             Log.e(TAG, "text highlight failed: ${e.message}")
         }
-        clearFirmwareInk(); renderAndBlit(); adapter.refreshFull()
+        clearFirmwareInk(); repaintPanel()
     }
 
     /** Adopt `ids` as the selection, refresh the box, and show/update the selection toolbar (engine). */
@@ -2154,8 +2169,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             FloatArray(0)
         }
         clearFirmwareInk() // wipe the firmware ink left by drawing the lasso loop
-        renderAndBlit()
-        adapter.refreshFull()
+        repaintPanel()
         updateLassoHint() // hide the hint once something is selected; re-show if selection emptied
         runOnUiThread {
             if (selectedIds.isEmpty()) {
@@ -2246,8 +2260,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
     private fun clearSelectionAndRender() {
         selectedIds = IntArray(0)
         selectionBounds = FloatArray(0)
-        renderAndBlit()
-        adapter.refreshFull()
+        repaintPanel()
         updateLassoHint() // re-show the hint if still on the Lasso tool with nothing selected
         runOnUiThread { selectionToolbar.dismiss() }
     }
@@ -2310,7 +2323,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             engine.execute { defineWord(page, vToNx(pts[0]), vToNy(pts[1])) }
         }
         // Wipe the firmware ink the define gesture left behind (it never becomes an annotation).
-        engine.execute { clearFirmwareInk(); renderAndBlit(); adapter.refreshFull() }
+        engine.execute { clearFirmwareInk(); repaintPanel() }
     }
 
     /** Resolve the word under a normalized point and look it up (engine thread). */
@@ -2961,7 +2974,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             Log.i(TAG, "DIAG fit -> mode=$which")
             engine.execute {
                 try { NativeBridge.nativeSetFit(docHandle, which) } catch (e: RuntimeException) {}
-                renderAndBlit(); adapter.refreshFull()
+                repaintPanel()
             }
         })
     }
@@ -2974,7 +2987,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             Log.i(TAG, "DIAG crop auto=${which == 1}")
             engine.execute {
                 try { NativeBridge.nativeSetCrop(docHandle, which, cropMarginPref()) } catch (e: RuntimeException) {}
-                renderAndBlit(); adapter.refreshFull()
+                repaintPanel()
             }
         }))
         container.addView(settingRow("Margin", cellBar(8, cropMarginPref()) { level ->
@@ -2982,7 +2995,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             Log.i(TAG, "DIAG crop margin=$level")
             engine.execute {
                 try { NativeBridge.nativeSetCrop(docHandle, if (cropAutoPref()) 1 else 0, level) } catch (e: RuntimeException) {}
-                renderAndBlit(); adapter.refreshFull()
+                repaintPanel()
             }
         }))
         return container
@@ -3007,7 +3020,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
                 val np = try { call() } catch (e: RuntimeException) { -1 }
                 if (np >= 0) {
                     pageCount = NativeBridge.nativePageCount(docHandle)
-                    renderAndBlit(); adapter.refreshFull()
+                    repaintPanel()
                 } else {
                     runOnUiThread { Toast.makeText(this, "Page layout adjusts reflowable books (EPUB)", Toast.LENGTH_SHORT).show() }
                 }
@@ -3056,7 +3069,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
                     }
                 }
                 pageCount = NativeBridge.nativePageCount(docHandle)
-                renderAndBlit(); adapter.refreshFull()
+                repaintPanel()
             } else {
                 runOnUiThread { Toast.makeText(this, "This PDF has no text layer to reflow", Toast.LENGTH_SHORT).show() }
             }
@@ -3114,7 +3127,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             Log.i(TAG, "DIAG contrast step=$level")
             engine.execute {
                 try { NativeBridge.nativeSetContrast(docHandle, level) } catch (e: RuntimeException) {}
-                renderAndBlit(); adapter.refreshFull()
+                repaintPanel()
             }
         }))
         container.addView(settingRow("Quality", segmented(listOf("Low", "Default", "High"), renderQualityPref()) { which ->
@@ -3122,7 +3135,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             Log.i(TAG, "DIAG render quality=$which")
             engine.execute {
                 try { NativeBridge.nativeSetRenderQuality(docHandle, which) } catch (e: RuntimeException) {}
-                renderAndBlit(); adapter.refreshFull()
+                repaintPanel()
             }
         }))
         return container
@@ -3147,7 +3160,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             setTextScalePref(TEXT_SCALES[idx]); refresh()
             engine.execute {
                 val np = try { NativeBridge.nativeSetTextScale(docHandle, TEXT_SCALES[idx]) } catch (e: RuntimeException) { -1 }
-                if (np >= 0) { pageCount = NativeBridge.nativePageCount(docHandle); renderAndBlit(); adapter.refreshFull() }
+                if (np >= 0) { pageCount = NativeBridge.nativePageCount(docHandle); repaintPanel() }
                 else runOnUiThread { Toast.makeText(this, "Font size adjusts reflowable books (EPUB)", Toast.LENGTH_SHORT).show() }
             }
         }
