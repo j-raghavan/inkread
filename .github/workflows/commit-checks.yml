@@ -29,8 +29,18 @@ jobs:
         run: |
           set -euo pipefail
           # Conventional Commits: type(optional-scope)(optional !): subject
-          # Allowed types mirror the house style (see CONTRIBUTING.md).
-          pattern='^(feat|fix|perf|refactor|docs|test|chore|build|ci|revert)(\([a-z0-9._-]+\))?!?: .+'
+          # Allowed types mirror the house style (see CONTRIBUTING.md) + the standard set.
+          pattern='^(feat|fix|perf|refactor|docs|style|test|chore|build|ci|revert)(\([a-z0-9._-]+\))?!?: .+'
+
+          # Only enforce once the policy is live on the base branch. If the base branch does
+          # not yet contain this workflow, the PR is the one-time mainline import that brings
+          # the policy in — its legacy history predates the rule, so skip per-commit linting.
+          # Every normal PR (base already has the file) gets the full check.
+          if ! git cat-file -e "${BASE_SHA}:.github/workflows/commit-checks.yml" 2>/dev/null; then
+            echo "Base branch predates the commit-checks policy (bootstrap import); skipping per-commit lint."
+            exit 0
+          fi
+
           fail=0
           while IFS= read -r sha; do
             [ -z "$sha" ] && continue
