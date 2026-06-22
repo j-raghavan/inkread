@@ -1038,16 +1038,44 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
      * active stroke); otherwise arm the long-press → lookup timer. The tap itself is decided on UP
      * (the panel delivers finger UP reliably), so "rest the hand, then write" never turns a page.
      */
-    private fun onFingerDown(e: MotionEvent) {
-        val recentStylus = SystemClock.uptimeMillis() - lastStylusMs <= PALM_REJECT_MS
-        val major = e.getTouchMajor(0)
+    /**
+     * Heuristic palm / stray-touch test shared by the reading surface AND the chrome dialogs
+     * (RR19 palm rejection): a **finger** touch is treated as a palm when it is multi-pointer, lands
+     * within [PALM_REJECT_MS] of pen activity, arrives mid-stroke, or has a large contact major
+     * (≥ [PALM_TOUCH_MAJOR_FRAC] of the panel height). A stylus/eraser touch is never a palm.
+     */
+    private fun isPalmTouch(e: MotionEvent): Boolean {
+        val toolType = e.getToolType(0)
+        if (toolType == MotionEvent.TOOL_TYPE_STYLUS || toolType == MotionEvent.TOOL_TYPE_ERASER) return false
+        if (e.pointerCount > 1) return true
+        if (SystemClock.uptimeMillis() - lastStylusMs <= PALM_REJECT_MS) return true
+        if (strokeBuf.isNotEmpty()) return true
         val vh = surfaceView.height
-        val largeContact = vh > 0 && major >= vh * PALM_TOUCH_MAJOR_FRAC
-        if (e.pointerCount != 1 || recentStylus || largeContact || strokeBuf.isNotEmpty()) {
-            diag {
-                "DIAG palm-reject down pc=${e.pointerCount} recent=$recentStylus " +
-                    "major=$major large=$largeContact stroke=${strokeBuf.isNotEmpty()}"
+        return vh > 0 && e.getTouchMajor(0) >= vh * PALM_TOUCH_MAJOR_FRAC
+    }
+
+    /**
+     * Wrap a chrome view (bottom bar, sheets) so a resting palm can't press its controls — the
+     * single biggest palm-rejection gap, since dialog buttons bypass the reading surface's filter.
+     * A palm-like DOWN is intercepted (swallowed) before it reaches any child; a real finger/stylus
+     * tap passes straight through.
+     */
+    private fun palmGuard(content: View): View =
+        object : FrameLayout(this) {
+            override fun onInterceptTouchEvent(ev: MotionEvent): Boolean {
+                if (ev.actionMasked == MotionEvent.ACTION_DOWN && isPalmTouch(ev)) {
+                    diag { "DIAG chrome palm-reject major=${ev.getTouchMajor(0)} pc=${ev.pointerCount}" }
+                    return true // consume here; children (buttons) never see it
+                }
+                return super.onInterceptTouchEvent(ev)
             }
+        }.apply {
+            addView(content, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        }
+
+    private fun onFingerDown(e: MotionEvent) {
+        if (isPalmTouch(e)) {
+            diag { "DIAG palm-reject down pc=${e.pointerCount} major=${e.getTouchMajor(0)}" }
             fingerMoved = true // neutralise any later MOVE/UP from this rejected touch
             return
         }
@@ -1323,7 +1351,8 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         control(R.drawable.ic_menu_open, "Open") { openPicker() }
         container.addView(controls)
 
-        dialog.setContentView(container)
+        // Palm guard: a hand resting on the bottom-anchored bar must not press a control (esp. Home).
+        dialog.setContentView(palmGuard(container))
         dialog.window?.apply {
             setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
             setGravity(Gravity.BOTTOM)
@@ -2199,7 +2228,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             addView(tabRow)
         }
         select(0)
-        dialog.setContentView(container)
+        dialog.setContentView(palmGuard(container)) // same palm guard as the bottom bar
         dialog.window?.apply {
             setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
             setGravity(Gravity.BOTTOM)
