@@ -1,0 +1,75 @@
+name: Commit checks
+
+# Lightweight PR-hygiene gate, complementary to ci.yml (which runs the full host
+# fmt/clippy/test + JNI cross-check + license manifest). This one enforces the
+# *form* of the contribution: Conventional-Commit subjects and no AI/Co-Authored-By
+# attribution (a hard project rule — CLAUDE.md). Cheap and fast so it fails early.
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  conventional-commits:
+    name: conventional commit subjects
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Need the PR commits, not just the merge commit.
+          fetch-depth: 0
+      - name: Lint commit subjects on this PR
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          # Conventional Commits: type(optional-scope)(optional !): subject
+          # Allowed types mirror the house style (see CONTRIBUTING.md).
+          pattern='^(feat|fix|perf|refactor|docs|test|chore|build|ci|revert)(\([a-z0-9._-]+\))?!?: .+'
+          fail=0
+          while IFS= read -r sha; do
+            [ -z "$sha" ] && continue
+            subject="$(git log -1 --format=%s "$sha")"
+            # Allow merge commits and GitHub's revert/merge auto-subjects.
+            if printf '%s' "$subject" | grep -qE '^(Merge |Revert )'; then
+              continue
+            fi
+            if ! printf '%s' "$subject" | grep -qE "$pattern"; then
+              echo "::error::Non-conventional commit subject: '$subject' ($sha)"
+              fail=1
+            fi
+            if [ "${#subject}" -gt 72 ]; then
+              echo "::warning::Commit subject >72 chars: '$subject'"
+            fi
+          done < <(git rev-list "$BASE_SHA..$HEAD_SHA")
+          if [ "$fail" -ne 0 ]; then
+            echo "::error::One or more commits don't follow Conventional Commits — see CONTRIBUTING.md."
+            exit 1
+          fi
+          echo "All commit subjects conform. ✔"
+
+  no-ai-attribution:
+    name: no AI / Co-Authored-By attribution
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Reject attribution trailers (hard project rule)
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          # The tool is a facilitator, not a co-author — no attribution in commit bodies.
+          if git log "$BASE_SHA..$HEAD_SHA" --format='%B' \
+              | grep -inE 'co-authored-by:|generated with|🤖 generated' ; then
+            echo "::error::Found an attribution trailer in a commit message. Remove it (see CONTRIBUTING.md)."
+            exit 1
+          fi
+          echo "No attribution trailers. ✔"

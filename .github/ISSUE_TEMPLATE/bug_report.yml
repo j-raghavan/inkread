@@ -1,0 +1,89 @@
+name: 🐛 Bug report
+description: Something is broken — a crash, wrong layout, ink that won't render, a ghosting refresh.
+title: "bug: <short summary>"
+labels: ["bug", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a bug! A reproducible report gets fixed far faster.
+        For **security-sensitive** reports, do **not** use this form — see
+        [SECURITY.md](../blob/master/SECURITY.md).
+
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: Preflight
+      options:
+        - label: I searched existing issues and this isn't a duplicate.
+          required: true
+        - label: I'm not pasting any private/research material (decompiled APK, `.so`, jadx output).
+          required: true
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What did you see, and what did you expect instead?
+      placeholder: "Opening <file> on page 12 renders the handwriting layer shifted ~40px right…"
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: Numbered steps. The more precise, the faster the fix.
+      placeholder: |
+        1. Open <document>
+        2. Tap to turn to page 12
+        3. Add an ink stroke
+        4. …
+    validations:
+      required: true
+
+  - type: textarea
+    id: fixture
+    attributes:
+      label: Triggering document / minimal fixture
+      description: >
+        A document (or a minimal PDF/EPUB) that reproduces this is the single most useful thing you
+        can attach. If it's private, describe its shape (page count, has handwriting, scanned vs.
+        text, RTL, etc.).
+    validations:
+      required: false
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Which area?
+      options:
+        - "Not sure"
+        - "PDF / text extraction"
+        - "EPUB / reflow"
+        - "Handwriting / ink"
+        - "Refresh / EPD / ghosting"
+        - "Dictionary / define"
+        - "Lua plugin"
+        - "Build / APK / tooling"
+        - "Android shell / UI"
+    validations:
+      required: true
+
+  - type: input
+    id: device
+    attributes:
+      label: Device / environment
+      description: Supernote model + firmware, or "host" with OS for a build/test bug.
+      placeholder: "Supernote Manta (A11), firmware <ver>  —  or  macOS 15 host, rustc 1.90.0"
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs / backtrace
+      description: Relevant `adb logcat`, a panic backtrace, or test output. Will be auto-formatted.
+      render: text
+    validations:
+      required: false
