@@ -134,10 +134,9 @@ class SearchController(private val host: Host) {
                 if (found.isEmpty()) {
                     Toast.makeText(host.activity, "No matches for \"$q\"", Toast.LENGTH_SHORT).show()
                 } else {
-                    val capped = if (found.size >= MAX_SEARCH_HITS) " (first $MAX_SEARCH_HITS)" else ""
-                    val plural = if (found.size == 1) "" else "es"
-                    Toast.makeText(host.activity, "${found.size} match$plural$capped", Toast.LENGTH_SHORT).show()
-                    gotoHit(0)
+                    // Open the results list and let the reader pick which hit to jump to — don't
+                    // teleport to the first match (the list is the point of a search).
+                    showResults()
                 }
             }
         }
