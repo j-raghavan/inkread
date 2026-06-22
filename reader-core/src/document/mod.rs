@@ -409,6 +409,13 @@ pub trait Document {
         TextSelection::default()
     }
 
+    /// Whole-line selection over the vertical span of `rect` on `page` — the multi-line drag (RR11).
+    /// Unlike [`Self::text_in_rect`], every glyph of each line the band covers is selected (complete
+    /// characters, full-width per-line boxes), not the diagonal clip. Default: an empty selection.
+    fn text_lines_in_rect(&self, _page: usize, _rect: NormRect) -> TextSelection {
+        TextSelection::default()
+    }
+
     /// Find `query` on `page` (case-insensitive, whitespace-normalized substring) — RR2 in-document
     /// search. Returns one [`SearchMatch`] per occurrence (highlight boxes + context snippet) in
     /// reading order. The shell drives this page-by-page so the scan stays memory-bounded (RR19).

@@ -103,6 +103,11 @@ object NativeBridge {
     /** The text within the normalized rect on `page`; decode with [WireCodec.decodeSelection]. */
     external fun nativeTextInRect(handle: Long, page: Int, x0: Float, y0: Float, x1: Float, y1: Float): ByteArray
 
+    /** Whole-line selection over the rect's vertical span on `page` (the multi-line drag): complete
+     *  lines (full chars, full-width per-line boxes), not the diagonal clip. Decode with
+     *  [WireCodec.decodeSelection]. */
+    external fun nativeTextLinesInRect(handle: Long, page: Int, x0: Float, y0: Float, x1: Float, y1: Float): ByteArray
+
     /**
      * Find [query] on `page` (RR2 in-document search), case-insensitive. Returns the search wire
      * (decode with [WireCodec.decodeSearch]): one match per occurrence with a snippet + highlight

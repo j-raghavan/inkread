@@ -1165,6 +1165,30 @@ pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeTextInRect<
     .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
 }
 
+// nativeTextLinesInRect(handle, page, x0,y0,x1,y1) : bytes — whole-line selection over the rect's
+// vertical span (the multi-line drag). Selects complete lines (full chars, full-width per-line
+// boxes), not the diagonal clip nativeTextInRect would give. Decode with WireCodec.decodeSelection.
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeTextLinesInRect<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+    page: jint,
+    x0: jfloat,
+    y0: jfloat,
+    x1: jfloat,
+    y1: jfloat,
+) -> JByteArray<'local> {
+    env.with_env(|env| -> jni::errors::Result<JByteArray<'local>> {
+        let session = unsafe { session_mut(handle) }.map_err(|e| throw(env, &e))?;
+        let target = if page < 0 { 0usize } else { page as usize };
+        let sel = session.text_lines_in_rect(target, NormRect { x0, y0, x1, y1 });
+        env.byte_array_from_slice(&encode_selection_wire(&sel))
+    })
+    .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
+}
+
 /// Find `query` on `page` (RR2 in-document search). Returns the search wire (decode:
 /// `WireCodec.decodeSearch`): the page's matches as snippet + highlight boxes. The shell calls this
 /// page-by-page so the scan stays memory-bounded.

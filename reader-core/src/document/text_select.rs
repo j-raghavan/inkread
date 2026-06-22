@@ -265,6 +265,65 @@ pub fn text_in_rect(chars: &[CharBox], rect: NormRect) -> TextSelection {
     }
 }
 
+/// Select **whole lines** overlapped by `rect`'s vertical span — the multi-line drag (RR11). Unlike
+/// [`text_in_rect`] (which keeps only the glyphs geometrically inside the rect, clipping the first
+/// and last lines along a diagonal drag), this takes every glyph of every line the band meaningfully
+/// covers, so complete characters are selected: each line becomes one full-width box and the overall
+/// selection spans the full height of all lines by the widest line's width. `rect.x` is ignored
+/// (lines are taken whole). A line is included when the band covers more than a third of its height,
+/// so a band edge that merely grazes the neighbouring line doesn't pull it in. Trailing/leading
+/// word-less lines (e.g. a band edge clipping a blank line) are dropped.
+pub fn text_lines_in_rect(chars: &[CharBox], rect: NormRect) -> TextSelection {
+    if chars.is_empty() {
+        return TextSelection::default();
+    }
+    // Group every glyph into reading-order line runs (backends emit glyphs in reading order).
+    let mut lines: Vec<Vec<&CharBox>> = Vec::new();
+    for c in chars {
+        match lines.last_mut() {
+            Some(line) if same_line(&line[0].rect, &c.rect) => line.push(c),
+            _ => lines.push(vec![c]),
+        }
+    }
+    let mut parts: Vec<String> = Vec::new();
+    let mut boxes: Vec<NormRect> = Vec::new();
+    for line in &lines {
+        // The line's full vertical span + box (union of all its glyphs — the whole line, not a clip).
+        let mut b = line[0].rect;
+        for c in &line[1..] {
+            b = b.union(&c.rect);
+        }
+        let overlap = b.y1.min(rect.y1) - b.y0.max(rect.y0);
+        if overlap <= 0.3 * b.height().max(1e-4) {
+            continue; // the band only grazes this line — don't pull it in
+        }
+        parts.push(
+            line.iter()
+                .map(|c| c.ch)
+                .collect::<String>()
+                .trim()
+                .to_string(),
+        );
+        boxes.push(b);
+    }
+    // Drop word-less edge lines (a band edge clipping a blank line shows as an empty trailing line).
+    while parts.last().is_some_and(String::is_empty) {
+        parts.pop();
+        boxes.pop();
+    }
+    while parts.first().is_some_and(String::is_empty) {
+        parts.remove(0);
+        boxes.remove(0);
+    }
+    if parts.is_empty() {
+        return TextSelection::default();
+    }
+    TextSelection {
+        text: parts.join(" ").trim().to_string(),
+        boxes,
+    }
+}
+
 /// The glyph at `(x, y)`: the one whose box contains it, else the nearest on the same line within
 /// [`HIT_TOLERANCE`] (so a tap landing just off a glyph still selects it).
 fn hit_char(chars: &[CharBox], x: f32, y: f32) -> Option<usize> {
@@ -416,6 +475,47 @@ mod tests {
         );
         assert_eq!(sel.boxes.len(), 2, "two lines → two highlight boxes");
         assert!(sel.text.contains("first") && sel.text.contains("second"));
+    }
+
+    #[test]
+    fn text_lines_in_rect_takes_whole_lines_from_a_diagonal_band() {
+        // Three lines; a diagonal drag band that starts mid-line-1 and ends mid-line-3 with a narrow
+        // x-range must still select the FULL text of all three lines (not the clipped sub-rect).
+        let mut chars = line("the first line here", 0.0, 0.8, 0.10, 0.03);
+        chars.extend(line("the middle line two", 0.0, 0.8, 0.16, 0.03));
+        chars.extend(line("the last line three", 0.0, 0.8, 0.22, 0.03));
+        // Narrow x; starts mid-line-1 (0.10..0.13) and ends mid-line-3 (0.22..0.25).
+        let band = NormRect {
+            x0: 0.30,
+            y0: 0.115,
+            x1: 0.55,
+            y1: 0.235,
+        };
+        let sel = text_lines_in_rect(&chars, band);
+        assert_eq!(sel.boxes.len(), 3, "three lines → three full-line boxes");
+        // Every line's complete text is present (full chars, not the diagonal clip).
+        assert!(sel.text.contains("the first line here"));
+        assert!(sel.text.contains("the middle line two"));
+        assert!(sel.text.contains("the last line three"));
+        // Each box spans the full line width, not the narrow band x.
+        assert!(sel.boxes[0].x0 <= 0.01 && sel.boxes[0].x1 >= 0.79);
+    }
+
+    #[test]
+    fn text_lines_in_rect_ignores_a_barely_grazed_neighbour_and_drops_blank_edge() {
+        let mut chars = line("alpha beta", 0.0, 0.5, 0.10, 0.03);
+        chars.extend(line("gamma delta", 0.0, 0.5, 0.16, 0.03));
+        chars.extend(line("   ", 0.0, 0.5, 0.22, 0.03)); // a whitespace-only line below
+                                                         // Band covers line 1 fully, line 2 fully, and only grazes the blank line's top (<30%).
+        let band = NormRect {
+            x0: 0.0,
+            y0: 0.10,
+            x1: 1.0,
+            y1: 0.225,
+        };
+        let sel = text_lines_in_rect(&chars, band);
+        assert_eq!(sel.boxes.len(), 2, "blank/grazed trailing line dropped");
+        assert_eq!(sel.text, "alpha beta gamma delta");
     }
 
     #[test]

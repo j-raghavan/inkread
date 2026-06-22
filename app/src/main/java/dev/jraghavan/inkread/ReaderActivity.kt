@@ -1884,10 +1884,15 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
      * drag. [emptyMsg] is toasted when the rect holds no text. A drag is a *selection*, never an
      * auto-lookup — the user picks Define from the action sheet if they want a definition.
      */
-    private fun presentTextSelection(x0: Float, y0: Float, x1: Float, y1: Float, emptyMsg: String) {
+    private fun presentTextSelection(x0: Float, y0: Float, x1: Float, y1: Float, emptyMsg: String, lineBased: Boolean = false) {
         if (docHandle == 0L) return
         val sel = try {
-            WireCodec.decodeSelection(NativeBridge.nativeTextInRect(docHandle, currentPage, x0, y0, x1, y1))
+            val wire = if (lineBased) {
+                NativeBridge.nativeTextLinesInRect(docHandle, currentPage, x0, y0, x1, y1)
+            } else {
+                NativeBridge.nativeTextInRect(docHandle, currentPage, x0, y0, x1, y1)
+            }
+            WireCodec.decodeSelection(wire)
         } catch (e: RuntimeException) {
             Log.e(TAG, "text-in-rect failed: ${e.message}"); Selection("", emptyList())
         }
@@ -1917,13 +1922,16 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
     /** Action sheet for circled printed text: Define · Copy · Highlight (UI thread). */
     private fun showTextSelectionActions(sel: Selection) {
         val snippet = sel.text.trim().replace(Regex("\\s+"), " ")
+        // Define is a per-word action — it makes no sense for a multi-line selection, so a multi-line
+        // catch (more than one line box) offers only Copy + Highlight.
+        val items = if (sel.boxes.size > 1) arrayOf("Copy", "Highlight") else arrayOf("Define", "Copy", "Highlight")
         AlertDialog.Builder(this, R.style.InkDialog)
             .setTitle(if (snippet.length > 42) snippet.take(42) + "…" else snippet)
-            .setItems(arrayOf("Define", "Copy", "Highlight")) { _, which ->
-                when (which) {
-                    0 -> dict.defineSelectionText(snippet)
-                    1 -> copyTextToClipboard(snippet)
-                    2 -> engine.execute { highlightTextBoxes(sel) }
+            .setItems(items) { _, which ->
+                when (items[which]) {
+                    "Define" -> dict.defineSelectionText(snippet)
+                    "Copy" -> copyTextToClipboard(snippet)
+                    "Highlight" -> engine.execute { highlightTextBoxes(sel) }
                 }
             }
             // Any dismissal (action chosen or cancelled) clears the box overlay; a Highlight redraws
@@ -2126,10 +2134,13 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             // through the end of the line where it stopped — so widen the band to the full page
             // width; a single-line drag keeps the dragged horizontal span.
             val multiLine = (maxY - minY) > h * MULTILINE_DRAG_FRAC
+            // Multi-line: let the core take WHOLE lines over the drag's vertical span (complete
+            // characters, full-width per-line boxes) — x is irrelevant there. Single-line: the
+            // dragged horizontal span on that one line.
             val x0 = if (multiLine) 0f else vToNx(minX)
             val x1 = if (multiLine) 1f else vToNx(maxX)
             val y0 = vToNy(minY); val y1 = vToNy(maxY)
-            engine.execute { presentTextSelection(x0, y0, x1, y1, "No text under the selection") }
+            engine.execute { presentTextSelection(x0, y0, x1, y1, "No text under the selection", lineBased = multiLine) }
         } else {
             // A single still tap is a word lookup (the dict card).
             val page = currentPage

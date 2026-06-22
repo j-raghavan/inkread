@@ -710,6 +710,13 @@ impl ReaderSession {
         self.document.text_in_rect(page, rect)
     }
 
+    /// Whole-line selection over the vertical span of `rect` on `page` (RR11 / multi-line drag) — a
+    /// pass-through to [`Document::text_lines_in_rect`]. Selects complete lines, not the diagonal clip.
+    #[must_use]
+    pub fn text_lines_in_rect(&self, page: usize, rect: NormRect) -> TextSelection {
+        self.document.text_lines_in_rect(page, rect)
+    }
+
     /// Find `query` on `page` (RR2 in-document search) — a pass-through to
     /// [`Document::search_page`]. The shell drives the scan page-by-page so it stays memory-bounded.
     #[must_use]

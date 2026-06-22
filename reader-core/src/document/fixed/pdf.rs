@@ -756,6 +756,13 @@ impl Document for PdfBackend {
         }
     }
 
+    fn text_lines_in_rect(&self, page: usize, rect: NormRect) -> TextSelection {
+        match &*self.reflow.borrow() {
+            Some(v) => text_select::text_lines_in_rect(&v.page_chars(page), rect),
+            None => text_select::text_lines_in_rect(&self.page_chars(page), rect),
+        }
+    }
+
     fn search_page(&self, page: usize, query: &str) -> Vec<crate::document::SearchMatch> {
         match &*self.reflow.borrow() {
             Some(v) => text_select::find_matches(&v.page_chars(page), query),
