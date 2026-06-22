@@ -104,8 +104,19 @@ Contributions are very welcome — you don't need a Supernote to help. Start wit
 **[CONTRIBUTING.md](./CONTRIBUTING.md)** and look for **`good first issue`** labels. Please also read
 the [Code of Conduct](./CODE_OF_CONDUCT.md) and [Security Policy](./SECURITY.md).
 
+## About & disclaimer
+
+inkread is an **independent, community project** built by a Supernote Manta owner and fan. It exists
+because the itch was personal — I wanted reading and handwriting to work *together* on my own device,
+the way I needed them to, and built the reader I wished existed.
+
+> It is **not affiliated with, authorized by, sponsored by, or endorsed by Ratta or Supernote**.
+> "Supernote", "Manta", and related names are trademarks of their respective owners and are used here
+> only descriptively (for interoperability and identification). inkread is a clean-room implementation
+> and contains no decompiled or vendor-proprietary code. It is provided "as is", without warranty;
+> sideloading and use are at your own risk.
+
 ## License
 
 [AGPL-3.0-only](./LICENSE). Third-party components are listed in
-[LICENSES-3RDPARTY.md](./LICENSES-3RDPARTY.md). inkread is a clean-room implementation — it contains
-no decompiled vendor code.
+[LICENSES-3RDPARTY.md](./LICENSES-3RDPARTY.md).
