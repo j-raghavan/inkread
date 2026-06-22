@@ -18,7 +18,7 @@ jobs:
     name: conventional commit subjects
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # Need the PR commits, not just the merge commit.
           fetch-depth: 0
@@ -67,7 +67,7 @@ jobs:
     name: no AI / Co-Authored-By attribution
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - name: Reject attribution trailers (hard project rule)
