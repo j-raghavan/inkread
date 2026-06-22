@@ -13,6 +13,7 @@
 </p>
 
 <p align="center">
+  <a href="https://github.com/j-raghavan/inkread/releases/latest"><img alt="latest release" src="https://img.shields.io/github/v/release/j-raghavan/inkread?include_prereleases&sort=semver&label=release"></a>
   <a href="./.github/workflows/ci.yml"><img alt="CI" src="https://github.com/j-raghavan/inkread/actions/workflows/ci.yml/badge.svg"></a>
   <a href="https://codecov.io/gh/j-raghavan/inkread"><img alt="coverage" src="https://codecov.io/gh/j-raghavan/inkread/branch/master/graph/badge.svg"></a>
   <img alt="core: Rust" src="https://img.shields.io/badge/core-Rust-orange?logo=rust&logoColor=white">

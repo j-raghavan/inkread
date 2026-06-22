@@ -55,7 +55,9 @@ jobs:
             *) echo "::error::Release tag must start with 'v' (got '$tag')"; exit 1 ;;
           esac
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
-          echo "Release tag: $tag"
+          # versionName for the APK = the tag without the leading 'v' (e.g. v0.1.0-m0 -> 0.1.0-m0).
+          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+          echo "Release tag: $tag (version ${tag#v})"
 
       # --- Create + push the annotated tag on manual dispatch (push events already have it) ---
       - name: Create and push tag (manual dispatch)
@@ -100,7 +102,13 @@ jobs:
           echo "Using NDK: $ndk"
 
       # --- Build the APK via the canonical script (Rust core + pdfium + dict + Gradle) ---
+      # Gradle reads ORG_GRADLE_PROJECT_<name> env vars as project properties, so the tag's
+      # version lands in the APK's versionName/versionCode (see app/build.gradle.kts) — no
+      # change to buildApk.sh needed. versionCode uses the monotonic CI run number.
       - name: Build APK (./buildApk.sh)
+        env:
+          ORG_GRADLE_PROJECT_inkreadVersionName: ${{ steps.ver.outputs.version }}
+          ORG_GRADLE_PROJECT_inkreadVersionCode: ${{ github.run_number }}
         run: |
           chmod +x ./buildApk.sh
           ./buildApk.sh

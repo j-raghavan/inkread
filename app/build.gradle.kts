@@ -14,8 +14,11 @@ android {
         applicationId = "dev.jraghavan.inkread"
         minSdk = 24
         targetSdk = 34
-        versionCode = 1
-        versionName = "0.1.0-m0"
+        // Version is injected by CI on a release build: release.yml passes the git tag via
+        // ORG_GRADLE_PROJECT_inkread* env vars, which Gradle maps to these project properties.
+        // Local/dev builds fall back to a clearly-marked -dev version with code 1.
+        versionCode = (project.findProperty("inkreadVersionCode") as String?)?.toInt() ?: 1
+        versionName = (project.findProperty("inkreadVersionName") as String?) ?: "0.1.0-dev"
         ndk {
             // RK3566 is arm64; M0 ships arm64 only (RR29-FR1).
             abiFilters += "arm64-v8a"
