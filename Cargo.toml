@@ -14,7 +14,7 @@ edition = "2021"
 rust-version = "1.88"
 license = "AGPL-3.0-only"
 authors = ["J-Raghavan"]
-repository = "https://github.com/jraghavan/inkread"
+repository = "https://github.com/j-raghavan/inkread"
 
 [workspace.dependencies]
 # Internal crates.
