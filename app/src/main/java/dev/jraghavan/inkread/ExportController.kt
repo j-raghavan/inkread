@@ -86,17 +86,23 @@ class ExportController(private val host: Host) {
 
     /**
      * Write the annotated PDF to public storage (engine thread). inkread only holds a private copy
-     * of the source (opened via the picker), so it can't overwrite the original in place — instead
-     * it saves a `-annotated.pdf` **beside the original** if that file can be found in the synced
-     * folders, else into [EXPORT_DIR_NAME]. Either way it lands in a Partner-synced location.
+     * of the source (opened via the picker); it writes the result into a Partner-synced location:
+     *  - safe (default): a `-annotated.pdf` **beside the original** if found, else into [EXPORT_DIR_NAME];
+     *  - overwrite ([AppSettings.overwriteOnExport]): back onto the located original in place — only
+     *    when that original is actually found in the synced roots, else it falls back to the safe copy.
      */
     private fun runExport(srcPath: String, flatten: Boolean) {
         val srcName = File(srcPath).name
         val baseName = srcName.removeSuffix(".pdf").removeSuffix(".PDF")
-        val outDir = findOriginalParent(srcName)
-            ?: File(Environment.getExternalStorageDirectory(), EXPORT_DIR_NAME)
-        outDir.mkdirs()
-        val outFile = File(outDir, "$baseName-annotated.pdf")
+        val originalParent = findOriginalParent(srcName)
+        val overwrote = AppSettings.overwriteOnExport(activity) && originalParent != null
+        val outFile = if (overwrote) {
+            File(originalParent, srcName) // replace the user's original in place
+        } else {
+            val outDir = originalParent ?: File(Environment.getExternalStorageDirectory(), EXPORT_DIR_NAME)
+            outDir.mkdirs()
+            File(outDir, "$baseName-annotated.pdf")
+        }
         val ok = try {
             NativeBridge.nativeExportPdf(host.docHandle, outFile.absolutePath, flatten)
             Log.i(TAG, "DIAG export OK → ${outFile.absolutePath} (flatten=$flatten)")
@@ -107,11 +113,12 @@ class ExportController(private val host: Host) {
         val rel = outFile.absolutePath
             .removePrefix(Environment.getExternalStorageDirectory().absolutePath + "/")
         activity.runOnUiThread {
-            Toast.makeText(
-                activity,
-                if (ok) "Saved to $rel — sync to see it" else "Export failed",
-                Toast.LENGTH_LONG,
-            ).show()
+            val msg = when {
+                !ok -> "Export failed"
+                overwrote -> "Replaced $rel — sync to see it"
+                else -> "Saved to $rel — sync to see it"
+            }
+            Toast.makeText(activity, msg, Toast.LENGTH_LONG).show()
         }
     }
 

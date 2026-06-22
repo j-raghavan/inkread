@@ -98,8 +98,9 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
     // input, feeds the native ink seam, and bakes the core's strokes onto each rendered page.
     /** This page's strokes, decoded from the core's draw-wire for baking; engine-thread only. */
     private var pageStrokes: List<InkStrokeDraw> = emptyList()
-    /** 0-based page the strokes are keyed to; set on the engine thread after each render. */
-    private var currentPage = 0
+    /** 0-based page the strokes are keyed to; set on the engine thread after each render, read on the
+     *  UI thread (slider, coalesced page turns) — so `@Volatile`. */
+    @Volatile private var currentPage = 0
     /** Per-book bookmarks (RR16); engine-thread only. */
     private var bookmarks: Bookmarks? = null
     /** Total pages in the open doc; cached so the bottom-bar slider can read it on the UI thread. */
@@ -1146,10 +1147,38 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         val zone = if (x < third) "PREV" else if (x > 2 * third) "NEXT" else "TOC"
         diag { "DIAG handleTap x=$x w=$w -> $zone (${currentLinks.size} links, no hit)" }
         when (zone) {
-            "PREV" -> postGesture(Gesture.PREV_PAGE)
-            "NEXT" -> postGesture(Gesture.NEXT_PAGE)
+            "PREV" -> queuePageTurn(-1)
+            "NEXT" -> queuePageTurn(+1)
             else -> showBottomBar()
         }
+    }
+
+    // ---- coalesced page turns (RR25) -----------------------------------------------------------
+    // Each edge tap used to enqueue its own render + full EPD refresh on the (serial) engine thread,
+    // so holding/mashing the right edge ran N slow cycles back-to-back. Instead we accumulate the net
+    // page delta and issue ONE jump: the first tap fires immediately, and any taps that land while
+    // that render is in flight are batched into a single follow-up jump. 10 fast taps → 1–2 renders.
+
+    /** Pending net page delta from edge taps; UI-thread only. */
+    private var pendingPageDelta = 0
+    /** True while a coalesced jump is rendering; taps accumulate instead of enqueuing more (UI thread). */
+    private var turnInFlight = false
+
+    private fun queuePageTurn(delta: Int) {
+        pendingPageDelta += delta
+        flushPageTurns()
+    }
+
+    /** Apply the accumulated delta as a single jump, unless one is already rendering (then it drains
+     *  on completion). Snaps to the document bounds; a no-op at the edges. */
+    private fun flushPageTurns() {
+        if (turnInFlight || pendingPageDelta == 0) return
+        val last = pageCount.coerceAtLeast(1) - 1
+        val target = (currentPage + pendingPageDelta).coerceIn(0, last)
+        pendingPageDelta = 0
+        if (target == currentPage) return
+        turnInFlight = true
+        postJump(target) { runOnUiThread { turnInFlight = false; flushPageTurns() } }
     }
 
     /** Follow a tapped link (RR11-FR3): internal → jump+render+refresh; external → open URL. */
@@ -1178,20 +1207,24 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
     }
 
     /** Jump to an absolute page on the engine thread, then render + refresh (RR11-FR1). */
-    private fun postJump(page: Int) {
+    private fun postJump(page: Int, onDone: (() -> Unit)? = null) {
         engine.execute {
-            if (docHandle == 0L) return@execute
-            val commandBytes = try {
-                NativeBridge.nativeJumpToPage(docHandle, page)
-            } catch (e: RuntimeException) {
-                Log.e(TAG, "jump failed: ${e.message}")
-                return@execute
+            try {
+                if (docHandle == 0L) return@execute
+                val commandBytes = try {
+                    NativeBridge.nativeJumpToPage(docHandle, page)
+                } catch (e: RuntimeException) {
+                    Log.e(TAG, "jump failed: ${e.message}")
+                    return@execute
+                }
+                ink.clearAll() // wipe the firmware ink overlay so it doesn't bleed onto the new page
+                dropSelectionForPageChange()
+                renderAndBlit()
+                savePosition() // persist position per jump so an abrupt kill still reopens here (RR27)
+                adapter.executeAll(WireCodec.decodeCommands(commandBytes))
+            } finally {
+                onDone?.invoke() // release the coalescing latch even on early-out / error
             }
-            ink.clearAll() // wipe the firmware ink overlay so it doesn't bleed onto the new page
-            dropSelectionForPageChange()
-            renderAndBlit()
-            savePosition() // persist position per jump so an abrupt kill still reopens here (RR27)
-            adapter.executeAll(WireCodec.decodeCommands(commandBytes))
         }
     }
 
@@ -1203,24 +1236,6 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         runOnUiThread { selectionToolbar.dismiss() }
     }
 
-    /** Apply a page-turn gesture on the engine thread, then render + refresh (RR25). */
-    private fun postGesture(gesture: Gesture) {
-        engine.execute {
-            if (docHandle == 0L) return@execute
-            val commandBytes = try {
-                NativeBridge.nativeOnGesture(docHandle, gesture.code)
-            } catch (e: RuntimeException) {
-                Log.e(TAG, "gesture failed: ${e.message}")
-                return@execute
-            }
-            ink.clearAll() // wipe the firmware ink overlay so it doesn't bleed onto the new page
-            dropSelectionForPageChange()
-            renderAndBlit()
-            savePosition() // persist position per turn so an abrupt kill still reopens here (RR27)
-            // Execute the policy's refresh stream on the panel (RR2-FR3).
-            adapter.executeAll(WireCodec.decodeCommands(commandBytes))
-        }
-    }
 
     // ---- in-document search (RR2) ----
 
@@ -1327,11 +1342,12 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
                 ImageView(this).apply {
                     setImageResource(iconRes); setColorFilter(Color.BLACK)
                 },
-                LinearLayout.LayoutParams(dp(26), dp(26)),
+                LinearLayout.LayoutParams(dp(39), dp(39)),
             )
             cell.addView(TextView(this).apply {
-                text = label; setTextColor(Color.parseColor("#444444")); textSize = 10f
-                gravity = Gravity.CENTER; setPadding(0, dp(4), 0, 0)
+                text = label; setTextColor(Color.parseColor("#333333")); textSize = 13f
+                typeface = Typeface.DEFAULT_BOLD
+                gravity = Gravity.CENTER; setPadding(0, dp(5), 0, 0)
             })
             controls.addView(cell, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         }
