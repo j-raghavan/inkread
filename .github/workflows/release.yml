@@ -35,7 +35,7 @@ jobs:
       # On a tag push, github.ref IS the tag. On manual dispatch the tag may not exist
       # yet, so we check out the branch it was dispatched from (github.ref) and create the
       # tag below — never `ref: <tag>`, which would fail the checkout for a new tag.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ github.ref }}
           fetch-depth: 0
@@ -78,7 +78,7 @@ jobs:
 
       # --- JDK (Gradle needs 17–21) ---
       - name: Set up JDK 21
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "21"
@@ -145,7 +145,7 @@ jobs:
           echo "Built: $dest"
 
       - name: Publish GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ steps.ver.outputs.tag }}
           name: inkread ${{ steps.ver.outputs.tag }}

@@ -28,7 +28,7 @@ jobs:
     name: host fmt + clippy + test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # rust-toolchain.toml pins the channel + components; the action honours it.
       - name: Install toolchain (from rust-toolchain.toml)
         run: rustup show
@@ -63,7 +63,7 @@ jobs:
     name: coverage (cargo-llvm-cov → Codecov)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install toolchain (llvm-tools-preview comes from rust-toolchain.toml)
         run: rustup show
       - name: Install cargo-llvm-cov
@@ -82,7 +82,7 @@ jobs:
       - name: Generate lcov coverage (RR17 gate)
         run: cargo llvm-cov --workspace --lcov --output-path lcov.info
       - name: Upload to Codecov
-        uses: codecov/codecov-action@v4
+        uses: codecov/codecov-action@v7
         with:
           files: lcov.info
           fail_ci_if_error: false # don't fail the build on a flaky upload
@@ -95,7 +95,7 @@ jobs:
     name: cross-check JNI bridge (aarch64-linux-android)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install toolchain + android target
         run: rustup target add aarch64-linux-android
       # rusqlite's `bundled` SQLite (reader-core + inkread-dict) compiles C for the target, so even
@@ -120,7 +120,7 @@ jobs:
     name: license manifest (RR18-AC2)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install toolchain
         run: rustup show
       # Every resolved dependency's SPDX license must be on the AGPL-compatible allowlist
