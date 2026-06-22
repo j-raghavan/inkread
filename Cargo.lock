@@ -87,7 +87,7 @@ dependencies = [
 
 [[package]]
 name = "build-dict"
-version = "0.1.0"
+version = "0.1.0-m0"
 dependencies = [
  "inkread-dict",
 ]
@@ -242,7 +242,7 @@ dependencies = [
 
 [[package]]
 name = "device-eink"
-version = "0.1.0"
+version = "0.1.0-m0"
 
 [[package]]
 name = "dtoa"
@@ -445,7 +445,7 @@ dependencies = [
 
 [[package]]
 name = "inkread-dict"
-version = "0.1.0"
+version = "0.1.0-m0"
 dependencies = [
  "flate2",
  "rusqlite",
@@ -453,7 +453,7 @@ dependencies = [
 
 [[package]]
 name = "inkread-epub"
-version = "0.1.0"
+version = "0.1.0-m0"
 dependencies = [
  "ab_glyph",
  "ego-tree",
@@ -463,18 +463,18 @@ dependencies = [
 
 [[package]]
 name = "inkread-ink"
-version = "0.1.0"
+version = "0.1.0-m0"
 
 [[package]]
 name = "inkread-lua"
-version = "0.1.0"
+version = "0.1.0-m0"
 dependencies = [
  "mlua",
 ]
 
 [[package]]
 name = "inkread-pdftext"
-version = "0.1.0"
+version = "0.1.0-m0"
 dependencies = [
  "inkread-epub",
 ]
@@ -915,7 +915,7 @@ dependencies = [
 
 [[package]]
 name = "reader-core"
-version = "0.1.0"
+version = "0.1.0-m0"
 dependencies = [
  "device-eink",
  "inkread-dict",
