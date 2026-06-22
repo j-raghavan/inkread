@@ -1,0 +1,44 @@
+[package]
+name = "reader-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+# (dep floor: pdfium-render's transitive image/libloading need rustc >= 1.88)
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "The inkread engine cdylib (libreader.so): document parsing/render, the e-ink refresh policy, the reader session, and a feature-gated JNI bridge. Vendor-agnostic (IR-7); host-buildable without an Android SDK (RR1-AC3)."
+
+[lib]
+# Output name `reader` → `libreader.so` so the cdylib matches the Android
+# `System.loadLibrary("reader")` seam (NativeBridge.kt). The Rust import path is unchanged
+# (`use reader_core::...`, derived from the package name), so the host tests still link.
+name = "reader"
+# rlib for host tests; cdylib for libreader.so via cargo-ndk (RR1-FR1).
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+device-eink = { workspace = true }
+# `import` enables on-device StarDict install (nativeDictImport): the cdylib gains flate2 so the user
+# can add their own dictionaries (KOReader-style). Pure-Rust gzip backend; cross-compiles clean.
+inkread-dict = { workspace = true, features = ["import"] }
+inkread-ink = { workspace = true }
+# EPUB backend: parsing + reflow layout + glyph rasterization (RR2-FR5). Pure Rust; the EpubBackend
+# adapter (document/reflow) maps it to the Document trait.
+inkread-epub = { workspace = true }
+# PDF reflow reconstruction (ADR-INKREAD-0011): pdfium glyph geometry -> reflowable Block model, fed
+# through inkread-epub's layout via the shared ReflowView. Pure Rust; host-testable.
+inkread-pdftext = { workspace = true }
+pdfium-render = { workspace = true }
+tiny-skia = { workspace = true }
+rusqlite = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Amendment 1: `jni` is OPTIONAL and pulled in ONLY by the `jni-bridge` feature, so a
+# bare `cargo test -p reader-core` leaves `jni` out of the resolved graph (RR1-AC3 / IR-7).
+jni = { workspace = true, optional = true }
+
+[features]
+default = []
+jni-bridge = ["dep:jni"]

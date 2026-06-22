@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- inkread M0 Android shell (RR1-FR2). Storage permission per RR22 (M1a) is intentionally
+     not requested yet for the M0 bring-up; M0 opens a path the user places on-device. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- Opt-in online dictionary fallback (Wiktionary) for non-bundled languages (RR12 / D4). -->
+    <uses-permission android:name="android.permission.INTERNET" />
+
+    <!-- All-files access (ADR-INKREAD-0005): the PDF export writes the annotated copy into a
+         public, Partner-synced folder (e.g. /storage/emulated/0/EXPORT) so it reaches the desktop.
+         Granted via Settings → All files access (Android 11+); sideloaded-app scope. -->
+    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
+
+    <!-- Supernote Digest ("Knowledge") write-through (ADR-INKREAD-0010): a lasso selection can be
+         saved into the firmware Digest app via its exported ContentProvider
+         (content://com.ratta.supernote.knowledge.provider). Both permissions are protectionLevel
+         "normal", so they are auto-granted to this sideloaded app at install — no platform signature
+         or system UID required. Vendor specifics stay in DigestController (IR-7). -->
+    <uses-permission android:name="com.ratta.supernote.knowledge.permission.READ_KNOWLEDGE" />
+    <uses-permission android:name="com.ratta.supernote.knowledge.permission.WRITE_KNOWLEDGE" />
+
+    <application
+        android:allowBackup="false"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:label="InkRead"
+        android:supportsRtl="true"
+        android:theme="@android:style/Theme.NoTitleBar.Fullscreen">
+
+        <!-- Home screen + launcher: brand and entry points (Open / Library / Continue). -->
+        <activity
+            android:name=".HomeActivity"
+            android:exported="true"
+            android:configChanges="orientation|screenSize|keyboardHidden">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!-- The reader; launched from Home with a book / pick / resume extra (not exported). -->
+        <activity
+            android:name=".ReaderActivity"
+            android:exported="false"
+            android:configChanges="orientation|screenSize|keyboardHidden" />
+
+        <!-- App-level settings + help, launched from the Home gear (not exported). -->
+        <activity
+            android:name=".SettingsActivity"
+            android:exported="false"
+            android:configChanges="orientation|screenSize|keyboardHidden" />
+    </application>
+</manifest>

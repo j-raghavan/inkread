@@ -1,0 +1,172 @@
+name: Release
+
+# Build the signed APK and publish a GitHub Release with auto-generated notes when a
+# v* tag is pushed (or via manual dispatch). Mirrors the local `./buildApk.sh` pipeline:
+# cargo-ndk builds libreader.so → the pinned BSD libpdfium is fetched + sha256-verified →
+# the dictionary corpus is staged → Gradle assembles the APK. The APK is attached to the
+# Release so anyone can sideload it without a toolchain.
+#
+# NOTE (M0 / ADR Decision 3): the "release" variant is self-signed with the debug key for
+# sideload bring-up. A real release signingConfig lands in M4 (RR29-FR2) — wire the keystore
+# in via repo secrets here when it does.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to build & release (e.g. v0.1.0-m0)"
+        required: true
+        type: string
+
+permissions:
+  contents: write # create the Release and upload the APK asset
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-apk:
+    name: build APK & publish release
+    runs-on: ubuntu-latest
+    steps:
+      # On a tag push, github.ref IS the tag. On manual dispatch the tag may not exist
+      # yet, so we check out the branch it was dispatched from (github.ref) and create the
+      # tag below — never `ref: <tag>`, which would fail the checkout for a new tag.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
+          fetch-depth: 0
+
+      # --- Resolve the release tag (push: the pushed tag; dispatch: the input) ---
+      - name: Resolve release tag
+        id: ver
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            tag="${{ github.event.inputs.tag }}"
+          else
+            tag="${{ github.ref_name }}"
+          fi
+          case "$tag" in
+            v*) ;;
+            *) echo "::error::Release tag must start with 'v' (got '$tag')"; exit 1 ;;
+          esac
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          # versionName for the APK = the tag without the leading 'v' (e.g. v0.1.0-m0 -> 0.1.0-m0).
+          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+          echo "Release tag: $tag (version ${tag#v})"
+
+      # --- Create + push the annotated tag on manual dispatch (push events already have it) ---
+      - name: Create and push tag (manual dispatch)
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          TAG: ${{ steps.ver.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null 2>&1; then
+            echo "::error::Tag $TAG already exists on origin — bump the version or delete the tag first."
+            exit 1
+          fi
+          git config user.name "${{ github.actor }}"
+          git config user.email "${{ github.actor }}@users.noreply.github.com"
+          git tag -a "$TAG" -m "Release $TAG"
+          git push origin "refs/tags/$TAG"
+          echo "Tagged $(git rev-parse --short HEAD) as $TAG and pushed to origin."
+
+      # --- JDK (Gradle needs 17–21) ---
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: gradle
+
+      # --- Rust (honours rust-toolchain.toml: channel + components + android targets) ---
+      - name: Install Rust toolchain (from rust-toolchain.toml)
+        run: rustup show
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk --locked
+
+      # --- Point cargo-ndk at the runner's preinstalled Android NDK (same as ci.yml) ---
+      - name: Configure Android NDK
+        run: |
+          set -euo pipefail
+          ndk="${ANDROID_NDK_LATEST_HOME:-${ANDROID_NDK_HOME:-${ANDROID_NDK_ROOT:-}}}"
+          test -n "$ndk" || { echo "::error::No Android NDK found on the runner"; exit 1; }
+          echo "ANDROID_NDK_HOME=$ndk" >> "$GITHUB_ENV"
+          echo "Using NDK: $ndk"
+
+      # --- Stamp the crate version from the tag (build-time only, not committed) ---
+      # reader-core reports CARGO_PKG_VERSION over JNI (jni.rs nativeHello), and env!() bakes
+      # it at compile time — so the workspace version must be set BEFORE cargo-ndk runs.
+      # All member crates inherit version.workspace, so the single root line drives everything.
+      - name: Stamp crate version from tag
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          set -euo pipefail
+          # Anchored at line start: dependency versions are inline tables (`x = { version = … }`)
+          # and won't match, so only [workspace.package].version is rewritten.
+          n="$(grep -c '^version = ' Cargo.toml)"
+          test "$n" -eq 1 || { echo "::error::expected exactly 1 workspace version line, found $n"; exit 1; }
+          sed -i "s/^version = \".*\"/version = \"$VERSION\"/" Cargo.toml
+          echo "reader-core crate version → $(grep '^version = ' Cargo.toml)"
+
+      # --- Build the APK via the canonical script (Rust core + pdfium + dict + Gradle) ---
+      # Gradle reads ORG_GRADLE_PROJECT_<name> env vars as project properties, so the tag's
+      # version lands in the APK's versionName/versionCode (see app/build.gradle.kts) — no
+      # change to buildApk.sh needed. versionCode uses the monotonic CI run number.
+      - name: Build APK (./buildApk.sh)
+        env:
+          ORG_GRADLE_PROJECT_inkreadVersionName: ${{ steps.ver.outputs.version }}
+          ORG_GRADLE_PROJECT_inkreadVersionCode: ${{ github.run_number }}
+        run: |
+          chmod +x ./buildApk.sh
+          ./buildApk.sh
+
+      - name: Locate the built APK
+        id: apk
+        run: |
+          set -euo pipefail
+          apk="$(find app/build/outputs/apk/release -type f -name '*.apk' -print -quit)"
+          test -n "$apk" || { echo "::error::No APK produced under app/build/outputs/apk/release"; exit 1; }
+          # Give the asset a versioned, tag-named filename.
+          tag="${{ steps.ver.outputs.tag }}"
+          dest="inkread-${tag}.apk"
+          cp "$apk" "$dest"
+          sha256sum "$dest" > "$dest.sha256"
+          echo "path=$dest" >> "$GITHUB_OUTPUT"
+          echo "sha256=$dest.sha256" >> "$GITHUB_OUTPUT"
+          echo "Built: $dest"
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.ver.outputs.tag }}
+          name: inkread ${{ steps.ver.outputs.tag }}
+          generate_release_notes: true # auto changelog from merged PRs/commits since last tag
+          prerelease: ${{ contains(steps.ver.outputs.tag, '-') }}
+          files: |
+            ${{ steps.apk.outputs.path }}
+            ${{ steps.apk.outputs.sha256 }}
+          body: |
+            ### inkread ${{ steps.ver.outputs.tag }}
+
+            A Rust-core e-ink document reader with first-class handwriting, for the Supernote
+            (RK3566, Android 11).
+
+            **Install (sideload):**
+            ```
+            adb install -r inkread-${{ steps.ver.outputs.tag }}.apk
+            ```
+
+            > This build is self-signed with the debug key for sideload bring-up (M0, ADR
+            > Decision 3). Verify the attached `.sha256` before installing. A production-signed
+            > release lands in M4 (RR29-FR2).
+
+            ---

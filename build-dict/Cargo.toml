@@ -1,0 +1,19 @@
+[package]
+name = "build-dict"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Offline tool (host-only, NOT shipped to device): import StarDict dictionaries into the indexed dict.db corpus inkread-dict reads at runtime (ADR-INKREAD-0009 D2). Keeps the gzip dep out of the device cdylib."
+
+[[bin]]
+name = "build-dict"
+path = "src/main.rs"
+
+[dependencies]
+# The StarDict import pipeline (file IO + gzip + the parse primitives) now lives in the library
+# behind the `import` feature; this tool is a thin host-side CLI over it (the same code the device
+# uses), so build-dict carries no gzip dep of its own.
+inkread-dict = { workspace = true, features = ["import"] }

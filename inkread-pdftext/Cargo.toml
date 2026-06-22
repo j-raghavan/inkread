@@ -1,0 +1,15 @@
+[package]
+name = "inkread-pdftext"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "PDF text reflow reconstruction (ADR-INKREAD-0011): glyph geometry -> reflowable Block model, fed to the inkread-epub layout engine. Pure geometry; host-testable; no pdfium, no Android, no vendor (IR-7)."
+
+[dependencies]
+# Block/Inline/TextRun — the reflow content model shared with the EPUB engine. This crate produces
+# that model from PDF glyph geometry so the existing inkread-epub layout/render/pagination pipeline
+# is reused verbatim (ADR-INKREAD-0011 Decision 1). No other deps: pure geometry, host-testable.
+inkread-epub = { workspace = true }

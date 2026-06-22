@@ -1,0 +1,129 @@
+name: CI
+
+# Host-first CI (RR29-FR3): the Rust core builds + tests on the host with NO Android SDK
+# (RR1-AC3), then the JNI bridge is cross-checked for the device target, and the license
+# manifest is verified (RR18-AC2). The full APK build is intentionally out of this gate for
+# M0 (it needs the NDK + a device to be meaningful); CI proves the core + the seams.
+#
+# The pdfium render tests (open/render/DRM/corrupt) SKIP unless PDFIUM_DYNAMIC_LIB_PATH is
+# set, so the `host` job fetches the BSD bblanchon libpdfium and re-runs them with the env
+# var SET — the render path actually EXECUTES in CI, not just on the maintainer's machine.
+#
+# Local toolchain caveat: a Homebrew `rust` on PATH (rustc 1.85) SHADOWS the rustup 1.90.0
+# pin in rust-toolchain.toml — Homebrew ships a real cargo, not a rustup shim, so `cargo`
+# resolves to it. Locally, prepend the rustup toolchain bin so 1.90.0 is used, e.g.:
+#   export PATH="$HOME/.rustup/toolchains/1.90.0-<triple>/bin:$PATH"
+# CI runners have no Homebrew rust, so `rustup show` honours the pin directly.
+
+on:
+  push:
+    branches: [master, "feat/**"]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  host:
+    name: host fmt + clippy + test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # rust-toolchain.toml pins the channel + components; the action honours it.
+      - name: Install toolchain (from rust-toolchain.toml)
+        run: rustup show
+      - name: Format
+        run: cargo fmt --all --check
+      - name: Clippy (warnings = errors)
+        run: cargo clippy --all -- -D warnings
+      - name: Test (host, no Android SDK — RR1-AC3)
+        # Default run: proves the suite is green even when libpdfium is absent (pdf tests
+        # skip cleanly). The next step makes them actually execute.
+        run: cargo test --workspace
+      - name: Fetch BSD libpdfium (bblanchon) for the render tests
+        run: |
+          set -euo pipefail
+          ver="chromium/7881"
+          url="https://github.com/bblanchon/pdfium-binaries/releases/download/${ver}/pdfium-linux-x64.tgz"
+          mkdir -p "$RUNNER_TEMP/pdfium"
+          curl -sSL "$url" -o "$RUNNER_TEMP/pdfium.tgz"
+          tar -xzf "$RUNNER_TEMP/pdfium.tgz" -C "$RUNNER_TEMP/pdfium"
+          echo "PDFIUM_DYNAMIC_LIB_PATH=$RUNNER_TEMP/pdfium/lib/libpdfium.so" >> "$GITHUB_ENV"
+      - name: Run pdfium render tests for real (RR5/RR7-FR5 — render path EXECUTES)
+        # With PDFIUM_DYNAMIC_LIB_PATH now set, the open/render/DRM/corrupt/concurrent tests
+        # run instead of skipping — proving the render + failure paths in CI.
+        run: cargo test -p reader-core document::fixed::pdf -- --nocapture
+      - name: Assert jni absent from the host graph (IR-7 / RR1-AC3)
+        run: |
+          if cargo tree -p reader-core -e normal | grep -qw jni; then
+            echo "::error::jni leaked into reader-core's default dependency graph"; exit 1
+          fi
+
+  coverage:
+    name: coverage (cargo-llvm-cov → Codecov)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain (llvm-tools-preview comes from rust-toolchain.toml)
+        run: rustup show
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+      # Fetch the BSD libpdfium so the render tests EXECUTE under coverage instead of
+      # skipping — otherwise the pdf render path reads as uncovered (mirrors the host job).
+      - name: Fetch BSD libpdfium (bblanchon) for the render tests
+        run: |
+          set -euo pipefail
+          ver="chromium/7881"
+          url="https://github.com/bblanchon/pdfium-binaries/releases/download/${ver}/pdfium-linux-x64.tgz"
+          mkdir -p "$RUNNER_TEMP/pdfium"
+          curl -sSL "$url" -o "$RUNNER_TEMP/pdfium.tgz"
+          tar -xzf "$RUNNER_TEMP/pdfium.tgz" -C "$RUNNER_TEMP/pdfium"
+          echo "PDFIUM_DYNAMIC_LIB_PATH=$RUNNER_TEMP/pdfium/lib/libpdfium.so" >> "$GITHUB_ENV"
+      - name: Generate lcov coverage (RR17 gate)
+        run: cargo llvm-cov --workspace --lcov --output-path lcov.info
+      - name: Upload to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          files: lcov.info
+          fail_ci_if_error: false # don't fail the build on a flaky upload
+        env:
+          # Optional for public repos (tokenless works but is rate-limited); add a
+          # CODECOV_TOKEN repo secret to make uploads reliable.
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+
+  jni-bridge-target:
+    name: cross-check JNI bridge (aarch64-linux-android)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain + android target
+        run: rustup target add aarch64-linux-android
+      # rusqlite's `bundled` SQLite (reader-core + inkread-dict) compiles C for the target, so even
+      # `cargo check --target aarch64-linux-android` invokes `cc` for Android — it needs the NDK
+      # clang as the cross C compiler (no link still happens). Point cc-rs + cargo at the runner's
+      # pre-installed NDK — the same toolchain cargo-ndk uses for the real APK build. minSdk 24.
+      - name: Point cc/cargo at the runner's Android NDK
+        run: |
+          set -euo pipefail
+          ndk="${ANDROID_NDK_LATEST_HOME:-${ANDROID_NDK_HOME:-${ANDROID_NDK_ROOT:-}}}"
+          tc="$ndk/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          test -x "$tc/aarch64-linux-android24-clang" || { echo "::error::NDK clang not found under $tc"; exit 1; }
+          {
+            echo "CC_aarch64_linux_android=$tc/aarch64-linux-android24-clang"
+            echo "AR_aarch64_linux_android=$tc/llvm-ar"
+            echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=$tc/aarch64-linux-android24-clang"
+          } >> "$GITHUB_ENV"
+      - name: Check reader-core with the JNI bridge for the device target
+        run: cargo check -p reader-core --features jni-bridge --target aarch64-linux-android
+
+  license-manifest:
+    name: license manifest (RR18-AC2)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain
+        run: rustup show
+      # Every resolved dependency's SPDX license must be on the AGPL-compatible allowlist
+      # (ADR Decision 2); a new dep with an unvetted license fails the build (RR18-AC2).
+      - name: Verify dependency licenses against the allowlist
+        run: ./scripts/check-licenses.sh

@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 💬 Questions & ideas (Discussions)
+    url: https://github.com/j-raghavan/inkread/discussions
+    about: "How does X work? Is this the right approach? Open-ended discussion lives here, not in issues."
+  - name: 🔒 Report a security vulnerability
+    url: https://github.com/j-raghavan/inkread/security/policy
+    about: "Please report vulnerabilities privately — do not open a public issue. See SECURITY.md."

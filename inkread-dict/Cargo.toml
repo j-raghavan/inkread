@@ -1,0 +1,28 @@
+[package]
+name = "inkread-dict"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Offline-first dictionary + thesaurus lookup engine (RR12 / ADR-INKREAD-0009): layered resolution (exact → stem) over an indexed SQLite corpus, language routing, and a permission-gated online-fallback port. Host-testable; names no vendor (IR-7)."
+
+[lib]
+crate-type = ["rlib"]
+
+[features]
+default = []
+# On-device StarDict import (src/import.rs). Pulls flate2 for `.dict.dz`; enabled by reader-core
+# (so libreader.so can install user dictionaries) and build-dict. Kept off by default so the runtime
+# lookup path — and host tests that only need lookup — never compile the gzip dep (the original
+# build-dict intent: keep gzip out unless import is actually built in).
+import = ["dep:flate2"]
+
+[dependencies]
+# Bundled SQLite (compiled from source) — hermetic host build, same engine cross-compiles for the
+# device (mirrors reader-core's ADR Decision 4). The pre-built dict.db is opened read-only on device.
+rusqlite = { workspace = true }
+# .dict.dz is dictzip — gzip-compatible, so flate2's GzDecoder decompresses it. MIT/Apache. Default
+# (pure-Rust miniz_oxide) backend cross-compiles to aarch64-android with no system zlib.
+flate2 = { version = "1", optional = true }

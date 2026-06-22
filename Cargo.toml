@@ -1,0 +1,56 @@
+# inkread — Rust workspace (RR1-FR1).
+#   device-eink   : vendor-neutral refresh contracts + mock recorder + wire codec (host-only).
+#   reader-core   : the cdylib engine (document/render/policy/session) + feature-gated JNI bridge.
+#
+# IR-7: reader-core never names a vendor and never compiles `jni`/panel code on the host.
+# RR1-AC3: bare `cargo test -p reader-core` builds with `jni` absent from the resolved graph.
+[workspace]
+resolver = "2"
+members = ["build-dict", "device-eink", "inkread-dict", "inkread-epub", "inkread-ink", "inkread-lua", "inkread-pdftext", "reader-core"]
+
+[workspace.package]
+version = "0.1.0-m0"
+edition = "2021"
+rust-version = "1.88"
+license = "AGPL-3.0-only"
+authors = ["J-Raghavan"]
+repository = "https://github.com/j-raghavan/inkread"
+
+[workspace.dependencies]
+# Internal crates.
+device-eink = { path = "device-eink" }
+inkread-dict = { path = "inkread-dict" }
+inkread-epub = { path = "inkread-epub" }
+inkread-ink = { path = "inkread-ink" }
+inkread-lua = { path = "inkread-lua" }
+inkread-pdftext = { path = "inkread-pdftext" }
+reader-core = { path = "reader-core" }
+
+# External — versions verified against docs.rs at implementation time.
+# pdfium-render: latest is 0.9.1 (0.9.2 does not exist on crates.io).
+# `thread_safe` wraps all pdfium calls in a global mutex (pdfium itself is not
+# thread-safe) so a process-global `Pdfium` can back PdfDocument<'static> and be
+# reached from the JNI reader thread soundly.
+pdfium-render = { version = "0.9.1", features = ["thread_safe"] }
+tiny-skia = "0.11"
+jni = "0.22.4"
+# serde + serde_json (both MIT/Apache, AGPL-compatible — auto-passes check-licenses.sh) back the
+# portable sidecar `metadata.json` (RR10-FR5 JSON interop). Pure Rust; the host build stays hermetic.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# rusqlite with `bundled` SQLite (compiled from source) so the host build is hermetic and the
+# Android cdylib cross-compiles the same engine — no system-library dependency (ADR Decision 4).
+rusqlite = { version = "0.32", features = ["bundled"] }
+# mlua with vendored Lua 5.4 (compiled from source via cc, like rusqlite `bundled`) — the embedded
+# plugin runtime (RR13). MIT-licensed (Lua itself is MIT) → AGPL-compatible (check-licenses.sh).
+mlua = { version = "0.10", features = ["lua54", "vendored"] }
+
+[profile.release]
+# A reader on a battery e-ink device: optimize for size + speed, strip symbols.
+# NOTE: keep `panic = "unwind"` (the default) — the JNI boundary catches panics
+# and converts them to Java exceptions (RR21-FR3); `panic = "abort"` would make
+# that catch_unwind impossible and crash the process across JNI.
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true
