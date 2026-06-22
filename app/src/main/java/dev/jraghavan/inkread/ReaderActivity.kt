@@ -1532,7 +1532,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             Tool.PEN -> "Pen — write with the stylus"
             Tool.HIGHLIGHTER -> "Highlighter — drag over text; tap again to change shade"
             Tool.ERASER -> "Eraser — drag the stylus over ink to remove it"
-            Tool.DEFINE -> "Define — tap a word (or drag over text) to look it up"
+            Tool.DEFINE -> "Define — tap a word to look it up; drag over text to select it"
             Tool.LASSO -> "Lasso — circle strokes to select; tap Lasso again for Freehand"
             else -> chosen.label
         }
@@ -1846,19 +1846,28 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             y0 = minOf(y0, poly[i + 1]); y1 = maxOf(y1, poly[i + 1])
             i += 2
         }
+        presentTextSelection(x0, y0, x1, y1, "Nothing under the loop — circle ink or printed words")
+    }
+
+    /**
+     * Select the printed text in a normalized rect, shade the caught boxes, and offer
+     * Define / Copy / Highlight (engine thread). Shared by the lasso text fallback and a Define-tool
+     * drag. [emptyMsg] is toasted when the rect holds no text. A drag is a *selection*, never an
+     * auto-lookup — the user picks Define from the action sheet if they want a definition.
+     */
+    private fun presentTextSelection(x0: Float, y0: Float, x1: Float, y1: Float, emptyMsg: String) {
+        if (docHandle == 0L) return
         val sel = try {
             WireCodec.decodeSelection(NativeBridge.nativeTextInRect(docHandle, currentPage, x0, y0, x1, y1))
         } catch (e: RuntimeException) {
-            Log.e(TAG, "lasso text-in-rect failed: ${e.message}"); Selection("", emptyList())
+            Log.e(TAG, "text-in-rect failed: ${e.message}"); Selection("", emptyList())
         }
-        diag { "DIAG lasso text fallback: '${sel.text.take(40)}' (${sel.boxes.size} boxes)" }
-        clearFirmwareInk() // wipe the firmware ink left by drawing the lasso loop
+        diag { "DIAG text selection: '${sel.text.take(40)}' (${sel.boxes.size} boxes)" }
+        clearFirmwareInk() // wipe the firmware ink the select gesture left behind
         renderAndBlit()
         if (sel.isEmpty) {
             refreshPanel()
-            runOnUiThread {
-                Toast.makeText(this, "Nothing under the loop — circle ink or printed words", Toast.LENGTH_SHORT).show()
-            }
+            runOnUiThread { Toast.makeText(this, emptyMsg, Toast.LENGTH_SHORT).show() }
             return
         }
         drawTextSelectionBoxes(sel.boxes) // show what was caught, then offer actions
@@ -2081,15 +2090,24 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             i += 2
         }
         val dragged = (maxX - minX) > w * 0.03f || (maxY - minY) > h * 0.02f
-        val page = currentPage
         if (dragged) {
-            val r = floatArrayOf(vToNx(minX), vToNy(minY), vToNx(maxX), vToNy(maxY))
-            engine.execute { dict.defineRect(page, r) }
+            // A drag is a text *selection*, not a one-word lookup: show the caught text + the
+            // Define/Copy/Highlight sheet (same UX as the lasso), never an auto dict card.
+            // A multi-line drag selects FULL lines — from the start of the line where the drag began
+            // through the end of the line where it stopped — so widen the band to the full page
+            // width; a single-line drag keeps the dragged horizontal span.
+            val multiLine = (maxY - minY) > h * MULTILINE_DRAG_FRAC
+            val x0 = if (multiLine) 0f else vToNx(minX)
+            val x1 = if (multiLine) 1f else vToNx(maxX)
+            val y0 = vToNy(minY); val y1 = vToNy(maxY)
+            engine.execute { presentTextSelection(x0, y0, x1, y1, "No text under the selection") }
         } else {
+            // A single still tap is a word lookup (the dict card).
+            val page = currentPage
             engine.execute { dict.defineWord(page, vToNx(pts[0]), vToNy(pts[1])) }
+            // Wipe the firmware ink the define gesture left behind (it never becomes an annotation).
+            engine.execute { clearFirmwareInk(); repaintPanel() }
         }
-        // Wipe the firmware ink the define gesture left behind (it never becomes an annotation).
-        engine.execute { clearFirmwareInk(); repaintPanel() }
     }
 
     private fun contrastPref(): Int =
@@ -2587,6 +2605,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         const val PREVIEW_MS = 50L // min interval between live zoom/pan preview blits (e-ink cadence).
         const val ZOOM_STEP = 1.4f // +/- button zoom multiplier.
         const val SELECTION_HANDLE_PX = 8f // half-size of the square corner handles on the selection box.
+        const val MULTILINE_DRAG_FRAC = 0.045f // Define-drag vertical span (frac of height) above which it's treated as multi-line → full-line select.
         const val CONTRAST_MAX = 8 // mirrors reader-core render::contrast::MAX_CONTRAST_STEP (RR4).
         val LINE_SPACINGS = floatArrayOf(1.2f, 1.4f, 1.7f) // Small / Medium / Large (RR4).
         const val HIGHLIGHT_WIDTH_PX = 30f // wide marker band (vs INK_STROKE_WIDTH for the pen).
