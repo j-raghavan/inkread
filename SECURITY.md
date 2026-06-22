@@ -10,8 +10,8 @@ inkread is pre-1.0 and ships from `master`. Security fixes target the **latest r
 **Please do not open a public issue for security vulnerabilities.**
 
 Report privately via GitHub's [**Report a vulnerability**](https://github.com/j-raghavan/inkread/security/advisories/new)
-(Security → Advisories) so we can triage and fix before disclosure. If you can't use that, email
-**jrlabs01@gmail.com** with `inkread security` in the subject.
+(Security → Advisories) so we can triage and fix before disclosure. This keeps the report
+confidential and notifies the maintainers directly — please use it rather than any public channel.
 
 Please include:
 
