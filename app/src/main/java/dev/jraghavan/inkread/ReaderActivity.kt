@@ -209,7 +209,8 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         // swipe). Mark it a long-press FIRST so the eventual UP never falls through to a page flip —
         // even if the lookup finds no word. (No "recent MOVE" gate: the held-finger MOVE stream has
         // gaps, and finger UP is reliable here, so the gate only caused false page flips.)
-        if (fingerMoved) return@Runnable
+        // A pinch-zoom in flight is never a word lookup, even if a finger sat still long enough.
+        if (fingerMoved || scaleDetector.isInProgress) return@Runnable
         fingerLookupFired = true // suppresses the tap/page-flip on the upcoming UP
         if (SystemClock.uptimeMillis() - lastStylusMs <= PALM_REJECT_MS || strokeBuf.isNotEmpty()) return@Runnable
         lookupWordAtView(fingerDownX, fingerDownY)
@@ -346,6 +347,14 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
                 }
             } else if (toolType == MotionEvent.TOOL_TYPE_FINGER) {
                 scaleDetector.onTouchEvent(event)
+                // A second finger means a pinch-zoom, not a tap/long-press. The single-finger DOWN
+                // armed the word-lookup timer; cancel it the instant a 2nd pointer appears (or the
+                // scale gesture engages) and neutralise this gesture, so a held pinch never triggers
+                // a Dict lookup. (onFingerMove/Up can't do this — they're gated to pointerCount==1.)
+                if (event.pointerCount > 1 || scaleDetector.isInProgress) {
+                    mainHandler.removeCallbacks(fingerLongPress)
+                    fingerMoved = true
+                }
                 // While a pinch is in progress (2 fingers), don't run tap/pan/long-press logic.
                 if (!scaleDetector.isInProgress && event.pointerCount == 1) {
                     // The zoom minimap (when shown) is an interactive navigator + zoom control;
