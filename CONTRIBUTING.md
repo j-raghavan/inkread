@@ -114,7 +114,7 @@ automatically — you don't install anything by hand.
 ### Clone & verify the host build
 
 ```bash
-git clone https://github.com/jraghavan/inkread.git
+git clone https://github.com/j-raghavan/inkread.git
 cd inkread
 cargo test --workspace      # should be green with no Android SDK installed
 ```
@@ -250,7 +250,7 @@ security issues in the public tracker.
 
 - **A specific bug or proposal** → open an issue.
 - **"How does X work / is this the right approach?"** → start a
-  [GitHub Discussion](https://github.com/jraghavan/inkread/discussions) (or open a draft PR and ask
+  [GitHub Discussion](https://github.com/j-raghavan/inkread/discussions) (or open a draft PR and ask
   inline).
 
 Welcome aboard — we're glad you're here. 🚀

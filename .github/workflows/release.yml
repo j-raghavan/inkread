@@ -32,10 +32,47 @@ jobs:
     name: build APK & publish release
     runs-on: ubuntu-latest
     steps:
+      # On a tag push, github.ref IS the tag. On manual dispatch the tag may not exist
+      # yet, so we check out the branch it was dispatched from (github.ref) and create the
+      # tag below — never `ref: <tag>`, which would fail the checkout for a new tag.
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.inputs.tag || github.ref }}
+          ref: ${{ github.ref }}
           fetch-depth: 0
+
+      # --- Resolve the release tag (push: the pushed tag; dispatch: the input) ---
+      - name: Resolve release tag
+        id: ver
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            tag="${{ github.event.inputs.tag }}"
+          else
+            tag="${{ github.ref_name }}"
+          fi
+          case "$tag" in
+            v*) ;;
+            *) echo "::error::Release tag must start with 'v' (got '$tag')"; exit 1 ;;
+          esac
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "Release tag: $tag"
+
+      # --- Create + push the annotated tag on manual dispatch (push events already have it) ---
+      - name: Create and push tag (manual dispatch)
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          TAG: ${{ steps.ver.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null 2>&1; then
+            echo "::error::Tag $TAG already exists on origin — bump the version or delete the tag first."
+            exit 1
+          fi
+          git config user.name "${{ github.actor }}"
+          git config user.email "${{ github.actor }}@users.noreply.github.com"
+          git tag -a "$TAG" -m "Release $TAG"
+          git push origin "refs/tags/$TAG"
+          echo "Tagged $(git rev-parse --short HEAD) as $TAG and pushed to origin."
 
       # --- JDK (Gradle needs 17–21) ---
       - name: Set up JDK 21
@@ -75,7 +112,7 @@ jobs:
           apk="$(find app/build/outputs/apk/release -type f -name '*.apk' -print -quit)"
           test -n "$apk" || { echo "::error::No APK produced under app/build/outputs/apk/release"; exit 1; }
           # Give the asset a versioned, tag-named filename.
-          tag="${GITHUB_REF_NAME:-${{ github.event.inputs.tag }}}"
+          tag="${{ steps.ver.outputs.tag }}"
           dest="inkread-${tag}.apk"
           cp "$apk" "$dest"
           sha256sum "$dest" > "$dest.sha256"
@@ -86,22 +123,22 @@ jobs:
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
-          name: inkread ${{ github.event.inputs.tag || github.ref_name }}
+          tag_name: ${{ steps.ver.outputs.tag }}
+          name: inkread ${{ steps.ver.outputs.tag }}
           generate_release_notes: true # auto changelog from merged PRs/commits since last tag
-          prerelease: ${{ contains(github.event.inputs.tag || github.ref_name, '-') }}
+          prerelease: ${{ contains(steps.ver.outputs.tag, '-') }}
           files: |
             ${{ steps.apk.outputs.path }}
             ${{ steps.apk.outputs.sha256 }}
           body: |
-            ### inkread ${{ github.event.inputs.tag || github.ref_name }}
+            ### inkread ${{ steps.ver.outputs.tag }}
 
             A Rust-core e-ink document reader with first-class handwriting, for the Supernote
             (RK3566, Android 11).
 
             **Install (sideload):**
             ```
-            adb install -r inkread-${{ github.event.inputs.tag || github.ref_name }}.apk
+            adb install -r inkread-${{ steps.ver.outputs.tag }}.apk
             ```
 
             > This build is self-signed with the debug key for sideload bring-up (M0, ADR
