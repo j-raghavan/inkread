@@ -1,9 +1,7 @@
 package dev.jraghavan.inkread
 
 import android.app.Activity
-import android.graphics.Color
 import android.graphics.RectF
-import android.graphics.drawable.GradientDrawable
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
@@ -46,18 +44,16 @@ class SelectionToolbar(
         dismiss()
         val row = LinearLayout(activity).apply {
             orientation = LinearLayout.HORIZONTAL
-            background = GradientDrawable().apply {
-                setColor(Color.WHITE)
-                setStroke(maxOf(2, dp(1)), Color.BLACK)
-                cornerRadius = dp(10).toFloat()
-            }
-            setPadding(dp(4), dp(4), dp(4), dp(4))
+            background = Ink.cardBg(Ink.RADIUS_CHIP)
+            setPadding(dp(5), dp(5), dp(5), dp(5))
         }
         val win = PopupWindow(row, ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
             isOutsideTouchable = false // keep it up while the user works the selection
             isFocusable = false
         }
-        for (action in SelAction.values()) {
+        // Hairline-separated cells read as a crisp instrument row on e-ink (vs. a blur of adjacent icons).
+        SelAction.values().forEachIndexed { i, action ->
+            if (i > 0) row.addView(divider())
             val enabled = action != SelAction.PASTE || canPaste
             row.addView(cell(action, win, enabled))
         }
@@ -83,11 +79,21 @@ class SelectionToolbar(
         popup = null
     }
 
+    /** A thin vertical rule between cells. */
+    private fun divider(): View = View(activity).apply {
+        setBackgroundColor(Ink.hairline)
+        val v = dp(10)
+        layoutParams = LinearLayout.LayoutParams(Ink.hair(), dp(48) - 2 * v).apply {
+            gravity = Gravity.CENTER_VERTICAL
+            setMargins(0, v, 0, v)
+        }
+    }
+
     /** One square icon cell. */
     private fun cell(action: SelAction, win: PopupWindow, enabled: Boolean): ImageView =
         ImageView(activity).apply {
             setImageResource(action.iconRes)
-            setColorFilter(if (enabled) Color.BLACK else Color.parseColor("#BDBDBD"))
+            setColorFilter(if (enabled) Ink.ink else Ink.disabled)
             val pad = dp(10)
             setPadding(pad, pad, pad, pad)
             val side = dp(48)

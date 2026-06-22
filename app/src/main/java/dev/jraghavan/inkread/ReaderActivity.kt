@@ -724,7 +724,12 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         engine.execute { openSwap(file.absolutePath, file.name) }
     }
 
-    private fun renderAndBlit() {
+    /**
+     * Render the current page and blit it. [deferLinks] skips the per-page link fetch so the page-turn
+     * path (postJump) can flash the panel first and fetch links *after* — links are only needed for
+     * the next tap, not before the page is visible.
+     */
+    private fun renderAndBlit(deferLinks: Boolean = false) {
         val handle = docHandle
         val buf = renderBuffer ?: return
         val bmp = bitmap ?: return
@@ -754,9 +759,9 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         // The active in-document search hit's highlight boxes (RR2), if it lives on this page.
         val searchHl = search.highlightForPage(currentPage)
         if (searchHl.isNotEmpty()) drawSearchHighlight(cv, searchHl)
-        // Keep a small full-page thumbnail from the fit render to drive the zoom minimap.
-        if (zoom <= 1f) updateFitThumb(bmp)
-        // Zoom minimap (top-right): full page + the current viewport window (RR5-FR3).
+        // Zoom minimap (top-right): full page + the current viewport window (RR5-FR3). The fit
+        // thumbnail it draws is captured lazily when zoom is first engaged (captureFitThumb), not on
+        // every fit-page turn — so ordinary reading pays no per-flip scale + alloc.
         if (zoom > 1f) drawZoomMinimap(cv)
         // A top-right dog-ear: faint outline (tap-to-bookmark affordance) / solid when bookmarked.
         drawBookmarkCorner(cv)
@@ -765,7 +770,14 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             Books.saveThumbnail(this, currentBookId, bmp)
         }
         blit { canvas -> canvas.drawBitmap(bmp, 0f, 0f, null) }
-        // Cache this page's links for tap hit-testing (RR11-FR3). Cheap; pdfium caches per page.
+        if (!deferLinks) refreshCurrentLinks()
+    }
+
+    /** Cache the current page's links for tap hit-testing (RR11-FR3). Off the page-turn critical path
+     *  (postJump calls this after the flash); links are only needed for the next tap. */
+    private fun refreshCurrentLinks() {
+        val handle = docHandle
+        if (handle == 0L) return
         currentLinks = try {
             WireCodec.decodeLinks(NativeBridge.nativePageLinks(handle, currentPage))
         } catch (e: RuntimeException) {
@@ -946,6 +958,13 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         val old = fitThumb
         fitThumb = Bitmap.createScaledBitmap(src, tw, th, true)
         if (old != null && old != fitThumb) old.recycle()
+    }
+
+    /** Snapshot the current fit page for the zoom minimap — called once when zoom is engaged from
+     *  fit (not on every flip). At that point [bitmap] still holds the fit render (a pinch only
+     *  transforms it on the surface, never overwrites it). */
+    private fun captureFitThumb() {
+        if (zoom <= 1f) bitmap?.let { updateFitThumb(it) }
     }
 
     /** Minimap panel geometry (thumbnail + the −/+ zoom buttons below it). Deterministic from the
@@ -1256,9 +1275,12 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
                 }
                 ink.clearAll() // wipe the firmware ink overlay so it doesn't bleed onto the new page
                 dropSelectionForPageChange()
-                renderAndBlit()
-                savePosition() // persist position per jump so an abrupt kill still reopens here (RR27)
+                renderAndBlit(deferLinks = true)
+                // Flash the panel FIRST so the new page is visible with no persistence/links work
+                // in front of it; then do the off-critical-path bookkeeping (RR27 position + links).
                 adapter.executeAll(WireCodec.decodeCommands(commandBytes))
+                savePosition() // persist position per jump so an abrupt kill still reopens here (RR27)
+                refreshCurrentLinks()
             } finally {
                 onDone?.invoke() // release the coalescing latch even on early-out / error
             }
@@ -1305,24 +1327,26 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         val dialog = Dialog(this).apply { requestWindowFeature(Window.FEATURE_NO_TITLE) }
         val container = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setBackgroundColor(Color.WHITE)
+            setBackgroundColor(Ink.paper)
         }
-        // Hairline top divider so the bar reads as a surface, not a floating box.
+        // A crisp black keyline up top so the bar reads as a docked surface, not a floating box.
         container.addView(
-            View(this).apply { setBackgroundColor(Color.parseColor("#33000000")) },
-            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(1).coerceAtLeast(1)),
+            View(this).apply { setBackgroundColor(Ink.ink) },
+            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, Ink.hair()),
         )
 
         // Page-slider row:  [N / Total]  ────────●────────  (grayscale, tap the chip to type a page)
         val pageLabel = TextView(this).apply {
             text = "${cur + 1} / $total"
-            setTextColor(Color.BLACK)
-            textSize = 13f
+            setTextColor(Ink.ink)
+            textSize = 12f
+            typeface = Ink.mono
+            letterSpacing = 0.04f
             gravity = Gravity.CENTER
-            setPadding(dp(12), dp(5), dp(12), dp(5))
+            setPadding(dp(12), dp(6), dp(12), dp(6))
             background = GradientDrawable().apply {
-                setColor(Color.parseColor("#F2F2F2"))
-                cornerRadius = dp(14).toFloat()
+                setColor(Ink.fill)
+                cornerRadius = Ink.dpf(40)
             }
             setOnClickListener { dialog.dismiss(); showPageEntry(total) }
         }
@@ -1331,11 +1355,11 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         fun bar(c: Int) = GradientDrawable().apply { setColor(c); cornerRadius = trackH.toFloat(); setSize(0, trackH) }
         val track = android.graphics.drawable.LayerDrawable(
             arrayOf(
-                bar(Color.parseColor("#D8D8D8")),
-                android.graphics.drawable.ClipDrawable(bar(Color.BLACK), Gravity.START, android.graphics.drawable.ClipDrawable.HORIZONTAL),
+                bar(Ink.hairline),
+                android.graphics.drawable.ClipDrawable(bar(Ink.ink), Gravity.START, android.graphics.drawable.ClipDrawable.HORIZONTAL),
             ),
         ).apply { setId(0, android.R.id.background); setId(1, android.R.id.progress) }
-        val knob = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(Color.BLACK); setSize(dp(16), dp(16)) }
+        val knob = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(Ink.ink); setSize(dp(16), dp(16)) }
         val seek = SeekBar(this).apply {
             max = total - 1
             progress = cur
@@ -1377,13 +1401,13 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             }
             cell.addView(
                 ImageView(this).apply {
-                    setImageResource(iconRes); setColorFilter(Color.BLACK)
+                    setImageResource(iconRes); setColorFilter(Ink.ink)
                 },
                 LinearLayout.LayoutParams(dp(39), dp(39)),
             )
             cell.addView(TextView(this).apply {
-                text = label; setTextColor(Color.parseColor("#333333")); textSize = 13f
-                typeface = Typeface.DEFAULT_BOLD
+                text = label; setTextColor(Ink.inkSoft); textSize = 11f
+                typeface = Ink.mono; letterSpacing = 0.02f
                 gravity = Gravity.CENTER; setPadding(0, dp(5), 0, 0)
             })
             controls.addView(cell, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
@@ -1409,7 +1433,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         dialog.window?.apply {
             setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
             setGravity(Gravity.BOTTOM)
-            setBackgroundDrawable(android.graphics.drawable.ColorDrawable(Color.WHITE))
+            setBackgroundDrawable(android.graphics.drawable.ColorDrawable(Ink.paper))
         }
         dialog.show()
     }
@@ -1496,17 +1520,16 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
 
         val outer = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setBackgroundColor(Color.WHITE)
-            setPadding(dp(24), dp(20), dp(24), dp(12))
+            setPadding(dp(24), dp(22), dp(24), dp(14))
         }
-        outer.addView(TextView(this).apply {
-            text = "Contents"; setTextColor(Color.BLACK); textSize = 20f
-            typeface = Typeface.DEFAULT_BOLD; setPadding(0, 0, 0, dp(12))
-        })
+        outer.addView(Ink.eyebrow(this, "Contents"))
+        outer.addView(Ink.gap(this, 10))
+        outer.addView(Ink.rule(this))
+        outer.addView(Ink.gap(this, 4))
         val list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         toc.forEachIndexed { i, item ->
-            if (i > 0) list.addView(View(this).apply { setBackgroundColor(Color.parseColor("#EEEEEE")) },
-                LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, maxOf(1, dp(1))))
+            if (i > 0) list.addView(View(this).apply { setBackgroundColor(Ink.hairline) },
+                LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, Ink.hair()))
             list.addView(LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
@@ -1515,14 +1538,14 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
                 setOnClickListener { dialog.dismiss(); item.targetPage?.let { postJump(it) } }
                 addView(TextView(this@ReaderActivity).apply {
                     text = item.title
-                    setTextColor(if (item.targetPage != null) Color.BLACK else Color.parseColor("#9E9E9E"))
-                    textSize = if (item.depth == 0) 16f else 15f
-                    if (item.depth == 0) typeface = Typeface.DEFAULT_BOLD
+                    setTextColor(if (item.targetPage != null) Ink.ink else Ink.muted)
+                    textSize = if (item.depth == 0) 17f else 15f
+                    typeface = if (item.depth == 0) Ink.serifBold else Ink.serif
                     maxLines = 2
                 }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
                 item.targetPage?.let { p ->
                     addView(TextView(this@ReaderActivity).apply {
-                        text = "${p + 1}"; setTextColor(Color.parseColor("#9E9E9E")); textSize = 13f
+                        text = "${p + 1}"; setTextColor(Ink.muted); textSize = 12f; typeface = Ink.mono
                         setPadding(dp(12), 0, 0, 0)
                     })
                 }
@@ -1534,7 +1557,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         dialog.setContentView(outer)
         dialog.window?.apply {
             setLayout((resources.displayMetrics.widthPixels * 0.82f).toInt(), ViewGroup.LayoutParams.WRAP_CONTENT)
-            setBackgroundDrawable(GradientDrawable().apply { setColor(Color.WHITE); cornerRadius = dp(12).toFloat() })
+            setBackgroundDrawable(Ink.cardBg())
         }
         dialog.show()
     }
@@ -1655,7 +1678,9 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
 
     /** Multiply the zoom (clamped); snap back to fit at ~1. Used by the +/- buttons and pinch-end. */
     private fun zoomBy(factor: Float) {
-        zoom = (zoom * factor).coerceIn(1f, MAX_ZOOM_UI)
+        val next = (zoom * factor).coerceIn(1f, MAX_ZOOM_UI)
+        if (zoom <= 1f && next > 1f) captureFitThumb() // grab the fit thumb before leaving fit
+        zoom = next
         if (zoom <= 1.01f) { zoom = 1f; panX = 0f; panY = 0f }
         applyZoom()
     }
@@ -1699,6 +1724,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             }
             override fun onScaleEnd(d: android.view.ScaleGestureDetector) {
                 val newZoom = (gestureStartZoom * liveScale).coerceIn(1f, MAX_ZOOM_UI)
+                if (gestureStartZoom <= 1f && newZoom > 1f) captureFitThumb() // zoom field still ≤1 here
                 if (newZoom <= 1.01f) {
                     zoom = 1f; panX = 0f; panY = 0f
                 } else {
@@ -2270,20 +2296,20 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
                 // Active tab: white, boxed (connected to the panel) + bold label. Inactive: flat gray.
                 if (j == i) {
                     c.background = GradientDrawable().apply {
-                        setColor(Color.WHITE); setStroke(maxOf(1, dp(2)), Color.BLACK)
+                        setColor(Ink.paper); setStroke(Ink.keyline(), Ink.ink)
                     }
                 } else {
                     c.background = null
-                    c.setBackgroundColor(Color.parseColor("#F2F2F2"))
+                    c.setBackgroundColor(Ink.fill)
                 }
-                (c.getChildAt(1) as? TextView)?.setTypeface(
-                    null, if (j == i) android.graphics.Typeface.BOLD else android.graphics.Typeface.NORMAL,
-                )
+                val tab = c.getChildAt(1) as? TextView
+                tab?.setTypeface(Ink.mono, if (j == i) android.graphics.Typeface.BOLD else android.graphics.Typeface.NORMAL)
+                tab?.setTextColor(if (j == i) Ink.ink else Ink.inkSoft)
             }
         }
         val tabRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
-            setBackgroundColor(Color.parseColor("#F2F2F2"))
+            setBackgroundColor(Ink.fill)
         }
         panels.forEachIndexed { i, (label, icon, _) ->
             val cell = LinearLayout(this).apply {
@@ -2291,11 +2317,11 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
                 setPadding(dp(4), dp(10), dp(4), dp(10)); isClickable = true
                 setOnClickListener { select(i) }
                 addView(
-                    ImageView(this@ReaderActivity).apply { setImageResource(icon); setColorFilter(Color.BLACK) },
+                    ImageView(this@ReaderActivity).apply { setImageResource(icon); setColorFilter(Ink.ink) },
                     LinearLayout.LayoutParams(dp(24), dp(24)),
                 )
                 addView(TextView(this@ReaderActivity).apply {
-                    text = label; textSize = 10f; setTextColor(Color.parseColor("#444444"))
+                    text = label; textSize = 10f; setTextColor(Ink.inkSoft); typeface = Ink.mono
                     gravity = Gravity.CENTER; setPadding(0, dp(3), 0, 0)
                 })
             }
@@ -2304,11 +2330,11 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         }
         val container = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setBackgroundColor(Color.WHITE)
-            // Hairline top divider so the sheet reads as a surface (established bottom-bar template).
+            setBackgroundColor(Ink.paper)
+            // Black keyline up top so the sheet reads as a docked surface (bottom-bar template).
             addView(
-                View(this@ReaderActivity).apply { setBackgroundColor(Color.parseColor("#33000000")) },
-                LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(1).coerceAtLeast(1)),
+                View(this@ReaderActivity).apply { setBackgroundColor(Ink.ink) },
+                LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, Ink.hair()),
             )
             // Active tab's panel — WRAP_CONTENT so the sheet GROWS UP per tab (KOReader-style),
             // bottom-anchored, instead of a fixed box with dead space.
@@ -2317,8 +2343,8 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
                 LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT),
             )
             addView(
-                View(this@ReaderActivity).apply { setBackgroundColor(Color.parseColor("#22000000")) },
-                LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 1),
+                View(this@ReaderActivity).apply { setBackgroundColor(Ink.hairline) },
+                LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, Ink.hair()),
             )
             addView(tabRow)
         }
@@ -2327,7 +2353,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         dialog.window?.apply {
             setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
             setGravity(Gravity.BOTTOM)
-            setBackgroundDrawable(android.graphics.drawable.ColorDrawable(Color.WHITE))
+            setBackgroundDrawable(android.graphics.drawable.ColorDrawable(Ink.paper))
         }
         dialog.show()
     }
@@ -2342,11 +2368,11 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         val segs = ArrayList<TextView>()
         fun style(tv: TextView, on: Boolean) {
             if (on) {
-                tv.setTextColor(Color.WHITE)
+                tv.setTextColor(Ink.paper)
                 tv.setTypeface(null, android.graphics.Typeface.BOLD)
-                tv.background = GradientDrawable().apply { setColor(Color.parseColor("#5A5A5A")); cornerRadius = radius }
+                tv.background = GradientDrawable().apply { setColor(Ink.ink); cornerRadius = radius }
             } else {
-                tv.setTextColor(Color.BLACK)
+                tv.setTextColor(Ink.ink)
                 tv.setTypeface(null, android.graphics.Typeface.NORMAL)
                 tv.background = null
             }
@@ -2354,8 +2380,8 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         return LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             background = GradientDrawable().apply {
-                setColor(Color.WHITE); cornerRadius = radius
-                setStroke(maxOf(1, dp(1)), Color.parseColor("#9E9E9E"))
+                setColor(Ink.paper); cornerRadius = radius
+                setStroke(Ink.hair(), Ink.ringSoft)
             }
             val p = dp(3); setPadding(p, p, p, p)
             options.forEachIndexed { i, opt ->
@@ -2379,12 +2405,12 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         var filled = initial
         val draws = ArrayList<GradientDrawable>()
         fun repaint() = draws.forEachIndexed { i, g ->
-            g.setColor(if (i < filled) Color.parseColor("#5A5A5A") else Color.WHITE)
+            g.setColor(if (i < filled) Ink.ink else Ink.paper)
         }
         return LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
             for (i in 0 until count) {
-                val g = GradientDrawable().apply { setStroke(maxOf(1, dp(1)), Color.parseColor("#9E9E9E")) }
+                val g = GradientDrawable().apply { setStroke(Ink.hair(), Ink.ringSoft) }
                 draws.add(g)
                 addView(View(this@ReaderActivity).apply {
                     background = g; isClickable = true
