@@ -32,17 +32,10 @@ class ColorPalette(
         dismiss()
         val col = LinearLayout(activity).apply {
             orientation = LinearLayout.VERTICAL
-            background = GradientDrawable().apply {
-                setColor(Color.WHITE); setStroke(maxOf(2, dp(1)), Color.BLACK); cornerRadius = dp(12).toFloat()
-            }
-            setPadding(dp(16), dp(12), dp(16), dp(12))
+            background = Ink.cardBg()
+            setPadding(Ink.dp(20), Ink.dp(16), Ink.dp(20), Ink.dp(16))
         }
-        col.addView(TextView(activity).apply {
-            text = title
-            textSize = 15f
-            setTextColor(Color.BLACK)
-            setPadding(0, 0, 0, dp(8))
-        })
+        col.addView(Ink.eyebrow(activity, title).apply { setPadding(0, 0, 0, Ink.dp(12)) })
         val row = LinearLayout(activity).apply { orientation = LinearLayout.HORIZONTAL }
         val win = android.widget.PopupWindow(col, ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
             isOutsideTouchable = true; isFocusable = true
@@ -78,15 +71,17 @@ class ColorPalette(
                 shape = GradientDrawable.OVAL
                 setColor(opaque)
                 // Selected = thick black ring; others = thin grey ring so light swatches still read.
-                setStroke(if (selected) dp(4) else dp(1), if (selected) Color.BLACK else Color.parseColor("#9E9E9E"))
+                setStroke(if (selected) dp(4) else Ink.hair(), if (selected) Ink.ink else Ink.ringSoft)
             }
         })
         cell.addView(TextView(activity).apply {
             text = name
-            textSize = 12f
+            textSize = 11f
+            typeface = Ink.mono
+            letterSpacing = 0.04f
             gravity = Gravity.CENTER
-            setTextColor(Color.BLACK)
-            setPadding(0, dp(4), 0, 0)
+            setTextColor(if (selected) Ink.ink else Ink.muted)
+            setPadding(0, dp(6), 0, 0)
         })
         return cell
     }
