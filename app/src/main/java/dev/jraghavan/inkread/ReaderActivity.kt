@@ -724,7 +724,12 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         engine.execute { openSwap(file.absolutePath, file.name) }
     }
 
-    private fun renderAndBlit() {
+    /**
+     * Render the current page and blit it. [deferLinks] skips the per-page link fetch so the page-turn
+     * path (postJump) can flash the panel first and fetch links *after* — links are only needed for
+     * the next tap, not before the page is visible.
+     */
+    private fun renderAndBlit(deferLinks: Boolean = false) {
         val handle = docHandle
         val buf = renderBuffer ?: return
         val bmp = bitmap ?: return
@@ -754,9 +759,9 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         // The active in-document search hit's highlight boxes (RR2), if it lives on this page.
         val searchHl = search.highlightForPage(currentPage)
         if (searchHl.isNotEmpty()) drawSearchHighlight(cv, searchHl)
-        // Keep a small full-page thumbnail from the fit render to drive the zoom minimap.
-        if (zoom <= 1f) updateFitThumb(bmp)
-        // Zoom minimap (top-right): full page + the current viewport window (RR5-FR3).
+        // Zoom minimap (top-right): full page + the current viewport window (RR5-FR3). The fit
+        // thumbnail it draws is captured lazily when zoom is first engaged (captureFitThumb), not on
+        // every fit-page turn — so ordinary reading pays no per-flip scale + alloc.
         if (zoom > 1f) drawZoomMinimap(cv)
         // A top-right dog-ear: faint outline (tap-to-bookmark affordance) / solid when bookmarked.
         drawBookmarkCorner(cv)
@@ -765,7 +770,14 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             Books.saveThumbnail(this, currentBookId, bmp)
         }
         blit { canvas -> canvas.drawBitmap(bmp, 0f, 0f, null) }
-        // Cache this page's links for tap hit-testing (RR11-FR3). Cheap; pdfium caches per page.
+        if (!deferLinks) refreshCurrentLinks()
+    }
+
+    /** Cache the current page's links for tap hit-testing (RR11-FR3). Off the page-turn critical path
+     *  (postJump calls this after the flash); links are only needed for the next tap. */
+    private fun refreshCurrentLinks() {
+        val handle = docHandle
+        if (handle == 0L) return
         currentLinks = try {
             WireCodec.decodeLinks(NativeBridge.nativePageLinks(handle, currentPage))
         } catch (e: RuntimeException) {
@@ -946,6 +958,13 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         val old = fitThumb
         fitThumb = Bitmap.createScaledBitmap(src, tw, th, true)
         if (old != null && old != fitThumb) old.recycle()
+    }
+
+    /** Snapshot the current fit page for the zoom minimap — called once when zoom is engaged from
+     *  fit (not on every flip). At that point [bitmap] still holds the fit render (a pinch only
+     *  transforms it on the surface, never overwrites it). */
+    private fun captureFitThumb() {
+        if (zoom <= 1f) bitmap?.let { updateFitThumb(it) }
     }
 
     /** Minimap panel geometry (thumbnail + the −/+ zoom buttons below it). Deterministic from the
@@ -1256,9 +1275,12 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
                 }
                 ink.clearAll() // wipe the firmware ink overlay so it doesn't bleed onto the new page
                 dropSelectionForPageChange()
-                renderAndBlit()
-                savePosition() // persist position per jump so an abrupt kill still reopens here (RR27)
+                renderAndBlit(deferLinks = true)
+                // Flash the panel FIRST so the new page is visible with no persistence/links work
+                // in front of it; then do the off-critical-path bookkeeping (RR27 position + links).
                 adapter.executeAll(WireCodec.decodeCommands(commandBytes))
+                savePosition() // persist position per jump so an abrupt kill still reopens here (RR27)
+                refreshCurrentLinks()
             } finally {
                 onDone?.invoke() // release the coalescing latch even on early-out / error
             }
@@ -1656,7 +1678,9 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
 
     /** Multiply the zoom (clamped); snap back to fit at ~1. Used by the +/- buttons and pinch-end. */
     private fun zoomBy(factor: Float) {
-        zoom = (zoom * factor).coerceIn(1f, MAX_ZOOM_UI)
+        val next = (zoom * factor).coerceIn(1f, MAX_ZOOM_UI)
+        if (zoom <= 1f && next > 1f) captureFitThumb() // grab the fit thumb before leaving fit
+        zoom = next
         if (zoom <= 1.01f) { zoom = 1f; panX = 0f; panY = 0f }
         applyZoom()
     }
@@ -1700,6 +1724,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             }
             override fun onScaleEnd(d: android.view.ScaleGestureDetector) {
                 val newZoom = (gestureStartZoom * liveScale).coerceIn(1f, MAX_ZOOM_UI)
+                if (gestureStartZoom <= 1f && newZoom > 1f) captureFitThumb() // zoom field still ≤1 here
                 if (newZoom <= 1.01f) {
                     zoom = 1f; panX = 0f; panY = 0f
                 } else {
