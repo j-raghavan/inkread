@@ -36,9 +36,11 @@ interface EinkAdapter {
     }
 
     /**
-     * Force a full-screen panel refresh after a blit that carries no command stream (the
-     * initial open, a SAF import). On a full-only panel this is the same flash a page turn's
-     * `Update{Full}` produces. Default no-op.
+     * Request a full-screen panel refresh after a blit that carries no command stream (the
+     * initial open, a SAF import, a UI-chrome change). On a full-only panel this is the same flash a
+     * page turn's `Update{Full}` produces. Implementations MAY coalesce a burst of these into a
+     * single frame to save EPD power, so callers must not rely on a synchronous, per-call refresh.
+     * Default no-op.
      */
     fun refreshFull() {}
 }

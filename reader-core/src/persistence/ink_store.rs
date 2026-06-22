@@ -64,6 +64,35 @@ fn io_err(e: io::Error) -> CoreError {
     CoreError::Persistence(e.to_string())
 }
 
+/// Hard ceiling on a single page's `.inkbin` sidecar file (RR20 / RR21-FR3). Mirrors the document
+/// open cap ([`crate::jni`]'s `read_document_file`): we **stat before read** so a crafted/oversized
+/// sidecar can't force a huge allocation, complementing the codec's per-count decode limits. One
+/// page of ink is kilobytes; 64 MiB is far above any real page while bounding a hostile file.
+const MAX_INKBIN_BYTES: u64 = 64 << 20;
+
+/// Read a page `.inkbin`, capping the size before the read (RR21-FR3). `Ok(None)` if the file is
+/// absent (an un-annotated page). A file over `max_bytes` is reported as **corrupt** so the caller
+/// quarantines it and degrades the page to empty — exactly like an undecodable file — rather than
+/// attempting the allocation. `max_bytes` is a parameter only so the cap is unit-testable cheaply.
+fn read_page_capped(path: &Path, max_bytes: u64) -> CoreResult<Option<Vec<u8>>> {
+    let meta = match fs::metadata(path) {
+        Ok(m) => m,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(io_err(e)),
+    };
+    if meta.len() > max_bytes {
+        return Err(CoreError::CorruptDocument(format!(
+            "sidecar page is {} bytes, over the {max_bytes}-byte limit",
+            meta.len()
+        )));
+    }
+    match fs::read(path) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(io_err(e)),
+    }
+}
+
 /// Best-effort directory fsync so a rename/unlink is itself durable across power loss (RR20-FR6):
 /// `sync_all` on a file flushes its *data*, but the **directory entry** created/removed by the
 /// rename/unlink is only guaranteed durable once the parent dir is fsync'd. A platform or
@@ -112,10 +141,10 @@ impl FsInkStore {
 
 impl InkStore for FsInkStore {
     fn load_page(&self, page: usize) -> CoreResult<InkLayer> {
-        match fs::read(self.paths.page_file(page)) {
-            Ok(bytes) => Ok(decode_layer(&bytes)?),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(InkLayer::new()),
-            Err(e) => Err(io_err(e)),
+        let path = self.paths.page_file(page);
+        match read_page_capped(&path, MAX_INKBIN_BYTES)? {
+            Some(bytes) => Ok(decode_layer(&bytes)?),
+            None => Ok(InkLayer::new()),
         }
     }
 
@@ -356,6 +385,25 @@ mod tests {
             1,
             "committed survives"
         );
+    }
+
+    #[test]
+    fn oversized_sidecar_is_rejected_before_read() {
+        // A page file larger than the cap must be reported corrupt (so the caller quarantines and
+        // degrades to empty) WITHOUT being read into memory. Tested with a tiny cap so the file
+        // stays small (RR21-FR3).
+        let tmp = TempDir::new();
+        let store = fs_store(&tmp);
+        store.save_page(0, &one_stroke_layer()).unwrap();
+        let path = store.paths.page_file(0);
+        assert!(matches!(
+            read_page_capped(&path, 4),
+            Err(CoreError::CorruptDocument(_))
+        ));
+        // An absent page is still None (not an error), regardless of the cap.
+        assert!(read_page_capped(&store.paths.page_file(9), 4)
+            .unwrap()
+            .is_none());
     }
 
     #[test]

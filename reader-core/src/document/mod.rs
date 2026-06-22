@@ -70,6 +70,16 @@ impl FitMode {
             _ => FitMode::Page,
         }
     }
+
+    /// The wire integer for this mode (inverse of [`Self::from_code`]) — used to key the render cache.
+    #[must_use]
+    pub fn code(self) -> u8 {
+        match self {
+            FitMode::Page => 0,
+            FitMode::Width => 1,
+            FitMode::Height => 2,
+        }
+    }
 }
 
 /// Document metadata (title/author) — the M0 subset (RR5-FR2).

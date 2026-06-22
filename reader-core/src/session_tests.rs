@@ -244,7 +244,7 @@ fn on_trim_memory_clears_caches() {
 
 #[test]
 fn render_rejects_mismatched_buffer() {
-    let s = session(1, DeviceCapabilities::supernote_full());
+    let mut s = session(1, DeviceCapabilities::supernote_full());
     let mut wrong = vec![0u8; 10 * 10 * 4];
     let mut pb = PixelBuffer::from_rgba(&mut wrong, 10, 10).unwrap();
     assert!(matches!(
@@ -255,10 +255,80 @@ fn render_rejects_mismatched_buffer() {
 
 #[test]
 fn render_current_into_matching_buffer_ok() {
-    let s = session(1, DeviceCapabilities::supernote_full());
+    let mut s = session(1, DeviceCapabilities::supernote_full());
     let mut buf = vec![0u8; 100 * 120 * 4];
     let mut pb = PixelBuffer::from_rgba(&mut buf, 100, 120).unwrap();
     assert!(s.render_current(&mut pb).is_ok());
+}
+
+// RR4-FR6 / RR24: a revisited page (same view-settings) is served from the render cache without
+// re-rasterizing; a settings change keys a fresh render; a repagination/viewport change drops it.
+#[test]
+fn render_cache_serves_revisits_and_invalidates_on_change() {
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    /// A document that counts how many times a page was actually rasterized.
+    struct CountingDoc {
+        pages: usize,
+        renders: Rc<Cell<usize>>,
+    }
+    impl Document for CountingDoc {
+        fn page_count(&self) -> usize {
+            self.pages
+        }
+        fn metadata(&self) -> DocumentMetadata {
+            DocumentMetadata::default()
+        }
+        fn render_page(&self, index: usize, buf: &mut PixelBuffer<'_>) -> CoreResult<()> {
+            if index >= self.pages {
+                return Err(CoreError::PageOutOfRange {
+                    requested: index,
+                    available: self.pages,
+                });
+            }
+            self.renders.set(self.renders.get() + 1);
+            buf.fill_white();
+            Ok(())
+        }
+    }
+
+    let renders = Rc::new(Cell::new(0usize));
+    let mut s = ReaderSession::with_document(
+        Box::new(CountingDoc {
+            pages: 3,
+            renders: renders.clone(),
+        }),
+        DeviceCapabilities::supernote_full(),
+        Viewport::new(100, 120, 226),
+    );
+    let mut buf = vec![0u8; 100 * 120 * 4];
+    let render = |s: &mut ReaderSession, buf: &mut [u8]| {
+        let mut pb = PixelBuffer::from_rgba(buf, 100, 120).unwrap();
+        s.render_current(&mut pb).unwrap();
+    };
+
+    render(&mut s, &mut buf); // page 0: miss → rasterize
+    assert_eq!(renders.get(), 1);
+    render(&mut s, &mut buf); // page 0 again: hit → no rasterize
+    assert_eq!(renders.get(), 1);
+    assert_eq!(s.caches().render().len(), 1);
+
+    s.on_gesture(Gesture::NextPage);
+    render(&mut s, &mut buf); // page 1: miss
+    assert_eq!(renders.get(), 2);
+    s.on_gesture(Gesture::PrevPage);
+    render(&mut s, &mut buf); // back to page 0: still cached → hit
+    assert_eq!(renders.get(), 2);
+
+    // A contrast change is part of the key → distinct buffer, fresh rasterize.
+    s.set_contrast(5);
+    render(&mut s, &mut buf);
+    assert_eq!(renders.get(), 3);
+
+    // A viewport change invalidates the cache (geometry changed underneath the keys).
+    s.set_viewport(Viewport::new(100, 120, 226));
+    assert_eq!(s.caches().render().len(), 0);
 }
 
 #[test]

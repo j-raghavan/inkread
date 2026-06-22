@@ -58,6 +58,13 @@ object NativeBridge {
     /** Free the session. Null-safe + double-close tolerant (Amendment 2). */
     external fun nativeCloseDocument(handle: Long)
 
+    /**
+     * Shed bounded caches under platform memory pressure (RR24-FR3 / `onTrimMemory`). [level] is the
+     * core severity code: 0 = moderate (drop the least-critical caches), 1 = critical (drop all).
+     * Null/closed-handle safe — never throws.
+     */
+    external fun nativeOnTrimMemory(handle: Long, level: Int)
+
     /** Page count of the open document. */
     external fun nativePageCount(handle: Long): Int
 

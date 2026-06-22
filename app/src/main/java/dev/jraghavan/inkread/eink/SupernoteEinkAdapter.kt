@@ -1,5 +1,7 @@
 package dev.jraghavan.inkread.eink
 
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
 import android.view.View
 import dev.jraghavan.inkread.DeviceCapabilities
@@ -44,14 +46,29 @@ class SupernoteEinkAdapter : EinkAdapter {
     /** The panel-owning view; its context resolves the system "eink" service. */
     @Volatile private var view: View? = null
 
+    /** Coalesces bursts of [refreshFull] into one panel frame (see [refreshFull]). */
+    private val refreshHandler = Handler(Looper.getMainLooper())
+    private val coalescedFrame = Runnable { sendOneFullFrame() }
+
     override fun capabilities(): DeviceCapabilities = DeviceCapabilities.supernoteBaseline()
 
     override fun attachView(view: View?) {
         this.view = view
+        if (view == null) refreshHandler.removeCallbacks(coalescedFrame) // no panel to push to
     }
 
+    /**
+     * Request a full-screen panel refresh, **coalesced** (RR15 power). A GC16 full frame is the
+     * most expensive operation on the EPD, and the shell fires `refreshFull()` after every UI-chrome
+     * change (toolbar, palette, dialog dismiss, long-press lookup) — often several back-to-back. A
+     * trailing-edge debounce collapses each burst into a single frame: every call reschedules the one
+     * pending frame a short window out, so the last blit in the burst is what reaches the panel, and
+     * accidental double-refreshes cost nothing. Policy-driven page turns go through
+     * [execute]/[executeUpdate], not here, so their latency is unchanged.
+     */
     override fun refreshFull() {
-        sendOneFullFrame()
+        refreshHandler.removeCallbacks(coalescedFrame)
+        refreshHandler.postDelayed(coalescedFrame, COALESCE_WINDOW_MS)
     }
 
     override fun execute(command: RefreshCommand) {
@@ -156,5 +173,9 @@ class SupernoteEinkAdapter : EinkAdapter {
 
     private companion object {
         const val TAG = "SupernoteEinkAdapter"
+
+        /** Trailing-edge debounce window for [refreshFull] coalescing — small next to a GC16 full
+         *  refresh (hundreds of ms), so a single refresh feels immediate while bursts collapse. */
+        const val COALESCE_WINDOW_MS = 32L
     }
 }

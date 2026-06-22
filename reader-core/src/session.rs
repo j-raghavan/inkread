@@ -81,7 +81,7 @@ pub struct ReaderSession {
     /// The book identity this session persists under (set with the store).
     book: Option<BookId>,
     /// Bounded render + cover caches under the resource budget (RR24); trimmed on memory
-    /// pressure. The render hot path consumes these in M1a.6 (with the threading rework).
+    /// pressure. [`Self::render_current`] serves/populates the render cache on the fit path.
     caches: Caches,
     /// The annotation store for this document's sidecar (RR10); `None` = ink not persisted.
     ink: Option<Arc<dyn InkStore>>,
@@ -273,8 +273,8 @@ impl ReaderSession {
         Ok(())
     }
 
-    /// The bounded render + cover caches (RR24). The render hot path / shell inserts rendered
-    /// pages and covers here; M1a.6 wires the render path to consult them.
+    /// The bounded render + cover caches (RR24). [`Self::render_current`] consults/fills the render
+    /// cache; the shell uses the cover cache for the library grid.
     pub fn caches(&mut self) -> &mut Caches {
         &mut self.caches
     }
@@ -344,12 +344,17 @@ impl ReaderSession {
         // Preserve nothing of the partial counter on a metrics change — a fresh full is
         // expected after a viewport change anyway (RR21-FR4).
         self.policy = EinkRefreshPolicy::new(caps, screen);
+        // Cached renders are sized to the old viewport and laid out for it — drop them.
+        self.invalidate_render_cache();
     }
 
     /// Render the current page into the shell's borrowed buffer (RR4 / Amendment 5).
     ///
-    /// The buffer must match the session viewport; the borrow does not outlive this call.
-    pub fn render_current(&self, buf: &mut PixelBuffer<'_>) -> CoreResult<()> {
+    /// The buffer must match the session viewport; the borrow does not outlive this call. The
+    /// non-magnified page render is served from the bounded render cache when an identical
+    /// `(page + view-settings)` buffer is held (RR4-FR6 / RR24) — re-rasterization is skipped on a
+    /// revisit (e.g. paging back and forth). `&mut self` because a hit/insert mutates the cache.
+    pub fn render_current(&mut self, buf: &mut PixelBuffer<'_>) -> CoreResult<()> {
         if buf.width() != self.viewport.width || buf.height() != self.viewport.height {
             return Err(CoreError::BufferMismatch(format!(
                 "buffer {}x{} != viewport {}x{}",
@@ -361,36 +366,90 @@ impl ReaderSession {
         }
         if self.zoom > 1.0 + 1e-3 {
             // Magnified view: content is buf*zoom; show a buf-sized window panned over the overscan.
-            // (Render quality is not applied during a transient pinch-zoom.)
+            // (Render quality is not applied during a transient pinch-zoom.) Not cached — the pan
+            // window slides continuously, so a cache would thrash without ever paying off.
             let bw = self.viewport.width as f32;
             let bh = self.viewport.height as f32;
             let off_x = (self.pan_x * bw * (self.zoom - 1.0)).round() as i32;
             let off_y = (self.pan_y * bh * (self.zoom - 1.0)).round() as i32;
             self.document
                 .render_zoom(self.page, buf, self.zoom, off_x, off_y)?;
-        } else {
-            let q = render_quality_factor(self.render_quality);
-            if (q - 1.0).abs() < 1e-3 {
-                self.render_fit_or_crop(buf)?;
-            } else {
-                // Render at q× the panel resolution, then bilinear-resample down/up to the panel —
-                // supersampling (high) smooths e-ink text; sub-sampling (low) is faster/softer.
-                let qw = ((self.viewport.width as f32 * q).round() as u32).clamp(1, 8000);
-                let qh = ((self.viewport.height as f32 * q).round() as u32).clamp(1, 8000);
-                let mut tmp = vec![0u8; (qw as usize) * (qh as usize) * 4];
-                {
-                    let mut tbuf = PixelBuffer::from_rgba(&mut tmp, qw, qh)?;
-                    self.render_fit_or_crop(&mut tbuf)?;
+            crate::render::contrast::apply_contrast(
+                buf,
+                crate::render::contrast::step_to_gamma(self.contrast),
+            );
+            return Ok(());
+        }
+        // Non-magnified page render — the page-turn / revisit case. The rendered bytes are a pure
+        // function of (page + view-settings): ink is composited by the shell, never baked here, and
+        // page content is immutable. So an identical key may be served straight from the cache,
+        // skipping the pdfium rasterization. Only the resting view (no pan) is cached; a panned fit
+        // window is transient like the zoom case.
+        let cacheable = self.pan_x == 0.0 && self.pan_y == 0.0;
+        let key = self.render_cache_key();
+        if cacheable {
+            if let Some(bytes) = self.caches.render().get(&key) {
+                if bytes.len() == buf.bytes().len() {
+                    buf.bytes_mut().copy_from_slice(bytes);
+                    return Ok(());
                 }
-                crate::render::resample::resample_bilinear(&tmp, qw, qh, buf);
             }
         }
-        // Display enhancement (RR4): remap pixels for contrast after the backend renders.
+        let q = render_quality_factor(self.render_quality);
+        if (q - 1.0).abs() < 1e-3 {
+            self.render_fit_or_crop(buf)?;
+        } else {
+            // Render at q× the panel resolution, then bilinear-resample down/up to the panel —
+            // supersampling (high) smooths e-ink text; sub-sampling (low) is faster/softer.
+            let qw = ((self.viewport.width as f32 * q).round() as u32).clamp(1, 8000);
+            let qh = ((self.viewport.height as f32 * q).round() as u32).clamp(1, 8000);
+            let mut tmp = vec![0u8; (qw as usize) * (qh as usize) * 4];
+            {
+                let mut tbuf = PixelBuffer::from_rgba(&mut tmp, qw, qh)?;
+                self.render_fit_or_crop(&mut tbuf)?;
+            }
+            crate::render::resample::resample_bilinear(&tmp, qw, qh, buf);
+        }
+        // Display enhancement (RR4): remap pixels for contrast after the backend renders. The
+        // cached buffer is the final displayed pixels (the key carries the contrast step), so a
+        // later serve needs no re-apply.
         crate::render::contrast::apply_contrast(
             buf,
             crate::render::contrast::step_to_gamma(self.contrast),
         );
+        if cacheable {
+            self.caches.render().insert(key, buf.bytes().to_vec());
+        }
         Ok(())
+    }
+
+    /// The render-cache key for the current page + view-settings (RR4-FR6). The pixel-pipeline axes
+    /// (zoom/rotation/invert/dither/gamma) are at their non-magnified defaults — the cache is only
+    /// consulted on the fit path — so only the page and the view-settings vary.
+    fn render_cache_key(&self) -> crate::render::PageHash {
+        crate::render::PageHash::new(
+            self.page as u32,
+            1.0,
+            0,
+            false,
+            crate::render::DitherMode::None,
+            1.0,
+        )
+        .with_view(
+            self.fit_mode.code(),
+            self.crop_auto,
+            self.crop_margin,
+            self.render_quality,
+            self.contrast,
+        )
+    }
+
+    /// Drop cached page renders whose content/geometry changed underneath their key — a reflow
+    /// toggle, a repagination, or a viewport resize. The view-setting axes live *in* the key, so a
+    /// fit/crop/quality/contrast change needs no invalidation; only a change to what a given page
+    /// index renders to (or the buffer size) does.
+    fn invalidate_render_cache(&mut self) {
+        self.caches.render().clear();
     }
 
     /// Render the current page fit (or auto-cropped) into `buf` (RR4). With auto-crop on, the white
@@ -524,6 +583,7 @@ impl ReaderSession {
         match self.document.set_text_scale(scale, self.page) {
             Some(new_page) => {
                 self.page = new_page.min(self.page_count().saturating_sub(1));
+                self.invalidate_render_cache(); // repagination changes what each page index renders
                 self.load_ink_for_current_page();
                 true
             }
@@ -537,6 +597,7 @@ impl ReaderSession {
         match self.document.set_line_spacing(mult, self.page) {
             Some(new_page) => {
                 self.page = new_page.min(self.page_count().saturating_sub(1));
+                self.invalidate_render_cache(); // repagination changes what each page index renders
                 self.load_ink_for_current_page();
                 true
             }
@@ -550,6 +611,7 @@ impl ReaderSession {
         match self.document.set_alignment(align_code, self.page) {
             Some(new_page) => {
                 self.page = new_page.min(self.page_count().saturating_sub(1));
+                self.invalidate_render_cache(); // repagination changes what each page index renders
                 self.load_ink_for_current_page();
                 true
             }
@@ -574,6 +636,7 @@ impl ReaderSession {
             Some(new_page) => {
                 self.page = new_page.min(self.page_count().saturating_sub(1));
                 *self.crop_cache.borrow_mut() = None; // page indices change meaning across the toggle
+                self.invalidate_render_cache(); // ...so do the cached page renders
                 self.load_ink_for_current_page();
                 true
             }

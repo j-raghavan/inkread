@@ -444,6 +444,26 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         }
     }
 
+    /**
+     * Shed bounded native caches under platform memory pressure (RR24-FR3). Posted to the engine
+     * thread because the session — and [docHandle] — are engine-thread-only and the render path
+     * mutates the cache. `RUNNING_CRITICAL` and any backgrounded/hidden level map to *critical*
+     * (drop all caches); lighter running pressure maps to *moderate* (drop the least-critical).
+     */
+    override fun onTrimMemory(level: Int) {
+        super.onTrimMemory(level)
+        val code = if (level >= android.content.ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL) 1 else 0
+        engine.execute {
+            if (docHandle != 0L) {
+                try {
+                    NativeBridge.nativeOnTrimMemory(docHandle, code)
+                } catch (e: RuntimeException) {
+                    Log.e(TAG, "trim memory failed: ${e.message}")
+                }
+            }
+        }
+    }
+
     /** Launch the system file picker for a PDF (RR22). */
     private fun openPicker() {
         // PDF (fixed-layout) + EPUB (reflowable). The core dispatches by file extension; some
