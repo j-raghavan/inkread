@@ -188,7 +188,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         if (viewW == 0 || viewH == 0) return@Runnable
         val nx = vToNx(lpDownX); val ny = vToNy(lpDownY)
         val page = currentPage
-        Log.i(TAG, "DIAG long-press lookup @($nx,$ny) page=$page")
+        diag { "DIAG long-press lookup @($nx,$ny) page=$page" }
         engine.execute {
             clearFirmwareInk(); repaintPanel() // wipe the pen dot the hold left
             dict.defineWord(page, nx, ny)
@@ -219,7 +219,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
     private fun lookupWordAtView(vx: Float, vy: Float) {
         if (viewW == 0 || viewH == 0) return
         val nx = vToNx(vx); val ny = vToNy(vy); val page = currentPage
-        Log.i(TAG, "DIAG long-press lookup @($nx,$ny) page=$page")
+        diag { "DIAG long-press lookup @($nx,$ny) page=$page" }
         engine.execute { dict.defineWord(page, nx, ny) }
     }
 
@@ -336,7 +336,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
                 mainHandler.removeCallbacks(fingerLongPress) // a stylus event ⇒ that finger was a palm
                 val a = event.actionMasked
                 if (a == MotionEvent.ACTION_DOWN || a == MotionEvent.ACTION_UP) {
-                    Log.i(TAG, "DIAG stylus action=$a tool=$tool type=$toolType hist=${event.historySize}")
+                    diag { "DIAG stylus action=$a tool=$tool type=$toolType hist=${event.historySize}" }
                 }
                 when (tool) {
                     Tool.DEFINE -> captureSelection(event)
@@ -616,7 +616,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             // (RR6/RR10 / ADR-INKREAD-0010). Attach the store so strokes save + reload.
             try {
                 NativeBridge.nativeAttachInkStore(docHandle, path)
-                Log.i(TAG, "DIAG ink store attached for $path")
+                diag { "DIAG ink store attached for $path" }
             } catch (e: RuntimeException) {
                 Log.e(TAG, "attach ink store failed: ${e.message}")
             }
@@ -706,7 +706,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         } catch (e: RuntimeException) {
             Log.e(TAG, "ink fetch failed: ${e.message}"); emptyList()
         }
-        Log.i(TAG, "DIAG baked ${pageStrokes.size} core strokes on page $currentPage")
+        diag { "DIAG baked ${pageStrokes.size} core strokes on page $currentPage" }
         val cv = Canvas(bmp)
         for (s in pageStrokes) drawStroke(cv, s)
         // The active lasso selection's bounding box (ADR-INKREAD-0010).
@@ -732,7 +732,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             Log.e(TAG, "links fetch failed: ${e.message}")
             emptyList()
         }
-        Log.i(TAG, "DIAG page $currentPage: ${currentLinks.size} links ${currentLinks.take(3).map { it.targetPage ?: it.uri }}")
+        diag { "DIAG page $currentPage: ${currentLinks.size} links ${currentLinks.take(3).map { it.targetPage ?: it.uri }}" }
     }
 
     /** Draw a centered "Loading…" frame so the open doesn't look like a freeze. */
@@ -758,6 +758,12 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         } finally {
             runCatching { holder.unlockCanvasAndPost(canvas) }
         }
+    }
+
+    /** Verbose diagnostic log, gated by [DIAG]. Inline + lambda so the message is not even built
+     *  when tracing is off (these run on render/stroke/tap paths). */
+    private inline fun diag(msg: () -> String) {
+        if (DIAG) Log.i(TAG, msg())
     }
 
     // ---- panel repaint (RR2-FR4 / RR15): the single choke point for pushing to the EPD ----
@@ -833,7 +839,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
 
     /** Hand the captured stroke to the engine thread for persistence (UI thread). */
     private fun finalizeStroke() {
-        Log.i(TAG, "DIAG finalizeStroke buf=${strokeBuf.size / 2} pts")
+        diag { "DIAG finalizeStroke buf=${strokeBuf.size / 2} pts" }
         if (strokeBuf.size < 2) { strokeBuf.clear(); return }
         val raw = strokeBuf.toFloatArray()
         strokeBuf.clear()
@@ -857,7 +863,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
                 i += 2
             }
             NativeBridge.nativeInkEndStroke(docHandle)
-            Log.i(TAG, "DIAG commitStroke OK ${raw.size / 2} pts tool=$tool → core page $currentPage")
+            diag { "DIAG commitStroke OK ${raw.size / 2} pts tool=$tool → core page $currentPage" }
         } catch (e: RuntimeException) {
             Log.e(TAG, "ink commit failed: ${e.message}")
         }
@@ -1029,11 +1035,10 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         val vh = surfaceView.height
         val largeContact = vh > 0 && major >= vh * PALM_TOUCH_MAJOR_FRAC
         if (e.pointerCount != 1 || recentStylus || largeContact || strokeBuf.isNotEmpty()) {
-            Log.i(
-                TAG,
+            diag {
                 "DIAG palm-reject down pc=${e.pointerCount} recent=$recentStylus " +
-                    "major=$major large=$largeContact stroke=${strokeBuf.isNotEmpty()}",
-            )
+                    "major=$major large=$largeContact stroke=${strokeBuf.isNotEmpty()}"
+            }
             fingerMoved = true // neutralise any later MOVE/UP from this rejected touch
             return
         }
@@ -1080,7 +1085,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         if (SystemClock.uptimeMillis() - lastStylusMs > PALM_REJECT_MS && strokeBuf.isEmpty()) {
             handleTap(fingerDownX, fingerDownY)
         } else {
-            Log.i(TAG, "DIAG tap suppressed (stylus active → palm)")
+            diag { "DIAG tap suppressed (stylus active → palm)" }
         }
     }
 
@@ -1090,7 +1095,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         if (w > 0f && h > 0f) {
             val link = currentLinks.firstOrNull { it.contains(vToNx(x), vToNy(y)) }
             if (link != null) {
-                Log.i(TAG, "DIAG handleTap link hit -> ${link.targetPage ?: link.uri}")
+                diag { "DIAG handleTap link hit -> ${link.targetPage ?: link.uri}" }
                 followLink(link)
                 return
             }
@@ -1102,7 +1107,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         }
         val third = w / 3f
         val zone = if (x < third) "PREV" else if (x > 2 * third) "NEXT" else "TOC"
-        Log.i(TAG, "DIAG handleTap x=$x w=$w -> $zone (${currentLinks.size} links, no hit)")
+        diag { "DIAG handleTap x=$x w=$w -> $zone (${currentLinks.size} links, no hit)" }
         when (zone) {
             "PREV" -> postGesture(Gesture.PREV_PAGE)
             "NEXT" -> postGesture(Gesture.NEXT_PAGE)
@@ -1783,7 +1788,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
 
     /** Close the loop and ask the core which strokes it selects (engine thread). */
     private fun finalizeLasso() {
-        Log.i(TAG, "DIAG finalizeLasso buf=${lassoBuf.size / 2} pts mode=$lassoMode")
+        diag { "DIAG finalizeLasso buf=${lassoBuf.size / 2} pts mode=$lassoMode" }
         if (lassoBuf.size < 6) { // need ≥3 points for a polygon
             lassoBuf.clear()
             engine.execute { clearFirmwareInk(); repaintPanel() }
@@ -1807,7 +1812,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             } catch (e: RuntimeException) {
                 Log.e(TAG, "lasso select failed: ${e.message}"); return@execute
             }
-            Log.i(TAG, "DIAG lasso selected ${ids.size} strokes from ${poly.size / 2}-pt loop")
+            diag { "DIAG lasso selected ${ids.size} strokes from ${poly.size / 2}-pt loop" }
             // No ink under the loop → fall back to selecting the PRINTED words inside it (the user
             // circled book text, not handwriting). Lasso thus selects ink OR text — circle anything.
             if (ids.isEmpty()) selectTextInLoop(poly) else setSelection(ids)
@@ -1837,7 +1842,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         } catch (e: RuntimeException) {
             Log.e(TAG, "lasso text-in-rect failed: ${e.message}"); Selection("", emptyList())
         }
-        Log.i(TAG, "DIAG lasso text fallback: '${sel.text.take(40)}' (${sel.boxes.size} boxes)")
+        diag { "DIAG lasso text fallback: '${sel.text.take(40)}' (${sel.boxes.size} boxes)" }
         clearFirmwareInk() // wipe the firmware ink left by drawing the lasso loop
         renderAndBlit()
         if (sel.isEmpty) {
@@ -1905,7 +1910,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
                 NativeBridge.nativeInkAddPoint(docHandle, b.x1, midY, 1.0f, Float.NaN, Float.NaN, 0)
                 NativeBridge.nativeInkEndStroke(docHandle)
             }
-            Log.i(TAG, "DIAG highlighted ${sel.boxes.size} text boxes")
+            diag { "DIAG highlighted ${sel.boxes.size} text boxes" }
         } catch (e: RuntimeException) {
             Log.e(TAG, "text highlight failed: ${e.message}")
         }
@@ -2268,7 +2273,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         )
         val sel = orients.indexOf(orientationPref()).coerceAtLeast(0)
         return settingRow("Rotation", segmented(listOf("0°", "90°", "180°", "270°"), sel) { which ->
-            Log.i(TAG, "DIAG rotation -> $which")
+            diag { "DIAG rotation -> $which" }
             applyOrientation(orients[which])
         })
     }
@@ -2277,7 +2282,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         val sel = fitPref().coerceIn(0, 2) // index = core FitMode code
         return settingRow("Fit", segmented(listOf("Full", "Width", "Height"), sel) { which ->
             setFitPref(which)
-            Log.i(TAG, "DIAG fit -> mode=$which")
+            diag { "DIAG fit -> mode=$which" }
             engine.execute {
                 try { NativeBridge.nativeSetFit(docHandle, which) } catch (e: RuntimeException) {}
                 repaintPanel()
@@ -2290,7 +2295,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         val container = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         container.addView(settingRow("Page Crop", segmented(listOf("None", "Auto"), if (cropAutoPref()) 1 else 0) { which ->
             setCropAutoPref(which == 1)
-            Log.i(TAG, "DIAG crop auto=${which == 1}")
+            diag { "DIAG crop auto=${which == 1}" }
             engine.execute {
                 try { NativeBridge.nativeSetCrop(docHandle, which, cropMarginPref()) } catch (e: RuntimeException) {}
                 repaintPanel()
@@ -2298,7 +2303,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         }))
         container.addView(settingRow("Margin", cellBar(8, cropMarginPref()) { level ->
             setCropMarginPref(level)
-            Log.i(TAG, "DIAG crop margin=$level")
+            diag { "DIAG crop margin=$level" }
             engine.execute {
                 try { NativeBridge.nativeSetCrop(docHandle, if (cropAutoPref()) 1 else 0, level) } catch (e: RuntimeException) {}
                 repaintPanel()
@@ -2338,18 +2343,18 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         val supportsReflow = try { NativeBridge.nativeSupportsReflow(docHandle) } catch (e: RuntimeException) { false }
         if (supportsReflow) {
             container.addView(settingRow("Reflow", segmented(listOf("Off", "On"), if (reflowOn) 1 else 0) { which ->
-                Log.i(TAG, "DIAG reflow=${which == 1}")
+                diag { "DIAG reflow=${which == 1}" }
                 setReflowMode(which == 1)
             }))
         }
         container.addView(settingRow("Line Spacing", segmented(listOf("Small", "Medium", "Large"), lineSpacingPref()) { which ->
             setLineSpacingPref(which)
-            Log.i(TAG, "DIAG line spacing=$which")
+            diag { "DIAG line spacing=$which" }
             applyReflow { NativeBridge.nativeSetLineSpacing(docHandle, LINE_SPACINGS[which]) }
         }))
         container.addView(settingRow("Alignment", segmented(listOf("Left", "Justify", "Center", "Right"), alignmentPref()) { which ->
             setAlignmentPref(which)
-            Log.i(TAG, "DIAG alignment=$which")
+            diag { "DIAG alignment=$which" }
             applyReflow { NativeBridge.nativeSetAlignment(docHandle, which) }
         }))
         return container
@@ -2430,7 +2435,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         val container = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         container.addView(settingRow("Contrast", cellBar(CONTRAST_MAX, contrastPref()) { level ->
             setContrastPref(level)
-            Log.i(TAG, "DIAG contrast step=$level")
+            diag { "DIAG contrast step=$level" }
             engine.execute {
                 try { NativeBridge.nativeSetContrast(docHandle, level) } catch (e: RuntimeException) {}
                 repaintPanel()
@@ -2438,7 +2443,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         }))
         container.addView(settingRow("Quality", segmented(listOf("Low", "Default", "High"), renderQualityPref()) { which ->
             setRenderQualityPref(which)
-            Log.i(TAG, "DIAG render quality=$which")
+            diag { "DIAG render quality=$which" }
             engine.execute {
                 try { NativeBridge.nativeSetRenderQuality(docHandle, which) } catch (e: RuntimeException) {}
                 repaintPanel()
@@ -2557,6 +2562,10 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
 
     companion object {
         const val TAG = "ReaderActivity"
+
+        /** Gate for verbose `DIAG` tracing. Off by default: these logs run on render/stroke/tap
+         *  paths and can leak reading behavior to logcat on a shared device. Flip when debugging. */
+        const val DIAG = false
         const val DPI = 226 // Supernote-class panel density (approx); refined per device.
         const val REQ_OPEN_DOC = 1 // startActivityForResult request code for the PDF picker.
         const val PREFS = "inkread"

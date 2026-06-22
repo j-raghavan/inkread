@@ -131,7 +131,22 @@ class DictController(private val host: Host) {
                 setRequestProperty("User-Agent", "InkRead/0.1 (offline e-ink reader)")
             }
             if (conn.responseCode != 200) return null
-            val body = conn.inputStream.bufferedReader().use { it.readText() }
+            // Cap the body read: a definition response is a few KB, but the network is untrusted —
+            // a runaway/slow body shouldn't be slurped whole (DoS + radio cost). A truncated body
+            // simply fails JSON parsing below and falls through to the no-result path.
+            val body = conn.inputStream.use { input ->
+                val out = java.io.ByteArrayOutputStream()
+                val chunk = ByteArray(8192)
+                var total = 0
+                while (true) {
+                    val n = input.read(chunk)
+                    if (n < 0) break
+                    total += n
+                    if (total > MAX_DEFINITION_BYTES) break
+                    out.write(chunk, 0, n)
+                }
+                out.toString("UTF-8")
+            }
             val root = JSONObject(body)
             val lang = if (root.has("en")) "en" else root.keys().asSequence().firstOrNull() ?: return null
             val arr = root.getJSONArray(lang)
@@ -509,5 +524,9 @@ class DictController(private val host: Host) {
 
     private companion object {
         const val TAG = "DictController"
+
+        /** Cap on the online-definition response body (RR12). A real Wiktionary definition is a few
+         *  KB; this bounds an untrusted/runaway body without affecting valid lookups. */
+        const val MAX_DEFINITION_BYTES = 512 * 1024
     }
 }
