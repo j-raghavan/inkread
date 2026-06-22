@@ -117,6 +117,14 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         override fun engineExecute(block: () -> Unit) { engine.execute(block) }
     })
 
+    // ---- PDF annotation export (ADR-INKREAD-0005) — owns the chooser + engine-thread write (SRP) ----
+    private val export = ExportController(object : ExportController.Host {
+        override val activity get() = this@ReaderActivity
+        override val docHandle get() = this@ReaderActivity.docHandle
+        override val currentDocPath get() = this@ReaderActivity.currentDocPath
+        override fun engineExecute(block: () -> Unit) { engine.execute(block) }
+    })
+
     // ---- tool model (ADR-INKREAD-0010) ----
     /** The active annotation tool. [Tool.PEN] inks via firmware; the rest capture the stylus. */
     @Volatile private var tool: Tool = Tool.PEN
@@ -1294,7 +1302,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         // Quick zoom (circle −/+ icons — not magnifiers, which are reserved for Search). Also in Adjust → Zoom.
         control(R.drawable.ic_menu_zoom_out, "Zoom −") { zoomBy(1f / ZOOM_STEP) }
         control(R.drawable.ic_menu_zoom_in, "Zoom +") { zoomBy(ZOOM_STEP) }
-        control(R.drawable.ic_menu_export, "Export") { showExportDialog() }
+        control(R.drawable.ic_menu_export, "Export") { export.showExportDialog() }
         control(R.drawable.ic_menu_dict, "Dicts") { dict.showDictionariesDialog() }
         // Document controls consolidated into one KOReader-style tabbed sheet (Rotate/Fit/Font/Display).
         control(R.drawable.ic_menu_adjust, "Adjust") { showAdjustSheet() }
@@ -1308,97 +1316,6 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             setBackgroundDrawable(android.graphics.drawable.ColorDrawable(Color.WHITE))
         }
         dialog.show()
-    }
-
-    /**
-     * Export the annotations into the PDF (ADR-INKREAD-0005). Lets the user pick editable PDF
-     * annotations vs. flattened (baked-in) content, then writes it back in place. Writing modifies
-     * the original file, so confirm first; the heavy lifting is on the engine thread.
-     */
-    private fun showExportDialog() {
-        val path = currentDocPath
-        if (path == null || docHandle == 0L) {
-            Toast.makeText(this, "No open document to export", Toast.LENGTH_SHORT).show()
-            return
-        }
-        // inkread reads a PRIVATE copy of the PDF; to make the export visible on the desktop it must
-        // land in a Partner-synced PUBLIC folder, which needs all-files access (Android 11+).
-        if (!Environment.isExternalStorageManager()) {
-            AlertDialog.Builder(this, R.style.InkDialog)
-                .setTitle("Allow file access to export")
-                .setMessage("To save annotated PDFs into your synced $EXPORT_DIR_NAME folder (so they appear on your computer), inkread needs \"All files access\". Grant it on the next screen, then export again.")
-                .setPositiveButton("Open settings") { _, _ ->
-                    val uri = Uri.parse("package:$packageName")
-                    runCatching {
-                        startActivity(Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION, uri))
-                    }.onFailure {
-                        startActivity(Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION))
-                    }
-                }
-                .setNegativeButton("Cancel", null)
-                .show()
-            return
-        }
-        // NOTE: AlertDialog shows EITHER a message OR an items list, not both — choices go in labels.
-        AlertDialog.Builder(this, R.style.InkDialog)
-            .setTitle("Export annotated PDF to $EXPORT_DIR_NAME")
-            .setItems(
-                arrayOf(
-                    "Editable annotations (Adobe / Preview)",
-                    "Flatten — shows everywhere (incl. Partner app)",
-                ),
-            ) { _, which ->
-                val flatten = which == 1
-                Toast.makeText(this, "Exporting…", Toast.LENGTH_SHORT).show()
-                engine.execute { runExport(path, flatten) }
-            }
-            .setNegativeButton("Cancel", null)
-            .show()
-    }
-
-    /**
-     * Write the annotated PDF to public storage (engine thread). inkread only holds a private copy
-     * of the source (opened via the picker), so it can't overwrite the original in place — instead
-     * it saves a `-annotated.pdf` **beside the original** if that file can be found in the synced
-     * folders, else into [EXPORT_DIR_NAME]. Either way it lands in a Partner-synced location.
-     */
-    private fun runExport(srcPath: String, flatten: Boolean) {
-        val srcName = File(srcPath).name
-        val baseName = srcName.removeSuffix(".pdf").removeSuffix(".PDF")
-        val outDir = findOriginalParent(srcName)
-            ?: File(Environment.getExternalStorageDirectory(), EXPORT_DIR_NAME)
-        outDir.mkdirs()
-        val outFile = File(outDir, "$baseName-annotated.pdf")
-        val ok = try {
-            NativeBridge.nativeExportPdf(docHandle, outFile.absolutePath, flatten)
-            Log.i(TAG, "DIAG export OK → ${outFile.absolutePath} (flatten=$flatten)")
-            true
-        } catch (e: RuntimeException) {
-            Log.e(TAG, "export failed: ${e.message}"); false
-        }
-        val rel = outFile.absolutePath
-            .removePrefix(Environment.getExternalStorageDirectory().absolutePath + "/")
-        runOnUiThread {
-            Toast.makeText(
-                this,
-                if (ok) "Saved to $rel — sync to see it" else "Export failed",
-                Toast.LENGTH_LONG,
-            ).show()
-        }
-    }
-
-    /** Find the folder holding the original PDF (so the export lands beside it). Searches the
-     *  Supernote-synced roots a few levels deep; null if not found (then the caller uses a default). */
-    private fun findOriginalParent(fileName: String): File? {
-        val root = Environment.getExternalStorageDirectory()
-        for (dir in SYNCED_DIRS) {
-            val r = File(root, dir)
-            if (!r.isDirectory) continue
-            val hit = r.walkTopDown().maxDepth(5)
-                .firstOrNull { it.isFile && it.name == fileName }
-            if (hit != null) return hit.parentFile
-        }
-        return null
     }
 
     /** A "go to page" text-entry dialog (RR11-FR1): type a 1-based page number to jump. */
@@ -2651,9 +2568,6 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         const val MAX_ZOOM_UI = 5f // matches the core's MAX_ZOOM clamp (RR5-FR3).
         const val PREVIEW_MS = 50L // min interval between live zoom/pan preview blits (e-ink cadence).
         const val ZOOM_STEP = 1.4f // +/- button zoom multiplier.
-        const val EXPORT_DIR_NAME = "Document"
-        // Supernote folders the Partner app syncs — searched to place the export beside the original.
-        val SYNCED_DIRS = arrayOf("Document", "EXPORT", "Note", "INBOX", "MyStyle", "Download")
         const val SELECTION_HANDLE_PX = 8f // half-size of the square corner handles on the selection box.
         const val CONTRAST_MAX = 8 // mirrors reader-core render::contrast::MAX_CONTRAST_STEP (RR4).
         val LINE_SPACINGS = floatArrayOf(1.2f, 1.4f, 1.7f) // Small / Medium / Large (RR4).
