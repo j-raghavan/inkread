@@ -40,7 +40,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # rusqlite with `bundled` SQLite (compiled from source) so the host build is hermetic and the
 # Android cdylib cross-compiles the same engine — no system-library dependency (ADR Decision 4).
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
 # mlua with vendored Lua 5.4 (compiled from source via cc, like rusqlite `bundled`) — the embedded
 # plugin runtime (RR13). MIT-licensed (Lua itself is MIT) → AGPL-compatible (check-licenses.sh).
 mlua = { version = "0.10", features = ["lua54", "vendored"] }
