@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="app/src/main/res/mipmap-xxxhdpi/ic_launcher.png" alt="inkread" width="120" height="120">
+  <img src=".github/assets/inkread-icon.png" alt="inkread" width="120" height="120">
 </p>
 
 <h1 align="center">inkread</h1>
