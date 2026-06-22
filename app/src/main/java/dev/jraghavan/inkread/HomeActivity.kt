@@ -66,15 +66,29 @@ class HomeActivity : Activity() {
         return s
     }
 
+    /** Signature of the shelf state the current view was built from — lets onResume skip a full
+     *  rebuild (and the e-ink full refresh it triggers) when nothing the home screen shows changed,
+     *  e.g. returning from Settings rather than the reader. */
+    private var shelfSig: String? = null
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(buildView())
+        shelfSig = shelfSignature()
     }
 
     override fun onResume() {
         super.onResume()
-        setContentView(buildView()) // refresh covers + progress after returning from the reader
+        val sig = shelfSignature()
+        if (sig != shelfSig) {
+            setContentView(buildView()) // refresh covers + progress after returning from the reader
+            shelfSig = sig
+        }
     }
+
+    /** A stable digest of what the shelf renders — recents order + per-book read progress. */
+    private fun shelfSignature(): String =
+        Books.recents(this).joinToString("|") { "${it.id}@${Books.progress(this, it.id)}" }
 
     private fun buildView(): View {
         val w = resources.displayMetrics.widthPixels

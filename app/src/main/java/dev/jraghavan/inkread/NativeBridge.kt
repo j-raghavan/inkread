@@ -207,8 +207,17 @@ object NativeBridge {
     /** Add a sample to the in-progress stroke (ink) or erase at the point (eraser). NaN tilt = absent. */
     external fun nativeInkAddPoint(handle: Long, x: Float, y: Float, pressure: Float, tiltX: Float, tiltY: Float, timestampMs: Int)
 
+    /** Batched [nativeInkAddPoint]: [xy] is packed `[x0,y0,x1,y1,…]` (pressure 1, no tilt/timestamp).
+     *  One JNI crossing per stroke instead of per point — cheaper on the annotation hot path. */
+    external fun nativeInkAddPoints(handle: Long, xy: FloatArray)
+
     /** Commit the in-progress stroke / eraser gesture; autosaves the page only if it changed. */
     external fun nativeInkEndStroke(handle: Long)
+
+    /** Opt into deferred-autosave mode: edits mark the page dirty instead of fsyncing on every
+     *  stroke-end, and the shell flushes via [nativeInkSave] on a trailing-edge debounce. Off by
+     *  default (save-on-stroke-end durability). A power/flash-wear knob. */
+    external fun nativeInkSetDeferredAutosave(handle: Long, deferred: Boolean)
 
     /** Strokes on [page] in the draw-wire (decode with [WireCodec.decodeStrokes]) — for baking. */
     external fun nativeInkStrokesForDraw(handle: Long, page: Int): ByteArray

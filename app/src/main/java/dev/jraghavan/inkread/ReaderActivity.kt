@@ -187,6 +187,21 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
     /** Safety net for a swallowed stylus ACTION_UP: commit the stroke after a brief pen pause. */
     private val strokeFinalize = Runnable { finalizeStroke() }
 
+    /** Trailing-edge flush of deferred ink (RR20): coalesces the per-stroke fsync into one write a
+     *  short while after the pen goes idle. onPause/teardown flush immediately and cancel this. */
+    private val inkFlush = Runnable {
+        val h = docHandle
+        if (h != 0L) engine.execute {
+            try { NativeBridge.nativeInkSave(h) } catch (e: RuntimeException) { Log.e(TAG, "ink flush failed: ${e.message}") }
+        }
+    }
+
+    /** (Re)arm the trailing-edge ink flush after an edit; resets the timer on each new stroke. */
+    private fun scheduleInkFlush() {
+        mainHandler.removeCallbacks(inkFlush)
+        mainHandler.postDelayed(inkFlush, INK_FLUSH_MS)
+    }
+
     // ---- stylus long-press → instant word lookup (natural "hold a word to define it") ----
     private var lpDownX = 0f
     private var lpDownY = 0f
@@ -467,6 +482,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         if (::colorPalette.isInitialized) colorPalette.dismiss()
         mainHandler.removeCallbacks(fingerLongPress) // drop any pending finger gesture on leaving
         mainHandler.removeCallbacks(longPress)
+        mainHandler.removeCallbacks(inkFlush) // the explicit flush below supersedes the debounce
         ink.teardown() // release the firmware ink claim + clear the overlay
         // Persist the reading position + flush ink when backgrounded (RR27/RR20) — engine thread.
         engine.execute {
@@ -636,6 +652,11 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             try {
                 NativeBridge.nativeAttachInkStore(docHandle, path)
                 diag { "DIAG ink store attached for $path" }
+                // Defer the per-stroke fsync: edits mark the page dirty and we flush on a trailing
+                // debounce (scheduleInkFlush) + on pause/teardown, instead of fsyncing the sidecar
+                // on every stroke-end — saves flash wear + energy on long note sessions. The core
+                // still flushes on page-change/export, so nothing is lost on navigation.
+                NativeBridge.nativeInkSetDeferredAutosave(docHandle, true)
             } catch (e: RuntimeException) {
                 Log.e(TAG, "attach ink store failed: ${e.message}")
             }
@@ -865,6 +886,16 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         engine.execute { commitStroke(raw) }
     }
 
+    /** Map packed view-space `[x,y,…]` to packed page-normalized `[x,y,…]` for [NativeBridge.nativeInkAddPoints]. */
+    private fun toNormPoints(view: FloatArray): FloatArray {
+        val out = FloatArray(view.size)
+        var i = 0
+        while (i + 1 < view.size) {
+            out[i] = vToNx(view[i]); out[i + 1] = vToNy(view[i + 1]); i += 2
+        }
+        return out
+    }
+
     /** Feed the captured pen stroke to the core (begin→points→end → autosave). Engine thread. */
     private fun commitStroke(raw: FloatArray) {
         val w = viewW; val h = viewH
@@ -876,12 +907,9 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         val color = if (isHl) highlightColor() else penColor()
         try {
             NativeBridge.nativeInkBeginStroke(docHandle, coreTool, color, widthNorm, System.currentTimeMillis())
-            var i = 0
-            while (i + 1 < raw.size) {
-                NativeBridge.nativeInkAddPoint(docHandle, vToNx(raw[i]), vToNy(raw[i + 1]), 1.0f, Float.NaN, Float.NaN, 0)
-                i += 2
-            }
+            NativeBridge.nativeInkAddPoints(docHandle, toNormPoints(raw))
             NativeBridge.nativeInkEndStroke(docHandle)
+            scheduleInkFlush() // deferred autosave: persist on a trailing debounce, not this fsync
             diag { "DIAG commitStroke OK ${raw.size / 2} pts tool=$tool → core page $currentPage" }
         } catch (e: RuntimeException) {
             Log.e(TAG, "ink commit failed: ${e.message}")
@@ -1754,12 +1782,9 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         val radiusNorm = lenToNorm(ERASE_RADIUS_PX)
         try {
             NativeBridge.nativeInkBeginStroke(docHandle, CORE_TOOL_ERASER, INK_COLOR_BLACK, radiusNorm, System.currentTimeMillis())
-            var i = 0
-            while (i + 1 < viewPts.size) {
-                NativeBridge.nativeInkAddPoint(docHandle, vToNx(viewPts[i]), vToNy(viewPts[i + 1]), 1.0f, Float.NaN, Float.NaN, 0)
-                i += 2
-            }
+            NativeBridge.nativeInkAddPoints(docHandle, toNormPoints(viewPts))
             NativeBridge.nativeInkEndStroke(docHandle)
+            scheduleInkFlush() // deferred autosave: persist on a trailing debounce, not this fsync
         } catch (e: RuntimeException) {
             Log.e(TAG, "erase failed: ${e.message}"); return
         }
@@ -2020,6 +2045,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
                 NativeBridge.nativeInkAddPoint(docHandle, b.x1, midY, 1.0f, Float.NaN, Float.NaN, 0)
                 NativeBridge.nativeInkEndStroke(docHandle)
             }
+            scheduleInkFlush() // deferred autosave: persist the baked bands on the trailing debounce
             diag { "DIAG highlighted ${sel.boxes.size} text boxes" }
         } catch (e: RuntimeException) {
             Log.e(TAG, "text highlight failed: ${e.message}")
@@ -2104,13 +2130,13 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
 
     /** Undo the last ink edit (from the tool pill). Global — refreshes any active selection too. */
     private fun inkUndo() = engine.execute {
-        try { NativeBridge.nativeInkUndo(docHandle) } catch (e: RuntimeException) {}
+        try { NativeBridge.nativeInkUndo(docHandle); scheduleInkFlush() } catch (e: RuntimeException) {}
         refreshSelectionAfterHistory()
     }
 
     /** Redo the last undone ink edit (from the tool pill). */
     private fun inkRedo() = engine.execute {
-        try { NativeBridge.nativeInkRedo(docHandle) } catch (e: RuntimeException) {}
+        try { NativeBridge.nativeInkRedo(docHandle); scheduleInkFlush() } catch (e: RuntimeException) {}
         refreshSelectionAfterHistory()
     }
 
@@ -2709,6 +2735,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         val LINE_SPACINGS = floatArrayOf(1.2f, 1.4f, 1.7f) // Small / Medium / Large (RR4).
         const val HIGHLIGHT_WIDTH_PX = 30f // wide marker band (vs INK_STROKE_WIDTH for the pen).
         const val STROKE_PAUSE_MS = 600L // commit a stroke after this pen-pause (swallowed-UP net).
+        const val INK_FLUSH_MS = 1500L // trailing-edge delay before the deferred ink autosave fsyncs.
         const val LONG_PRESS_MS = 500L // hold the pen this long (≈still) on a word → look it up.
         const val LONG_PRESS_SLOP_PX = 16f // movement beyond this cancels the long-press (it's a stroke).
         const val INK_STROKE_WIDTH = 6f // baked-ink line width (px) tuned to match the firmware pen.

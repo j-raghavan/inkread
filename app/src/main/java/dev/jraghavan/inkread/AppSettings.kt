@@ -10,6 +10,7 @@ import android.content.Context
 object AppSettings {
     private const val PREFS = "settings"
     private const val KEY_OVERWRITE_ON_EXPORT = "overwrite_on_export"
+    private const val KEY_ONLINE_LOOKUP = "online_lookup"
 
     private fun prefs(c: Context) = c.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
 
@@ -22,4 +23,14 @@ object AppSettings {
 
     fun setOverwriteOnExport(c: Context, value: Boolean) =
         prefs(c).edit().putBoolean(KEY_OVERWRITE_ON_EXPORT, value).apply()
+
+    /**
+     * When true, a dictionary miss falls back to an online (Wiktionary) lookup, waking the radio.
+     * Off by default — inkread is offline-first, and a definitive opt-in keeps looked-up words from
+     * leaving the device without the reader's say-so (the review's privacy/power note).
+     */
+    fun onlineLookup(c: Context): Boolean = prefs(c).getBoolean(KEY_ONLINE_LOOKUP, false)
+
+    fun setOnlineLookup(c: Context, value: Boolean) =
+        prefs(c).edit().putBoolean(KEY_ONLINE_LOOKUP, value).apply()
 }
