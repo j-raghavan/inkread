@@ -798,6 +798,25 @@ pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeInkAddPoint
     .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
 }
 
+// nativeInkAddPoints(handle, float[] xy) — batched form of nativeInkAddPoint: `xy` is packed
+// [x0,y0,x1,y1,…] (pressure 1.0, no tilt/timestamp). One JNI crossing per stroke instead of per
+// point, cutting boundary overhead on the annotation hot path.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeInkAddPoints<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+    xy: JFloatArray<'local>,
+) {
+    env.with_env(|env| -> jni::errors::Result<()> {
+        let pts = read_f32_array(env, &xy)?;
+        let session = unsafe { session_mut(handle) }.map_err(|e| throw(env, &e))?;
+        session.ink_add_points(&pts).map_err(|e| throw(env, &e))?;
+        Ok(())
+    })
+    .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
+}
+
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeInkEndStroke<'local>(
     mut env: EnvUnowned<'local>,
@@ -807,6 +826,28 @@ pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeInkEndStrok
     env.with_env(|env| -> jni::errors::Result<()> {
         let session = unsafe { session_mut(handle) }.map_err(|e| throw(env, &e))?;
         session.ink_end_stroke().map_err(|e| throw(env, &e))?;
+        Ok(())
+    })
+    .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
+}
+
+// nativeInkSetDeferredAutosave(handle, deferred) — opt into deferred-autosave mode (the shell's
+// per-stroke-fsync power knob). When on, edits mark the page dirty and the shell flushes on a
+// trailing-edge debounce via nativeInkSave; off (default) keeps save-on-stroke-end durability.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeInkSetDeferredAutosave<
+    'local,
+>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+    deferred: jboolean,
+) {
+    env.with_env(|env| -> jni::errors::Result<()> {
+        let session = unsafe { session_mut(handle) }.map_err(|e| throw(env, &e))?;
+        session
+            .set_autosave_deferred(deferred)
+            .map_err(|e| throw(env, &e))?;
         Ok(())
     })
     .resolve::<jni::errors::ThrowRuntimeExAndDefault>()

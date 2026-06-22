@@ -57,6 +57,9 @@ class SearchController(private val host: Host) {
     @Volatile private var query = ""
     @Volatile private var boxes: List<SelBox> = emptyList()
     @Volatile private var boxesPage = -1
+    /** Set on the UI thread (Cancel) and polled by the engine-thread scan each page so a long
+     *  full-document search can be aborted instead of pinning the SoC to the last page. */
+    @Volatile private var searchCancelled = false
 
     /** The active hit's highlight boxes if it lives on [page], else empty. Read on the engine thread
      *  by the render path; the shell draws these over the page. */
@@ -108,14 +111,24 @@ class SearchController(private val host: Host) {
         if (q.isEmpty()) { clear(); return }
         val handle = host.docHandle
         if (handle == 0L) return
-        Toast.makeText(host.activity, "Searching…", Toast.LENGTH_SHORT).show()
+        searchCancelled = false
+        // The scan blocks the engine thread, but the UI thread is free — so a cancelable progress
+        // dialog lets the user abort a long full-document scan (the Cancel flips the volatile flag
+        // the loop polls each page). Non-cancelable via back so the only exit is an explicit choice.
+        val progress = AlertDialog.Builder(host.activity)
+            .setTitle("Searching…")
+            .setMessage("Scanning the document for “$q”.")
+            .setNegativeButton("Cancel") { _, _ -> searchCancelled = true }
+            .setCancelable(false)
+            .create()
+        progress.show()
         host.engineExecute {
-            if (host.docHandle != handle) return@engineExecute
             val total = host.pageCount.coerceAtLeast(1)
             val found = ArrayList<SearchHit>()
             var page = 0
-            while (page < total && found.size < MAX_SEARCH_HITS) {
-                if (host.docHandle != handle) return@engineExecute
+            var aborted = host.docHandle != handle
+            while (!aborted && page < total && found.size < MAX_SEARCH_HITS) {
+                if (host.docHandle != handle || searchCancelled) { aborted = true; break }
                 val matches = try {
                     WireCodec.decodeSearch(NativeBridge.nativeSearchPage(handle, page, q))
                 } catch (e: RuntimeException) {
@@ -127,16 +140,16 @@ class SearchController(private val host: Host) {
                 }
                 page++
             }
-            query = q
-            hits = found
-            index = -1
+            // Only commit results for a completed scan; an aborted one leaves the prior query intact.
+            if (!aborted) { query = q; hits = found; index = -1 }
             host.activity.runOnUiThread {
-                if (found.isEmpty()) {
-                    Toast.makeText(host.activity, "No matches for \"$q\"", Toast.LENGTH_SHORT).show()
-                } else {
+                try { progress.dismiss() } catch (e: Exception) {}
+                when {
+                    aborted -> Toast.makeText(host.activity, "Search cancelled", Toast.LENGTH_SHORT).show()
+                    found.isEmpty() -> Toast.makeText(host.activity, "No matches for \"$q\"", Toast.LENGTH_SHORT).show()
                     // Open the results list and let the reader pick which hit to jump to — don't
                     // teleport to the first match (the list is the point of a search).
-                    showResults()
+                    else -> showResults()
                 }
             }
         }

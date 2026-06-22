@@ -548,6 +548,91 @@ fn eraser_removes_strokes_and_autosaves() {
 }
 
 #[test]
+fn deferred_autosave_holds_writes_until_an_explicit_flush() {
+    // The power knob: in deferred mode a stroke is held in memory and not fsynced on stroke-end;
+    // the shell's debounced save_ink flushes it. (Default immediate mode is covered above.)
+    let store: Arc<dyn InkStore> = Arc::new(MemInkStore::new());
+    let mut s = session(1, DeviceCapabilities::supernote_full());
+    s.attach_ink_store(Arc::clone(&store)).unwrap();
+    s.set_autosave_deferred(true).unwrap();
+
+    draw(&mut s, &[(0.1, 0.1), (0.2, 0.2)]);
+    assert_eq!(s.ink_strokes().len(), 1, "stroke is live in the layer");
+    assert!(
+        store.pages_with_ink().unwrap().is_empty(),
+        "deferred: nothing persisted on stroke-end"
+    );
+
+    s.save_ink().unwrap();
+    assert_eq!(
+        store.pages_with_ink().unwrap(),
+        vec![0],
+        "explicit flush persists the page"
+    );
+}
+
+#[test]
+fn deferred_autosave_flushes_before_a_page_turn() {
+    // A page turn must flush the outgoing page's pending edits, or deferred ink would be lost when
+    // the layer is swapped for the new page.
+    let store: Arc<dyn InkStore> = Arc::new(MemInkStore::new());
+    let mut s = session(2, DeviceCapabilities::supernote_full());
+    s.attach_ink_store(Arc::clone(&store)).unwrap();
+    s.set_autosave_deferred(true).unwrap();
+
+    draw(&mut s, &[(0.1, 0.1), (0.2, 0.2)]); // page 0, not yet flushed
+    assert!(store.pages_with_ink().unwrap().is_empty());
+
+    s.on_gesture(Gesture::NextPage); // flushes page 0 before loading page 1
+    assert_eq!(
+        store.pages_with_ink().unwrap(),
+        vec![0],
+        "page 0 flushed on the turn"
+    );
+    assert_eq!(s.ink_strokes().len(), 0, "page 1 starts empty");
+}
+
+#[test]
+fn disabling_deferred_autosave_flushes_pending_edits() {
+    let store: Arc<dyn InkStore> = Arc::new(MemInkStore::new());
+    let mut s = session(1, DeviceCapabilities::supernote_full());
+    s.attach_ink_store(Arc::clone(&store)).unwrap();
+    s.set_autosave_deferred(true).unwrap();
+    draw(&mut s, &[(0.1, 0.1), (0.2, 0.2)]);
+    assert!(store.pages_with_ink().unwrap().is_empty());
+
+    s.set_autosave_deferred(false).unwrap(); // turning the knob off must not strand the edit
+    assert_eq!(store.pages_with_ink().unwrap(), vec![0]);
+}
+
+#[test]
+fn ink_add_points_batches_a_whole_stroke() {
+    let mut s = session(1, DeviceCapabilities::supernote_full());
+    s.ink_begin_stroke(Tool::Pen, InkColor::BLACK, 0.01, 0)
+        .unwrap();
+    // Packed [x0,y0,x1,y1,x2,y2]; the trailing odd float is ignored.
+    s.ink_add_points(&[0.1, 0.1, 0.2, 0.2, 0.3, 0.3, 0.9])
+        .unwrap();
+    s.ink_end_stroke().unwrap();
+    let strokes = s.ink_strokes();
+    assert_eq!(strokes.len(), 1);
+    assert_eq!(strokes[0].points.len(), 3, "three (x,y) pairs landed");
+}
+
+#[test]
+fn validate_export_path_contains_the_write_target() {
+    let dir = std::env::temp_dir();
+    let ok = dir.join("inkread-export.pdf");
+    assert!(validate_export_path(ok.to_str().unwrap()).is_ok());
+
+    // Relative, traversal, and non-existent-parent paths are all refused.
+    assert!(validate_export_path("export.pdf").is_err());
+    assert!(validate_export_path(dir.join("../export.pdf").to_str().unwrap()).is_err());
+    assert!(validate_export_path("/no/such/dir/export.pdf").is_err());
+    assert!(validate_export_path("").is_err());
+}
+
+#[test]
 fn ink_works_in_memory_without_a_store() {
     // A store-less session still captures and edits ink (just no persistence) — no panic.
     let mut s = session(1, DeviceCapabilities::supernote_full());

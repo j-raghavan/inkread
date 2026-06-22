@@ -99,6 +99,17 @@ pub struct ReaderSession {
     /// Whether the in-progress eraser gesture has removed anything yet — gates the autosave so a
     /// no-op erase doesn't rewrite an unchanged page (needless e-ink flash / IO).
     erase_changed: bool,
+    /// When true, edits don't fsync the sidecar on every stroke-end; they mark the page dirty and
+    /// the shell flushes on a trailing-edge debounce (and on pause/page-change/close). A
+    /// power/flash-wear knob (the review's per-stroke-fsync finding) — **off by default** so the
+    /// RR7-FR6/RR20-FR2 save-on-stroke-end durability contract holds unless the shell opts in.
+    autosave_deferred: bool,
+    /// In deferred mode, whether the current page has unsaved edits awaiting [`Self::flush_ink`].
+    ink_dirty: bool,
+    /// The page index the in-memory [`Self::layer`] belongs to. Saves target this, not `page` — so a
+    /// deferred flush triggered *after* `page` has advanced (a page turn) still writes the outgoing
+    /// page. Equals `page` during normal editing; updated whenever the layer is (re)loaded.
+    layer_page: usize,
     /// The lasso clipboard (ADR-INKREAD-0010): strokes copied/cut from any page, held on the
     /// session so a paste can land on a **different** page (NeoReader's cross-page clipboard).
     clipboard: Vec<Stroke>,
@@ -214,6 +225,9 @@ impl ReaderSession {
             active_tool: Tool::Pen,
             active_width: 0.0,
             erase_changed: false,
+            autosave_deferred: false,
+            ink_dirty: false,
+            layer_page: 0,
             clipboard: Vec::new(),
             identity,
             contrast: 0,
@@ -796,6 +810,7 @@ impl ReaderSession {
         self.ink = Some(store);
         self.verify_or_stamp_identity();
         self.layer = self.load_layer_for_page(self.page);
+        self.layer_page = self.page;
         Ok(())
     }
 
@@ -898,6 +913,19 @@ impl ReaderSession {
         Ok(())
     }
 
+    /// Add a whole run of samples to the in-progress stroke (or erase along them) in one call — the
+    /// batched form of [`Self::ink_add_point`]. `xy` is packed `[x0, y0, x1, y1, …]`; pressure
+    /// defaults to 1.0 with no tilt/timestamp (the shell's stylus-capture path supplies none). This
+    /// lets the shell hand a 200-point stroke across JNI once instead of paying 200 round-trips on
+    /// the RK3566 annotation hot path (the review's per-point-JNI finding). A trailing odd float is
+    /// ignored; an invalid sample aborts the batch with the same error the per-point call raises.
+    pub fn ink_add_points(&mut self, xy: &[f32]) -> CoreResult<()> {
+        for pt in xy.chunks_exact(2) {
+            self.ink_add_point(pt[0], pt[1], 1.0, None, None, 0)?;
+        }
+        Ok(())
+    }
+
     /// Finish the in-progress stroke and autosave the page **only if it changed** (RR7-FR6 /
     /// RR20-FR2): an ink stroke that committed at least one point, or an eraser gesture that
     /// removed something. A no-op stroke/erase does not rewrite the page (saves e-ink flash + IO).
@@ -908,7 +936,7 @@ impl ReaderSession {
             self.erase_changed
         };
         if changed {
-            self.autosave_ink()?;
+            self.persist_after_edit()?;
         }
         Ok(())
     }
@@ -917,7 +945,7 @@ impl ReaderSession {
     pub fn ink_undo(&mut self) -> CoreResult<bool> {
         let changed = self.layer.undo();
         if changed {
-            self.autosave_ink()?;
+            self.persist_after_edit()?;
         }
         Ok(changed)
     }
@@ -926,21 +954,53 @@ impl ReaderSession {
     pub fn ink_redo(&mut self) -> CoreResult<bool> {
         let changed = self.layer.redo();
         if changed {
-            self.autosave_ink()?;
+            self.persist_after_edit()?;
         }
         Ok(changed)
     }
 
-    /// Flush the current page's ink to the store (RR20-FR2) — an explicit save for pause/close,
-    /// complementing the automatic autosave on stroke-end/undo/redo.
-    pub fn save_ink(&self) -> CoreResult<()> {
-        self.autosave_ink()
+    /// Enable/disable **deferred autosave** (the shell's per-stroke-fsync power knob). When enabled,
+    /// edits mark the page dirty instead of writing on each stroke-end; the shell is then responsible
+    /// for flushing on a trailing-edge debounce (and the session itself flushes on page-change /
+    /// export / explicit [`Self::save_ink`]). Switching back to immediate mode flushes any pending
+    /// edit so nothing is left unsaved.
+    pub fn set_autosave_deferred(&mut self, deferred: bool) -> CoreResult<()> {
+        if !deferred && self.ink_dirty {
+            self.flush_ink()?;
+        }
+        self.autosave_deferred = deferred;
+        Ok(())
+    }
+
+    /// Persist after an edit: write now (immediate mode), or just mark the page dirty (deferred
+    /// mode) so the shell's debounced [`Self::save_ink`] coalesces the fsync.
+    fn persist_after_edit(&mut self) -> CoreResult<()> {
+        if self.autosave_deferred {
+            self.ink_dirty = true;
+            Ok(())
+        } else {
+            self.autosave_ink()
+        }
+    }
+
+    /// Flush the current page's ink to the store (RR20-FR2) — an explicit save for pause/close and
+    /// the trailing-edge flush in deferred mode, complementing the per-edit autosave.
+    pub fn save_ink(&mut self) -> CoreResult<()> {
+        self.flush_ink()
+    }
+
+    /// Write the current page if it has pending edits (always writes in immediate mode, where
+    /// `ink_dirty` is never set), clearing the dirty flag. No-op without a store.
+    fn flush_ink(&mut self) -> CoreResult<()> {
+        self.autosave_ink()?;
+        self.ink_dirty = false;
+        Ok(())
     }
 
     /// Persist the current page's layer to the store (RR20-FR2). No-op without a store.
     fn autosave_ink(&self) -> CoreResult<()> {
         if let Some(store) = &self.ink {
-            store.save_page(self.page, &self.layer)?;
+            store.save_page(self.layer_page, &self.layer)?;
         }
         Ok(())
     }
@@ -1038,7 +1098,8 @@ impl ReaderSession {
     /// written. Colours are preserved (true RGBA). Gathers all pages from the sidecar after first
     /// flushing the current page, so unsaved edits are included.
     pub fn export_pdf(&mut self, out_path: &str, flatten: bool) -> CoreResult<()> {
-        self.autosave_ink()?; // flush the current page's edits to the sidecar first
+        validate_export_path(out_path)?; // contain the write target before touching the filesystem
+        self.flush_ink()?; // flush the current page's edits to the sidecar first
         let mode = if flatten {
             ExportMode::Flatten
         } else {
@@ -1075,8 +1136,15 @@ impl ReaderSession {
     /// Swap the in-memory layer to the current page's stored ink on a page change. Any pending
     /// stroke is dropped; the load degrades safely (see [`Self::load_layer_for_page`]).
     fn load_ink_for_current_page(&mut self) {
+        // In deferred mode the outgoing page may hold unsaved edits — flush before the layer is
+        // swapped out, or they'd be lost on the page turn. Best-effort, matching this module's
+        // degrade-safely stance: a transient write error must not block navigation.
+        if self.ink_dirty {
+            let _ = self.flush_ink(); // saves under `layer_page` (the outgoing page), not the new one
+        }
         self.layer.cancel_stroke();
         self.layer = self.load_layer_for_page(self.page);
+        self.layer_page = self.page;
         // A page turn resets the view to fit (RR5-FR3): the old pan/zoom is meaningless on a new page.
         self.zoom = 1.0;
         self.pan_x = 0.0;
@@ -1098,6 +1166,36 @@ impl ReaderSession {
             }
             Err(_) => InkLayer::new(),
         }
+    }
+}
+
+/// Contain the PDF-export write target before it reaches pdfium's `save_to_file` (IR security, the
+/// review's "export path lacks native containment"). The shell chooses the path with all-files
+/// access, so the core can't know Android's storage roots — but it *can* reject the shapes a buggy
+/// or compromised shell should never produce: a relative path, a `..` traversal component, or a
+/// parent directory that doesn't already exist (export creates a file, never a directory tree).
+/// This bounds "write anywhere the UID can reach via traversal" without second-guessing legitimate
+/// user-chosen destinations.
+fn validate_export_path(out_path: &str) -> CoreResult<()> {
+    use std::path::{Component, Path};
+    let bad = |why: &str| {
+        Err(CoreError::InvalidArgument(format!(
+            "export path {why}: {out_path}"
+        )))
+    };
+    if out_path.is_empty() {
+        return bad("is empty");
+    }
+    let path = Path::new(out_path);
+    if !path.is_absolute() {
+        return bad("must be absolute");
+    }
+    if path.components().any(|c| matches!(c, Component::ParentDir)) {
+        return bad("must not contain `..`");
+    }
+    match path.parent() {
+        Some(dir) if dir.is_dir() => Ok(()),
+        _ => bad("parent directory does not exist"),
     }
 }
 

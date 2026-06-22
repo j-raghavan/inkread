@@ -104,7 +104,7 @@ class DictController(private val host: Host) {
         } catch (e: RuntimeException) {
             WordDefinition(false, "", "", emptyList(), emptyList())
         }
-        if (!def.found) {
+        if (!def.found && AppSettings.onlineLookup(activity)) {
             onlineLookup(word)?.let { online ->
                 try {
                     NativeBridge.nativeDictPut(dictHandle, online.lang, online.headword, online.senses.joinToString("\n"))

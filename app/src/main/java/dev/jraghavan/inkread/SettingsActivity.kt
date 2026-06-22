@@ -75,6 +75,22 @@ class SettingsActivity : Activity() {
             ) { onExportOverwriteTapped() },
         )
 
+        // ── Dictionary ─────────────────────────────────────────────────────────────
+        column.addView(spacer(dp(34)))
+        column.addView(eyebrow("Dictionary"))
+        column.addView(spacer(dp(12)))
+        column.addView(
+            toggleRow(
+                title = "Look up missing words online",
+                desc = "When the on-device dictionary has no entry, fetch a definition from " +
+                    "Wiktionary. This uses the network and sends the word off your device. Off by " +
+                    "default — inkread is offline-first.",
+                on = AppSettings.onlineLookup(this),
+            ) {
+                AppSettings.setOnlineLookup(this, !AppSettings.onlineLookup(this)); refresh()
+            },
+        )
+
         // ── How it works ───────────────────────────────────────────────────────────
         column.addView(spacer(dp(34)))
         column.addView(eyebrow("How it works"))

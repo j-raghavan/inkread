@@ -96,17 +96,50 @@ pub fn is_stardict_dir(dir: &Path) -> bool {
     find(dir, "ifo").is_ok() && find(dir, "idx").is_ok()
 }
 
+/// Hard ceiling on the dictionary data block — decompressed for `.dict.dz`, on-disk for `.dict`.
+/// Mirrors the document-open / sidecar caps elsewhere in the workspace: it bounds a malformed or
+/// hostile bundle so an unbounded `.dict.dz` expansion (a "gzip bomb") cannot OOM the process.
+/// 512 MiB comfortably covers real StarDict corpora — the largest common dictionaries are
+/// ~100–200 MiB, and `.idx` offsets are 32-bit, so a larger block isn't even addressable.
+const MAX_DICT_BYTES: u64 = 512 * 1024 * 1024;
+
 /// The `.dict` data, decompressing `.dict.dz` (dictzip, gzip-compatible) when that's the only form.
+/// Both paths are size-bounded by [`MAX_DICT_BYTES`].
 fn read_dict(dir: &Path) -> DictResult<Vec<u8>> {
     if let Ok(plain) = find(dir, "dict") {
-        return read_bytes(&plain);
+        return read_capped(&plain, MAX_DICT_BYTES);
     }
     let dz = find(dir, "dict.dz")?;
     let raw = read_bytes(&dz)?;
+    decompress_capped(&raw, MAX_DICT_BYTES)
+        .map_err(|e| DictError::Backend(format!("{}: {e}", dz.display())))
+}
+
+/// `fs::read` with a stat-before-read size guard, mirroring the document-open boundary: refuse a
+/// `.dict` larger than `max` rather than slurping it whole.
+fn read_capped(path: &Path, max: u64) -> DictResult<Vec<u8>> {
+    let len = fs::metadata(path).map_err(be(path))?.len();
+    if len > max {
+        return Err(DictError::Backend(format!(
+            "{}: dictionary exceeds {max}-byte cap ({len} bytes)",
+            path.display()
+        )));
+    }
+    fs::read(path).map_err(be(path))
+}
+
+/// Gunzip `raw`, refusing to expand past `max` bytes. Reads at most `max + 1` decompressed bytes
+/// (so an over-cap stream is detected, not silently truncated) and errors if the cap is exceeded —
+/// the defence against a `.dict.dz` "gzip bomb" that would otherwise inflate into an unbounded `Vec`.
+fn decompress_capped(raw: &[u8], max: u64) -> Result<Vec<u8>, String> {
     let mut out = Vec::new();
-    GzDecoder::new(raw.as_slice())
+    GzDecoder::new(raw)
+        .take(max + 1)
         .read_to_end(&mut out)
-        .map_err(|e| DictError::Backend(format!("decompress {}: {e}", dz.display())))?;
+        .map_err(|e| format!("decompress: {e}"))?;
+    if out.len() as u64 > max {
+        return Err(format!("decompressed dictionary exceeds {max}-byte cap"));
+    }
     Ok(out)
 }
 
@@ -227,6 +260,30 @@ mod tests {
             Err(DictError::Backend(_))
         ));
         assert!(!is_stardict_dir(&dir));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn decompress_capped_rejects_a_gzip_bomb() {
+        // 64 KiB of zeros gzips to a few hundred bytes — a tiny stand-in for a real bomb.
+        let mut enc = GzEncoder::new(Vec::new(), Compression::default());
+        enc.write_all(&vec![0u8; 64 * 1024]).unwrap();
+        let gz = enc.finish().unwrap();
+        // Under a 1 KiB cap the 64 KiB expansion is refused, not slurped.
+        let err = decompress_capped(&gz, 1024).unwrap_err();
+        assert!(err.contains("cap"), "cap error surfaced: {err}");
+        // The same stream under an ample cap decompresses to its full size.
+        let ok = decompress_capped(&gz, 1024 * 1024).unwrap();
+        assert_eq!(ok.len(), 64 * 1024);
+    }
+
+    #[test]
+    fn read_capped_rejects_an_oversize_dict_file() {
+        let dir = scratch("oversize");
+        let path = dir.join("big.dict");
+        fs::write(&path, vec![b'x'; 4096]).unwrap();
+        assert!(read_capped(&path, 1024).is_err(), "4 KiB > 1 KiB cap");
+        assert_eq!(read_capped(&path, 1024 * 1024).unwrap().len(), 4096);
         let _ = fs::remove_dir_all(&dir);
     }
 }

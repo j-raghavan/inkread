@@ -8,6 +8,8 @@ import android.provider.OpenableColumns
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
+import java.io.InputStream
+import java.io.OutputStream
 
 /**
  * A minimal on-device book library (RR17) for the shell: imported PDFs live under
@@ -40,12 +42,31 @@ object Books {
         val ext = if (raw.substringAfterLast('.', "").equals("epub", ignoreCase = true)) "epub" else "pdf"
         val dest = File(dir(context), "${sanitize(raw)}.$ext")
         return try {
-            context.contentResolver.openInputStream(uri)?.use { input ->
-                dest.outputStream().use { out -> input.copyTo(out) }
+            val ok = context.contentResolver.openInputStream(uri)?.use { input ->
+                dest.outputStream().use { out -> copyCapped(input, out, MAX_IMPORT_BYTES) }
             } ?: return null
+            // Over the cap: the core would reject this at open anyway (2 GiB), so don't keep a
+            // huge/partial copy wasting storage. Match the native limit, fail before fully writing.
+            if (!ok) { dest.delete(); return null }
             dest
         } catch (e: Exception) {
+            dest.delete() // never leave a partial copy behind on an IO failure
             null
+        }
+    }
+
+    /** Stream [input] → [out], aborting once more than [max] bytes have been read (mirrors the native
+     *  open cap so a file the core would refuse never gets fully written). Returns false if the source
+     *  exceeded the cap, true otherwise. */
+    private fun copyCapped(input: InputStream, out: OutputStream, max: Long): Boolean {
+        val buf = ByteArray(64 * 1024)
+        var total = 0L
+        while (true) {
+            val n = input.read(buf)
+            if (n < 0) return true
+            total += n
+            if (total > max) return false
+            out.write(buf, 0, n)
         }
     }
 
@@ -128,6 +149,9 @@ object Books {
 
     private const val THUMB_W = 360
     private const val RECENTS_MAX = 12
+    // Cap a SAF import at the native open limit (2 GiB) so an oversized/unbounded source stream is
+    // rejected before it's fully copied into app storage, not after (the review's import-cap note).
+    private const val MAX_IMPORT_BYTES = 2L shl 30
 
     private fun queryName(context: Context, uri: Uri): String? =
         context.contentResolver
