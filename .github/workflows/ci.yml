@@ -59,6 +59,38 @@ jobs:
             echo "::error::jni leaked into reader-core's default dependency graph"; exit 1
           fi
 
+  coverage:
+    name: coverage (cargo-llvm-cov → Codecov)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain (llvm-tools-preview comes from rust-toolchain.toml)
+        run: rustup show
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+      # Fetch the BSD libpdfium so the render tests EXECUTE under coverage instead of
+      # skipping — otherwise the pdf render path reads as uncovered (mirrors the host job).
+      - name: Fetch BSD libpdfium (bblanchon) for the render tests
+        run: |
+          set -euo pipefail
+          ver="chromium/7881"
+          url="https://github.com/bblanchon/pdfium-binaries/releases/download/${ver}/pdfium-linux-x64.tgz"
+          mkdir -p "$RUNNER_TEMP/pdfium"
+          curl -sSL "$url" -o "$RUNNER_TEMP/pdfium.tgz"
+          tar -xzf "$RUNNER_TEMP/pdfium.tgz" -C "$RUNNER_TEMP/pdfium"
+          echo "PDFIUM_DYNAMIC_LIB_PATH=$RUNNER_TEMP/pdfium/lib/libpdfium.so" >> "$GITHUB_ENV"
+      - name: Generate lcov coverage (RR17 gate)
+        run: cargo llvm-cov --workspace --lcov --output-path lcov.info
+      - name: Upload to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          files: lcov.info
+          fail_ci_if_error: false # don't fail the build on a flaky upload
+        env:
+          # Optional for public repos (tokenless works but is rate-limited); add a
+          # CODECOV_TOKEN repo secret to make uploads reliable.
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+
   jni-bridge-target:
     name: cross-check JNI bridge (aarch64-linux-android)
     runs-on: ubuntu-latest

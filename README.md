@@ -1,5 +1,8 @@
 <p align="center">
-  <img src="app/src/main/res/mipmap-xxxhdpi/ic_launcher_foreground.png" alt="inkread" width="120" height="120">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset=".github/assets/inkread-icon-dark.png">
+    <img src=".github/assets/inkread-icon-light.png" alt="inkread" width="120" height="120">
+  </picture>
 </p>
 
 <h1 align="center">inkread</h1>
@@ -11,6 +14,8 @@
 
 <p align="center">
   <a href="./.github/workflows/ci.yml"><img alt="CI" src="https://github.com/j-raghavan/inkread/actions/workflows/ci.yml/badge.svg"></a>
+  <a href="https://codecov.io/gh/j-raghavan/inkread"><img alt="coverage" src="https://codecov.io/gh/j-raghavan/inkread/branch/master/graph/badge.svg"></a>
+  <img alt="core: Rust" src="https://img.shields.io/badge/core-Rust-orange?logo=rust&logoColor=white">
   <a href="./LICENSE"><img alt="License: AGPL-3.0" src="https://img.shields.io/badge/license-AGPL--3.0-blue.svg"></a>
   <img alt="status: early (M0)" src="https://img.shields.io/badge/status-early%20(M0)-orange.svg">
 </p>
