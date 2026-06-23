@@ -200,6 +200,39 @@ impl ReaderSession {
         Ok(session)
     }
 
+    /// Open a plain-text file from bytes and build a session (RR2-FR5). Reflowable like EPUB: the
+    /// paragraphs are paginated to the viewport and repaginate if it (or the font size) changes.
+    pub fn open_txt(
+        bytes: Vec<u8>,
+        caps: DeviceCapabilities,
+        viewport: Viewport,
+    ) -> CoreResult<Self> {
+        let fingerprint = crate::persistence::identity::fingerprint(&bytes);
+        let size = bytes.len() as u64;
+        let document = crate::document::plain::PlainBackend::open(bytes, viewport)?;
+        let meta = document.metadata();
+        let identity = Some(DocIdentity {
+            fingerprint,
+            size,
+            title: meta.title,
+            author: meta.author,
+        });
+        Ok(Self::assemble(Box::new(document), caps, viewport, identity))
+    }
+
+    /// Open a plain-text file and attach a persistence store, resuming the saved position for `book`.
+    pub fn open_txt_with_store(
+        bytes: Vec<u8>,
+        caps: DeviceCapabilities,
+        viewport: Viewport,
+        store: Arc<dyn ReaderStore>,
+        book: BookId,
+    ) -> CoreResult<Self> {
+        let mut session = Self::open_txt(bytes, caps, viewport)?;
+        session.attach_store(store, book)?;
+        Ok(session)
+    }
+
     /// The single session constructor — every `open_*`/`with_document` path routes through this so
     /// the field initialization lives in one place (initial page 0; policy sized to the viewport).
     fn assemble(
