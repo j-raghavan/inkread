@@ -89,4 +89,56 @@ class PalmFilterTest {
         // Before the surface is sized, the size test must not fire on a huge major (no false palm).
         assertFalse(palm(majorPx = 9999f, viewH = 0, sinceStylus = 10_000L))
     }
+
+    // ---- isPenActive: the pinch-zoom gate (suppress pinch while the writing hand rests). ----
+
+    private fun penActive(
+        hovering: Boolean = false,
+        stroke: Boolean = false,
+        sinceStylus: Long = 10_000L,
+    ) = PalmFilter.isPenActive(
+        penHovering = hovering,
+        strokeInProgress = stroke,
+        msSinceStylus = sinceStylus,
+        palmRejectMs = rejectMs,
+    )
+
+    @Test fun pinchSuppressedWhilePenHovering() {
+        assertTrue(penActive(hovering = true))
+    }
+
+    @Test fun pinchSuppressedMidStroke() {
+        assertTrue(penActive(stroke = true))
+    }
+
+    @Test fun pinchSuppressedWithinPenWindow() {
+        // Palm landing right after a pen event (the resting hand during writing) ⇒ pen is active.
+        assertTrue(penActive(sinceStylus = 500L))
+    }
+
+    @Test fun deliberatePinchAllowedWhenPenIdle() {
+        // Pen lifted away and quiet past the reject window ⇒ a two-finger pinch is intentional zoom.
+        assertFalse(penActive(sinceStylus = 10_000L))
+    }
+
+    @Test fun penActiveAtExactRejectBoundaryIsActive() {
+        // The `<=` boundary: a finger landing exactly PALM_REJECT_MS after the pen is still the
+        // writing hand (pinch stays suppressed). Pins the off-by-one edge.
+        assertTrue(penActive(sinceStylus = rejectMs))
+    }
+
+    @Test fun penIdleOneMsPastRejectBoundary() {
+        // One ms beyond the window with no hover/stroke ⇒ pen idle, pinch allowed.
+        assertFalse(penActive(sinceStylus = rejectMs + 1))
+    }
+
+    /** Refactor guard: extracting [PalmFilter.isPenActive] out of [PalmFilter.isPalm] must not drift
+     *  the truth table — a small single-pointer finger within any pen-active window is still a palm. */
+    @Test fun isPalmUnchangedByPenActiveExtraction() {
+        assertTrue(palm(sinceStylus = 500L, majorPx = 60f))
+        assertTrue(palm(hovering = true, majorPx = 60f))
+        assertTrue(palm(stroke = true, majorPx = 60f))
+        // Complement: no pen signals ⇒ a fingertip is NOT a palm (navigation still works).
+        assertFalse(palm(sinceStylus = rejectMs + 1, majorPx = 60f))
+    }
 }
