@@ -5,10 +5,12 @@
 //! ([`fixed::PdfBackend`]) is the one implementation in M0.
 
 pub mod fixed;
+pub mod format;
 pub mod reflow;
 pub(crate) mod reflow_view;
 pub mod text_select;
 
+pub use format::DocFormat;
 pub use text_select::{CharBox, NormRect, SearchMatch, TextSelection};
 
 use crate::error::CoreResult;

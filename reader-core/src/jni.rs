@@ -37,7 +37,8 @@ use inkread_ink::{InkColor, Tool};
 use crate::budget::TrimLevel;
 use crate::dict::{encode_definition_wire, Dict};
 use crate::document::{
-    encode_links_wire, encode_search_wire, encode_selection_wire, encode_toc_wire, NormRect,
+    encode_links_wire, encode_search_wire, encode_selection_wire, encode_toc_wire, DocFormat,
+    NormRect,
 };
 use crate::error::{CoreError, CoreResult};
 use crate::persistence::ink_store::{FsInkStore, InkStore};
@@ -143,10 +144,9 @@ pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeOpenDocumen
 
         let bytes = read_document_file(&path).map_err(|e| throw(env, &e))?;
 
-        let opened = if is_epub(&path) {
-            ReaderSession::open_epub(bytes, caps, viewport)
-        } else {
-            ReaderSession::open_pdf(bytes, caps, viewport)
+        let opened = match DocFormat::resolve(&path, &bytes) {
+            DocFormat::Epub => ReaderSession::open_epub(bytes, caps, viewport),
+            DocFormat::Pdf => ReaderSession::open_pdf(bytes, caps, viewport),
         };
         match opened {
             Ok(session) => Ok(Box::into_raw(Box::new(session)) as jlong),
@@ -185,13 +185,6 @@ fn read_document_file(path: &str) -> CoreResult<Vec<u8>> {
     std::fs::read(&resolved).map_err(|e| CoreError::InvalidArgument(format!("read {path}: {e}")))
 }
 
-/// Pick the backend by file extension: `.epub` (case-insensitive) → reflowable EPUB, else PDF.
-fn is_epub(path: &str) -> bool {
-    std::path::Path::new(path)
-        .extension()
-        .is_some_and(|e| e.eq_ignore_ascii_case("epub"))
-}
-
 // =====================================================================================
 // nativeOpenDocumentWithStore(path, capsBytes, w, h, dpi, dbPath, bookId) : long
 // Opens a PDF AND attaches a SQLite-backed store (RR12 / RR27 session restore): the saved
@@ -226,10 +219,13 @@ pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeOpenDocumen
         let store = SqliteStore::open(Path::new(&db_path)).map_err(|e| throw(env, &e))?;
         let store: Arc<dyn ReaderStore> = Arc::new(store);
 
-        let opened = if is_epub(&path) {
-            ReaderSession::open_epub_with_store(bytes, caps, viewport, store, book)
-        } else {
-            ReaderSession::open_pdf_with_store(bytes, caps, viewport, store, book)
+        let opened = match DocFormat::resolve(&path, &bytes) {
+            DocFormat::Epub => {
+                ReaderSession::open_epub_with_store(bytes, caps, viewport, store, book)
+            }
+            DocFormat::Pdf => {
+                ReaderSession::open_pdf_with_store(bytes, caps, viewport, store, book)
+            }
         };
         match opened {
             Ok(session) => Ok(Box::into_raw(Box::new(session)) as jlong),
