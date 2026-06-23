@@ -376,23 +376,46 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
                     else -> captureStylus(event) // PEN (Highlighter is still P2)
                 }
             } else if (toolType == MotionEvent.TOOL_TYPE_FINGER) {
-                scaleDetector.onTouchEvent(event)
-                // A second finger means a pinch-zoom, not a tap/long-press. The single-finger DOWN
-                // armed the word-lookup timer; cancel it the instant a 2nd pointer appears (or the
-                // scale gesture engages) and neutralise this gesture, so a held pinch never triggers
-                // a Dict lookup. (onFingerMove/Up can't do this — they're gated to pointerCount==1.)
-                if (event.pointerCount > 1 || scaleDetector.isInProgress) {
-                    mainHandler.removeCallbacks(fingerLongPress)
+                // Pinch-zoom must not fire while writing: the resting hand/palm registers as a
+                // 2-finger contact and the ScaleGestureDetector would zoom the page out from under
+                // the pen. Gate the detector with the same palm rule used for taps/pan (PalmFilter)
+                // — feed it ONLY when the pen is idle. While the pen is active these contacts are
+                // the writing hand, not a deliberate pinch (RR19 palm rejection / ADR-INKREAD-0010).
+                if (penActiveForPinch()) {
+                    // A real pinch already in flight when the pen engaged: neutralise the accumulated
+                    // scale and cancel so onScaleEnd reverts to the committed zoom (no half-scaled
+                    // preview lingers, and the detector doesn't stay stuck in-progress).
+                    if (scaleDetector.isInProgress) {
+                        liveScale = 1f
+                        val cancel = MotionEvent.obtain(event).apply { action = MotionEvent.ACTION_CANCEL }
+                        scaleDetector.onTouchEvent(cancel)
+                        cancel.recycle()
+                    }
+                    // Likewise drop any in-flight minimap interaction: its latches are reset ONLY
+                    // inside handleMinimapTouch's UP path, which we bypass here — leaving them stuck
+                    // would make handleMinimapTouch swallow the next finger gesture once the pen idles.
+                    minimapActive = false; minimapThumbDrag = false
+                    mainHandler.removeCallbacks(fingerLongPress) // the writing hand, not a tap
                     fingerMoved = true
-                }
-                // While a pinch is in progress (2 fingers), don't run tap/pan/long-press logic.
-                if (!scaleDetector.isInProgress && event.pointerCount == 1) {
-                    // The zoom minimap (when shown) is an interactive navigator + zoom control;
-                    // it claims touches over its panel before the page gesture logic runs.
-                    if (!handleMinimapTouch(event)) when (event.actionMasked) {
-                        MotionEvent.ACTION_DOWN -> onFingerDown(event)
-                        MotionEvent.ACTION_MOVE -> onFingerMove(event)
-                        MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> onFingerUp(event)
+                } else {
+                    scaleDetector.onTouchEvent(event)
+                    // A second finger means a pinch-zoom, not a tap/long-press. The single-finger DOWN
+                    // armed the word-lookup timer; cancel it the instant a 2nd pointer appears (or the
+                    // scale gesture engages) and neutralise this gesture, so a held pinch never triggers
+                    // a Dict lookup. (onFingerMove/Up can't do this — they're gated to pointerCount==1.)
+                    if (event.pointerCount > 1 || scaleDetector.isInProgress) {
+                        mainHandler.removeCallbacks(fingerLongPress)
+                        fingerMoved = true
+                    }
+                    // While a pinch is in progress (2 fingers), don't run tap/pan/long-press logic.
+                    if (!scaleDetector.isInProgress && event.pointerCount == 1) {
+                        // The zoom minimap (when shown) is an interactive navigator + zoom control;
+                        // it claims touches over its panel before the page gesture logic runs.
+                        if (!handleMinimapTouch(event)) when (event.actionMasked) {
+                            MotionEvent.ACTION_DOWN -> onFingerDown(event)
+                            MotionEvent.ACTION_MOVE -> onFingerMove(event)
+                            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> onFingerUp(event)
+                        }
                     }
                 }
             }
@@ -1124,6 +1147,20 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             touchMajorFrac = PALM_TOUCH_MAJOR_FRAC,
         )
     }
+
+    /**
+     * True while the pen is active (hovering, mid-stroke, or lifted within [PALM_REJECT_MS]) — so a
+     * concurrent finger contact is the writing hand. Gates the pinch-zoom detector: the resting palm
+     * during writing otherwise reads as a two-finger pinch and zooms the page out from under the pen
+     * (RR19 palm rejection extended to the pincher). Mirrors [isPalmTouch]'s pen-proximity test,
+     * minus the multi-pointer check (a pinch IS multi-pointer; pen proximity is the discriminator).
+     */
+    private fun penActiveForPinch(): Boolean = PalmFilter.isPenActive(
+        penHovering = penHovering,
+        strokeInProgress = strokeBuf.isNotEmpty(),
+        msSinceStylus = SystemClock.uptimeMillis() - lastStylusMs,
+        palmRejectMs = PALM_REJECT_MS,
+    )
 
     /**
      * Wrap a chrome view (bottom bar, sheets) so a resting palm can't press its controls — the

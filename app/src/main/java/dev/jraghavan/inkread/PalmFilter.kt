@@ -44,9 +44,24 @@ object PalmFilter {
     ): Boolean {
         if (isStylusTool) return false
         if (pointerCount > 1) return true
-        if (penHovering) return true
-        if (msSinceStylus <= palmRejectMs) return true
-        if (strokeInProgress) return true
+        if (isPenActive(penHovering, strokeInProgress, msSinceStylus, palmRejectMs)) return true
         return viewHeightPx > 0 && touchMajorPx >= viewHeightPx * touchMajorFrac
     }
+
+    /**
+     * The EMR pen is **active** — hovering over the glass, mid-stroke, or lifted within
+     * [palmRejectMs] — so any concurrent finger contact is the writing hand, not deliberate
+     * navigation. Used to suppress **pinch-zoom while writing**: the resting palm otherwise reads as
+     * a two-finger pinch and zooms the page out from under the pen.
+     *
+     * This is the pen-proximity subset of [isPalm], deliberately WITHOUT the multi-pointer test — a
+     * pinch is intrinsically multi-pointer, so pointer count can't discriminate a palm pinch from a
+     * real one. Pen proximity is what tells them apart.
+     */
+    fun isPenActive(
+        penHovering: Boolean,
+        strokeInProgress: Boolean,
+        msSinceStylus: Long,
+        palmRejectMs: Long,
+    ): Boolean = penHovering || strokeInProgress || msSinceStylus <= palmRejectMs
 }
