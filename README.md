@@ -18,7 +18,7 @@
   <a href="https://codecov.io/gh/j-raghavan/inkread"><img alt="coverage" src="https://codecov.io/gh/j-raghavan/inkread/branch/master/graph/badge.svg"></a>
   <img alt="core: Rust" src="https://img.shields.io/badge/core-Rust-orange?logo=rust&logoColor=white">
   <a href="./LICENSE"><img alt="License: AGPL-3.0" src="https://img.shields.io/badge/license-AGPL--3.0-blue.svg"></a>
-  <img alt="status: early (M0)" src="https://img.shields.io/badge/status-early%20(M0)-orange.svg">
+  <img alt="status: early (M0)" src="https://img.shields.io/badge/status-early%20(beta)-orange.svg">
 </p>
 
 ---
@@ -41,6 +41,53 @@ On e-ink today you usually pick one of two compromises:
 inkread aims at the **gap between them**: real reading *and* real handwriting, with your annotations
 **written back into the PDF** (editable or flattened) so they're portable to any other app — all on
 an open [AGPL-3.0](./LICENSE) Rust core you can audit and extend.
+
+
+## Demo
+
+
+https://github.com/user-attachments/assets/4381ee07-3683-45ef-9fa4-9ed7cdd11295
+
+  ## Features
+
+  **Reading**
+  - Reads **PDF** and **EPUB**
+  - Reflowable text with adjustable font size
+  - Pinch-to-zoom with a page navigator (minimap + zoom controls)
+  - Table of contents navigation
+  - Bookmarks and go-to-page
+  - Page display controls: rotate, crop, contrast, margins
+
+  **Handwriting & annotation**
+  - Movable, floating tool palette
+  - Pen — write directly on the page with the stylus
+  - Highlighter
+  - Four ink colours (black, blue, red, green), switchable in-window
+  - Adjustable stroke thickness
+  - Eraser
+  - Lasso select — circle ink or text to move, copy, delete, or look up
+  - Undo / redo
+
+  **Text tools**
+  - Full-text search with jump-between-matches
+  - Dictionary lookup with thesaurus
+  - Add your own custom dictionaries (drop a starter dictionary into `MYSTYLES/SnDict/<name>` and install it in-app)
+  - Send a multi-line selection to the **Supernote Digest**
+
+  **Export & data**
+  - Export annotations as a PDF into a synced folder
+  - Overwrite the original PDF in place, or save a separate `-annotated` copy
+  - Offline-first — no network unless explicitly enabled
+
+  **Platform**
+  - Built for the Supernote family (RK3566, Android 11)
+  - Kotlin/Android shell + a Rust core (over JNI) that owns parsing, layout, rendering, the refresh policy, and the ink model
+  - Licensed under **AGPL-3.0**
+
+  >Custom Dictionaries:
+  >>- The custom-dictionary path follows my [SnDictionary](https://github.com/j-raghavan/sn-dictionary) Plugin.
+  >>- Place your stardict file in (MYSTYLES/SnDict/<name>) and it will show up when you want to install it as custom dictionary. 
+  
 
 ## How it compares
 
@@ -109,7 +156,11 @@ the [Code of Conduct](./CODE_OF_CONDUCT.md) and [Security Policy](./SECURITY.md)
 
 inkread is an **independent, community project** built by a Supernote Manta owner and fan. It exists
 because the itch was personal — I wanted reading and handwriting to work *together* on my own device,
-the way I needed them to, and built the reader I wished existed.
+the way I needed them to, and built the reader I wished existed. 
+
+I did try KOReader and i felt it was little sluggish on my Supernote Manta. Having developed a few
+plugins for Supernote, i took the plunge to create this. In no way or shape this is a replacement for
+the KOReader, this is more of a custom app for the Awesome Supernote Device!
 
 > It is **not affiliated with, authorized by, sponsored by, or endorsed by Ratta or Supernote**.
 > "Supernote", "Manta", and related names are trademarks of their respective owners and are used here
