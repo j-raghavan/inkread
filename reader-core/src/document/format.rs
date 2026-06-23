@@ -10,13 +10,16 @@
 use std::path::Path;
 
 /// The backends the open path can dispatch to. `Pdf` is the fixed-layout backend
-/// ([`super::fixed::PdfBackend`]); `Epub` is the reflowable backend ([`super::reflow`]).
+/// ([`super::fixed::PdfBackend`]); `Epub` ([`super::reflow`]) and `Text` ([`super::plain`]) are the
+/// reflowable backends.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DocFormat {
     /// Fixed-layout PDF.
     Pdf,
     /// Reflowable EPUB (a ZIP container).
     Epub,
+    /// Plain text (`.txt`/`.text`). Has no magic signature — identified by extension only.
+    Text,
 }
 
 /// PDF header marker (ISO 32000): a conforming file begins with `%PDF-`.
@@ -30,7 +33,8 @@ impl DocFormat {
     /// This is the authoritative signal: a positive match here is trusted over the extension, so a
     /// mislabeled file still opens with the right backend. A ZIP container is reported as [`Self::Epub`]
     /// (the only ZIP-based backend today). PDFs that carry leading junk before `%PDF-` (tolerated by
-    /// the spec) won't match here and fall back to the extension in [`Self::resolve`].
+    /// the spec) won't match here and fall back to the extension in [`Self::resolve`]. Plain text has
+    /// no reliable signature, so [`Self::Text`] is never sniffed — it is identified by extension only.
     pub(crate) fn sniff(bytes: &[u8]) -> Option<DocFormat> {
         if bytes.starts_with(PDF_MAGIC) {
             Some(DocFormat::Pdf)
@@ -49,6 +53,8 @@ impl DocFormat {
             Some(DocFormat::Pdf)
         } else if ext.eq_ignore_ascii_case("epub") {
             Some(DocFormat::Epub)
+        } else if ext.eq_ignore_ascii_case("txt") || ext.eq_ignore_ascii_case("text") {
+            Some(DocFormat::Text)
         } else {
             None
         }
@@ -159,6 +165,34 @@ mod tests {
     fn resolve_defaults_to_pdf_when_nothing_matches() {
         assert_eq!(
             DocFormat::resolve("mystery", b"unrecognized bytes"),
+            DocFormat::Pdf
+        );
+    }
+
+    #[test]
+    fn from_extension_identifies_plain_text() {
+        assert_eq!(
+            DocFormat::from_extension("notes.txt"),
+            Some(DocFormat::Text)
+        );
+        assert_eq!(
+            DocFormat::from_extension("README.TXT"),
+            Some(DocFormat::Text)
+        );
+        assert_eq!(DocFormat::from_extension("a/b.text"), Some(DocFormat::Text));
+    }
+
+    #[test]
+    fn resolve_uses_extension_for_text_which_has_no_magic() {
+        // Plain text has no signature, so resolution is by extension.
+        assert_eq!(DocFormat::sniff(b"hello world"), None);
+        assert_eq!(
+            DocFormat::resolve("notes.txt", b"hello world"),
+            DocFormat::Text
+        );
+        // Magic still wins over a `.txt` name (a PDF saved as .txt opens as PDF).
+        assert_eq!(
+            DocFormat::resolve("mislabeled.txt", &pdf_bytes()),
             DocFormat::Pdf
         );
     }
