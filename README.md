@@ -138,6 +138,65 @@ Build & sideload the Android APK (needs JDK 17–21, the Android NDK, and `cargo
 
 Prebuilt APKs are attached to each [GitHub Release](https://github.com/j-raghavan/inkread/releases).
 
+## Using inkread
+
+Open a document from the **home screen** (*Open a Document*, or pick up where you left off
+from the *Continue reading* card). PDFs and EPUBs are supported. Your reading position, ink,
+and per-book settings are saved automatically and restored when you reopen.
+
+Two surfaces drive everything: a **bottom control bar** (tap the centre of the page) and a
+**floating tool palette** docked to the right edge (drag the grip to move it, tap to collapse).
+
+### Reading & navigation
+
+| Action | How |
+|---|---|
+| Turn page | Tap the **left third** (back) or **right third** (forward) |
+| Jump to a page | Centre-tap → drag the **slider**, or tap the page number to type one |
+| Table of contents | Centre-tap → **Contents** → tap an entry to jump |
+| Bookmark a page | Tap the **top-right corner** (dog-ear); list them via **Marks** |
+| Zoom & pan | **Pinch** to zoom; a minimap (top-right) shows your viewport. Fit/zoom presets live under **Adjust → Zoom** |
+
+### Search & dictionary
+
+- **Search** — centre-tap → **Search**, type a query, and step hit-to-hit. Matches are
+  highlighted on the page. On-device, works offline.
+- **Dictionary** — **long-press a word** with the stylus, or pick the **Define** tool and tap.
+  Looks up an installed offline dictionary first, with an opt-in Wiktionary fallback. Install or
+  remove dictionaries from the lookup card.
+
+### Handwriting & annotation tools
+
+Pick a tool from the floating palette. Tap a tool again to reveal its options (e.g. colours).
+**Undo/Redo** sit on the palette.
+
+| Tool | What it does |
+|---|---|
+| **Pen** | Write directly on the page with low-latency e-ink ink. Strokes bake into the page and persist. |
+| **Highlighter** | Lay down a wide translucent band; multiple colours. |
+| **Eraser** | Drag across strokes to remove them. |
+| **Lasso** | Draw a loop around your writing to select it. A floating toolbar then offers **move, cut, copy, paste, delete, select-all**, and **Add to Digest**. (Loop over printed text instead and it selects the text.) |
+| **Define** | Tap a word to look it up, or drag to select text for **Copy / Define / Highlight / Add to Digest**. |
+
+Ink is saved to a sidecar next to your document and re-loaded next time.
+
+### Saving your work elsewhere
+
+- **Export to PDF** — centre-tap → **Export**. Choose **editable annotations** (portable to
+  Preview, Adobe, etc.) or **flattened** (baked in, visible in any viewer). Written beside the
+  original file.
+- **Add to Digest** — from a lasso or text selection, push the selected text (with its page) into
+  the Supernote **Digest** app.
+
+### Display & layout
+
+Centre-tap → **Adjust** opens a tabbed sheet: **Rotate** (portrait/landscape), **Crop**
+(auto-crop + margin), **Zoom** (fit mode + level), **Page** (text scale), **Font** (line
+spacing, alignment — EPUB), and **Display** (contrast). Settings are remembered per book.
+
+> **On the roadmap:** EPUB reflow controls, Lua plugins, and cross-document search are in the
+> core or specified but not yet exposed in the shipped app — see [Status](#status).
+
 ## Architecture
 
 ```
