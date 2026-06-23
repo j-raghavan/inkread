@@ -6,6 +6,7 @@
 
 pub mod fixed;
 pub mod format;
+pub mod plain;
 pub mod reflow;
 pub(crate) mod reflow_view;
 pub mod text_select;
