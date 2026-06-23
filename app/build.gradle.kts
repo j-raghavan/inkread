@@ -57,4 +57,8 @@ dependencies {
     // ignores. Bump these together with compileSdk + AGP, not piecemeal.
     implementation("androidx.core:core-ktx:1.13.1")
     implementation("androidx.appcompat:appcompat:1.7.0")
+
+    // Host JVM unit tests for pure logic (e.g. PalmFilter) — run via :app:testDebugUnitTest, no
+    // emulator/device needed (an emulator can't simulate the Supernote EMR pen anyway).
+    testImplementation("junit:junit:4.13.2")
 }

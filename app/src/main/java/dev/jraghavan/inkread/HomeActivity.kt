@@ -263,8 +263,10 @@ class HomeActivity : Activity() {
         gravity = Gravity.CENTER_HORIZONTAL
         addView(TextView(this@HomeActivity).apply {
             text = swashCaps("Super Reader for a Super You")
-            setTextColor(inkSoft); textSize = fs(31f); typeface = scriptBold
-            paint.isFakeBoldText = true; gravity = Gravity.CENTER; includeFontPadding = false
+            // Subtle footer: small (matches the version eyebrow's 12sp) and light (muted grey, not
+            // the heavy dark script it was) so it reads as a quiet tagline, not a headline.
+            setTextColor(textMuted); textSize = fs(12f); typeface = script
+            gravity = Gravity.CENTER; includeFontPadding = false
         })
         addView(LinearLayout(this@HomeActivity).apply {
             orientation = LinearLayout.HORIZONTAL
