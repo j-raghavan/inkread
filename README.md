@@ -28,6 +28,10 @@ inkread is a document reader and writing platform for tablet-class **e-ink** dev
 JNI) that owns parsing, layout, rendering, the refresh policy, and the **ink model** — so the hard
 parts are memory-safe, vendor-neutral, and testable on your laptop with no device.
 
+>inkRead is an early open-source e-ink reader for Supernote that combines serious PDF/EPUB reading with
+>handwriting-first annotation. It uses a Kotlin Android shell around a Rust core for parsing, layout, rendering,
+>ink, dictionaries, and refresh policy. The goal is simple: portable reading, portable annotations, and no cloud dependency.
+
 ## Why inkread?
 
 On e-ink today you usually pick one of two compromises:
