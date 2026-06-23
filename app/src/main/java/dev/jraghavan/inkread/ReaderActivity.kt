@@ -79,6 +79,11 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
      *  [PALM_REJECT_MS] of it is treated as a resting palm and ignored for navigation. */
     @Volatile private var lastStylusMs = 0L
 
+    /** True while the EMR pen is in proximity (hover enter/move seen, no exit yet). The hand rests as
+     *  the pen approaches, so any finger that lands while the pen hovers is a palm — this rejects the
+     *  FIRST palm at the start of writing, before the pen has actually touched (RR19). */
+    @Volatile private var penHovering = false
+
     /** Single worker thread for all engine/JNI/document work (serialized per RR21). */
     private val engine = Executors.newSingleThreadExecutor { r -> Thread(r, "inkread-engine") }
 
@@ -455,6 +460,10 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         val tool = event.getToolType(0)
         if (tool == MotionEvent.TOOL_TYPE_STYLUS || tool == MotionEvent.TOOL_TYPE_ERASER) {
             lastStylusMs = SystemClock.uptimeMillis()
+            // Track pen proximity: HOVER_ENTER/MOVE ⇒ near the glass, HOVER_EXIT ⇒ lifted away. A
+            // finger that lands while the pen hovers is the accompanying palm (rejected immediately,
+            // without waiting for the PALM_REJECT_MS window to be primed by a touch).
+            penHovering = event.actionMasked != MotionEvent.ACTION_HOVER_EXIT
         }
         return super.dispatchGenericMotionEvent(event)
     }
@@ -1103,12 +1112,17 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
      */
     private fun isPalmTouch(e: MotionEvent): Boolean {
         val toolType = e.getToolType(0)
-        if (toolType == MotionEvent.TOOL_TYPE_STYLUS || toolType == MotionEvent.TOOL_TYPE_ERASER) return false
-        if (e.pointerCount > 1) return true
-        if (SystemClock.uptimeMillis() - lastStylusMs <= PALM_REJECT_MS) return true
-        if (strokeBuf.isNotEmpty()) return true
-        val vh = surfaceView.height
-        return vh > 0 && e.getTouchMajor(0) >= vh * PALM_TOUCH_MAJOR_FRAC
+        return PalmFilter.isPalm(
+            isStylusTool = toolType == MotionEvent.TOOL_TYPE_STYLUS || toolType == MotionEvent.TOOL_TYPE_ERASER,
+            pointerCount = e.pointerCount,
+            penHovering = penHovering,
+            strokeInProgress = strokeBuf.isNotEmpty(),
+            msSinceStylus = SystemClock.uptimeMillis() - lastStylusMs,
+            palmRejectMs = PALM_REJECT_MS,
+            touchMajorPx = e.getTouchMajor(0),
+            viewHeightPx = surfaceView.height,
+            touchMajorFrac = PALM_TOUCH_MAJOR_FRAC,
+        )
     }
 
     /**
@@ -2816,7 +2830,12 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         const val PASTE_OFFSET = 0.03f // normalized offset so a paste lands just beside the source.
         const val FINGER_LONG_PRESS_MS = 500L // finger held ~still this long on a word → look it up.
         const val FINGER_MOVE_SLOP_PX = 24f // finger travel beyond this = a swipe, not a tap/hold.
-        const val PALM_TOUCH_MAJOR_FRAC = 0.12f // contact major ≥ 12% of view height ⇒ a palm.
+        // Contact major ≥ this fraction of the panel height ⇒ a palm. Lowered from 0.12 to 0.06
+        // (≈154px on a 2560px panel) per on-device PALMDIAG capture: resting palms reported
+        // touch-major ≈ 140–240px, well under the old 307px gate, so the very first palm leaked
+        // before any pen event primed the timing window. 0.06 catches those by size at the outset;
+        // a fingertip tap reads well below it. Tunable.
+        const val PALM_TOUCH_MAJOR_FRAC = 0.06f
 
         // Launch extras from HomeActivity.
         const val EXTRA_PICK = "inkread.pick" // open the file picker on launch.

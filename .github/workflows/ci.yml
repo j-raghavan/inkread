@@ -127,3 +127,22 @@ jobs:
       # (ADR Decision 2); a new dep with an unvetted license fails the build (RR18-AC2).
       - name: Verify dependency licenses against the allowlist
         run: ./scripts/check-licenses.sh
+
+  android-unit-tests:
+    name: android unit tests (host JVM)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      # JVM unit tests for pure Kotlin logic (PalmFilter palm-rejection) — run on the host, NO
+      # emulator: a generic AVD can't simulate the Supernote EMR pen / EPD, so device-shaped
+      # decisions are validated here against the real captured contact metrics. The runner's
+      # preinstalled Android SDK (ANDROID_HOME, platform-34) configures the app module; no NDK,
+      # no libreader.so, no device needed.
+      - name: Set up JDK 21
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: gradle
+      - name: Run app JVM unit tests (:app:testDebugUnitTest)
+        run: ./gradlew :app:testDebugUnitTest --console=plain
