@@ -19,7 +19,7 @@ use inkread_epub::{parse_blocks, Block, EpubPackage, NavPoint};
 use crate::document::text_select::{self, CharBox, NormRect, TextAnchor, TextSelection};
 use crate::document::{Document, DocumentMetadata, SearchMatch, TocEntry};
 use crate::error::{CoreError, CoreResult};
-use crate::position::PinPosition;
+use crate::position::{PageRange, PinPosition};
 use crate::render::PixelBuffer;
 
 /// Base body font size in device pixels at scale `1.0` (Supernote-class panel). The user's text
@@ -229,6 +229,24 @@ impl EpubBackend {
         let chapter = self.chapter_of(page);
         let (start, end) = text_select::anchored_span(&self.page_chars(page), rect)?;
         Some((self.pin_at(chapter, start), self.pin_at(chapter, end)))
+    }
+
+    /// The `[start, end)` [`PageRange`] (RR6-FR2 / RR8-FR4) a global `page` spans: from its first
+    /// anchored glyph to the start of the next anchored page, host-derived. The book's last page ends
+    /// at a chapter-end sentinel. `None` for an anchorless page (rule-only / empty), which has no
+    /// text position. Anchorless interior pages are skipped when finding the exclusive end, so a
+    /// rule/blank page between two text pages doesn't truncate the range (ADR-INKREAD-0013 D2).
+    #[allow(dead_code)]
+    pub(crate) fn page_range(&self, page: usize) -> Option<PageRange> {
+        let start = self.page_pin(page)?;
+        let total = self.laid.borrow().pages.len();
+        let end = (page + 1..total)
+            .find_map(|p| self.page_pin(p))
+            .unwrap_or_else(|| PinPosition {
+                text_offset: i32::MAX,
+                ..start.clone()
+            });
+        Some(PageRange::new(start, end))
     }
 
     /// The chapter index that global `page` falls in (the last chapter whose start ≤ page).
@@ -533,6 +551,40 @@ mod tests {
         b.set_text_scale(1.7, 0).unwrap();
         assert_eq!(char_at(&b, &start), Some(sc), "start re-anchors");
         assert_eq!(char_at(&b, &end), Some(ec), "end re-anchors");
+    }
+
+    #[test]
+    fn page_ranges_are_stable_for_identical_layout() {
+        // RR8 DoD: same inputs ⇒ identical boundaries.
+        let b = EpubBackend::open(SAMPLE.to_vec(), vp(400, 600)).unwrap();
+        let _ = render(&b, 0, 400, 600);
+        let ranges1: Vec<PageRange> = (0..b.page_count())
+            .filter_map(|p| b.page_range(p))
+            .collect();
+        b.set_text_scale(1.0, 0).unwrap(); // identical layout → must reproduce the boundaries
+        let ranges2: Vec<PageRange> = (0..b.page_count())
+            .filter_map(|p| b.page_range(p))
+            .collect();
+        assert!(!ranges1.is_empty());
+        assert_eq!(ranges1, ranges2);
+    }
+
+    #[test]
+    fn page_range_starts_ascend_and_each_range_is_ordered() {
+        let b = EpubBackend::open(SAMPLE.to_vec(), vp(400, 600)).unwrap();
+        let _ = render(&b, 0, 400, 600);
+        let ranges: Vec<PageRange> = (0..b.page_count())
+            .filter_map(|p| b.page_range(p))
+            .collect();
+        assert!(ranges.len() >= 2);
+        for r in &ranges {
+            assert!(r.start <= r.end, "each range is ordered");
+        }
+        // Page starts ascend in reading order (host-derived global ordering, RR8-FR4).
+        assert!(
+            ranges.windows(2).all(|w| w[0].start <= w[1].start),
+            "page starts ascend"
+        );
     }
 
     #[test]
