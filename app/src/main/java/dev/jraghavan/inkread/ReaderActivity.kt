@@ -398,16 +398,17 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
                 // surviving finger with the original down's stale origin, so its trailing pan must be
                 // suppressed until a fresh DOWN (#49). Set in BOTH branches below via this single check.
                 if (event.pointerCount > 1) gestureWasMultiTouch = true
-                // Pinch-zoom must not fire while writing: the resting hand/palm registers as a
-                // 2-finger contact and the ScaleGestureDetector would zoom the page out from under
-                // the pen. Gate the detector with the same palm rule used for taps/pan (PalmFilter)
-                // — feed it ONLY when the pen is idle. While the pen is active these contacts are
-                // the writing hand, not a deliberate pinch (RR19 palm rejection / ADR-INKREAD-0010).
-                if (PalmFilter.isPinchPalm(penActiveForPinch(), maxTouchMajor(event), surfaceView.height, PALM_TOUCH_MAJOR_FRAC)) {
-                    // The pen is active OR a contact is palm-sized: this is the writing hand, not a
-                    // deliberate pinch. Reject it BEFORE the ScaleGestureDetector sees it (the
-                    // size term catches a palm-heel pinch that lands after the pen-active window has
-                    // lapsed — the "resting hand zooms the page" report, #49).
+                // Pinch-zoom must not fire while writing: the resting hand registers as a 2-finger
+                // contact and the ScaleGestureDetector would zoom the page out from under the pen.
+                // Gate on pen-proximity ONLY: on this hardware a firm pinch fingertip reports a
+                // contact-major as large as a palm (160–240px on a 2560px panel), so a contact-size
+                // term here suppressed genuine two-finger pinches — pen activity (hover / stroke /
+                // within PALM_REJECT_MS) is the reliable discriminator for the writing hand (#49,
+                // device-confirmed on Nomad). Single-finger palm rejection still uses size, where
+                // taps (≈80–128px) and palms (≈160–240px) separate cleanly.
+                if (penActiveForPinch()) {
+                    // The pen is active: this is the writing hand, not a deliberate pinch. Reject it
+                    // BEFORE the ScaleGestureDetector sees it.
                     // Unconditionally feed the detector a CANCEL: it reverts any in-flight scale to
                     // the committed zoom, AND closes a buffered pointer-down from a fast-settling palm
                     // that landed before the detector crossed its minSpan (so isInProgress was still
@@ -1187,17 +1188,6 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         msSinceStylus = SystemClock.uptimeMillis() - lastStylusMs,
         palmRejectMs = PALM_REJECT_MS,
     )
-
-    /** Largest contact-major across all active pointers (px) — fed to [PalmFilter.isPinchPalm] so a
-     *  palm-sized contact in a two-finger gesture suppresses the pinch even when the pen is idle.
-     *  Validated on the Nomad (palms report major ≈140–240px). A model/firmware that under-reports
-     *  touch-major (0) makes the size term no-op, safely falling back to the pen-proximity gate — no
-     *  false zoom, but the pen-idle palm hole isn't closed there; re-characterize per device. */
-    private fun maxTouchMajor(e: MotionEvent): Float {
-        var m = 0f
-        for (i in 0 until e.pointerCount) m = maxOf(m, e.getTouchMajor(i))
-        return m
-    }
 
     /**
      * Wrap a chrome view (bottom bar, sheets) so a resting palm can't press its controls — the
