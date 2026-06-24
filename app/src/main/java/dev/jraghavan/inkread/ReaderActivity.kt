@@ -239,6 +239,12 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
      *  user dragged" and would otherwise pan on a rejected palm's UP. MOVE/UP bail while this is set;
      *  cleared on the next DOWN / UP (#49). */
     private var fingerIsPalm = false
+    /** Latched once a gesture has been multi-pointer (a pinch). A pointer lifting from 2→1 fingers
+     *  arrives as ACTION_POINTER_UP at pointerCount==2, which the single-finger dispatch skips, so the
+     *  surviving finger's trailing MOVEs would otherwise pan from the ORIGINAL down's stale origin and
+     *  jump the page. While set, single-finger pan/tap is suppressed until a fresh DOWN starts a clean
+     *  gesture; reset on ACTION_DOWN (#49). */
+    private var gestureWasMultiTouch = false
     private val fingerLongPress = Runnable {
         // A genuine 500ms hold (UP cancels this for a tap; a beyond-slop MOVE cancels it for a
         // swipe). Mark it a long-press FIRST so the eventual UP never falls through to a page flip —
@@ -381,10 +387,17 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
                     else -> captureStylus(event) // PEN (Highlighter is still P2)
                 }
             } else if (toolType == MotionEvent.TOOL_TYPE_FINGER) {
-                // Clear the palm latch at the start of every fresh gesture, so a latch stranded by a
-                // gesture whose terminal UP was consumed elsewhere (minimap, or a 1→2→1 pointer
-                // transition that bypassed onFingerUp) can never kill the next real gesture (#49).
-                if (event.actionMasked == MotionEvent.ACTION_DOWN) fingerIsPalm = false
+                // A fresh primary DOWN starts a clean gesture: clear both per-gesture latches. This
+                // also rescues a latch stranded by a gesture whose terminal UP was consumed elsewhere
+                // (minimap, or a 1→2→1 transition that bypassed onFingerUp), which would otherwise kill
+                // the next gesture (#49).
+                if (event.actionMasked == MotionEvent.ACTION_DOWN) {
+                    fingerIsPalm = false; gestureWasMultiTouch = false
+                }
+                // Latch once this gesture goes multi-pointer: after a pinch, a 2→1 lift leaves the
+                // surviving finger with the original down's stale origin, so its trailing pan must be
+                // suppressed until a fresh DOWN (#49). Set in BOTH branches below via this single check.
+                if (event.pointerCount > 1) gestureWasMultiTouch = true
                 // Pinch-zoom must not fire while writing: the resting hand/palm registers as a
                 // 2-finger contact and the ScaleGestureDetector would zoom the page out from under
                 // the pen. Gate the detector with the same palm rule used for taps/pan (PalmFilter)
@@ -1234,6 +1247,8 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             fingerIsPalm = true
             return
         }
+        // After a pinch, the surviving finger's origin is stale — don't pan until a fresh gesture.
+        if (gestureWasMultiTouch) return
         lastFingerMoveMs = SystemClock.uptimeMillis()
         if (!fingerMoved && kotlin.math.hypot(e.x - fingerDownX, e.y - fingerDownY) > FINGER_MOVE_SLOP_PX) {
             fingerMoved = true
@@ -1254,6 +1269,9 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         // already applies below, here extended to the zoomed-in pan commit). This is the core of the
         // "resting hand pans/zooms the page" fix (#49).
         if (fingerIsPalm || penActiveForPinch()) { fingerIsPalm = false; return }
+        // After a pinch, a 2→1 lift leaves a stale origin: commit no pan/tap for the trailing finger
+        // (a fresh DOWN clears this latch and restarts clean panning) (#49).
+        if (gestureWasMultiTouch) return
         // Zoomed in: a drag pans the page; a still tap does nothing (no page-turn while zoomed).
         if (zoom > 1f) {
             if (fingerMoved) {
