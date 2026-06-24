@@ -178,6 +178,18 @@ class PalmFilterTest {
         assertTrue(pinchPalm(penActive = false, maxMajorPx = panel * frac))
     }
 
+    @Test fun pinchAllowedJustBelowSizeBoundary() {
+        // The asymmetric half of the boundary: one px under frac*height is NOT a palm, so a real
+        // pinch isn't eaten. Guards against a regression flipping `>=` to `>` or shifting the gate up.
+        assertFalse(pinchPalm(penActive = false, maxMajorPx = panel * frac - 1f))
+    }
+
+    @Test fun pinchPalmZeroMajorIsNotPalmWhilePenIdle() {
+        // Floor: a device that reports no contact major (0) must fall back to penActive only — never
+        // a palm by size — so a genuine pinch isn't blocked where touch-major is unreported.
+        assertFalse(pinchPalm(penActive = false, maxMajorPx = 0f))
+    }
+
     @Test fun pinchPalmUnknownViewHeightSkipsSizeTerm() {
         // Before the surface is sized, the size term must not fire on a huge major — only penActive
         // can suppress, so a genuine early pinch isn't wrongly eaten.

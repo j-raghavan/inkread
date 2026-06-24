@@ -381,6 +381,10 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
                     else -> captureStylus(event) // PEN (Highlighter is still P2)
                 }
             } else if (toolType == MotionEvent.TOOL_TYPE_FINGER) {
+                // Clear the palm latch at the start of every fresh gesture, so a latch stranded by a
+                // gesture whose terminal UP was consumed elsewhere (minimap, or a 1→2→1 pointer
+                // transition that bypassed onFingerUp) can never kill the next real gesture (#49).
+                if (event.actionMasked == MotionEvent.ACTION_DOWN) fingerIsPalm = false
                 // Pinch-zoom must not fire while writing: the resting hand/palm registers as a
                 // 2-finger contact and the ScaleGestureDetector would zoom the page out from under
                 // the pen. Gate the detector with the same palm rule used for taps/pan (PalmFilter)
@@ -391,15 +395,15 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
                     // deliberate pinch. Reject it BEFORE the ScaleGestureDetector sees it (the
                     // size term catches a palm-heel pinch that lands after the pen-active window has
                     // lapsed — the "resting hand zooms the page" report, #49).
-                    // A real pinch already in flight when the pen engaged: neutralise the accumulated
-                    // scale and cancel so onScaleEnd reverts to the committed zoom (no half-scaled
-                    // preview lingers, and the detector doesn't stay stuck in-progress).
-                    if (scaleDetector.isInProgress) {
-                        liveScale = 1f
-                        val cancel = MotionEvent.obtain(event).apply { action = MotionEvent.ACTION_CANCEL }
-                        scaleDetector.onTouchEvent(cancel)
-                        cancel.recycle()
-                    }
+                    // Unconditionally feed the detector a CANCEL: it reverts any in-flight scale to
+                    // the committed zoom, AND closes a buffered pointer-down from a fast-settling palm
+                    // that landed before the detector crossed its minSpan (so isInProgress was still
+                    // false) — gating the cancel on isInProgress would strand that pointer. CANCEL on
+                    // an idle detector is a documented no-op, so always sending it is safe.
+                    liveScale = 1f
+                    val cancel = MotionEvent.obtain(event).apply { action = MotionEvent.ACTION_CANCEL }
+                    scaleDetector.onTouchEvent(cancel)
+                    cancel.recycle()
                     // Likewise drop any in-flight minimap interaction: its latches are reset ONLY
                     // inside handleMinimapTouch's UP path, which we bypass here — leaving them stuck
                     // would make handleMinimapTouch swallow the next finger gesture once the pen idles.
@@ -1172,7 +1176,10 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
     )
 
     /** Largest contact-major across all active pointers (px) — fed to [PalmFilter.isPinchPalm] so a
-     *  palm-sized contact in a two-finger gesture suppresses the pinch even when the pen is idle. */
+     *  palm-sized contact in a two-finger gesture suppresses the pinch even when the pen is idle.
+     *  Validated on the Nomad (palms report major ≈140–240px). A model/firmware that under-reports
+     *  touch-major (0) makes the size term no-op, safely falling back to the pen-proximity gate — no
+     *  false zoom, but the pen-idle palm hole isn't closed there; re-characterize per device. */
     private fun maxTouchMajor(e: MotionEvent): Float {
         var m = 0f
         for (i in 0 until e.pointerCount) m = maxOf(m, e.getTouchMajor(i))
@@ -1219,11 +1226,12 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
     /** Finger MOVE: track liveness; beyond the slop it's a swipe/scroll, not a tap or hold. When
      *  zoomed, a drag live-previews the pan (cached bitmap translated); committed on UP. */
     private fun onFingerMove(e: MotionEvent) {
-        if (fingerIsPalm) return // latched palm — never preview a pan
-        // Re-validate: a contact that read small at DOWN can grow into a palm as the hand settles.
-        if (isPalmTouch(e)) {
-            diag { "DIAG palm-reject move major=${e.getTouchMajor(0)}" }
-            fingerIsPalm = true; fingerMoved = true
+        // Bail (and latch) if already a palm, or if the pen engages mid-gesture (the writing hand
+        // settling while the finger is still down). Re-validate pen-proximity only — NOT contact
+        // size: a fast/flat legit swipe can momentarily spike touch-major past the palm fraction, and
+        // re-checking size every MOVE would make one spurious sample kill the swipe (#49 review).
+        if (fingerIsPalm || penActiveForPinch()) {
+            fingerIsPalm = true
             return
         }
         lastFingerMoveMs = SystemClock.uptimeMillis()
@@ -1241,9 +1249,11 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
     /** Finger UP: a quick, still press is a navigation tap (page zones / link / TOC). */
     private fun onFingerUp(e: MotionEvent) {
         mainHandler.removeCallbacks(fingerLongPress)
-        // A palm (latched at DOWN/MOVE, or only now grown to palm size) commits nothing — no pan, no
-        // tap. This is the core of the "resting hand pans/zooms the page" fix (#49).
-        if (fingerIsPalm || isPalmTouch(e)) { fingerIsPalm = false; return }
+        // A palm commits nothing — no pan, no tap. Bail if latched, or if the pen is active (a finger
+        // lift within PALM_REJECT_MS of pen activity is the writing hand; same RR19 rule the tap path
+        // already applies below, here extended to the zoomed-in pan commit). This is the core of the
+        // "resting hand pans/zooms the page" fix (#49).
+        if (fingerIsPalm || penActiveForPinch()) { fingerIsPalm = false; return }
         // Zoomed in: a drag pans the page; a still tap does nothing (no page-turn while zoomed).
         if (zoom > 1f) {
             if (fingerMoved) {
