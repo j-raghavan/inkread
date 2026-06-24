@@ -18,3 +18,10 @@ ego-tree = "0.11"
 # ab_glyph (Apache-2.0/MIT, pure Rust) — glyph advances (Metrics) + outline rasterization for the
 # reflow renderer; cross-compiles to aarch64-android with no native font lib.
 ab_glyph = "0.2"
+# serde (MIT/Apache) — derive on the laid-out page model so a whole pagination can be cached to the
+# `book.inkread/` sidecar and rehydrated on reopen (ADR-INKREAD-0013 D3).
+serde = { workspace = true }
+
+[dev-dependencies]
+# serde_json backs the page-model round-trip test (the cache itself lives in reader-core).
+serde_json = { workspace = true }

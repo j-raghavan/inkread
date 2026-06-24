@@ -17,6 +17,8 @@
 //! font rasterizer; Phase 4 plugs a real glyph-advance implementation (skrifa/swash) and renders the
 //! [`Page`]s into a `PixelBuffer`.
 
+use serde::{Deserialize, Serialize};
+
 use crate::content::{Block, Inline};
 
 /// Glyph-advance measurement for a font (Phase 4 supplies a real implementation; tests use a
@@ -131,7 +133,7 @@ impl LayoutOpts {
 /// derived from character counts, **not pixels**, so they are invariant under a font-size / margin /
 /// alignment change — the property a highlight or Digest entry needs to re-resolve to the same text
 /// after the page reflows (golden `SPEC-INKREAD.md` RR8-FR2/AC1).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct SourceAnchor {
     /// Reading-order index of the source block in the chapter.
     pub block: usize,
@@ -141,7 +143,7 @@ pub struct SourceAnchor {
 
 /// A positioned run of text on a line. `x`/`top` are relative to the page's **content origin** (the
 /// top-left after the margin); the renderer adds `opts.margin`. Baseline ≈ `top + size_px`.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PlacedRun {
     pub x: f32,
     pub text: String,
@@ -155,7 +157,7 @@ pub struct PlacedRun {
 
 /// One laid-out line: its `top` (content-relative), `height` (the line box), and positioned runs.
 /// A horizontal rule line carries `rule = true` and no runs.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LayoutLine {
     pub top: f32,
     pub height: f32,
@@ -164,7 +166,7 @@ pub struct LayoutLine {
 }
 
 /// A laid-out page: the lines that fall within the content box.
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct Page {
     pub lines: Vec<LayoutLine>,
 }
@@ -753,6 +755,20 @@ mod tests {
             para_gap: 0.0,
             align: Align::Left,
         }
+    }
+
+    #[test]
+    fn pages_round_trip_through_json() {
+        // The pagination cache (ADR-INKREAD-0013 D3) persists laid pages; serialization must be
+        // lossless so a rehydrated page renders/selects identically (anchors included).
+        let opts = LayoutOpts::new(400.0, 600.0, 16.0);
+        let blocks = parse_blocks(
+            "<html><body><h2>Title</h2><p>one two three</p><ul><li>a</li></ul></body></html>",
+        );
+        let pages = paginate(&blocks, &opts, &Mono);
+        let json = serde_json::to_string(&pages).expect("serialize");
+        let back: Vec<Page> = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back, pages, "laid pages round-trip losslessly");
     }
 
     #[test]
