@@ -1723,16 +1723,12 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         // window that steals focus and drops the overlay — the ringed swatch is the feedback.
         if (chosen == Tool.HIGHLIGHTER && tool == Tool.HIGHLIGHTER) {
             if (colorPalette.isShowing()) collapseColorPalette()
-            else colorPalette.show("Highlighter", HIGHLIGHT_COLORS, HIGHLIGHT_COLOR_NAMES, hlColorIdx) { idx ->
-                hlColorIdx = idx
-            }
+            else openColorColumn("Highlighter", HIGHLIGHT_COLORS, HIGHLIGHT_COLOR_NAMES, hlColorIdx) { hlColorIdx = it }
             return true
         }
         if (chosen == Tool.PEN && tool == Tool.PEN) {
             if (colorPalette.isShowing()) collapseColorPalette()
-            else colorPalette.show("Pen", PEN_COLORS, PEN_COLOR_NAMES, penColorIdx) { idx ->
-                penColorIdx = idx
-            }
+            else openColorColumn("Pen", PEN_COLORS, PEN_COLOR_NAMES, penColorIdx) { penColorIdx = it }
             return true
         }
         if (chosen == tool) return true
@@ -1771,6 +1767,19 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
      */
     private fun collapseColorPalette() {
         colorPalette.dismiss()
+        postJump(currentPage)
+    }
+
+    /**
+     * Mount the colour column, then repaint the current page — the SHOW-side mirror of
+     * [collapseColorPalette]. Adding the overlay view triggers the firmware's full auto-refresh, which
+     * repaints the page from the app surface and wipes the live-ink overlay; strokes drawn since the
+     * last page render live ONLY on that overlay, so without this repaint they vanish until a page turn
+     * re-bakes them (the "tap Pen → annotations disappear" report, #50). [postJump] of the current page
+     * re-bakes the committed strokes (renderAndBlit) and drives a real EPD frame, restoring them.
+     */
+    private fun openColorColumn(title: String, colors: IntArray, names: Array<String>, sel: Int, onPick: (Int) -> Unit) {
+        colorPalette.show(title, colors, names, sel, onPick)
         postJump(currentPage)
     }
 
