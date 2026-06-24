@@ -14,6 +14,7 @@ pub mod error;
 pub mod ink_wire;
 pub mod persistence;
 pub mod policy;
+pub mod position;
 pub mod render;
 pub mod session;
 pub mod settings;
