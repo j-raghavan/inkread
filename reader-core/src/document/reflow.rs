@@ -229,6 +229,19 @@ impl EpubBackend {
         best
     }
 
+    /// The `[start, end]` [`PinPosition`] pair a selection rectangle covers on `page` — the anchor a
+    /// highlight / note / Digest range stores (RR11-FR4 / RR12). `None` when nothing is selected.
+    #[allow(dead_code)]
+    pub(crate) fn selection_pins(
+        &self,
+        page: usize,
+        rect: NormRect,
+    ) -> Option<(PinPosition, PinPosition)> {
+        let chapter = self.chapter_of(page);
+        let (start, end) = text_select::anchored_span(&self.page_chars(page), rect)?;
+        Some((self.pin_at(chapter, start), self.pin_at(chapter, end)))
+    }
+
     /// The chapter index that global `page` falls in (the last chapter whose start ≤ page).
     fn chapter_of(&self, page: usize) -> usize {
         let laid = self.laid.borrow();
@@ -507,6 +520,30 @@ mod tests {
             pin.chapter_index.max(0) as usize
         );
         let _ = moved_page;
+    }
+
+    #[test]
+    fn selection_pins_span_in_order_and_survive_a_font_size_change() {
+        let b = EpubBackend::open(SAMPLE.to_vec(), vp(400, 600)).unwrap();
+        let _ = render(&b, 0, 400, 600);
+        // A band over the top of page 0 selects the opening lines.
+        let band = NormRect {
+            x0: 0.0,
+            y0: 0.0,
+            x1: 1.0,
+            y1: 0.5,
+        };
+        let (start, end) = b.selection_pins(0, band).expect("a selection on page 0");
+        assert!(start <= end, "start pin precedes end pin");
+        let (sc, ec) = (
+            char_at(&b, &start).expect("start char"),
+            char_at(&b, &end).expect("end char"),
+        );
+
+        // Reflow at a larger size: the same span endpoints re-resolve to the same characters.
+        b.set_text_scale(1.7, 0).unwrap();
+        assert_eq!(char_at(&b, &start), Some(sc), "start re-anchors");
+        assert_eq!(char_at(&b, &end), Some(ec), "end re-anchors");
     }
 
     #[test]
