@@ -1030,6 +1030,18 @@ impl ReaderSession {
         Ok(())
     }
 
+    /// Flush the outgoing page's ink on a page turn, retrying a bounded number of times so a single
+    /// transient IO hiccup (EINTR, a momentary lock) doesn't cost the user their ink — then giving
+    /// up so navigation never blocks on a hard failure (ENOSPC). Degrade-safely, RR20 / #50.
+    fn flush_ink_retrying(&mut self) {
+        const ATTEMPTS: u32 = 3;
+        for _ in 0..ATTEMPTS {
+            if self.flush_ink().is_ok() {
+                return;
+            }
+        }
+    }
+
     /// Persist the current page's layer to the store (RR20-FR2). No-op without a store.
     fn autosave_ink(&self) -> CoreResult<()> {
         if let Some(store) = &self.ink {
@@ -1169,13 +1181,14 @@ impl ReaderSession {
     /// Swap the in-memory layer to the current page's stored ink on a page change. Any pending
     /// stroke is dropped; the load degrades safely (see [`Self::load_layer_for_page`]).
     fn load_ink_for_current_page(&mut self) {
-        // In deferred mode the outgoing page may hold unsaved edits — flush before the layer is
-        // swapped out, or they'd be lost on the page turn. Best-effort, matching this module's
-        // degrade-safely stance: a transient write error must not block navigation.
-        if self.ink_dirty {
-            let _ = self.flush_ink(); // saves under `layer_page` (the outgoing page), not the new one
+        // A page turn must not silently drop an in-progress stroke (#50 — "disappearing strokes"):
+        // COMMIT it to the outgoing page instead of cancelling. Then persist the outgoing page
+        // before the layer is swapped — a just-committed stroke, or (deferred mode) pending edits.
+        // The flush saves under `layer_page` (the outgoing page), not the new one.
+        let committed = self.layer.finish_stroke().is_some();
+        if committed || self.ink_dirty {
+            self.flush_ink_retrying();
         }
-        self.layer.cancel_stroke();
         self.layer = self.load_layer_for_page(self.page);
         self.layer_page = self.page;
         // A page turn resets the view to fit (RR5-FR3): the old pan/zoom is meaningless on a new page.
