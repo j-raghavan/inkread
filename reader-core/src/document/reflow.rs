@@ -19,6 +19,8 @@ use inkread_epub::{parse_blocks, Block, EpubPackage, NavPoint};
 use crate::document::text_select::{self, CharBox, NormRect, TextAnchor, TextSelection};
 use crate::document::{Document, DocumentMetadata, SearchMatch, TocEntry};
 use crate::error::{CoreError, CoreResult};
+use crate::persistence::pagination_cache::{CachedPagination, PaginationCache};
+use crate::persistence::sidecar::SidecarPaths;
 use crate::position::{PageRange, PinPosition};
 use crate::render::PixelBuffer;
 
@@ -59,11 +61,36 @@ pub struct EpubBackend {
     align: Cell<Align>,
     /// The current pagination; recomputed when the viewport or scale changes.
     laid: RefCell<Laid>,
+    /// Optional disk pagination cache (ADR-INKREAD-0013 D3): when present, a layout is loaded from /
+    /// written to `book.inkread/pagination/` keyed by `layout_digest`, so reopening at the same
+    /// viewport + style skips re-pagination. Absent ⇒ always lay out fresh.
+    cache: Option<PaginationCache>,
 }
 
 impl EpubBackend {
-    /// Parse `bytes` and paginate for the initial `viewport`. Maps parse failures to a typed error.
+    /// Parse `bytes` and paginate for the initial `viewport` (no pagination cache).
     pub fn open(bytes: Vec<u8>, viewport: crate::render::Viewport) -> CoreResult<Self> {
+        Self::open_inner(bytes, viewport, None)
+    }
+
+    /// Like [`Self::open`] but backed by the document's `book.inkread/` pagination cache
+    /// (ADR-INKREAD-0013 D3): the initial layout — and every repagination — is loaded from / written
+    /// to disk keyed by `layout_digest`, so reopening at the same viewport + style skips the layout.
+    pub fn open_with_cache(
+        bytes: Vec<u8>,
+        viewport: crate::render::Viewport,
+        paths: &SidecarPaths,
+    ) -> CoreResult<Self> {
+        Self::open_inner(bytes, viewport, Some(PaginationCache::new(paths)))
+    }
+
+    /// Parse `bytes` and paginate for `viewport`, consulting `cache` if present. Maps parse failures
+    /// to a typed error.
+    fn open_inner(
+        bytes: Vec<u8>,
+        viewport: crate::render::Viewport,
+        cache: Option<PaginationCache>,
+    ) -> CoreResult<Self> {
         let pkg = EpubPackage::open(bytes)
             .map_err(|e| CoreError::RenderBackend(format!("epub open: {e}")))?;
         let chapters: Vec<Vec<Block>> =
@@ -74,15 +101,14 @@ impl EpubBackend {
             author: pkg.author.clone(),
         };
         let font = AbFont::default_font();
-        let laid = layout_all(
-            &chapters,
-            &font,
+        let opts = opts_for(
             viewport.width,
             viewport.height,
             BASE_FONT_PX,
             1.4,
             Align::Left,
         );
+        let laid = build_laid(cache.as_ref(), &chapters, &font, opts);
         Ok(Self {
             chapters,
             chapter_keys,
@@ -93,6 +119,7 @@ impl EpubBackend {
             line_spacing: Cell::new(1.4),
             align: Cell::new(Align::Left),
             laid: RefCell::new(laid),
+            cache,
         })
     }
 
@@ -112,15 +139,8 @@ impl EpubBackend {
                 || (laid.opts.font_px - font_px).abs() > 0.01
         };
         if needs {
-            let fresh = layout_all(
-                &self.chapters,
-                &self.font,
-                w,
-                h,
-                font_px,
-                self.line_spacing.get(),
-                self.align.get(),
-            );
+            let opts = opts_for(w, h, font_px, self.line_spacing.get(), self.align.get());
+            let fresh = build_laid(self.cache.as_ref(), &self.chapters, &self.font, opts);
             *self.laid.borrow_mut() = fresh;
         }
     }
@@ -133,15 +153,14 @@ impl EpubBackend {
             let laid = self.laid.borrow();
             (laid.opts.page_w as u32, laid.opts.page_h as u32)
         };
-        let fresh = layout_all(
-            &self.chapters,
-            &self.font,
+        let opts = opts_for(
             w,
             h,
             self.font_px(),
             self.line_spacing.get(),
             self.align.get(),
         );
+        let fresh = build_laid(self.cache.as_ref(), &self.chapters, &self.font, opts);
         let target = fresh.chapter_start.get(chapter).copied().unwrap_or(0);
         *self.laid.borrow_mut() = fresh;
         Some(target)
@@ -339,18 +358,49 @@ impl Document for EpubBackend {
 }
 
 /// Paginate every chapter for `(w, h, font_px, line_spacing, align)`; each chapter starts a page.
-fn layout_all(
-    chapters: &[Vec<Block>],
-    font: &AbFont,
-    w: u32,
-    h: u32,
-    font_px: f32,
-    line_spacing: f32,
-    align: Align,
-) -> Laid {
+/// Build the [`LayoutOpts`] for a viewport + typography — the single place opts are assembled, so the
+/// `layout_digest` computed for the cache key (ADR-INKREAD-0013) always matches what `layout_all`
+/// paginates with.
+fn opts_for(w: u32, h: u32, font_px: f32, line_spacing: f32, align: Align) -> LayoutOpts {
     let mut opts = LayoutOpts::new(w as f32, h as f32, font_px);
     opts.line_spacing = line_spacing;
     opts.align = align;
+    opts
+}
+
+/// Paginate the whole book for `opts`, returning the cache-on-miss layout. Loads from `cache` (keyed
+/// by `opts.layout_digest()`) when present, else lays out and best-effort writes the result back
+/// (ADR-INKREAD-0013 D3). A cache write failure is non-fatal — the in-memory layout is still used.
+fn build_laid(
+    cache: Option<&PaginationCache>,
+    chapters: &[Vec<Block>],
+    font: &AbFont,
+    opts: LayoutOpts,
+) -> Laid {
+    let digest = opts.layout_digest();
+    if let Some(c) = cache {
+        if let Some(cached) = c.load(digest) {
+            return Laid {
+                opts,
+                pages: cached.pages,
+                chapter_start: cached.chapter_start,
+            };
+        }
+    }
+    let laid = layout_all(chapters, font, opts);
+    if let Some(c) = cache {
+        let _ = c.store(
+            digest,
+            &CachedPagination {
+                chapter_start: laid.chapter_start.clone(),
+                pages: laid.pages.clone(),
+            },
+        );
+    }
+    laid
+}
+
+fn layout_all(chapters: &[Vec<Block>], font: &AbFont, opts: LayoutOpts) -> Laid {
     let mut pages = Vec::new();
     let mut chapter_start = Vec::with_capacity(chapters.len());
     for blocks in chapters {
@@ -585,6 +635,72 @@ mod tests {
             ranges.windows(2).all(|w| w[0].start <= w[1].start),
             "page starts ascend"
         );
+    }
+
+    /// Self-cleaning temp dir for the pagination-cache wiring tests.
+    struct TempDir {
+        path: std::path::PathBuf,
+    }
+    impl TempDir {
+        fn new(tag: &str) -> Self {
+            let mut path = std::env::temp_dir();
+            path.push(format!("inkread-reflowcache-{tag}-{:p}", &tag));
+            std::fs::create_dir_all(&path).unwrap();
+            Self { path }
+        }
+    }
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
+
+    #[test]
+    fn open_with_cache_writes_then_reload_matches() {
+        let tmp = TempDir::new("write");
+        let paths = SidecarPaths::from_root(&tmp.path);
+        let b = EpubBackend::open_with_cache(SAMPLE.to_vec(), vp(400, 600), &paths).unwrap();
+        let n = b.page_count();
+        // The miss path wrote the layout to disk; it reloads as the same pagination.
+        let digest = opts_for(400, 600, BASE_FONT_PX, 1.4, Align::Left).layout_digest();
+        let loaded = PaginationCache::new(&paths)
+            .load(digest)
+            .expect("cache written on first open");
+        assert_eq!(
+            loaded.pages.len(),
+            n,
+            "cached page count matches the layout"
+        );
+    }
+
+    #[test]
+    fn open_with_cache_uses_a_planted_cache_instead_of_laying_out() {
+        // Definitive hit proof: plant a cache under the digest the backend will compute, then open —
+        // the backend must report the planted pagination, not a fresh SAMPLE layout.
+        let tmp = TempDir::new("hit");
+        let paths = SidecarPaths::from_root(&tmp.path);
+        let digest = opts_for(400, 600, BASE_FONT_PX, 1.4, Align::Left).layout_digest();
+        let planted = CachedPagination {
+            chapter_start: vec![0],
+            pages: vec![Page::default(), Page::default(), Page::default()],
+        };
+        PaginationCache::new(&paths)
+            .store(digest, &planted)
+            .unwrap();
+
+        let b = EpubBackend::open_with_cache(SAMPLE.to_vec(), vp(400, 600), &paths).unwrap();
+        assert_eq!(
+            b.page_count(),
+            3,
+            "used the planted cache, not a fresh layout"
+        );
+    }
+
+    #[test]
+    fn open_without_cache_is_unaffected() {
+        // The no-cache constructor still works and writes nothing.
+        let b = EpubBackend::open(SAMPLE.to_vec(), vp(400, 600)).unwrap();
+        assert!(b.page_count() >= 2);
     }
 
     #[test]

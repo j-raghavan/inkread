@@ -9,6 +9,7 @@
 
 pub mod identity;
 pub mod ink_store;
+pub(crate) mod pagination_cache;
 pub mod sidecar;
 pub mod sqlite;
 

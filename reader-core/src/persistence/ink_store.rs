@@ -104,8 +104,9 @@ fn sync_dir(dir: &Path) {
 }
 
 /// Atomically replace `path` with `bytes`: write a flushed `*.tmp` sibling, rename over the target,
-/// then fsync the parent directory so the rename survives power loss. The parent must exist.
-fn atomic_write(path: &Path, bytes: &[u8]) -> CoreResult<()> {
+/// then fsync the parent directory so the rename survives power loss. The parent must exist. Shared
+/// with the pagination cache (ADR-INKREAD-0013) so both sidecar writers are crash-safe the same way.
+pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> CoreResult<()> {
     let mut tmp_name: OsString = path.as_os_str().to_owned();
     tmp_name.push(".tmp");
     let tmp = Path::new(&tmp_name);
