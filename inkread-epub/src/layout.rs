@@ -97,6 +97,22 @@ impl LayoutOpts {
     }
 }
 
+/// A reflow-stable source anchor for a placed run/glyph (ADR-INKREAD-0012; feeds RR6 `PinPosition`).
+///
+/// `block` is the reading-order index of the source [`Block`](crate::content::Block) in the chapter
+/// (the v1 `xpath` — stable because reflow never reorders blocks). `char_offset` is the
+/// **chapter-relative** character offset of the run's (or this glyph's) first character. Both are
+/// derived from character counts, **not pixels**, so they are invariant under a font-size / margin /
+/// alignment change — the property a highlight or Digest entry needs to re-resolve to the same text
+/// after the page reflows (golden `SPEC-INKREAD.md` RR8-FR2/AC1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SourceAnchor {
+    /// Reading-order index of the source block in the chapter.
+    pub block: usize,
+    /// Chapter-relative character offset of the first character.
+    pub char_offset: usize,
+}
+
 /// A positioned run of text on a line. `x`/`top` are relative to the page's **content origin** (the
 /// top-left after the margin); the renderer adds `opts.margin`. Baseline ≈ `top + size_px`.
 #[derive(Debug, Clone, PartialEq)]
@@ -107,6 +123,8 @@ pub struct PlacedRun {
     pub bold: bool,
     pub italic: bool,
     pub href: Option<String>,
+    /// Source anchor of this run's first character (ADR-INKREAD-0012).
+    pub anchor: SourceAnchor,
 }
 
 /// One laid-out line: its `top` (content-relative), `height` (the line box), and positioned runs.
@@ -141,15 +159,26 @@ fn heading_scale(level: u8) -> f32 {
 #[must_use]
 pub fn paginate(blocks: &[Block], opts: &LayoutOpts, m: &dyn Metrics) -> Vec<Page> {
     let mut pager = Pager::new(opts);
-    for block in blocks {
+    // Chapter-relative character cursor, advanced as source text is consumed in reading order, so
+    // every placed run/glyph carries a font-invariant offset (ADR-INKREAD-0012).
+    let mut cursor = 0usize;
+    for (block_index, block) in blocks.iter().enumerate() {
         match block {
             Block::Heading { level, content } => {
                 let size = opts.font_px * heading_scale(*level);
-                pager.add_paragraph(content, size, 0.0, true, m);
+                pager.add_paragraph(content, size, 0.0, true, block_index, &mut cursor, m);
                 pager.gap(opts.para_gap);
             }
             Block::Paragraph { content } => {
-                pager.add_paragraph(content, opts.font_px, 0.0, false, m);
+                pager.add_paragraph(
+                    content,
+                    opts.font_px,
+                    0.0,
+                    false,
+                    block_index,
+                    &mut cursor,
+                    m,
+                );
                 pager.gap(opts.para_gap);
             }
             Block::ListItem {
@@ -162,7 +191,7 @@ pub fn paginate(blocks: &[Block], opts: &LayoutOpts, m: &dyn Metrics) -> Vec<Pag
                 } else {
                     "•".to_string()
                 };
-                pager.add_list_item(&marker, content, opts.font_px, m);
+                pager.add_list_item(&marker, content, opts.font_px, block_index, &mut cursor, m);
                 pager.gap(opts.para_gap * 0.4);
             }
             Block::Image { alt, .. } => {
@@ -179,7 +208,7 @@ pub fn paginate(blocks: &[Block], opts: &LayoutOpts, m: &dyn Metrics) -> Vec<Pag
                     italic: true,
                     href: None,
                 })];
-                pager.add_paragraph(&run, opts.font_px, 0.0, false, m);
+                pager.add_paragraph(&run, opts.font_px, 0.0, false, block_index, &mut cursor, m);
                 pager.gap(opts.para_gap);
             }
             Block::Rule => pager.add_rule(opts.para_gap),
@@ -244,15 +273,28 @@ impl<'o> Pager<'o> {
     }
 
     /// Lay out a paragraph/heading: greedy-break its inlines to the content width and emit lines.
+    /// `cursor` is the chapter-relative character offset, advanced as the inlines are consumed.
+    #[allow(clippy::too_many_arguments)]
     fn add_paragraph(
         &mut self,
         inlines: &[Inline],
         size: f32,
         indent: f32,
         bold_all: bool,
+        block: usize,
+        cursor: &mut usize,
         m: &dyn Metrics,
     ) {
-        let lines = break_lines(inlines, size, indent, self.opts.content_w(), bold_all, m);
+        let lines = break_lines(
+            inlines,
+            size,
+            indent,
+            self.opts.content_w(),
+            bold_all,
+            block,
+            cursor,
+            m,
+        );
         let line_h = size * self.opts.line_spacing;
         let n = lines.len();
         for (i, mut runs) in lines.into_iter().enumerate() {
@@ -268,10 +310,33 @@ impl<'o> Pager<'o> {
     }
 
     /// Lay out a list item with a hanging marker and indented body.
-    fn add_list_item(&mut self, marker: &str, inlines: &[Inline], size: f32, m: &dyn Metrics) {
+    fn add_list_item(
+        &mut self,
+        marker: &str,
+        inlines: &[Inline],
+        size: f32,
+        block: usize,
+        cursor: &mut usize,
+        m: &dyn Metrics,
+    ) {
         let marker_w = m.advance(marker, size, false, false);
         let indent = marker_w + m.advance("  ", size, false, false);
-        let mut lines = break_lines(inlines, size, indent, self.opts.content_w(), false, m);
+        // The marker is synthetic (not source text): it shares the body's start offset and does not
+        // consume cursor budget, so body offsets still map to source characters.
+        let marker_anchor = SourceAnchor {
+            block,
+            char_offset: *cursor,
+        };
+        let mut lines = break_lines(
+            inlines,
+            size,
+            indent,
+            self.opts.content_w(),
+            false,
+            block,
+            cursor,
+            m,
+        );
         // Prepend the marker to the first line at the content origin (hanging indent).
         if let Some(first) = lines.first_mut() {
             first.insert(
@@ -283,6 +348,7 @@ impl<'o> Pager<'o> {
                     bold: false,
                     italic: false,
                     href: None,
+                    anchor: marker_anchor,
                 },
             );
         } else {
@@ -293,6 +359,7 @@ impl<'o> Pager<'o> {
                 bold: false,
                 italic: false,
                 href: None,
+                anchor: marker_anchor,
             }]);
         }
         let line_h = size * self.opts.line_spacing;
@@ -309,25 +376,37 @@ impl<'o> Pager<'o> {
     }
 }
 
-/// A line-breaking token.
+/// A line-breaking token. `Word`s carry their source [`SourceAnchor`] so it can be stamped onto the
+/// resulting [`PlacedRun`].
 enum Tok<'a> {
     Word {
         text: &'a str,
         bold: bool,
         italic: bool,
         href: Option<&'a str>,
+        anchor: SourceAnchor,
     },
     Space,
     Break,
 }
 
 /// Flatten inlines into words/spaces/breaks, preserving inter-run spacing (text is already
-/// whitespace-collapsed by Phase 2, so a single ASCII space separates words).
-fn tokenize(inlines: &[Inline], bold_all: bool) -> Vec<Tok<'_>> {
+/// whitespace-collapsed by Phase 2, so a single ASCII space separates words). `cursor` advances by
+/// the chapter-relative character count as words and the spaces/breaks between them are consumed, so
+/// each word's [`SourceAnchor`] records where its first character sits (ADR-INKREAD-0012).
+fn tokenize<'a>(
+    inlines: &'a [Inline],
+    bold_all: bool,
+    block: usize,
+    cursor: &mut usize,
+) -> Vec<Tok<'a>> {
     let mut toks = Vec::new();
     for inline in inlines {
         match inline {
-            Inline::Break => toks.push(Tok::Break),
+            Inline::Break => {
+                toks.push(Tok::Break);
+                *cursor += 1; // the <br> occupies one character position
+            }
             Inline::Image { alt, .. } => {
                 let label = if alt.is_empty() { "[img]" } else { alt };
                 toks.push(Tok::Word {
@@ -335,12 +414,18 @@ fn tokenize(inlines: &[Inline], bold_all: bool) -> Vec<Tok<'_>> {
                     bold: false,
                     italic: true,
                     href: None,
+                    anchor: SourceAnchor {
+                        block,
+                        char_offset: *cursor,
+                    },
                 });
+                *cursor += label.chars().count();
             }
             Inline::Run(r) => {
                 for (i, part) in r.text.split(' ').enumerate() {
                     if i > 0 {
                         toks.push(Tok::Space);
+                        *cursor += 1; // the single collapsed space between words
                     }
                     if !part.is_empty() {
                         toks.push(Tok::Word {
@@ -348,7 +433,12 @@ fn tokenize(inlines: &[Inline], bold_all: bool) -> Vec<Tok<'_>> {
                             bold: r.bold || bold_all,
                             italic: r.italic,
                             href: r.href.as_deref(),
+                            anchor: SourceAnchor {
+                                block,
+                                char_offset: *cursor,
+                            },
                         });
+                        *cursor += part.chars().count();
                     }
                 }
             }
@@ -400,12 +490,15 @@ fn align_line(
 /// Greedy line-break: returns each line as its positioned runs (x relative to content origin; the
 /// body is offset by `indent`). Words wider than the available width are placed on their own line
 /// (not split — hyphenation is a later refinement).
+#[allow(clippy::too_many_arguments)]
 fn break_lines(
     inlines: &[Inline],
     size: f32,
     indent: f32,
     content_w: f32,
     bold_all: bool,
+    block: usize,
+    cursor: &mut usize,
     m: &dyn Metrics,
 ) -> Vec<Vec<PlacedRun>> {
     let avail = (content_w - indent).max(1.0);
@@ -415,7 +508,7 @@ fn break_lines(
     let mut x = 0.0f32; // offset within the body column (excludes indent)
     let mut need_space = false;
 
-    for tok in tokenize(inlines, bold_all) {
+    for tok in tokenize(inlines, bold_all, block, cursor) {
         match tok {
             Tok::Break => {
                 if !cur.is_empty() {
@@ -430,6 +523,7 @@ fn break_lines(
                 bold,
                 italic,
                 href,
+                anchor,
             } => {
                 let ww = m.advance(text, size, bold, italic);
                 let place = |x: f32, cur: &mut Vec<PlacedRun>| {
@@ -440,6 +534,7 @@ fn break_lines(
                         bold,
                         italic,
                         href: href.map(str::to_string),
+                        anchor,
                     });
                 };
                 if cur.is_empty() {
@@ -610,5 +705,104 @@ mod tests {
     #[test]
     fn empty_blocks_make_no_pages() {
         assert!(paginate(&[], &LayoutOpts::new(400.0, 600.0, 16.0), &Mono).is_empty());
+    }
+
+    /// Collect every placed run as `(block, char_offset, text)` in reading order.
+    fn run_anchors(pages: &[Page]) -> Vec<(usize, usize, String)> {
+        pages
+            .iter()
+            .flat_map(|p| p.lines.iter())
+            .flat_map(|l| l.runs.iter())
+            .map(|r| (r.anchor.block, r.anchor.char_offset, r.text.clone()))
+            .collect()
+    }
+
+    fn wide(font_px: f32) -> LayoutOpts {
+        LayoutOpts {
+            page_w: 100_000.0,
+            page_h: 100_000.0,
+            margin: 0.0,
+            font_px,
+            line_spacing: 1.0,
+            para_gap: 0.0,
+            align: Align::Left,
+        }
+    }
+
+    #[test]
+    fn run_anchors_track_chapter_character_offsets() {
+        // "alpha"(5)@0, space@5, "beta"(4)@6, space@10, "gamma"@11.
+        let pages = paginate(&[para("alpha beta gamma")], &wide(10.0), &Mono);
+        assert_eq!(
+            run_anchors(&pages),
+            vec![
+                (0, 0, "alpha".into()),
+                (0, 6, "beta".into()),
+                (0, 11, "gamma".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn block_index_increments_and_offset_continues_across_blocks() {
+        // block 0 "one two": one@0, two@4 → cursor 7; block 1 "three"@7.
+        let pages = paginate(&[para("one two"), para("three")], &wide(10.0), &Mono);
+        assert_eq!(
+            run_anchors(&pages),
+            vec![
+                (0, 0, "one".into()),
+                (0, 4, "two".into()),
+                (1, 7, "three".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn list_marker_shares_body_offset_and_does_not_consume_budget() {
+        let pages = paginate(
+            &[
+                Block::ListItem {
+                    ordered: true,
+                    index: 1,
+                    content: vec![Inline::Run(TextRun {
+                        text: "first".into(),
+                        bold: false,
+                        italic: false,
+                        href: None,
+                    })],
+                },
+                para("after"),
+            ],
+            &LayoutOpts::new(1000.0, 1000.0, 10.0),
+            &Mono,
+        );
+        let anchors = run_anchors(&pages);
+        // Marker "1." and body "first" both anchor at offset 0 of block 0; the marker adds no budget,
+        // so "after" (block 1) starts at 5 (= len("first")), not 7.
+        assert_eq!(anchors[0], (0, 0, "1.".into()), "marker shares body start");
+        assert_eq!(anchors[1], (0, 0, "first".into()), "body at block start");
+        assert_eq!(
+            anchors[2],
+            (1, 5, "after".into()),
+            "marker consumed no offset"
+        );
+    }
+
+    #[test]
+    fn run_anchors_are_font_size_invariant() {
+        // Wrapping differs by size, but each word keeps its (block, char_offset) — the reflow-stable
+        // property a highlight/Digest anchor relies on (ADR-INKREAD-0012).
+        let blocks = [
+            para("the quick brown fox jumps over"),
+            para("the lazy dog sleeps soundly"),
+        ];
+        let narrow = |fp: f32| {
+            let opts = LayoutOpts {
+                page_w: 60.0,
+                ..wide(fp)
+            };
+            run_anchors(&paginate(&blocks, &opts, &Mono))
+        };
+        assert_eq!(narrow(10.0), narrow(20.0));
     }
 }

@@ -16,7 +16,7 @@
 
 use ab_glyph::{point, Font, FontVec, PxScale, ScaleFont};
 
-use crate::layout::{LayoutOpts, Metrics, Page};
+use crate::layout::{LayoutOpts, Metrics, Page, SourceAnchor};
 
 /// The bundled default reading face — Spectral Regular (SIL OFL 1.1; see `fonts/OFL.txt`).
 const DEFAULT_FONT: &[u8] = include_bytes!("../fonts/Spectral-Regular.ttf");
@@ -150,6 +150,10 @@ pub struct PlacedGlyph {
     pub y0: f32,
     pub x1: f32,
     pub y1: f32,
+    /// Reflow-stable source anchor of this glyph (ADR-INKREAD-0012): the run's `block` and the
+    /// glyph's chapter-relative `char_offset`. Lets `reader-core` mint a `PinPosition` from a
+    /// selection or a page's first glyph.
+    pub anchor: SourceAnchor,
 }
 
 /// Extract a laid-out [`Page`]'s glyphs as positioned boxes (pixel space), walking runs **exactly**
@@ -166,12 +170,13 @@ pub fn page_glyphs(page: &Page, opts: &LayoutOpts, font: &AbFont) -> Vec<PlacedG
         }
         let y0 = margin + line.top;
         let y1 = y0 + line.height;
-        let mut prev_run_end: Option<f32> = None;
+        let mut prev_run_end: Option<(f32, SourceAnchor)> = None;
         for run in &line.runs {
             let sf = font.font.as_scaled(PxScale::from(run.size_px));
             let run_start = margin + run.x;
-            // Bridge the gap to the previous run on this line with a space glyph.
-            if let Some(end) = prev_run_end {
+            // Bridge the gap to the previous run on this line with a space glyph, anchored just past
+            // the previous run's last character (its char_offset + its length = the space position).
+            if let Some((end, prev_anchor)) = prev_run_end {
                 if run_start > end {
                     out.push(PlacedGlyph {
                         ch: ' ',
@@ -179,12 +184,14 @@ pub fn page_glyphs(page: &Page, opts: &LayoutOpts, font: &AbFont) -> Vec<PlacedG
                         y0,
                         x1: run_start,
                         y1,
+                        anchor: prev_anchor,
                     });
                 }
             }
             let mut pen_x = run_start;
             let mut prev = None;
-            for ch in run.text.chars() {
+            // The glyph's chapter-relative offset = the run's first-char offset + its index in the run.
+            for (i, ch) in run.text.chars().enumerate() {
                 let id = font.font.glyph_id(ch);
                 if let Some(p) = prev {
                     pen_x += sf.kern(p, id);
@@ -196,11 +203,19 @@ pub fn page_glyphs(page: &Page, opts: &LayoutOpts, font: &AbFont) -> Vec<PlacedG
                     y0,
                     x1: pen_x + adv,
                     y1,
+                    anchor: SourceAnchor {
+                        block: run.anchor.block,
+                        char_offset: run.anchor.char_offset + i,
+                    },
                 });
                 pen_x += adv;
                 prev = Some(id);
             }
-            prev_run_end = Some(pen_x);
+            let run_end_anchor = SourceAnchor {
+                block: run.anchor.block,
+                char_offset: run.anchor.char_offset + run.text.chars().count(),
+            };
+            prev_run_end = Some((pen_x, run_end_anchor));
         }
     }
     out
@@ -279,6 +294,50 @@ mod tests {
             .take_while(|g| g.ch != ' ')
             .collect::<Vec<_>>();
         assert!(first_word.windows(2).all(|w| w[0].x0 <= w[1].x0));
+    }
+
+    #[test]
+    fn glyph_anchors_index_the_chapter_text() {
+        // On one line each glyph's char_offset equals its position in the rejoined text (words +
+        // single inter-word spaces), and all sit in block 0.
+        let font = AbFont::default_font();
+        let opts = LayoutOpts::new(4000.0, 600.0, 18.0);
+        let pages = paginate(&[paragraph("Hello reflowed world")], &opts, &font);
+        let glyphs = page_glyphs(&pages[0], &opts, &font);
+        assert_eq!(glyphs.len(), "Hello reflowed world".chars().count());
+        for (i, g) in glyphs.iter().enumerate() {
+            assert_eq!(g.anchor.block, 0);
+            assert_eq!(g.anchor.char_offset, i, "glyph {:?} at {i}", g.ch);
+        }
+    }
+
+    #[test]
+    fn glyph_anchors_are_stable_across_font_size() {
+        // The headline property (RR8-AC1 / ADR-INKREAD-0012): a character keeps its
+        // (block, char_offset) when the page reflows at a different size, so a highlight/Digest
+        // re-resolves to the same text. Synthesized inter-word spaces are layout-dependent and
+        // excluded; word characters must agree exactly.
+        let font = AbFont::default_font();
+        let blocks = [
+            paragraph("The quick brown fox jumps over"),
+            paragraph("the lazy dog sleeps soundly now"),
+        ];
+        let collect = |fp: f32| -> std::collections::BTreeMap<(usize, usize), char> {
+            let opts = LayoutOpts::new(220.0, 400.0, fp);
+            paginate(&blocks, &opts, &font)
+                .iter()
+                .flat_map(|p| page_glyphs(p, &opts, &font))
+                .filter(|g| g.ch != ' ')
+                .map(|g| ((g.anchor.block, g.anchor.char_offset), g.ch))
+                .collect()
+        };
+        let small = collect(13.0);
+        let large = collect(26.0);
+        assert!(!small.is_empty());
+        assert_eq!(
+            small, large,
+            "a glyph keeps its (block, char_offset) across a font-size change"
+        );
     }
 
     #[test]

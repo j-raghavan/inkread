@@ -56,6 +56,23 @@ pub struct CharBox {
     pub ch: char,
     /// Its normalized box.
     pub rect: NormRect,
+    /// Reflow-stable source anchor (ADR-INKREAD-0012), when the backend is reflowable. `None` for
+    /// fixed-layout PDF (its position *is* the page). Reflow backends fill it so a selection or a
+    /// page's first glyph can be turned into a `PinPosition` that survives a font-size change.
+    pub anchor: Option<TextAnchor>,
+}
+
+/// A reflow-stable text anchor: the source block (reading-order index in the chapter) and the
+/// chapter-relative character offset. Field-identical to `inkread_epub::layout::SourceAnchor` but
+/// kept as the core's own selection-domain type so the selection model isn't coupled to the
+/// renderer's glyph type (the backends convert at the boundary). The backend frames it into a full
+/// `PinPosition` (it owns the chapter index/id).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct TextAnchor {
+    /// Reading-order index of the source block in the chapter.
+    pub block: usize,
+    /// Chapter-relative character offset.
+    pub char_offset: usize,
 }
 
 /// A resolved selection: the selected text plus the boxes a shell highlights (one per text line).
@@ -263,6 +280,19 @@ pub fn text_in_rect(chars: &[CharBox], rect: NormRect) -> TextSelection {
         text: parts.join(" ").trim().to_string(),
         boxes,
     }
+}
+
+/// The reflow-stable anchors of the **first and last** glyphs a rectangle selects, in reading order
+/// — the `[start, end]` pin pair for a highlight / note / Digest range (RR11-FR4 / ADR-INKREAD-0012).
+/// Uses the same selection predicate as [`text_in_rect`]. Returns `None` when the selection is empty
+/// or its glyphs carry no anchor (a fixed-layout backend), so callers fall back to a page anchor.
+#[must_use]
+pub fn anchored_span(chars: &[CharBox], rect: NormRect) -> Option<(TextAnchor, TextAnchor)> {
+    let mut selected = chars.iter().filter(|c| rect.intersects(&c.rect));
+    let start = selected.next()?.anchor?;
+    // `end` is the last selected glyph's anchor; a single-glyph selection collapses to `start`.
+    let end = selected.next_back().and_then(|c| c.anchor).unwrap_or(start);
+    Some((start, end))
 }
 
 /// Select the text a **drag** sweeps from `start` to `end` (normalized points), the reading-order
@@ -476,8 +506,73 @@ mod tests {
                     x1: x0 + (i as f32 + 1.0) * w,
                     y1: y + h,
                 },
+                anchor: None,
             })
             .collect()
+    }
+
+    /// A single-row line whose glyphs carry consecutive chapter-relative anchors in `block`.
+    fn anchored_line(s: &str, block: usize, start_off: usize) -> Vec<CharBox> {
+        line(s, 0.0, 0.8, 0.10, 0.03)
+            .into_iter()
+            .enumerate()
+            .map(|(i, mut c)| {
+                c.anchor = Some(TextAnchor {
+                    block,
+                    char_offset: start_off + i,
+                });
+                c
+            })
+            .collect()
+    }
+
+    #[test]
+    fn anchored_span_returns_first_and_last_selected_anchors() {
+        let chars = anchored_line("hello world", 2, 100);
+        // A rect covering the whole line selects every glyph.
+        let full = NormRect {
+            x0: 0.0,
+            y0: 0.0,
+            x1: 1.0,
+            y1: 1.0,
+        };
+        let (s, e) = anchored_span(&chars, full).expect("span");
+        assert_eq!(
+            s,
+            TextAnchor {
+                block: 2,
+                char_offset: 100
+            }
+        );
+        assert_eq!(
+            e,
+            TextAnchor {
+                block: 2,
+                char_offset: 100 + "hello world".chars().count() - 1,
+            }
+        );
+    }
+
+    #[test]
+    fn anchored_span_is_none_for_unanchored_or_empty() {
+        let bare = line("abc", 0.0, 0.8, 0.10, 0.03); // anchor: None
+        let full = NormRect {
+            x0: 0.0,
+            y0: 0.0,
+            x1: 1.0,
+            y1: 1.0,
+        };
+        assert!(anchored_span(&bare, full).is_none(), "unanchored → None");
+        let empty = NormRect {
+            x0: 0.0,
+            y0: 0.9,
+            x1: 0.1,
+            y1: 1.0,
+        };
+        assert!(
+            anchored_span(&anchored_line("abc", 0, 0), empty).is_none(),
+            "no glyph selected → None"
+        );
     }
 
     #[test]
@@ -593,6 +688,7 @@ mod tests {
                 x1: 0.81,
                 y1: 0.13,
             },
+            anchor: None,
         });
         chars.extend(line("second line two", 0.0, 0.8, 0.16, 0.03));
         let sel = text_line_span(&chars, (0.1, 0.115), (0.9, 0.175));

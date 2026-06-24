@@ -13,12 +13,13 @@
 use std::cell::{Cell, RefCell};
 
 use inkread_epub::layout::{paginate, Align, LayoutOpts, Page};
-use inkread_epub::render::{page_glyphs, render_page as raster_page, AbFont, GrayCanvas};
+use inkread_epub::render::{render_page as raster_page, AbFont, GrayCanvas};
 use inkread_epub::{parse_blocks, Block, EpubPackage, NavPoint};
 
-use crate::document::text_select::{self, CharBox, NormRect, TextSelection};
+use crate::document::text_select::{self, CharBox, NormRect, TextAnchor, TextSelection};
 use crate::document::{Document, DocumentMetadata, SearchMatch, TocEntry};
 use crate::error::{CoreError, CoreResult};
+use crate::position::PinPosition;
 use crate::render::PixelBuffer;
 
 /// Base body font size in device pixels at scale `1.0` (Supernote-class panel). The user's text
@@ -154,20 +155,80 @@ impl EpubBackend {
         let Some(page) = laid.pages.get(index) else {
             return Vec::new();
         };
-        let pw = laid.opts.page_w.max(1.0);
-        let ph = laid.opts.page_h.max(1.0);
-        page_glyphs(page, &laid.opts, &self.font)
-            .into_iter()
-            .map(|g| CharBox {
-                ch: g.ch,
-                rect: NormRect {
-                    x0: (g.x0 / pw).clamp(0.0, 1.0),
-                    y0: (g.y0 / ph).clamp(0.0, 1.0),
-                    x1: (g.x1 / pw).clamp(0.0, 1.0),
-                    y1: (g.y1 / ph).clamp(0.0, 1.0),
-                },
-            })
-            .collect()
+        // Shared with the PDF-reflow backend so the glyph→CharBox + anchor mapping lives once.
+        crate::document::reflow_view::page_charboxes(page, &laid.opts, &self.font)
+    }
+
+    /// Frame a chapter-relative [`TextAnchor`] into a full [`PinPosition`] (RR6) for `chapter`. The
+    /// backend owns the chapter identity; the offset is carried in `text_offset` so `position_int()`
+    /// orders within the chapter, and `xpath = [block]` re-anchors the source block (ADR-0012 D2).
+    //
+    // `pin_at`/`page_pin`/`pin_to_page` are the PinPosition composition foundation (ADR-0012 Phase 1,
+    // step 2). They are exercised by tests now and consumed in the follow-ups — selection→pin-pair
+    // and the RR12 reading-position resume / Digest wiring — hence `allow(dead_code)` until then.
+    #[allow(dead_code)]
+    fn pin_at(&self, chapter: usize, anchor: TextAnchor) -> PinPosition {
+        PinPosition {
+            chapter_index: chapter as i32,
+            chapter_id: self.chapter_keys.get(chapter).cloned().unwrap_or_default(),
+            chapter_start: 0,
+            chapter_end: i32::MAX,
+            node_position: 0,
+            text_offset: anchor.char_offset as i32,
+            xpath: vec![anchor.block as i32],
+        }
+    }
+
+    /// The [`PinPosition`] a global `page` starts at — its first anchored glyph (RR8/RR12 reading
+    /// position). `None` for an empty page (no glyphs to anchor).
+    #[allow(dead_code)]
+    pub(crate) fn page_pin(&self, page: usize) -> Option<PinPosition> {
+        let chapter = self.chapter_of(page);
+        let anchor = self.page_chars(page).into_iter().find_map(|c| c.anchor)?;
+        Some(self.pin_at(chapter, anchor))
+    }
+
+    /// Resolve a [`PinPosition`] back to the global page that contains it after a re-layout — the
+    /// re-anchoring that makes a highlight/Digest survive a font-size change (RR12-FR4). Picks, within
+    /// the pin's chapter, the last page whose first anchored glyph is at or before the pin's offset.
+    #[allow(dead_code)]
+    pub(crate) fn pin_to_page(&self, pin: &PinPosition) -> usize {
+        let laid = self.laid.borrow();
+        // Clamp a foreign/corrupt chapter index into range rather than scanning the whole book.
+        let chapter =
+            (pin.chapter_index.max(0) as usize).min(laid.chapter_start.len().saturating_sub(1));
+        let start = laid.chapter_start.get(chapter).copied().unwrap_or(0);
+        let end = laid
+            .chapter_start
+            .get(chapter + 1)
+            .copied()
+            .unwrap_or(laid.pages.len());
+        drop(laid);
+        let target = pin.text_offset.max(0);
+        let mut best = start;
+        for page in start..end {
+            match self.page_chars(page).into_iter().find_map(|c| c.anchor) {
+                Some(a) if (a.char_offset as i32) <= target => best = page,
+                // A real anchor past the target → reading order says stop. An anchorless interior
+                // page (a rule-only or empty page) must NOT stop the scan: keep looking.
+                Some(_) => break,
+                None => continue,
+            }
+        }
+        best
+    }
+
+    /// The `[start, end]` [`PinPosition`] pair a selection rectangle covers on `page` — the anchor a
+    /// highlight / note / Digest range stores (RR11-FR4 / RR12). `None` when nothing is selected.
+    #[allow(dead_code)]
+    pub(crate) fn selection_pins(
+        &self,
+        page: usize,
+        rect: NormRect,
+    ) -> Option<(PinPosition, PinPosition)> {
+        let chapter = self.chapter_of(page);
+        let (start, end) = text_select::anchored_span(&self.page_chars(page), rect)?;
+        Some((self.pin_at(chapter, start), self.pin_at(chapter, end)))
     }
 
     /// The chapter index that global `page` falls in (the last chapter whose start ≤ page).
@@ -399,6 +460,79 @@ mod tests {
         assert_eq!(new_page, b.toc()[1].target_page.unwrap());
         // PDF-style fixed layout would return None; EPUB returns Some.
         assert!(b.set_text_scale(1.0, 0).is_some());
+    }
+
+    /// The source character a pin currently resolves to: the glyph on `pin_to_page(pin)` whose anchor
+    /// matches the pin's block + offset.
+    fn char_at(b: &EpubBackend, pin: &PinPosition) -> Option<char> {
+        let page = b.pin_to_page(pin);
+        b.page_chars(page).into_iter().find_map(|c| {
+            c.anchor.and_then(|a| {
+                (a.block as i32 == pin.xpath[0] && a.char_offset as i32 == pin.text_offset)
+                    .then_some(c.ch)
+            })
+        })
+    }
+
+    #[test]
+    fn page_pin_anchors_to_the_first_glyph_and_first_page_is_chapter_start() {
+        let b = EpubBackend::open(SAMPLE.to_vec(), vp(400, 600)).unwrap();
+        let _ = render(&b, 0, 400, 600);
+        let pin = b.page_pin(0).expect("page 0 has text");
+        assert_eq!(pin.chapter_index, 0, "page 0 is chapter 0");
+        // The pin resolves to the first character actually painted on page 0.
+        let first_ch = b.page_chars(0).into_iter().find(|c| c.anchor.is_some());
+        assert_eq!(char_at(&b, &pin), first_ch.map(|c| c.ch));
+    }
+
+    #[test]
+    fn pin_re_anchors_to_the_same_character_across_a_font_size_change() {
+        // The headline guarantee (golden SPEC-INKREAD.md RR8-AC1 / RR12-FR4): a pin minted at one
+        // size re-resolves to the *same source character* after the page reflows at a new size.
+        let b = EpubBackend::open(SAMPLE.to_vec(), vp(400, 600)).unwrap();
+        let _ = render(&b, 0, 400, 600);
+        // Mint a pin partway through chapter 2 so re-pagination genuinely moves it.
+        let ch2 = b.toc()[1].target_page.unwrap();
+        let pin = b.page_pin(ch2).or_else(|| b.page_pin(0)).expect("a pin");
+        let before = char_at(&b, &pin).expect("char before reflow");
+
+        let moved_page = b.set_text_scale(1.9, ch2).unwrap();
+        let after = char_at(&b, &pin).expect("char after reflow");
+
+        assert_eq!(
+            before, after,
+            "pin re-resolves to the same source character after reflow"
+        );
+        // Sanity: the pin still lands inside its own chapter under the new pagination.
+        assert_eq!(
+            b.chapter_of(b.pin_to_page(&pin)),
+            pin.chapter_index.max(0) as usize
+        );
+        let _ = moved_page;
+    }
+
+    #[test]
+    fn selection_pins_span_in_order_and_survive_a_font_size_change() {
+        let b = EpubBackend::open(SAMPLE.to_vec(), vp(400, 600)).unwrap();
+        let _ = render(&b, 0, 400, 600);
+        // A band over the top of page 0 selects the opening lines.
+        let band = NormRect {
+            x0: 0.0,
+            y0: 0.0,
+            x1: 1.0,
+            y1: 0.5,
+        };
+        let (start, end) = b.selection_pins(0, band).expect("a selection on page 0");
+        assert!(start <= end, "start pin precedes end pin");
+        let (sc, ec) = (
+            char_at(&b, &start).expect("start char"),
+            char_at(&b, &end).expect("end char"),
+        );
+
+        // Reflow at a larger size: the same span endpoints re-resolve to the same characters.
+        b.set_text_scale(1.7, 0).unwrap();
+        assert_eq!(char_at(&b, &start), Some(sc), "start re-anchors");
+        assert_eq!(char_at(&b, &end), Some(ec), "end re-anchors");
     }
 
     #[test]
