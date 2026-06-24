@@ -101,15 +101,22 @@ impl LayoutOpts {
     /// A stable hash of every layout-affecting field — the pagination-cache discriminator (RR9-FR3,
     /// `SPEC-RUST-READER.md`). Two `LayoutOpts` that paginate identically share a digest; any change
     /// that moves page boundaries (viewport, font size, line/para spacing, alignment, margin) flips
-    /// it, while a non-layout change (e.g. a colour theme) would not. f32s are hashed by bit pattern
-    /// and the hasher is seeded deterministically, so the digest is reproducible across processes —
-    /// a requirement for an on-disk cache key (ADR-INKREAD-0013 D1).
+    /// it, while a non-layout change (e.g. a colour theme — none exist in `LayoutOpts`) could not.
+    ///
+    /// Uses **FNV-1a-64**, not `std::hash::DefaultHasher`: this value names an on-disk cache file, so
+    /// it must be **stable forever across builds and toolchains** — `DefaultHasher`'s algorithm is
+    /// explicitly allowed to change between releases. (Mirrors the FNV-1a fingerprint policy in
+    /// `reader-core`'s `persistence::identity`.) f32s are folded in by bit pattern so the digest is
+    /// exact and deterministic (ADR-INKREAD-0013 D1).
     #[must_use]
     pub fn layout_digest(&self) -> u64 {
-        use std::hash::{Hash, Hasher};
-        // DefaultHasher::new() seeds with fixed keys (0, 0) — deterministic across runs, unlike
-        // RandomState. Bit patterns make the f32s hashable and exact.
-        let mut h = std::collections::hash_map::DefaultHasher::new();
+        const FNV_OFFSET_64: u64 = 0xcbf2_9ce4_8422_2325;
+        const FNV_PRIME_64: u64 = 0x0000_0100_0000_01b3;
+        let mut h = FNV_OFFSET_64;
+        let mut eat = |byte: u8| {
+            h ^= u64::from(byte);
+            h = h.wrapping_mul(FNV_PRIME_64);
+        };
         for field in [
             self.page_w,
             self.page_h,
@@ -118,10 +125,12 @@ impl LayoutOpts {
             self.line_spacing,
             self.para_gap,
         ] {
-            field.to_bits().hash(&mut h);
+            for b in field.to_bits().to_le_bytes() {
+                eat(b);
+            }
         }
-        (self.align as u8).hash(&mut h);
-        h.finish()
+        eat(self.align as u8);
+        h
     }
 }
 
@@ -846,6 +855,23 @@ mod tests {
             .layout_digest(),
             "align"
         );
+    }
+
+    #[test]
+    fn layout_digest_is_pinned_against_algorithm_drift() {
+        // The digest names on-disk cache files (ADR-INKREAD-0013); pin a known value so a future
+        // change to the FNV constants/algorithm — which would silently orphan every cached
+        // pagination — is caught here, exactly as reader-core's identity fingerprint is pinned.
+        let opts = LayoutOpts {
+            page_w: 400.0,
+            page_h: 600.0,
+            margin: 24.0,
+            font_px: 16.0,
+            line_spacing: 1.4,
+            para_gap: 11.2,
+            align: Align::Left,
+        };
+        assert_eq!(opts.layout_digest(), 17_685_407_801_978_826_572);
     }
 
     #[test]
