@@ -968,6 +968,9 @@ impl ReaderSession {
         } else {
             self.erase_changed
         };
+        // Consume the erase flag: once the gesture ends it's been persisted (or marked dirty), so a
+        // lingering `erase_changed` must not later read as an *in-progress* erase on a page turn (#50).
+        self.erase_changed = false;
         if changed {
             self.persist_after_edit()?;
         }
@@ -1030,9 +1033,11 @@ impl ReaderSession {
         Ok(())
     }
 
-    /// Flush the outgoing page's ink on a page turn, retrying a bounded number of times so a single
-    /// transient IO hiccup (EINTR, a momentary lock) doesn't cost the user their ink — then giving
-    /// up so navigation never blocks on a hard failure (ENOSPC). Degrade-safely, RR20 / #50.
+    /// Flush the outgoing page's ink on a page turn, re-issuing the write a few times so a transient
+    /// failure that clears immediately (e.g. an `EINTR`-interrupted syscall) doesn't cost the user
+    /// their ink. The retry is immediate (no backoff), so it does NOT help a sustained condition
+    /// (`ENOSPC`, a held lock) — after a bounded number of attempts it gives up so navigation never
+    /// blocks on a hard failure. Degrade-safely, RR20 / #50.
     fn flush_ink_retrying(&mut self) {
         const ATTEMPTS: u32 = 3;
         for _ in 0..ATTEMPTS {
@@ -1178,17 +1183,24 @@ impl ReaderSession {
         self.document.export_pdf(out_path, &pages, mode)
     }
 
-    /// Swap the in-memory layer to the current page's stored ink on a page change. Any pending
-    /// stroke is dropped; the load degrades safely (see [`Self::load_layer_for_page`]).
+    /// Swap the in-memory layer to the current page's stored ink on a page change, persisting any
+    /// in-progress edit to the outgoing page first; the load degrades safely (see
+    /// [`Self::load_layer_for_page`]).
     fn load_ink_for_current_page(&mut self) {
-        // A page turn must not silently drop an in-progress stroke (#50 — "disappearing strokes"):
-        // COMMIT it to the outgoing page instead of cancelling. Then persist the outgoing page
-        // before the layer is swapped — a just-committed stroke, or (deferred mode) pending edits.
+        // A page turn must not silently drop an in-progress edit (#50 — "disappearing strokes"):
+        //  - a pending pen/highlighter stroke is COMMITTED to the outgoing page (not cancelled);
+        //  - an in-progress eraser gesture has already mutated the layer (`erase_changed`) but isn't
+        //    persisted until `ink_end_stroke` — the symmetric case — so it's flushed too;
+        //  - deferred mode's pending edits (`ink_dirty`) are flushed, as before.
         // The flush saves under `layer_page` (the outgoing page), not the new one.
         let committed = self.layer.finish_stroke().is_some();
-        if committed || self.ink_dirty {
+        if committed || self.erase_changed || self.ink_dirty {
             self.flush_ink_retrying();
         }
+        // The outgoing layer (and its edit state) is about to be discarded: clear the per-page edit
+        // flags so a flush that exhausted its retries can't leak a stale dirty bit onto the new page.
+        self.erase_changed = false;
+        self.ink_dirty = false;
         self.layer = self.load_layer_for_page(self.page);
         self.layer_page = self.page;
         // A page turn resets the view to fit (RR5-FR3): the old pan/zoom is meaningless on a new page.
