@@ -367,6 +367,8 @@ impl PdfBackend {
                     x1: nx0.max(nx1),
                     y1: ny_top.max(ny_bottom),
                 },
+                // Fixed-layout PDF: the page index is the anchor; no reflow anchor (ADR-0012).
+                anchor: None,
             });
         }
         out

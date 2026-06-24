@@ -17,7 +17,7 @@ use inkread_epub::layout::{paginate, Align, LayoutOpts, Page};
 use inkread_epub::render::{page_glyphs, render_page as raster_page, AbFont, GrayCanvas};
 use inkread_epub::Block;
 
-use crate::document::text_select::{CharBox, NormRect};
+use crate::document::text_select::{CharBox, NormRect, TextAnchor};
 use crate::error::{CoreError, CoreResult};
 use crate::render::PixelBuffer;
 
@@ -192,6 +192,12 @@ impl ReflowView {
                     x1: (g.x1 / pw).clamp(0.0, 1.0),
                     y1: (g.y1 / ph).clamp(0.0, 1.0),
                 },
+                // Reconstructed-PDF blocks flow through the same paginator, so the glyph carries an
+                // anchor over the *reflowed* unit (ADR-INKREAD-0012 Decision 3).
+                anchor: Some(TextAnchor {
+                    block: g.anchor.block,
+                    char_offset: g.anchor.char_offset,
+                }),
             })
             .collect()
     }

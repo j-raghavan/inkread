@@ -56,6 +56,22 @@ pub struct CharBox {
     pub ch: char,
     /// Its normalized box.
     pub rect: NormRect,
+    /// Reflow-stable source anchor (ADR-INKREAD-0012), when the backend is reflowable. `None` for
+    /// fixed-layout PDF (its position *is* the page). Reflow backends fill it so a selection or a
+    /// page's first glyph can be turned into a `PinPosition` that survives a font-size change.
+    pub anchor: Option<TextAnchor>,
+}
+
+/// A reflow-stable text anchor: the source block (reading-order index in the chapter) and the
+/// chapter-relative character offset. Mirrors `inkread_epub`'s glyph anchor but is kept local so
+/// this selection module stays dependency-free / host-testable. The backend frames it into a full
+/// `PinPosition` (it owns the chapter index/id).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct TextAnchor {
+    /// Reading-order index of the source block in the chapter.
+    pub block: usize,
+    /// Chapter-relative character offset.
+    pub char_offset: usize,
 }
 
 /// A resolved selection: the selected text plus the boxes a shell highlights (one per text line).
@@ -476,6 +492,7 @@ mod tests {
                     x1: x0 + (i as f32 + 1.0) * w,
                     y1: y + h,
                 },
+                anchor: None,
             })
             .collect()
     }
@@ -593,6 +610,7 @@ mod tests {
                 x1: 0.81,
                 y1: 0.13,
             },
+            anchor: None,
         });
         chars.extend(line("second line two", 0.0, 0.8, 0.16, 0.03));
         let sel = text_line_span(&chars, (0.1, 0.115), (0.9, 0.175));
