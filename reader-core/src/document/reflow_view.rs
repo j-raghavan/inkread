@@ -21,6 +21,31 @@ use crate::document::text_select::{CharBox, NormRect, TextAnchor};
 use crate::error::{CoreError, CoreResult};
 use crate::render::PixelBuffer;
 
+/// Normalize a laid-out page's glyphs into selection [`CharBox`]es: pixel boxes → `[0,1]` plus the
+/// reflow-stable anchor. Shared by **both** reflowable backends ([`super::reflow::EpubBackend`] and
+/// [`ReflowView`]) so the glyph→`CharBox` mapping — including the `SourceAnchor`→[`TextAnchor`]
+/// conversion at the renderer/core boundary — lives in exactly one place (ADR-INKREAD-0012).
+pub(crate) fn page_charboxes(page: &Page, opts: &LayoutOpts, font: &AbFont) -> Vec<CharBox> {
+    let pw = opts.page_w.max(1.0);
+    let ph = opts.page_h.max(1.0);
+    page_glyphs(page, opts, font)
+        .into_iter()
+        .map(|g| CharBox {
+            ch: g.ch,
+            rect: NormRect {
+                x0: (g.x0 / pw).clamp(0.0, 1.0),
+                y0: (g.y0 / ph).clamp(0.0, 1.0),
+                x1: (g.x1 / pw).clamp(0.0, 1.0),
+                y1: (g.y1 / ph).clamp(0.0, 1.0),
+            },
+            anchor: Some(TextAnchor {
+                block: g.anchor.block,
+                char_offset: g.anchor.char_offset,
+            }),
+        })
+        .collect()
+}
+
 /// Base body font size in device pixels at scale `1.0` — matches the EPUB backend so a PDF and an
 /// EPUB read at the same nominal size (RR2-FR5 font-size control).
 const BASE_FONT_PX: f32 = 38.0;
@@ -180,26 +205,9 @@ impl ReflowView {
         let Some(page) = laid.pages.get(index) else {
             return Vec::new();
         };
-        let pw = laid.opts.page_w.max(1.0);
-        let ph = laid.opts.page_h.max(1.0);
-        page_glyphs(page, &laid.opts, &self.font)
-            .into_iter()
-            .map(|g| CharBox {
-                ch: g.ch,
-                rect: NormRect {
-                    x0: (g.x0 / pw).clamp(0.0, 1.0),
-                    y0: (g.y0 / ph).clamp(0.0, 1.0),
-                    x1: (g.x1 / pw).clamp(0.0, 1.0),
-                    y1: (g.y1 / ph).clamp(0.0, 1.0),
-                },
-                // Reconstructed-PDF blocks flow through the same paginator, so the glyph carries an
-                // anchor over the *reflowed* unit (ADR-INKREAD-0012 Decision 3).
-                anchor: Some(TextAnchor {
-                    block: g.anchor.block,
-                    char_offset: g.anchor.char_offset,
-                }),
-            })
-            .collect()
+        // Reconstructed-PDF blocks flow through the same paginator, so glyphs carry an anchor over
+        // the *reflowed* unit (ADR-INKREAD-0012 Decision 3) — shared with the EPUB backend.
+        page_charboxes(page, &laid.opts, &self.font)
     }
 
     /// Set the text scale (font size) and repaginate, returning the preserved-position page.

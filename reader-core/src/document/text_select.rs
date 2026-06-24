@@ -63,8 +63,9 @@ pub struct CharBox {
 }
 
 /// A reflow-stable text anchor: the source block (reading-order index in the chapter) and the
-/// chapter-relative character offset. Mirrors `inkread_epub`'s glyph anchor but is kept local so
-/// this selection module stays dependency-free / host-testable. The backend frames it into a full
+/// chapter-relative character offset. Field-identical to `inkread_epub::layout::SourceAnchor` but
+/// kept as the core's own selection-domain type so the selection model isn't coupled to the
+/// renderer's glyph type (the backends convert at the boundary). The backend frames it into a full
 /// `PinPosition` (it owns the chapter index/id).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct TextAnchor {

@@ -25,6 +25,12 @@ const PIN_INT_BIAS: i64 = 2_147_483_648; // 2^31
 /// Width of `u32::MAX` (`4294967295`) in decimal digits — the fixed field width after biasing.
 const PIN_INT_WIDTH: usize = 10;
 
+/// Bias for `position_int()`, whose floor (`chapter_start + node_position + text_offset`, each i32)
+/// can reach `3 * i32::MIN`. Adding `3 * 2^31` keeps the whole reachable range non-negative.
+const PIN_INT64_BIAS: i64 = 3 * PIN_INT_BIAS;
+/// Width of the biased `position_int()` (`i32::MAX + 3*2^31` ≈ 8.6e9 → 10 digits; 11 for headroom).
+const PIN_INT64_WIDTH: usize = 11;
+
 /// Field separator in [`PinPosition::compare_key`]. `0x01` sorts below every digit and the xpath
 /// element separator, so a shorter xpath prefix sorts before a longer one (matching `Vec` order).
 const KEY_FIELD_SEP: char = '\u{1}';
@@ -86,12 +92,15 @@ impl PinPosition {
     /// width; the xpath uses a separator that preserves `Vec`'s prefix-is-less rule.
     #[must_use]
     pub fn compare_key(&self) -> String {
+        // Field order MUST match `order_cmp` exactly so the lexicographic key order equals `Ord`.
         let mut key = String::new();
+        key.push_str(&pad_int(self.chapter_index));
+        key.push(KEY_FIELD_SEP);
+        // `position_int()` is i64 (its floor can sum below `i32::MIN` for adversarial input), so it is
+        // encoded at full i64 width — casting to i32 here would wrap and disagree with `order_cmp`.
+        key.push_str(&pad_i64(self.position_int()));
+        key.push(KEY_FIELD_SEP);
         for v in [
-            self.chapter_index,
-            // position_int is i64 but always within biasing range for real documents; clamp defends
-            // against a hostile chapter_end far outside i32 (it can't, both inputs are i32).
-            self.position_int() as i32,
             self.node_position,
             self.text_offset,
             self.chapter_start,
@@ -171,6 +180,12 @@ fn pad_int(v: i32) -> String {
         i64::from(v) + PIN_INT_BIAS,
         width = PIN_INT_WIDTH
     )
+}
+
+/// Bias + zero-pad an i64 `position_int()` so its decimal string order matches numeric order across
+/// its full reachable range (its floor can sum down to `3 * i32::MIN`).
+fn pad_i64(v: i64) -> String {
+    format!("{:0width$}", v + PIN_INT64_BIAS, width = PIN_INT64_WIDTH)
 }
 
 #[cfg(test)]
@@ -282,6 +297,19 @@ mod tests {
             PinPosition {
                 node_position: -7,
                 ..pin(0, 0, 0, &[3])
+            },
+            // Adversarial: a position_int() that underflows i32 (sum < i32::MIN). Encoded at full i64
+            // width, so its compare_key still sorts consistently with Ord (regression for the old
+            // `as i32` cast that wrapped).
+            PinPosition {
+                node_position: i32::MIN,
+                text_offset: -1,
+                ..pin(0, 0, 0, &[1])
+            },
+            PinPosition {
+                node_position: i32::MIN,
+                text_offset: -100,
+                ..pin(0, 0, 0, &[1])
             },
         ];
         let mut by_cmp = positions.clone();

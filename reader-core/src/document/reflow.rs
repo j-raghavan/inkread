@@ -13,7 +13,7 @@
 use std::cell::{Cell, RefCell};
 
 use inkread_epub::layout::{paginate, Align, LayoutOpts, Page};
-use inkread_epub::render::{page_glyphs, render_page as raster_page, AbFont, GrayCanvas};
+use inkread_epub::render::{render_page as raster_page, AbFont, GrayCanvas};
 use inkread_epub::{parse_blocks, Block, EpubPackage, NavPoint};
 
 use crate::document::text_select::{self, CharBox, NormRect, TextAnchor, TextSelection};
@@ -155,24 +155,8 @@ impl EpubBackend {
         let Some(page) = laid.pages.get(index) else {
             return Vec::new();
         };
-        let pw = laid.opts.page_w.max(1.0);
-        let ph = laid.opts.page_h.max(1.0);
-        page_glyphs(page, &laid.opts, &self.font)
-            .into_iter()
-            .map(|g| CharBox {
-                ch: g.ch,
-                rect: NormRect {
-                    x0: (g.x0 / pw).clamp(0.0, 1.0),
-                    y0: (g.y0 / ph).clamp(0.0, 1.0),
-                    x1: (g.x1 / pw).clamp(0.0, 1.0),
-                    y1: (g.y1 / ph).clamp(0.0, 1.0),
-                },
-                anchor: Some(TextAnchor {
-                    block: g.anchor.block,
-                    char_offset: g.anchor.char_offset,
-                }),
-            })
-            .collect()
+        // Shared with the PDF-reflow backend so the glyph→CharBox + anchor mapping lives once.
+        crate::document::reflow_view::page_charboxes(page, &laid.opts, &self.font)
     }
 
     /// Frame a chapter-relative [`TextAnchor`] into a full [`PinPosition`] (RR6) for `chapter`. The
@@ -209,8 +193,10 @@ impl EpubBackend {
     /// the pin's chapter, the last page whose first anchored glyph is at or before the pin's offset.
     #[allow(dead_code)]
     pub(crate) fn pin_to_page(&self, pin: &PinPosition) -> usize {
-        let chapter = pin.chapter_index.max(0) as usize;
         let laid = self.laid.borrow();
+        // Clamp a foreign/corrupt chapter index into range rather than scanning the whole book.
+        let chapter =
+            (pin.chapter_index.max(0) as usize).min(laid.chapter_start.len().saturating_sub(1));
         let start = laid.chapter_start.get(chapter).copied().unwrap_or(0);
         let end = laid
             .chapter_start
@@ -223,7 +209,10 @@ impl EpubBackend {
         for page in start..end {
             match self.page_chars(page).into_iter().find_map(|c| c.anchor) {
                 Some(a) if (a.char_offset as i32) <= target => best = page,
-                _ => break, // pages are in reading order; once we pass the target, stop
+                // A real anchor past the target → reading order says stop. An anchorless interior
+                // page (a rule-only or empty page) must NOT stop the scan: keep looking.
+                Some(_) => break,
+                None => continue,
             }
         }
         best
