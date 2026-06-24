@@ -64,4 +64,24 @@ object PalmFilter {
         msSinceStylus: Long,
         palmRejectMs: Long,
     ): Boolean = penHovering || strokeInProgress || msSinceStylus <= palmRejectMs
+
+    /**
+     * Decide whether a multi-finger contact is a **palm pinch** rather than a deliberate zoom — used
+     * to gate the pinch-zoom detector before it ever sees the event. A pinch is suppressed when
+     * either:
+     *  - the pen is active ([penActive], the time/proximity gate), OR
+     *  - any contact is palm-sized ([maxTouchMajorPx] ≥ [touchMajorFrac] of [viewHeightPx]).
+     *
+     * The size term is what closes the pen-idle hole: during a natural writing pause the pen-active
+     * window lapses and hover may have exited, so the resting hand (palm heel + knuckle) would reach
+     * the [android.view.ScaleGestureDetector] and zoom the page out from under the user. A real
+     * two-fingertip pinch reports a small contact major (well under the palm fraction) and still
+     * passes. With [viewHeightPx] unknown (0) the size term is skipped — only [penActive] decides.
+     */
+    fun isPinchPalm(
+        penActive: Boolean,
+        maxTouchMajorPx: Float,
+        viewHeightPx: Int,
+        touchMajorFrac: Float,
+    ): Boolean = penActive || (viewHeightPx > 0 && maxTouchMajorPx >= viewHeightPx * touchMajorFrac)
 }

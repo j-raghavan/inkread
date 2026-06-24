@@ -234,6 +234,11 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
     private var fingerMoved = false
     private var fingerLookupFired = false
     private var lastFingerMoveMs = 0L
+    /** Latched for the whole finger gesture once it reads as a palm (at DOWN, or grown into one on a
+     *  later MOVE). Distinct from [fingerMoved]: the zoomed-in pan path treats `fingerMoved` as "the
+     *  user dragged" and would otherwise pan on a rejected palm's UP. MOVE/UP bail while this is set;
+     *  cleared on the next DOWN / UP (#49). */
+    private var fingerIsPalm = false
     private val fingerLongPress = Runnable {
         // A genuine 500ms hold (UP cancels this for a tap; a beyond-slop MOVE cancels it for a
         // swipe). Mark it a long-press FIRST so the eventual UP never falls through to a page flip —
@@ -381,7 +386,11 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
                 // the pen. Gate the detector with the same palm rule used for taps/pan (PalmFilter)
                 // — feed it ONLY when the pen is idle. While the pen is active these contacts are
                 // the writing hand, not a deliberate pinch (RR19 palm rejection / ADR-INKREAD-0010).
-                if (penActiveForPinch()) {
+                if (PalmFilter.isPinchPalm(penActiveForPinch(), maxTouchMajor(event), surfaceView.height, PALM_TOUCH_MAJOR_FRAC)) {
+                    // The pen is active OR a contact is palm-sized: this is the writing hand, not a
+                    // deliberate pinch. Reject it BEFORE the ScaleGestureDetector sees it (the
+                    // size term catches a palm-heel pinch that lands after the pen-active window has
+                    // lapsed — the "resting hand zooms the page" report, #49).
                     // A real pinch already in flight when the pen engaged: neutralise the accumulated
                     // scale and cancel so onScaleEnd reverts to the committed zoom (no half-scaled
                     // preview lingers, and the detector doesn't stay stuck in-progress).
@@ -1162,6 +1171,14 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         palmRejectMs = PALM_REJECT_MS,
     )
 
+    /** Largest contact-major across all active pointers (px) — fed to [PalmFilter.isPinchPalm] so a
+     *  palm-sized contact in a two-finger gesture suppresses the pinch even when the pen is idle. */
+    private fun maxTouchMajor(e: MotionEvent): Float {
+        var m = 0f
+        for (i in 0 until e.pointerCount) m = maxOf(m, e.getTouchMajor(i))
+        return m
+    }
+
     /**
      * Wrap a chrome view (bottom bar, sheets) so a resting palm can't press its controls — the
      * single biggest palm-rejection gap, since dialog buttons bypass the reading surface's filter.
@@ -1184,9 +1201,11 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
     private fun onFingerDown(e: MotionEvent) {
         if (isPalmTouch(e)) {
             diag { "DIAG palm-reject down pc=${e.pointerCount} major=${e.getTouchMajor(0)}" }
-            fingerMoved = true // neutralise any later MOVE/UP from this rejected touch
+            fingerIsPalm = true // latch: MOVE/UP bail, so a rejected palm never pans (esp. zoomed in)
+            fingerMoved = true // also neutralise the tap/long-press paths
             return
         }
+        fingerIsPalm = false
         fingerDownX = e.x; fingerDownY = e.y
         fingerMoved = false; fingerLookupFired = false
         lastFingerMoveMs = SystemClock.uptimeMillis()
@@ -1200,6 +1219,13 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
     /** Finger MOVE: track liveness; beyond the slop it's a swipe/scroll, not a tap or hold. When
      *  zoomed, a drag live-previews the pan (cached bitmap translated); committed on UP. */
     private fun onFingerMove(e: MotionEvent) {
+        if (fingerIsPalm) return // latched palm — never preview a pan
+        // Re-validate: a contact that read small at DOWN can grow into a palm as the hand settles.
+        if (isPalmTouch(e)) {
+            diag { "DIAG palm-reject move major=${e.getTouchMajor(0)}" }
+            fingerIsPalm = true; fingerMoved = true
+            return
+        }
         lastFingerMoveMs = SystemClock.uptimeMillis()
         if (!fingerMoved && kotlin.math.hypot(e.x - fingerDownX, e.y - fingerDownY) > FINGER_MOVE_SLOP_PX) {
             fingerMoved = true
@@ -1215,6 +1241,9 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
     /** Finger UP: a quick, still press is a navigation tap (page zones / link / TOC). */
     private fun onFingerUp(e: MotionEvent) {
         mainHandler.removeCallbacks(fingerLongPress)
+        // A palm (latched at DOWN/MOVE, or only now grown to palm size) commits nothing — no pan, no
+        // tap. This is the core of the "resting hand pans/zooms the page" fix (#49).
+        if (fingerIsPalm || isPalmTouch(e)) { fingerIsPalm = false; return }
         // Zoomed in: a drag pans the page; a still tap does nothing (no page-turn while zoomed).
         if (zoom > 1f) {
             if (fingerMoved) {
