@@ -466,6 +466,59 @@ fn fs_ink(doc: &std::path::Path) -> Arc<dyn InkStore> {
     Arc::new(FsInkStore::new(SidecarPaths::for_document(doc)))
 }
 
+/// An `InkStore` that fails its first `fail_n` saves (transient IO), then delegates to an inner
+/// [`MemInkStore`] — exercises the bounded page-turn flush retry (#50).
+struct FlakyStore {
+    remaining_failures: AtomicU64,
+    save_attempts: AtomicU64,
+    inner: MemInkStore,
+}
+impl FlakyStore {
+    fn new(fail_n: u64) -> Self {
+        Self {
+            remaining_failures: AtomicU64::new(fail_n),
+            save_attempts: AtomicU64::new(0),
+            inner: MemInkStore::new(),
+        }
+    }
+    /// Total `save_page` calls seen (failed + succeeded) — for the no-spurious-save guard.
+    fn save_attempts(&self) -> u64 {
+        self.save_attempts.load(Ordering::Relaxed)
+    }
+}
+impl InkStore for FlakyStore {
+    fn load_page(&self, page: usize) -> CoreResult<InkLayer> {
+        self.inner.load_page(page)
+    }
+    fn save_page(&self, page: usize, layer: &InkLayer) -> CoreResult<()> {
+        self.save_attempts.fetch_add(1, Ordering::Relaxed);
+        if self.remaining_failures.load(Ordering::Relaxed) > 0 {
+            self.remaining_failures.fetch_sub(1, Ordering::Relaxed);
+            return Err(CoreError::Persistence("transient IO".into()));
+        }
+        self.inner.save_page(page, layer)
+    }
+    fn pages_with_ink(&self) -> CoreResult<Vec<usize>> {
+        self.inner.pages_with_ink()
+    }
+    fn load_metadata(&self) -> CoreResult<Option<SidecarMetadata>> {
+        self.inner.load_metadata()
+    }
+    fn save_metadata(&self, meta: &SidecarMetadata) -> CoreResult<()> {
+        self.inner.save_metadata(meta)
+    }
+}
+
+/// Begin a pen stroke and add points but DON'T finish it — leaves a pending (in-progress) stroke,
+/// the mid-stroke state a page turn must not drop (#50).
+fn begin_pending(s: &mut ReaderSession, pts: &[(f32, f32)]) {
+    s.ink_begin_stroke(Tool::Pen, InkColor::BLACK, 0.01, 0)
+        .unwrap();
+    for &(x, y) in pts {
+        s.ink_add_point(x, y, 1.0, None, None, 0).unwrap();
+    }
+}
+
 /// Draw and commit one pen stroke through the public session API.
 fn draw(s: &mut ReaderSession, pts: &[(f32, f32)]) {
     s.ink_begin_stroke(Tool::Pen, InkColor::BLACK, 0.01, 0)
@@ -527,6 +580,216 @@ fn page_turn_loads_each_pages_own_ink() {
     assert_eq!(s.ink_strokes().len(), 1, "page 0 ink reloaded on return");
     s.on_gesture(Gesture::NextPage); // page 1 again
     assert_eq!(s.ink_strokes().len(), 1, "page 1 ink intact");
+}
+
+#[test]
+fn page_turn_commits_an_in_progress_stroke() {
+    // #50: a page turn taken mid-stroke (pen still down) used to drop the pending stroke. It must
+    // instead be committed to the OUTGOING page and persisted, then reload on return.
+    let store: Arc<dyn InkStore> = Arc::new(MemInkStore::new());
+    let mut s = session(2, DeviceCapabilities::supernote_full());
+    s.attach_ink_store(Arc::clone(&store)).unwrap();
+
+    begin_pending(&mut s, &[(0.1, 0.1), (0.2, 0.2)]); // pen down on page 0, not finished
+    assert_eq!(
+        s.ink_strokes().len(),
+        0,
+        "pending stroke isn't committed yet"
+    );
+
+    s.on_gesture(Gesture::NextPage); // turn the page mid-stroke
+    assert_eq!(
+        store.pages_with_ink().unwrap(),
+        vec![0],
+        "the in-progress stroke was committed + persisted to the outgoing page"
+    );
+
+    s.on_gesture(Gesture::PrevPage); // back to page 0
+    assert_eq!(
+        s.ink_strokes().len(),
+        1,
+        "the once-pending stroke reloads on return — not lost"
+    );
+    assert_eq!(
+        s.ink_strokes()[0].points.len(),
+        2,
+        "the committed stroke kept its points, not just its existence"
+    );
+}
+
+#[test]
+fn page_turn_commits_an_in_progress_erase() {
+    // #50 (eraser parity): an erase applied but not yet ended (ink_end_stroke) is the symmetric
+    // "disappearing edit" — a page turn must persist it, not let the erased stroke reappear.
+    let store: Arc<dyn InkStore> = Arc::new(MemInkStore::new());
+    let mut s = session(2, DeviceCapabilities::supernote_full());
+    s.attach_ink_store(Arc::clone(&store)).unwrap();
+    draw(&mut s, &[(0.10, 0.10), (0.20, 0.10)]); // page 0: a committed stroke
+    assert_eq!(store.pages_with_ink().unwrap(), vec![0]);
+
+    // Begin an eraser gesture over the stroke but DON'T end it (pen still down).
+    s.ink_begin_stroke(Tool::Eraser, InkColor::BLACK, 0.05, 0)
+        .unwrap();
+    s.ink_add_point(0.15, 0.10, 1.0, None, None, 0).unwrap();
+    assert_eq!(
+        s.ink_strokes().len(),
+        0,
+        "erase removed the stroke in-memory"
+    );
+
+    s.on_gesture(Gesture::NextPage); // turn mid-erase
+    assert!(
+        store.pages_with_ink().unwrap().is_empty(),
+        "the in-progress erase was persisted to the outgoing page (file removed)"
+    );
+    s.on_gesture(Gesture::PrevPage);
+    assert_eq!(
+        s.ink_strokes().len(),
+        0,
+        "the erased stroke stays gone on return — the erase wasn't lost"
+    );
+}
+
+#[test]
+fn page_turn_proceeds_when_flush_exhausts_its_retries() {
+    // #50 / RR20 degrade-safely: if every retry fails (e.g. ENOSPC), navigation must still proceed
+    // — never block, never panic — even though the outgoing page's ink is lost.
+    let store = Arc::new(FlakyStore::new(u64::MAX)); // never succeeds
+    let mut s = session(2, DeviceCapabilities::supernote_full());
+    s.attach_ink_store(Arc::clone(&store) as Arc<dyn InkStore>)
+        .unwrap();
+
+    begin_pending(&mut s, &[(0.1, 0.1), (0.2, 0.2)]);
+    s.on_gesture(Gesture::NextPage); // must not panic / must not hang
+    assert_eq!(
+        s.current_page(),
+        1,
+        "navigation proceeded despite a hard write failure"
+    );
+    assert!(
+        store.pages_with_ink().unwrap().is_empty(),
+        "nothing persisted on a hard failure — but we degraded safely"
+    );
+}
+
+#[test]
+fn deferred_mode_page_turn_flush_retries_transient_io() {
+    // AC#3: in DEFERRED mode the outgoing page's pending edits are flushed on the turn, riding out
+    // transient IO with the retry (the immediate-mode retry is covered separately).
+    let store = Arc::new(FlakyStore::new(2)); // first 2 saves fail, 3rd (in budget) succeeds
+    let mut s = session(2, DeviceCapabilities::supernote_full());
+    s.attach_ink_store(Arc::clone(&store) as Arc<dyn InkStore>)
+        .unwrap();
+    s.set_autosave_deferred(true).unwrap();
+
+    draw(&mut s, &[(0.1, 0.1), (0.2, 0.2)]); // page 0, held in memory (ink_dirty), not yet saved
+    assert!(store.pages_with_ink().unwrap().is_empty());
+
+    s.on_gesture(Gesture::NextPage); // flush-with-retry over the 2 transient failures
+    assert_eq!(
+        store.pages_with_ink().unwrap(),
+        vec![0],
+        "deferred page-0 edits persisted via the page-turn flush retry"
+    );
+}
+
+#[test]
+fn clean_page_turn_does_not_resave_immediate_mode() {
+    // A page turn with no pending stroke and no in-progress erase must not rewrite the outgoing page
+    // (immediate mode already saved it per stroke-end) — avoids a needless e-ink-relevant write.
+    let store = Arc::new(FlakyStore::new(0)); // never fails; counts save_page calls
+    let mut s = session(2, DeviceCapabilities::supernote_full());
+    s.attach_ink_store(Arc::clone(&store) as Arc<dyn InkStore>)
+        .unwrap();
+    draw(&mut s, &[(0.1, 0.1), (0.2, 0.2)]); // exactly one save (immediate stroke-end)
+    let before = store.save_attempts();
+
+    s.on_gesture(Gesture::NextPage); // clean turn: nothing to persist
+    assert_eq!(
+        store.save_attempts(),
+        before,
+        "a clean page turn did not re-save the outgoing page"
+    );
+}
+
+#[test]
+fn page_turn_commits_an_in_progress_highlighter_stroke() {
+    // Highlighter is_ink()==true, so it shares the pen commit-on-turn path — pin it explicitly.
+    let store: Arc<dyn InkStore> = Arc::new(MemInkStore::new());
+    let mut s = session(2, DeviceCapabilities::supernote_full());
+    s.attach_ink_store(Arc::clone(&store)).unwrap();
+    s.ink_begin_stroke(Tool::Highlighter, InkColor::BLACK, 0.03, 0)
+        .unwrap();
+    s.ink_add_point(0.1, 0.1, 1.0, None, None, 0).unwrap();
+    s.ink_add_point(0.3, 0.1, 1.0, None, None, 0).unwrap();
+
+    s.on_gesture(Gesture::NextPage);
+    s.on_gesture(Gesture::PrevPage);
+    assert_eq!(
+        s.ink_strokes().len(),
+        1,
+        "an in-progress highlighter stroke survives a page turn too"
+    );
+}
+
+#[test]
+fn page_turn_preserves_committed_strokes_plus_the_pending_one() {
+    // A page with several committed strokes AND a pending one must reload ALL of them.
+    let store: Arc<dyn InkStore> = Arc::new(MemInkStore::new());
+    let mut s = session(2, DeviceCapabilities::supernote_full());
+    s.attach_ink_store(Arc::clone(&store)).unwrap();
+    draw(&mut s, &[(0.1, 0.1), (0.2, 0.2)]);
+    draw(&mut s, &[(0.3, 0.3), (0.4, 0.4)]);
+    begin_pending(&mut s, &[(0.5, 0.5), (0.6, 0.6)]); // 3rd, not finished
+
+    s.on_gesture(Gesture::NextPage);
+    s.on_gesture(Gesture::PrevPage);
+    assert_eq!(
+        s.ink_strokes().len(),
+        3,
+        "two committed + one once-pending stroke all reload"
+    );
+}
+
+#[test]
+fn committed_stroke_survives_a_simulated_crash() {
+    // #50: in immediate mode a finished stroke is atomically written (fsync + rename) on stroke-end,
+    // so a hard kill with no graceful close still recovers it. Use a real FS sidecar; "crash" =
+    // open a fresh store over the same files without any save/close on the first session.
+    let tmp = TempDir::new();
+    let doc = tmp.path.join("book.pdf");
+
+    let mut s = session(1, DeviceCapabilities::supernote_full());
+    s.attach_ink_store(fs_ink(&doc)).unwrap();
+    draw(&mut s, &[(0.1, 0.1), (0.2, 0.2)]);
+    drop(s); // ReaderSession has no Drop/flush, so this is exactly a hard kill: nothing flushed here
+
+    let mut reopened = session(1, DeviceCapabilities::supernote_full());
+    reopened.attach_ink_store(fs_ink(&doc)).unwrap();
+    assert_eq!(
+        reopened.ink_strokes().len(),
+        1,
+        "the committed stroke was durable on disk before the crash"
+    );
+}
+
+#[test]
+fn page_turn_flush_retries_transient_io() {
+    // #50: the outgoing-page flush retries a transient IO error so a momentary hiccup doesn't drop
+    // the stroke. FlakyStore fails the first 2 saves; the 3rd (within the retry budget) persists.
+    let store = Arc::new(FlakyStore::new(2));
+    let mut s = session(2, DeviceCapabilities::supernote_full());
+    s.attach_ink_store(Arc::clone(&store) as Arc<dyn InkStore>)
+        .unwrap();
+
+    begin_pending(&mut s, &[(0.1, 0.1), (0.2, 0.2)]); // page 0, pen down
+    s.on_gesture(Gesture::NextPage); // commit + flush with retry over the 2 transient failures
+
+    assert_eq!(
+        store.pages_with_ink().unwrap(),
+        vec![0],
+        "the retry rode out the transient failures and persisted the stroke"
+    );
 }
 
 #[test]
