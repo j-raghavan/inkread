@@ -95,6 +95,32 @@ impl LayoutOpts {
     fn content_h(&self) -> f32 {
         (self.page_h - 2.0 * self.margin).max(1.0)
     }
+
+    /// A stable hash of every layout-affecting field — the pagination-cache discriminator (RR9-FR3,
+    /// `SPEC-RUST-READER.md`). Two `LayoutOpts` that paginate identically share a digest; any change
+    /// that moves page boundaries (viewport, font size, line/para spacing, alignment, margin) flips
+    /// it, while a non-layout change (e.g. a colour theme) would not. f32s are hashed by bit pattern
+    /// and the hasher is seeded deterministically, so the digest is reproducible across processes —
+    /// a requirement for an on-disk cache key (ADR-INKREAD-0013 D1).
+    #[must_use]
+    pub fn layout_digest(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        // DefaultHasher::new() seeds with fixed keys (0, 0) — deterministic across runs, unlike
+        // RandomState. Bit patterns make the f32s hashable and exact.
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        for field in [
+            self.page_w,
+            self.page_h,
+            self.margin,
+            self.font_px,
+            self.line_spacing,
+            self.para_gap,
+        ] {
+            field.to_bits().hash(&mut h);
+        }
+        (self.align as u8).hash(&mut h);
+        h.finish()
+    }
 }
 
 /// A reflow-stable source anchor for a placed run/glyph (ADR-INKREAD-0012; feeds RR6 `PinPosition`).
@@ -727,6 +753,83 @@ mod tests {
             para_gap: 0.0,
             align: Align::Left,
         }
+    }
+
+    #[test]
+    fn layout_digest_is_stable_and_sensitive_to_layout_fields() {
+        let base = LayoutOpts::new(400.0, 600.0, 16.0);
+        // Deterministic: identical opts → identical digest (same process AND, by fixed seed, across
+        // processes — the on-disk cache key contract).
+        assert_eq!(
+            base.layout_digest(),
+            LayoutOpts::new(400.0, 600.0, 16.0).layout_digest()
+        );
+
+        // Every layout-affecting field flips the digest.
+        let d = base.layout_digest();
+        assert_ne!(
+            d,
+            LayoutOpts {
+                page_w: 401.0,
+                ..base
+            }
+            .layout_digest(),
+            "width"
+        );
+        assert_ne!(
+            d,
+            LayoutOpts {
+                page_h: 601.0,
+                ..base
+            }
+            .layout_digest(),
+            "height"
+        );
+        assert_ne!(
+            d,
+            LayoutOpts {
+                margin: base.margin + 1.0,
+                ..base
+            }
+            .layout_digest(),
+            "margin"
+        );
+        assert_ne!(
+            d,
+            LayoutOpts {
+                font_px: 17.0,
+                ..base
+            }
+            .layout_digest(),
+            "font"
+        );
+        assert_ne!(
+            d,
+            LayoutOpts {
+                line_spacing: 1.5,
+                ..base
+            }
+            .layout_digest(),
+            "line spacing"
+        );
+        assert_ne!(
+            d,
+            LayoutOpts {
+                para_gap: base.para_gap + 1.0,
+                ..base
+            }
+            .layout_digest(),
+            "para gap"
+        );
+        assert_ne!(
+            d,
+            LayoutOpts {
+                align: Align::Justify,
+                ..base
+            }
+            .layout_digest(),
+            "align"
+        );
     }
 
     #[test]
