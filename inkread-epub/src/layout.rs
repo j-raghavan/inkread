@@ -17,6 +17,8 @@
 //! font rasterizer; Phase 4 plugs a real glyph-advance implementation (skrifa/swash) and renders the
 //! [`Page`]s into a `PixelBuffer`.
 
+use serde::{Deserialize, Serialize};
+
 use crate::content::{Block, Inline};
 
 /// Glyph-advance measurement for a font (Phase 4 supplies a real implementation; tests use a
@@ -95,6 +97,41 @@ impl LayoutOpts {
     fn content_h(&self) -> f32 {
         (self.page_h - 2.0 * self.margin).max(1.0)
     }
+
+    /// A stable hash of every layout-affecting field — the pagination-cache discriminator (RR9-FR3,
+    /// `SPEC-RUST-READER.md`). Two `LayoutOpts` that paginate identically share a digest; any change
+    /// that moves page boundaries (viewport, font size, line/para spacing, alignment, margin) flips
+    /// it, while a non-layout change (e.g. a colour theme — none exist in `LayoutOpts`) could not.
+    ///
+    /// Uses **FNV-1a-64**, not `std::hash::DefaultHasher`: this value names an on-disk cache file, so
+    /// it must be **stable forever across builds and toolchains** — `DefaultHasher`'s algorithm is
+    /// explicitly allowed to change between releases. (Mirrors the FNV-1a fingerprint policy in
+    /// `reader-core`'s `persistence::identity`.) f32s are folded in by bit pattern so the digest is
+    /// exact and deterministic (ADR-INKREAD-0013 D1).
+    #[must_use]
+    pub fn layout_digest(&self) -> u64 {
+        const FNV_OFFSET_64: u64 = 0xcbf2_9ce4_8422_2325;
+        const FNV_PRIME_64: u64 = 0x0000_0100_0000_01b3;
+        let mut h = FNV_OFFSET_64;
+        let mut eat = |byte: u8| {
+            h ^= u64::from(byte);
+            h = h.wrapping_mul(FNV_PRIME_64);
+        };
+        for field in [
+            self.page_w,
+            self.page_h,
+            self.margin,
+            self.font_px,
+            self.line_spacing,
+            self.para_gap,
+        ] {
+            for b in field.to_bits().to_le_bytes() {
+                eat(b);
+            }
+        }
+        eat(self.align as u8);
+        h
+    }
 }
 
 /// A reflow-stable source anchor for a placed run/glyph (ADR-INKREAD-0012; feeds RR6 `PinPosition`).
@@ -105,7 +142,7 @@ impl LayoutOpts {
 /// derived from character counts, **not pixels**, so they are invariant under a font-size / margin /
 /// alignment change — the property a highlight or Digest entry needs to re-resolve to the same text
 /// after the page reflows (golden `SPEC-INKREAD.md` RR8-FR2/AC1).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct SourceAnchor {
     /// Reading-order index of the source block in the chapter.
     pub block: usize,
@@ -115,7 +152,7 @@ pub struct SourceAnchor {
 
 /// A positioned run of text on a line. `x`/`top` are relative to the page's **content origin** (the
 /// top-left after the margin); the renderer adds `opts.margin`. Baseline ≈ `top + size_px`.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PlacedRun {
     pub x: f32,
     pub text: String,
@@ -129,7 +166,7 @@ pub struct PlacedRun {
 
 /// One laid-out line: its `top` (content-relative), `height` (the line box), and positioned runs.
 /// A horizontal rule line carries `rule = true` and no runs.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LayoutLine {
     pub top: f32,
     pub height: f32,
@@ -138,7 +175,7 @@ pub struct LayoutLine {
 }
 
 /// A laid-out page: the lines that fall within the content box.
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct Page {
     pub lines: Vec<LayoutLine>,
 }
@@ -727,6 +764,114 @@ mod tests {
             para_gap: 0.0,
             align: Align::Left,
         }
+    }
+
+    #[test]
+    fn pages_round_trip_through_json() {
+        // The pagination cache (ADR-INKREAD-0013 D3) persists laid pages; serialization must be
+        // lossless so a rehydrated page renders/selects identically (anchors included).
+        let opts = LayoutOpts::new(400.0, 600.0, 16.0);
+        let blocks = parse_blocks(
+            "<html><body><h2>Title</h2><p>one two three</p><ul><li>a</li></ul></body></html>",
+        );
+        let pages = paginate(&blocks, &opts, &Mono);
+        let json = serde_json::to_string(&pages).expect("serialize");
+        let back: Vec<Page> = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back, pages, "laid pages round-trip losslessly");
+    }
+
+    #[test]
+    fn layout_digest_is_stable_and_sensitive_to_layout_fields() {
+        let base = LayoutOpts::new(400.0, 600.0, 16.0);
+        // Deterministic: identical opts → identical digest (same process AND, by fixed seed, across
+        // processes — the on-disk cache key contract).
+        assert_eq!(
+            base.layout_digest(),
+            LayoutOpts::new(400.0, 600.0, 16.0).layout_digest()
+        );
+
+        // Every layout-affecting field flips the digest.
+        let d = base.layout_digest();
+        assert_ne!(
+            d,
+            LayoutOpts {
+                page_w: 401.0,
+                ..base
+            }
+            .layout_digest(),
+            "width"
+        );
+        assert_ne!(
+            d,
+            LayoutOpts {
+                page_h: 601.0,
+                ..base
+            }
+            .layout_digest(),
+            "height"
+        );
+        assert_ne!(
+            d,
+            LayoutOpts {
+                margin: base.margin + 1.0,
+                ..base
+            }
+            .layout_digest(),
+            "margin"
+        );
+        assert_ne!(
+            d,
+            LayoutOpts {
+                font_px: 17.0,
+                ..base
+            }
+            .layout_digest(),
+            "font"
+        );
+        assert_ne!(
+            d,
+            LayoutOpts {
+                line_spacing: 1.5,
+                ..base
+            }
+            .layout_digest(),
+            "line spacing"
+        );
+        assert_ne!(
+            d,
+            LayoutOpts {
+                para_gap: base.para_gap + 1.0,
+                ..base
+            }
+            .layout_digest(),
+            "para gap"
+        );
+        assert_ne!(
+            d,
+            LayoutOpts {
+                align: Align::Justify,
+                ..base
+            }
+            .layout_digest(),
+            "align"
+        );
+    }
+
+    #[test]
+    fn layout_digest_is_pinned_against_algorithm_drift() {
+        // The digest names on-disk cache files (ADR-INKREAD-0013); pin a known value so a future
+        // change to the FNV constants/algorithm — which would silently orphan every cached
+        // pagination — is caught here, exactly as reader-core's identity fingerprint is pinned.
+        let opts = LayoutOpts {
+            page_w: 400.0,
+            page_h: 600.0,
+            margin: 24.0,
+            font_px: 16.0,
+            line_spacing: 1.4,
+            para_gap: 11.2,
+            align: Align::Left,
+        };
+        assert_eq!(opts.layout_digest(), 17_685_407_801_978_826_572);
     }
 
     #[test]

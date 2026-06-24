@@ -19,7 +19,9 @@ use inkread_epub::{parse_blocks, Block, EpubPackage, NavPoint};
 use crate::document::text_select::{self, CharBox, NormRect, TextAnchor, TextSelection};
 use crate::document::{Document, DocumentMetadata, SearchMatch, TocEntry};
 use crate::error::{CoreError, CoreResult};
-use crate::position::PinPosition;
+use crate::persistence::pagination_cache::{CachedPagination, PaginationCache};
+use crate::persistence::sidecar::SidecarPaths;
+use crate::position::{PageRange, PinPosition};
 use crate::render::PixelBuffer;
 
 /// Base body font size in device pixels at scale `1.0` (Supernote-class panel). The user's text
@@ -59,11 +61,48 @@ pub struct EpubBackend {
     align: Cell<Align>,
     /// The current pagination; recomputed when the viewport or scale changes.
     laid: RefCell<Laid>,
+    /// Optional disk pagination cache (ADR-INKREAD-0013 D3): when present, a layout is loaded from /
+    /// written to `book.inkread/pagination/` keyed by `layout_digest`, so reopening at the same
+    /// viewport + style skips re-pagination. Absent ⇒ always lay out fresh.
+    cache: Option<PaginationCache>,
 }
 
 impl EpubBackend {
-    /// Parse `bytes` and paginate for the initial `viewport`. Maps parse failures to a typed error.
+    /// Parse `bytes` and paginate for the initial `viewport` (no pagination cache).
     pub fn open(bytes: Vec<u8>, viewport: crate::render::Viewport) -> CoreResult<Self> {
+        Self::open_inner(bytes, viewport, None)
+    }
+
+    /// Like [`Self::open`] but backed by the document's `book.inkread/` pagination cache
+    /// (ADR-INKREAD-0013 D3): the initial layout — and every repagination — is loaded from / written
+    /// to disk keyed by the content fingerprint + `layout_digest`, so reopening at the same viewport +
+    /// style skips the layout. The fingerprint scopes the cache to the document's bytes, so a changed
+    /// file at the same sidecar can never serve a stale pagination.
+    ///
+    /// NOTE: not yet wired into [`crate::session::ReaderSession`] — `session::open_epub` still uses
+    /// the cache-less [`Self::open`], so on-device reopen is not yet fast. Wiring it requires a
+    /// `SidecarPaths` at the session layer (it currently holds only trait-object stores); tracked as
+    /// the RR8 device-integration follow-up.
+    pub fn open_with_cache(
+        bytes: Vec<u8>,
+        viewport: crate::render::Viewport,
+        paths: &SidecarPaths,
+    ) -> CoreResult<Self> {
+        let fingerprint = crate::persistence::identity::fingerprint(&bytes);
+        Self::open_inner(
+            bytes,
+            viewport,
+            Some(PaginationCache::new(paths, fingerprint)),
+        )
+    }
+
+    /// Parse `bytes` and paginate for `viewport`, consulting `cache` if present. Maps parse failures
+    /// to a typed error.
+    fn open_inner(
+        bytes: Vec<u8>,
+        viewport: crate::render::Viewport,
+        cache: Option<PaginationCache>,
+    ) -> CoreResult<Self> {
         let pkg = EpubPackage::open(bytes)
             .map_err(|e| CoreError::RenderBackend(format!("epub open: {e}")))?;
         let chapters: Vec<Vec<Block>> =
@@ -74,15 +113,14 @@ impl EpubBackend {
             author: pkg.author.clone(),
         };
         let font = AbFont::default_font();
-        let laid = layout_all(
-            &chapters,
-            &font,
+        let opts = opts_for(
             viewport.width,
             viewport.height,
             BASE_FONT_PX,
             1.4,
             Align::Left,
         );
+        let laid = build_laid(cache.as_ref(), &chapters, &font, opts);
         Ok(Self {
             chapters,
             chapter_keys,
@@ -93,6 +131,7 @@ impl EpubBackend {
             line_spacing: Cell::new(1.4),
             align: Cell::new(Align::Left),
             laid: RefCell::new(laid),
+            cache,
         })
     }
 
@@ -112,15 +151,8 @@ impl EpubBackend {
                 || (laid.opts.font_px - font_px).abs() > 0.01
         };
         if needs {
-            let fresh = layout_all(
-                &self.chapters,
-                &self.font,
-                w,
-                h,
-                font_px,
-                self.line_spacing.get(),
-                self.align.get(),
-            );
+            let opts = opts_for(w, h, font_px, self.line_spacing.get(), self.align.get());
+            let fresh = build_laid(self.cache.as_ref(), &self.chapters, &self.font, opts);
             *self.laid.borrow_mut() = fresh;
         }
     }
@@ -133,15 +165,14 @@ impl EpubBackend {
             let laid = self.laid.borrow();
             (laid.opts.page_w as u32, laid.opts.page_h as u32)
         };
-        let fresh = layout_all(
-            &self.chapters,
-            &self.font,
+        let opts = opts_for(
             w,
             h,
             self.font_px(),
             self.line_spacing.get(),
             self.align.get(),
         );
+        let fresh = build_laid(self.cache.as_ref(), &self.chapters, &self.font, opts);
         let target = fresh.chapter_start.get(chapter).copied().unwrap_or(0);
         *self.laid.borrow_mut() = fresh;
         Some(target)
@@ -229,6 +260,27 @@ impl EpubBackend {
         let chapter = self.chapter_of(page);
         let (start, end) = text_select::anchored_span(&self.page_chars(page), rect)?;
         Some((self.pin_at(chapter, start), self.pin_at(chapter, end)))
+    }
+
+    /// The `[start, end)` [`PageRange`] (RR6-FR2 / RR8-FR4, `SPEC-RUST-READER`) a global `page` spans:
+    /// from its first anchored glyph to the start of the next anchored page, host-derived. The book's
+    /// last page ends at a chapter-end sentinel. `None` for an anchorless page (rule-only / empty),
+    /// which has no text position. Anchorless interior pages are skipped when finding the exclusive
+    /// end, so a rule/blank page between two text pages doesn't truncate the range (ADR-0013 D2).
+    #[allow(dead_code)]
+    pub(crate) fn page_range(&self, page: usize) -> Option<PageRange> {
+        let start = self.page_pin(page)?;
+        let total = self.laid.borrow().pages.len();
+        // Last-page sentinel: `text_offset = i32::MAX` orders strictly after `start` within the same
+        // chapter — via `position_int` when it isn't clamped, and via the `text_offset` tie-break in
+        // `PinPosition::cmp` even if both clamp to `chapter_end` — so `[start, end)` is never empty.
+        let end = (page + 1..total)
+            .find_map(|p| self.page_pin(p))
+            .unwrap_or_else(|| PinPosition {
+                text_offset: i32::MAX,
+                ..start.clone()
+            });
+        Some(PageRange::new(start, end))
     }
 
     /// The chapter index that global `page` falls in (the last chapter whose start ≤ page).
@@ -321,18 +373,71 @@ impl Document for EpubBackend {
 }
 
 /// Paginate every chapter for `(w, h, font_px, line_spacing, align)`; each chapter starts a page.
-fn layout_all(
-    chapters: &[Vec<Block>],
-    font: &AbFont,
-    w: u32,
-    h: u32,
-    font_px: f32,
-    line_spacing: f32,
-    align: Align,
-) -> Laid {
+/// Build the [`LayoutOpts`] for a viewport + typography — the single place opts are assembled, so the
+/// `layout_digest` computed for the cache key (ADR-INKREAD-0013) always matches what `layout_all`
+/// paginates with.
+fn opts_for(w: u32, h: u32, font_px: f32, line_spacing: f32, align: Align) -> LayoutOpts {
     let mut opts = LayoutOpts::new(w as f32, h as f32, font_px);
     opts.line_spacing = line_spacing;
     opts.align = align;
+    opts
+}
+
+/// Whether a loaded [`CachedPagination`] is internally consistent for a book of `n_chapters`: one
+/// `chapter_start` per chapter, starting at 0, strictly ascending, and every start in range of the
+/// cached pages. A well-typed but inconsistent blob (e.g. a corrupt or foreign file that still
+/// deserializes) is rejected so it can't silently mis-map TOC/anchoring (RR21-FR3 spirit).
+fn cached_pagination_is_valid(cached: &CachedPagination, n_chapters: usize) -> bool {
+    if cached.chapter_start.len() != n_chapters {
+        return false;
+    }
+    if n_chapters == 0 {
+        return true;
+    }
+    let pages = cached.pages.len();
+    pages > 0
+        && cached.chapter_start.first() == Some(&0)
+        && cached.chapter_start.windows(2).all(|w| w[0] < w[1])
+        && cached.chapter_start.iter().all(|&s| s < pages)
+}
+
+/// Paginate the whole book for `opts`, returning the cache-on-miss layout. Loads from `cache` (keyed
+/// by `opts.layout_digest()`) when present, else lays out and best-effort writes the result back
+/// (ADR-INKREAD-0013 D3). A cache write failure is non-fatal — the in-memory layout is still used.
+fn build_laid(
+    cache: Option<&PaginationCache>,
+    chapters: &[Vec<Block>],
+    font: &AbFont,
+    opts: LayoutOpts,
+) -> Laid {
+    let digest = opts.layout_digest();
+    if let Some(c) = cache {
+        if let Some(cached) = c.load(digest) {
+            if cached_pagination_is_valid(&cached, chapters.len()) {
+                return Laid {
+                    opts,
+                    pages: cached.pages,
+                    chapter_start: cached.chapter_start,
+                };
+            }
+            // A well-typed-but-inconsistent blob (wrong chapter count / out-of-range starts) is
+            // treated as a miss rather than trusted — lay out fresh below.
+        }
+    }
+    let laid = layout_all(chapters, font, opts);
+    if let Some(c) = cache {
+        let _ = c.store(
+            digest,
+            &CachedPagination {
+                chapter_start: laid.chapter_start.clone(),
+                pages: laid.pages.clone(),
+            },
+        );
+    }
+    laid
+}
+
+fn layout_all(chapters: &[Vec<Block>], font: &AbFont, opts: LayoutOpts) -> Laid {
     let mut pages = Vec::new();
     let mut chapter_start = Vec::with_capacity(chapters.len());
     for blocks in chapters {
@@ -533,6 +638,129 @@ mod tests {
         b.set_text_scale(1.7, 0).unwrap();
         assert_eq!(char_at(&b, &start), Some(sc), "start re-anchors");
         assert_eq!(char_at(&b, &end), Some(ec), "end re-anchors");
+    }
+
+    #[test]
+    fn page_ranges_are_stable_for_identical_layout() {
+        // RR8 DoD: same inputs ⇒ identical boundaries.
+        let b = EpubBackend::open(SAMPLE.to_vec(), vp(400, 600)).unwrap();
+        let _ = render(&b, 0, 400, 600);
+        let ranges1: Vec<PageRange> = (0..b.page_count())
+            .filter_map(|p| b.page_range(p))
+            .collect();
+        b.set_text_scale(1.0, 0).unwrap(); // identical layout → must reproduce the boundaries
+        let ranges2: Vec<PageRange> = (0..b.page_count())
+            .filter_map(|p| b.page_range(p))
+            .collect();
+        assert!(!ranges1.is_empty());
+        assert_eq!(ranges1, ranges2);
+    }
+
+    #[test]
+    fn page_range_starts_ascend_and_each_range_is_ordered() {
+        let b = EpubBackend::open(SAMPLE.to_vec(), vp(400, 600)).unwrap();
+        let _ = render(&b, 0, 400, 600);
+        let ranges: Vec<PageRange> = (0..b.page_count())
+            .filter_map(|p| b.page_range(p))
+            .collect();
+        assert!(ranges.len() >= 2);
+        for r in &ranges {
+            assert!(r.start <= r.end, "each range is ordered");
+        }
+        // Page starts ascend in reading order (host-derived global ordering, RR8-FR4).
+        assert!(
+            ranges.windows(2).all(|w| w[0].start <= w[1].start),
+            "page starts ascend"
+        );
+    }
+
+    /// Self-cleaning temp dir for the pagination-cache wiring tests.
+    struct TempDir {
+        path: std::path::PathBuf,
+    }
+    impl TempDir {
+        fn new(tag: &str) -> Self {
+            let mut path = std::env::temp_dir();
+            path.push(format!("inkread-reflowcache-{tag}-{:p}", &tag));
+            std::fs::create_dir_all(&path).unwrap();
+            Self { path }
+        }
+    }
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
+
+    /// A cache scoped to SAMPLE's content fingerprint — the same key `open_with_cache` will compute,
+    /// so a planted entry is actually addressed by the backend.
+    fn cache_for(paths: &SidecarPaths) -> PaginationCache {
+        PaginationCache::new(paths, crate::persistence::identity::fingerprint(SAMPLE))
+    }
+
+    #[test]
+    fn open_with_cache_writes_then_reload_matches() {
+        let tmp = TempDir::new("write");
+        let paths = SidecarPaths::from_root(&tmp.path);
+        let b = EpubBackend::open_with_cache(SAMPLE.to_vec(), vp(400, 600), &paths).unwrap();
+        let n = b.page_count();
+        // The miss path wrote the layout to disk; it reloads as the same pagination.
+        let digest = opts_for(400, 600, BASE_FONT_PX, 1.4, Align::Left).layout_digest();
+        let loaded = cache_for(&paths)
+            .load(digest)
+            .expect("cache written on first open");
+        assert_eq!(
+            loaded.pages.len(),
+            n,
+            "cached page count matches the layout"
+        );
+    }
+
+    #[test]
+    fn open_with_cache_uses_a_planted_cache_instead_of_laying_out() {
+        // Definitive hit proof: plant a cache under the (fingerprint, digest) the backend computes,
+        // then open — the backend must report the planted pagination, not a fresh SAMPLE layout.
+        let tmp = TempDir::new("hit");
+        let paths = SidecarPaths::from_root(&tmp.path);
+        let digest = opts_for(400, 600, BASE_FONT_PX, 1.4, Align::Left).layout_digest();
+        // SAMPLE has two chapters, so a *valid* cache needs two ascending in-range chapter starts.
+        let planted = CachedPagination {
+            chapter_start: vec![0, 2],
+            pages: vec![Page::default(), Page::default(), Page::default()],
+        };
+        cache_for(&paths).store(digest, &planted).unwrap();
+
+        let b = EpubBackend::open_with_cache(SAMPLE.to_vec(), vp(400, 600), &paths).unwrap();
+        assert_eq!(
+            b.page_count(),
+            3,
+            "used the planted cache, not a fresh layout"
+        );
+    }
+
+    #[test]
+    fn an_inconsistent_cache_blob_is_rejected_and_relaid_out() {
+        // A well-typed but inconsistent cache (wrong chapter count for SAMPLE) must not be trusted:
+        // the backend lays out fresh rather than reporting the planted 3 pages.
+        let tmp = TempDir::new("badblob");
+        let paths = SidecarPaths::from_root(&tmp.path);
+        let digest = opts_for(400, 600, BASE_FONT_PX, 1.4, Align::Left).layout_digest();
+        let bad = CachedPagination {
+            chapter_start: vec![0], // SAMPLE has two chapters → inconsistent
+            pages: vec![Page::default(), Page::default(), Page::default()],
+        };
+        cache_for(&paths).store(digest, &bad).unwrap();
+
+        let b = EpubBackend::open_with_cache(SAMPLE.to_vec(), vp(400, 600), &paths).unwrap();
+        assert_ne!(b.page_count(), 3, "did not trust the inconsistent cache");
+        assert!(b.page_count() >= 2, "laid out fresh instead");
+    }
+
+    #[test]
+    fn open_without_cache_is_unaffected() {
+        // The no-cache constructor still works and writes nothing.
+        let b = EpubBackend::open(SAMPLE.to_vec(), vp(400, 600)).unwrap();
+        assert!(b.page_count() >= 2);
     }
 
     #[test]
