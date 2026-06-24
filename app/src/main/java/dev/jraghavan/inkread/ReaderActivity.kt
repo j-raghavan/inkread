@@ -234,6 +234,17 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
     private var fingerMoved = false
     private var fingerLookupFired = false
     private var lastFingerMoveMs = 0L
+    /** Latched for the whole finger gesture once it reads as a palm (at DOWN, or grown into one on a
+     *  later MOVE). Distinct from [fingerMoved]: the zoomed-in pan path treats `fingerMoved` as "the
+     *  user dragged" and would otherwise pan on a rejected palm's UP. MOVE/UP bail while this is set;
+     *  cleared on the next DOWN / UP (#49). */
+    private var fingerIsPalm = false
+    /** Latched once a gesture has been multi-pointer (a pinch). A pointer lifting from 2→1 fingers
+     *  arrives as ACTION_POINTER_UP at pointerCount==2, which the single-finger dispatch skips, so the
+     *  surviving finger's trailing MOVEs would otherwise pan from the ORIGINAL down's stale origin and
+     *  jump the page. While set, single-finger pan/tap is suppressed until a fresh DOWN starts a clean
+     *  gesture; reset on ACTION_DOWN (#49). */
+    private var gestureWasMultiTouch = false
     private val fingerLongPress = Runnable {
         // A genuine 500ms hold (UP cancels this for a tap; a beyond-slop MOVE cancels it for a
         // swipe). Mark it a long-press FIRST so the eventual UP never falls through to a page flip —
@@ -376,21 +387,37 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
                     else -> captureStylus(event) // PEN (Highlighter is still P2)
                 }
             } else if (toolType == MotionEvent.TOOL_TYPE_FINGER) {
-                // Pinch-zoom must not fire while writing: the resting hand/palm registers as a
-                // 2-finger contact and the ScaleGestureDetector would zoom the page out from under
-                // the pen. Gate the detector with the same palm rule used for taps/pan (PalmFilter)
-                // — feed it ONLY when the pen is idle. While the pen is active these contacts are
-                // the writing hand, not a deliberate pinch (RR19 palm rejection / ADR-INKREAD-0010).
+                // A fresh primary DOWN starts a clean gesture: clear both per-gesture latches. This
+                // also rescues a latch stranded by a gesture whose terminal UP was consumed elsewhere
+                // (minimap, or a 1→2→1 transition that bypassed onFingerUp), which would otherwise kill
+                // the next gesture (#49).
+                if (event.actionMasked == MotionEvent.ACTION_DOWN) {
+                    fingerIsPalm = false; gestureWasMultiTouch = false
+                }
+                // Latch once this gesture goes multi-pointer: after a pinch, a 2→1 lift leaves the
+                // surviving finger with the original down's stale origin, so its trailing pan must be
+                // suppressed until a fresh DOWN (#49). Set in BOTH branches below via this single check.
+                if (event.pointerCount > 1) gestureWasMultiTouch = true
+                // Pinch-zoom must not fire while writing: the resting hand registers as a 2-finger
+                // contact and the ScaleGestureDetector would zoom the page out from under the pen.
+                // Gate on pen-proximity ONLY: on this hardware a firm pinch fingertip reports a
+                // contact-major as large as a palm (160–240px on a 2560px panel), so a contact-size
+                // term here suppressed genuine two-finger pinches — pen activity (hover / stroke /
+                // within PALM_REJECT_MS) is the reliable discriminator for the writing hand (#49,
+                // device-confirmed on Nomad). Single-finger palm rejection still uses size, where
+                // taps (≈80–128px) and palms (≈160–240px) separate cleanly.
                 if (penActiveForPinch()) {
-                    // A real pinch already in flight when the pen engaged: neutralise the accumulated
-                    // scale and cancel so onScaleEnd reverts to the committed zoom (no half-scaled
-                    // preview lingers, and the detector doesn't stay stuck in-progress).
-                    if (scaleDetector.isInProgress) {
-                        liveScale = 1f
-                        val cancel = MotionEvent.obtain(event).apply { action = MotionEvent.ACTION_CANCEL }
-                        scaleDetector.onTouchEvent(cancel)
-                        cancel.recycle()
-                    }
+                    // The pen is active: this is the writing hand, not a deliberate pinch. Reject it
+                    // BEFORE the ScaleGestureDetector sees it.
+                    // Unconditionally feed the detector a CANCEL: it reverts any in-flight scale to
+                    // the committed zoom, AND closes a buffered pointer-down from a fast-settling palm
+                    // that landed before the detector crossed its minSpan (so isInProgress was still
+                    // false) — gating the cancel on isInProgress would strand that pointer. CANCEL on
+                    // an idle detector is a documented no-op, so always sending it is safe.
+                    liveScale = 1f
+                    val cancel = MotionEvent.obtain(event).apply { action = MotionEvent.ACTION_CANCEL }
+                    scaleDetector.onTouchEvent(cancel)
+                    cancel.recycle()
                     // Likewise drop any in-flight minimap interaction: its latches are reset ONLY
                     // inside handleMinimapTouch's UP path, which we bypass here — leaving them stuck
                     // would make handleMinimapTouch swallow the next finger gesture once the pen idles.
@@ -1184,9 +1211,11 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
     private fun onFingerDown(e: MotionEvent) {
         if (isPalmTouch(e)) {
             diag { "DIAG palm-reject down pc=${e.pointerCount} major=${e.getTouchMajor(0)}" }
-            fingerMoved = true // neutralise any later MOVE/UP from this rejected touch
+            fingerIsPalm = true // latch: MOVE/UP bail, so a rejected palm never pans (esp. zoomed in)
+            fingerMoved = true // also neutralise the tap/long-press paths
             return
         }
+        fingerIsPalm = false
         fingerDownX = e.x; fingerDownY = e.y
         fingerMoved = false; fingerLookupFired = false
         lastFingerMoveMs = SystemClock.uptimeMillis()
@@ -1200,6 +1229,16 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
     /** Finger MOVE: track liveness; beyond the slop it's a swipe/scroll, not a tap or hold. When
      *  zoomed, a drag live-previews the pan (cached bitmap translated); committed on UP. */
     private fun onFingerMove(e: MotionEvent) {
+        // Bail (and latch) if already a palm, or if the pen engages mid-gesture (the writing hand
+        // settling while the finger is still down). Re-validate pen-proximity only — NOT contact
+        // size: a fast/flat legit swipe can momentarily spike touch-major past the palm fraction, and
+        // re-checking size every MOVE would make one spurious sample kill the swipe (#49 review).
+        if (fingerIsPalm || penActiveForPinch()) {
+            fingerIsPalm = true
+            return
+        }
+        // After a pinch, the surviving finger's origin is stale — don't pan until a fresh gesture.
+        if (gestureWasMultiTouch) return
         lastFingerMoveMs = SystemClock.uptimeMillis()
         if (!fingerMoved && kotlin.math.hypot(e.x - fingerDownX, e.y - fingerDownY) > FINGER_MOVE_SLOP_PX) {
             fingerMoved = true
@@ -1215,6 +1254,14 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
     /** Finger UP: a quick, still press is a navigation tap (page zones / link / TOC). */
     private fun onFingerUp(e: MotionEvent) {
         mainHandler.removeCallbacks(fingerLongPress)
+        // A palm commits nothing — no pan, no tap. Bail if latched, or if the pen is active (a finger
+        // lift within PALM_REJECT_MS of pen activity is the writing hand; same RR19 rule the tap path
+        // already applies below, here extended to the zoomed-in pan commit). This is the core of the
+        // "resting hand pans/zooms the page" fix (#49).
+        if (fingerIsPalm || penActiveForPinch()) { fingerIsPalm = false; return }
+        // After a pinch, a 2→1 lift leaves a stale origin: commit no pan/tap for the trailing finger
+        // (a fresh DOWN clears this latch and restarts clean panning) (#49).
+        if (gestureWasMultiTouch) return
         // Zoomed in: a drag pans the page; a still tap does nothing (no page-turn while zoomed).
         if (zoom > 1f) {
             if (fingerMoved) {
@@ -1666,16 +1713,12 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         // window that steals focus and drops the overlay — the ringed swatch is the feedback.
         if (chosen == Tool.HIGHLIGHTER && tool == Tool.HIGHLIGHTER) {
             if (colorPalette.isShowing()) collapseColorPalette()
-            else colorPalette.show("Highlighter", HIGHLIGHT_COLORS, HIGHLIGHT_COLOR_NAMES, hlColorIdx) { idx ->
-                hlColorIdx = idx
-            }
+            else openColorColumn("Highlighter", HIGHLIGHT_COLORS, HIGHLIGHT_COLOR_NAMES, hlColorIdx) { hlColorIdx = it }
             return true
         }
         if (chosen == Tool.PEN && tool == Tool.PEN) {
             if (colorPalette.isShowing()) collapseColorPalette()
-            else colorPalette.show("Pen", PEN_COLORS, PEN_COLOR_NAMES, penColorIdx) { idx ->
-                penColorIdx = idx
-            }
+            else openColorColumn("Pen", PEN_COLORS, PEN_COLOR_NAMES, penColorIdx) { penColorIdx = it }
             return true
         }
         if (chosen == tool) return true
@@ -1714,6 +1757,19 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
      */
     private fun collapseColorPalette() {
         colorPalette.dismiss()
+        postJump(currentPage)
+    }
+
+    /**
+     * Mount the colour column, then repaint the current page — the SHOW-side mirror of
+     * [collapseColorPalette]. Adding the overlay view triggers the firmware's full auto-refresh, which
+     * repaints the page from the app surface and wipes the live-ink overlay; strokes drawn since the
+     * last page render live ONLY on that overlay, so without this repaint they vanish until a page turn
+     * re-bakes them (the "tap Pen → annotations disappear" report, #50). [postJump] of the current page
+     * re-bakes the committed strokes (renderAndBlit) and drives a real EPD frame, restoring them.
+     */
+    private fun openColorColumn(title: String, colors: IntArray, names: Array<String>, sel: Int, onPick: (Int) -> Unit) {
+        colorPalette.show(title, colors, names, sel, onPick)
         postJump(currentPage)
     }
 

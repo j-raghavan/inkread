@@ -141,4 +141,5 @@ class PalmFilterTest {
         // Complement: no pen signals ⇒ a fingertip is NOT a palm (navigation still works).
         assertFalse(palm(sinceStylus = rejectMs + 1, majorPx = 60f))
     }
+
 }
