@@ -34,21 +34,31 @@ pub(crate) struct CachedPagination {
     pub pages: Vec<Page>,
 }
 
-/// Reads/writes laid paginations under `book.inkread/pagination/`, keyed by `layout_digest`.
+/// Reads/writes laid paginations under `book.inkread/pagination/`, keyed by the document content
+/// fingerprint **and** the `layout_digest`. The fingerprint guards against staleness: if the file at
+/// a sidecar path is replaced with different content, its fingerprint changes, so the old
+/// pagination's file is no longer addressed and can't be served for the new bytes.
+//
+// TODO(ADR-INKREAD-0013): the `pagination/` dir grows one file per (content, viewport, style) combo
+// and is never pruned. Bound it (LRU / keep-N) once the cache is wired into a real reopen path.
 pub(crate) struct PaginationCache {
     dir: PathBuf,
+    fingerprint: u128,
 }
 
 impl PaginationCache {
-    /// The cache rooted at a document's sidecar (`<book>.inkread/pagination/`).
-    pub(crate) fn new(paths: &SidecarPaths) -> Self {
+    /// The cache rooted at a document's sidecar (`<book>.inkread/pagination/`), scoped to the
+    /// document's content `fingerprint` (see [`crate::persistence::identity::fingerprint`]).
+    pub(crate) fn new(paths: &SidecarPaths, fingerprint: u128) -> Self {
         Self {
             dir: paths.root().join("pagination"),
+            fingerprint,
         }
     }
 
     fn file(&self, digest: u64) -> PathBuf {
-        self.dir.join(format!("{digest:016x}.json"))
+        self.dir
+            .join(format!("{:032x}-{digest:016x}.json", self.fingerprint))
     }
 
     /// The cached pagination for `digest`, or `None` on miss / oversize / corrupt — in every
@@ -114,10 +124,12 @@ mod tests {
         }
     }
 
+    const FP: u128 = 0x0123_4567_89ab_cdef_0123_4567_89ab_cdef;
+
     #[test]
     fn round_trips_through_disk() {
         let tmp = TempDir::new("rt");
-        let cache = PaginationCache::new(&SidecarPaths::from_root(&tmp.path));
+        let cache = PaginationCache::new(&SidecarPaths::from_root(&tmp.path), FP);
         let cached = sample();
         cache.store(0xABCD, &cached).unwrap();
         assert_eq!(cache.load(0xABCD), Some(cached));
@@ -126,7 +138,7 @@ mod tests {
     #[test]
     fn miss_and_corrupt_degrade_to_none() {
         let tmp = TempDir::new("miss");
-        let cache = PaginationCache::new(&SidecarPaths::from_root(&tmp.path));
+        let cache = PaginationCache::new(&SidecarPaths::from_root(&tmp.path), FP);
         assert_eq!(cache.load(0x1234), None, "absent digest is a miss");
 
         // A corrupt file at the digest's path is a miss, not a panic.
@@ -138,7 +150,7 @@ mod tests {
     #[test]
     fn distinct_digests_do_not_collide() {
         let tmp = TempDir::new("keys");
-        let cache = PaginationCache::new(&SidecarPaths::from_root(&tmp.path));
+        let cache = PaginationCache::new(&SidecarPaths::from_root(&tmp.path), FP);
         let a = sample();
         let mut b = sample();
         b.chapter_start = vec![0, 1];
@@ -146,5 +158,18 @@ mod tests {
         cache.store(2, &b).unwrap();
         assert_eq!(cache.load(1), Some(a));
         assert_eq!(cache.load(2), Some(b));
+    }
+
+    #[test]
+    fn a_different_fingerprint_does_not_serve_a_stale_pagination() {
+        // Same sidecar + same digest, but the document content changed (different fingerprint): the
+        // old entry must not be served for the new bytes.
+        let tmp = TempDir::new("stale");
+        let paths = SidecarPaths::from_root(&tmp.path);
+        PaginationCache::new(&paths, FP)
+            .store(7, &sample())
+            .unwrap();
+        let other = PaginationCache::new(&paths, FP ^ 1);
+        assert_eq!(other.load(7), None, "foreign-content cache is a miss");
     }
 }
