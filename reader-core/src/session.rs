@@ -622,6 +622,18 @@ impl ReaderSession {
         self.zoom
     }
 
+    /// The current horizontal pan `[0,1]` over the magnified overscan (0 at fit).
+    #[must_use]
+    pub fn pan_x(&self) -> f32 {
+        self.pan_x
+    }
+
+    /// The current vertical pan `[0,1]` over the magnified overscan (0 at fit / top of page).
+    #[must_use]
+    pub fn pan_y(&self) -> f32 {
+        self.pan_y
+    }
+
     /// Set the reflow **text scale** (font size; `1.0` = default) for a reflowable document,
     /// repaginating and preserving the reading position by chapter (RR2-FR5). Returns `true` if the
     /// format supports reflow (EPUB); `false` for fixed-layout PDF (no change). The shell re-renders
@@ -1203,9 +1215,16 @@ impl ReaderSession {
         self.ink_dirty = false;
         self.layer = self.load_layer_for_page(self.page);
         self.layer_page = self.page;
-        // A page turn resets the view to fit (RR5-FR3): the old pan/zoom is meaningless on a new page.
-        self.zoom = 1.0;
-        self.pan_x = 0.0;
+        // Preserve the reading magnification across a page turn (#52 — PDF nav responsiveness):
+        // dropping a zoomed-in view back to full-page fit on every turn forced the user to re-zoom,
+        // costing a second render to reach their intended view. Keep the zoom and the horizontal
+        // column (pan_x), but land at the TOP of the new page (pan_y = 0) so a turn starts the same
+        // column afresh. A magnified view is fixed-layout only (zoom > 1 never occurs in reflowed
+        // text, RR25-FR3), so reflowed pages — always at fit — still reset cleanly.
+        if self.zoom <= 1.0 + 1e-3 {
+            self.zoom = 1.0;
+            self.pan_x = 0.0;
+        }
         self.pan_y = 0.0;
     }
 
