@@ -10,6 +10,19 @@ use crate::document::{Document, FitMode};
 use crate::error::CoreError;
 use crate::render::PixelBuffer;
 
+/// Encode raw RGBA pixel `data` (w*h*4 bytes) as a PNG.
+fn encode_rgba_png(w: u32, h: u32, data: &[u8]) -> Vec<u8> {
+    let mut out = Vec::new();
+    {
+        let mut enc = png::Encoder::new(&mut out, w, h);
+        enc.set_color(png::ColorType::Rgba);
+        enc.set_depth(png::BitDepth::Eight);
+        let mut wr = enc.write_header().unwrap();
+        wr.write_image_data(data).unwrap();
+    }
+    out
+}
+
 /// Encode a solid-color RGBA PNG in memory.
 fn png_rgba(w: u32, h: u32, color: [u8; 4]) -> Vec<u8> {
     let data: Vec<u8> = color
@@ -18,15 +31,57 @@ fn png_rgba(w: u32, h: u32, color: [u8; 4]) -> Vec<u8> {
         .cycle()
         .take((w * h * 4) as usize)
         .collect();
+    encode_rgba_png(w, h, &data)
+}
+
+/// Encode a solid 8-bit **grayscale** (single-channel) PNG — exercises decode_png's Grayscale arm.
+fn png_gray(w: u32, h: u32, value: u8) -> Vec<u8> {
+    let data = vec![value; (w * h) as usize];
     let mut out = Vec::new();
     {
         let mut enc = png::Encoder::new(&mut out, w, h);
-        enc.set_color(png::ColorType::Rgba);
+        enc.set_color(png::ColorType::Grayscale);
         enc.set_depth(png::BitDepth::Eight);
         let mut wr = enc.write_header().unwrap();
         wr.write_image_data(&data).unwrap();
     }
     out
+}
+
+/// Encode an **indexed/palette** PNG (all pixels palette index 0) — exercises the EXPAND path so
+/// decode_png never hits its "indexed not expanded" error.
+fn png_indexed(w: u32, h: u32, palette0: [u8; 3]) -> Vec<u8> {
+    let data = vec![0u8; (w * h) as usize]; // every pixel → palette entry 0
+    let mut out = Vec::new();
+    {
+        let mut enc = png::Encoder::new(&mut out, w, h);
+        enc.set_color(png::ColorType::Indexed);
+        enc.set_depth(png::BitDepth::Eight);
+        enc.set_palette(vec![palette0[0], palette0[1], palette0[2], 255, 255, 255]);
+        let mut wr = enc.write_header().unwrap();
+        wr.write_image_data(&data).unwrap();
+    }
+    out
+}
+
+/// A 4-quadrant RGBA PNG (`2*half` square): TL red, TR green, BL blue, BR near-white — lets crop /
+/// zoom tests assert they landed on a known region.
+fn png_quadrants(half: u32) -> Vec<u8> {
+    let (w, h) = (half * 2, half * 2);
+    let mut data = vec![0u8; (w * h * 4) as usize];
+    for y in 0..h {
+        for x in 0..w {
+            let c = match (x < half, y < half) {
+                (true, true) => [220, 30, 30, 255],
+                (false, true) => [30, 200, 30, 255],
+                (true, false) => [30, 30, 220, 255],
+                (false, false) => [240, 240, 240, 255],
+            };
+            let o = ((y * w + x) * 4) as usize;
+            data[o..o + 4].copy_from_slice(&c);
+        }
+    }
+    encode_rgba_png(w, h, &data)
 }
 
 /// Pack named entries into a CBZ (a stored — uncompressed — ZIP).
@@ -181,4 +236,133 @@ fn natural_cmp_orders_numbers_numerically() {
     assert_eq!(natural_cmp("p001", "p1"), Ordering::Equal); // leading zeros don't change value
     assert_eq!(natural_cmp("ch1/p2.png", "ch1/p10.png"), Ordering::Less);
     assert_eq!(natural_cmp("Apple", "banana"), Ordering::Less); // case-insensitive
+}
+
+/// Render an arbitrary page via `f` into a fresh `n`×`n` buffer and return the bytes.
+fn render_via(
+    b: &CbzBackend,
+    n: u32,
+    f: impl FnOnce(&CbzBackend, &mut PixelBuffer<'_>),
+) -> Vec<u8> {
+    let mut px = vec![0u8; (n * n * 4) as usize];
+    let mut buf = PixelBuffer::from_rgba(&mut px, n, n).unwrap();
+    f(b, &mut buf);
+    px
+}
+
+#[test]
+fn render_zoom_at_unity_equals_render_page() {
+    // The documented identity: zoom=1, offset=(0,0) is byte-identical to render_page.
+    let b = CbzBackend::open(make_cbz(&[("p.png", png_quadrants(4))])).unwrap();
+    let page = render_via(&b, 8, |b, buf| b.render_page(0, buf).unwrap());
+    let zoom1 = render_via(&b, 8, |b, buf| b.render_zoom(0, buf, 1.0, 0, 0).unwrap());
+    assert_eq!(zoom1, page, "render_zoom(z=1,off=0) == render_page");
+}
+
+#[test]
+fn render_zoom_magnifies_a_known_quadrant() {
+    // At z=2, offset=(0,0) the window is the top-left quarter → the red quadrant fills the buffer.
+    let b = CbzBackend::open(make_cbz(&[("p.png", png_quadrants(8))])).unwrap();
+    let dom = avg_rgb(&render_via(&b, 8, |b, buf| {
+        b.render_zoom(0, buf, 2.0, 0, 0).unwrap()
+    }));
+    assert!(
+        dom[0] > 150 && dom[1] < 90 && dom[2] < 90,
+        "TL red quadrant: {dom:?}"
+    );
+}
+
+#[test]
+fn render_cropped_selects_a_quadrant_and_falls_back_when_degenerate() {
+    let b = CbzBackend::open(make_cbz(&[("p.png", png_quadrants(8))])).unwrap();
+    // Crop the top-left (red) quarter → fills the square buffer with red.
+    let tl = NormRect {
+        x0: 0.0,
+        y0: 0.0,
+        x1: 0.5,
+        y1: 0.5,
+    };
+    let cropped = render_via(&b, 8, |b, buf| {
+        b.render_cropped(0, buf, tl, FitMode::Page, 0.0, 0.0)
+            .unwrap()
+    });
+    let dom = avg_rgb(&cropped);
+    assert!(
+        dom[0] > 150 && dom[1] < 90,
+        "cropped to red quadrant: {dom:?}"
+    );
+    // A zero-area (degenerate) crop falls back to the whole page → equals render_fit of the page.
+    let degenerate = NormRect {
+        x0: 0.5,
+        y0: 0.5,
+        x1: 0.5,
+        y1: 0.5,
+    };
+    let crop_fallback = render_via(&b, 8, |b, buf| {
+        b.render_cropped(0, buf, degenerate, FitMode::Page, 0.0, 0.0)
+            .unwrap()
+    });
+    let whole = render_via(&b, 8, |b, buf| {
+        b.render_fit(0, buf, FitMode::Page, 0.0, 0.0).unwrap()
+    });
+    assert_eq!(
+        crop_fallback, whole,
+        "degenerate crop renders the whole page"
+    );
+}
+
+#[test]
+fn grayscale_png_decodes_to_neutral_rgb() {
+    let b = CbzBackend::open(make_cbz(&[("p.png", png_gray(8, 8, 90))])).unwrap();
+    let px = render(&b, 0, 8, 8);
+    let p = &px[0..4];
+    assert_eq!((p[0], p[1], p[2]), (90, 90, 90), "gray → R==G==B");
+    assert_eq!(p[3], 255, "opaque");
+}
+
+#[test]
+fn indexed_png_decodes_via_expand() {
+    // The EXPAND transformation turns a paletted PNG into RGB, so decode_png must NOT hit its
+    // "indexed not expanded" error — it should render the palette color.
+    let b = CbzBackend::open(make_cbz(&[("p.png", png_indexed(8, 8, [200, 40, 40]))])).unwrap();
+    let dom = avg_rgb(&render(&b, 0, 8, 8));
+    assert!(dom[0] > 150 && dom[1] < 100, "palette-0 red: {dom:?}");
+}
+
+#[test]
+fn bad_image_payloads_are_typed_errors_not_panics() {
+    // A .png entry whose bytes aren't a valid PNG → CorruptDocument when the page is decoded.
+    let b = CbzBackend::open(make_cbz(&[(
+        "p.png",
+        b"\x89PNG\r\n\x1a\n garbage".to_vec(),
+    )]))
+    .unwrap();
+    let mut px = vec![0u8; 8 * 8 * 4];
+    let mut buf = PixelBuffer::from_rgba(&mut px, 8, 8).unwrap();
+    assert!(matches!(
+        b.render_page(0, &mut buf),
+        Err(CoreError::CorruptDocument(_))
+    ));
+    // An image-extension entry holding a non-PNG/JPEG payload → UnsupportedFormat (sniff miss).
+    let b2 = CbzBackend::open(make_cbz(&[("p.jpg", b"GIF89a not a jpeg".to_vec())])).unwrap();
+    let mut px2 = vec![0u8; 8 * 8 * 4];
+    let mut buf2 = PixelBuffer::from_rgba(&mut px2, 8, 8).unwrap();
+    assert!(matches!(
+        b2.render_page(0, &mut buf2),
+        Err(CoreError::UnsupportedFormat(_))
+    ));
+}
+
+#[test]
+fn pages_in_nested_directories_order_naturally() {
+    // Cross-directory natural order: ch2 < ch10 (numeric), not lexicographic (ch10 < ch2).
+    let red = png_rgba(8, 8, [220, 30, 30, 255]); // ch2
+    let blue = png_rgba(8, 8, [30, 30, 220, 255]); // ch10
+    let b = CbzBackend::open(make_cbz(&[("ch10/p1.png", blue), ("ch2/p1.png", red)])).unwrap();
+    assert_eq!(b.page_count(), 2);
+    let p0 = avg_rgb(&render(&b, 0, 8, 8));
+    assert!(
+        p0[0] > 150 && p0[2] < 100,
+        "ch2 (red) sorts before ch10: {p0:?}"
+    );
 }
