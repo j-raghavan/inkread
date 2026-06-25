@@ -192,16 +192,27 @@ class HomeActivity : Activity() {
                     typeface = Typeface.create(serif, Typeface.ITALIC)
                 })
                 addView(TextView(this@HomeActivity).apply {
-                    text = r.title; setTextColor(ink); textSize = fs(26f); typeface = serif
-                    maxLines = 3; setLineSpacing(0f, 1.1f); setPadding(0, dim(7), 0, 0)
+                    text = Books.displayTitle(this@HomeActivity, r); setTextColor(ink); textSize = fs(26f)
+                    typeface = serif; maxLines = 3; setLineSpacing(0f, 1.1f); setPadding(0, dim(7), 0, 0)
                 })
+                Books.metaAuthor(this@HomeActivity, r.id)?.let { author ->
+                    addView(TextView(this@HomeActivity).apply {
+                        text = author; setTextColor(inkSoft); textSize = fs(15f)
+                        typeface = Typeface.create(serif, Typeface.ITALIC); setPadding(0, dim(5), 0, 0)
+                    })
+                }
                 addView(spacerWeighted(1f))
                 val percent = Books.progress(this@HomeActivity, r.id)
+                val pages = Books.metaPages(this@HomeActivity, r.id)
+                // "page N / M · X% complete" when the page count is known, else just the percentage.
+                val progressLabel = if (pages > 0)
+                    "page ${Books.metaPage(this@HomeActivity, r.id) + 1} / $pages · $percent%"
+                else "$percent% complete"
                 addView(LinearLayout(this@HomeActivity).apply {
                     orientation = LinearLayout.HORIZONTAL
                     gravity = Gravity.CENTER_VERTICAL
                     setPadding(0, dim(14), 0, 0)
-                    addView(eyebrow("$percent% complete"))
+                    addView(eyebrow(progressLabel))
                     addView(spacerWeighted(1f))
                     addView(TextView(this@HomeActivity).apply {
                         text = "Resume →"; setTextColor(ink); textSize = fs(15f); typeface = serif
@@ -363,7 +374,7 @@ class HomeActivity : Activity() {
         }
         if (!spine) {
             return TextView(this).apply {
-                text = r.title; setTextColor(textSecondary); textSize = fs(12f); typeface = serif
+                text = Books.displayTitle(this@HomeActivity, r); setTextColor(textSecondary); textSize = fs(12f); typeface = serif
                 gravity = Gravity.CENTER; setPadding(dim(8), dim(8), dim(8), dim(8))
                 background = GradientDrawable().apply {
                     setColor(Color.parseColor("#EFEFEF")); setStroke(maxOf(1, dp(1)), ink)
@@ -379,7 +390,7 @@ class HomeActivity : Activity() {
             addView(View(this@HomeActivity).apply { setBackgroundColor(Color.WHITE) },
                 LinearLayout.LayoutParams(dim(4), ViewGroup.LayoutParams.MATCH_PARENT))
             addView(TextView(this@HomeActivity).apply {
-                text = r.title; setTextColor(Color.WHITE); textSize = fs(15f); typeface = serif
+                text = Books.displayTitle(this@HomeActivity, r); setTextColor(Color.WHITE); textSize = fs(15f); typeface = serif
                 gravity = Gravity.BOTTOM; setLineSpacing(0f, 1.12f)
                 setPadding(dim(12), dim(12), dim(12), dim(12))
                 layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f)

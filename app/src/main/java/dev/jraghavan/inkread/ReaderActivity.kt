@@ -788,6 +788,15 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             }
             pageCount = NativeBridge.nativePageCount(docHandle)
             Books.pushRecent(this, bookId, path)
+            // Capture the real document metadata so the library shows the actual title/author + page
+            // position instead of the filename (the home redesign's real-data path).
+            try {
+                val t = NativeBridge.nativeDocTitle(docHandle)
+                val a = NativeBridge.nativeDocAuthor(docHandle)
+                Books.setMeta(this, bookId, t, a, pageCount)
+            } catch (e: RuntimeException) {
+                Log.e(TAG, "doc metadata failed: ${e.message}")
+            }
             Log.i(
                 TAG,
                 "opened $bookId: $pageCount pages, resumed at page ${NativeBridge.nativeCurrentPage(docHandle)}",
@@ -2988,10 +2997,11 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         } catch (e: RuntimeException) {
             Log.e(TAG, "save position failed: ${e.message}")
         }
-        // Record read progress for the home shelf (RR16/RR17).
+        // Record read progress + page position for the home shelf (RR16/RR17).
         val total = pageCount
         if (total > 0 && currentBookId.isNotEmpty()) {
             Books.setProgress(this, currentBookId, ((currentPage + 1) * 100) / total)
+            Books.setPage(this, currentBookId, currentPage)
         }
     }
 
