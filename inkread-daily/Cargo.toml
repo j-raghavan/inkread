@@ -1,0 +1,19 @@
+[package]
+name = "inkread-daily"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "inkread-daily (#66): turn feed/article sources into a self-contained daily-issue EPUB the inkread reader opens. Pure, host-testable assembly — fetching lives in the Android shell (IR-7)."
+
+[dependencies]
+# Writes the issue EPUB (a ZIP container). Already a workspace dependency (CBZ). Pure Rust,
+# AGPL-compatible, cross-compiles clean.
+zip = { workspace = true }
+
+[dev-dependencies]
+# Round-trip the assembled issue through the real EPUB parser the reader uses, so a malformed
+# container fails the host gate rather than the device.
+inkread-epub = { workspace = true }
