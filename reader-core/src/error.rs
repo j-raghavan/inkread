@@ -135,4 +135,58 @@ mod tests {
             "this file is protected and can't be opened"
         );
     }
+
+    // The status code AND the message prefix of every variant are part of the JNI contract (the
+    // Kotlin side switches on the code and surfaces the message). Pin both exactly so a future
+    // refactor that renumbers a variant or rewords a message breaks the build, not the device.
+    #[test]
+    fn status_codes_and_messages_are_pinned() {
+        let cases: [(CoreError, StatusCode, &str); 10] = [
+            (
+                CoreError::InvalidArgument("x".into()),
+                1,
+                "invalid argument: x",
+            ),
+            (
+                CoreError::UnsupportedFormat("x".into()),
+                2,
+                "unsupported file type: x",
+            ),
+            (
+                CoreError::CorruptDocument("x".into()),
+                3,
+                "this file appears damaged: x",
+            ),
+            (
+                CoreError::DrmProtected,
+                4,
+                "this file is protected and can't be opened",
+            ),
+            (
+                CoreError::PageOutOfRange {
+                    requested: 7,
+                    available: 3,
+                },
+                5,
+                "page 7 out of range (have 3)",
+            ),
+            (
+                CoreError::BufferMismatch("x".into()),
+                6,
+                "pixel buffer mismatch: x",
+            ),
+            (CoreError::RenderBackend("x".into()), 7, "render failed: x"),
+            (
+                CoreError::BackendUnavailable("x".into()),
+                8,
+                "render backend unavailable: x",
+            ),
+            (CoreError::InternalPanic("x".into()), 9, "internal error: x"),
+            (CoreError::Persistence("x".into()), 10, "storage error: x"),
+        ];
+        for (err, code, msg) in &cases {
+            assert_eq!(err.status_code(), *code, "code for {err:?}");
+            assert_eq!(&err.to_string(), msg, "message for {err:?}");
+        }
+    }
 }

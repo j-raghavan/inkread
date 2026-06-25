@@ -271,6 +271,49 @@ pub fn encode_search_wire(matches: &[SearchMatch]) -> Vec<u8> {
 /// Render targets a borrowed [`PixelBuffer`] (Fork 4); the backend white-fills before
 /// rasterizing (RR4-FR3) and resolves the channel order so the buffer ends up RGBA
 /// (Amendment 3).
+///
+/// # Invariants every implementation must uphold
+///
+/// - **Never panic across the boundary (RR21-FR3).** Every fallible method returns a typed
+///   [`CoreError`](crate::error::CoreError); a bad page index is
+///   [`PageOutOfRange`](crate::error::CoreError::PageOutOfRange), not a panic or an out-of-bounds
+///   access. Validate arguments at the seam.
+/// - **`page_count` is authoritative.** A valid index is `0..page_count()`; `render_page` and
+///   friends must reject anything else with `PageOutOfRange`.
+/// - **Render fills the whole buffer as opaque RGBA.** White-fill first, then rasterize, so no
+///   pixel is left uninitialized and alpha is `0xFF` (RR4-FR3 / Amendment 3).
+/// - **The render/repagination path is `&self`.** Repagination and caches use interior mutability
+///   (e.g. `RefCell`) so rendering stays shared — mirror the existing backends rather than taking
+///   `&mut self` (only an explicit mutation like `export_pdf` is `&mut self`).
+/// - **Defaults model a fixed-layout, non-reflowable page.** Reflow/zoom/crop/anchor hooks default
+///   to the no-op/`None` behavior; a reflowable backend (EPUB) overrides them. Only override what
+///   your format actually supports — see [`Self::is_magnifiable`], [`Self::supports_reflow`],
+///   [`Self::selection_pins`].
+///
+/// # Minimal implementation
+///
+/// A blank one-page backend — the smallest thing that satisfies the trait (all other methods take
+/// their fixed-layout defaults):
+///
+/// ```ignore
+/// use reader_core::document::{Document, DocumentMetadata};
+/// use reader_core::render::PixelBuffer;
+/// use reader_core::error::{CoreError, CoreResult};
+///
+/// struct BlankDoc;
+///
+/// impl Document for BlankDoc {
+///     fn page_count(&self) -> usize { 1 }
+///     fn metadata(&self) -> DocumentMetadata { DocumentMetadata::default() }
+///     fn render_page(&self, index: usize, buf: &mut PixelBuffer<'_>) -> CoreResult<()> {
+///         if index >= self.page_count() {
+///             return Err(CoreError::PageOutOfRange { requested: index, available: self.page_count() });
+///         }
+///         buf.fill_white(); // opaque RGBA, whole buffer — no partial render
+///         Ok(())
+///     }
+/// }
+/// ```
 pub trait Document {
     /// Total page count (fixed-layout: a trivial integer model — RR5-FR2).
     fn page_count(&self) -> usize;

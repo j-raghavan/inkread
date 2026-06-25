@@ -540,6 +540,61 @@ mod tests {
             .collect()
     }
 
+    fn rect(x0: f32, y0: f32, x1: f32, y1: f32) -> NormRect {
+        NormRect { x0, y0, x1, y1 }
+    }
+
+    #[test]
+    fn norm_rect_contains_is_inclusive_on_the_edge() {
+        let r = rect(0.2, 0.2, 0.8, 0.8);
+        assert!(r.contains(0.5, 0.5), "interior point");
+        assert!(r.contains(0.2, 0.2), "top-left corner is inclusive");
+        assert!(r.contains(0.8, 0.8), "bottom-right corner is inclusive");
+        assert!(r.contains(0.2, 0.5), "left edge is inclusive");
+        assert!(!r.contains(0.19, 0.5), "just left of the rect");
+        assert!(!r.contains(0.5, 0.81), "just below the rect");
+    }
+
+    #[test]
+    fn norm_rect_intersects_counts_a_touching_edge_and_excludes_a_gap() {
+        let a = rect(0.0, 0.0, 0.5, 0.5);
+        assert!(a.intersects(&rect(0.4, 0.4, 0.9, 0.9)), "overlapping area");
+        assert!(
+            a.intersects(&rect(0.5, 0.0, 0.9, 0.5)),
+            "edges touching counts (shared x=0.5)"
+        );
+        let gap = rect(0.6, 0.0, 0.9, 0.5);
+        assert!(!a.intersects(&gap), "x gap → disjoint");
+        assert!(!a.intersects(&rect(0.0, 0.6, 0.5, 0.9)), "y gap → disjoint");
+        // Symmetric for both the overlapping AND the disjoint case: a∩b == b∩a.
+        let b = rect(0.4, 0.4, 0.9, 0.9);
+        assert_eq!(a.intersects(&b), b.intersects(&a), "overlap is symmetric");
+        assert_eq!(
+            a.intersects(&gap),
+            gap.intersects(&a),
+            "disjoint is symmetric"
+        );
+        // A zero-area rect (a point) still intersects a rect that covers it.
+        let point = rect(0.25, 0.25, 0.25, 0.25);
+        assert!(
+            a.intersects(&point) && point.intersects(&a),
+            "degenerate point inside"
+        );
+    }
+
+    #[test]
+    fn norm_rect_union_is_the_smallest_covering_rect() {
+        let a = rect(0.1, 0.2, 0.4, 0.5);
+        let b = rect(0.3, 0.0, 0.9, 0.6);
+        assert_eq!(a.union(&b), rect(0.1, 0.0, 0.9, 0.6));
+        // Union with self is identity; union is commutative.
+        assert_eq!(a.union(&a), a);
+        assert_eq!(a.union(&b), b.union(&a));
+        // The union covers both operands' corners.
+        let u = a.union(&b);
+        assert!(u.contains(a.x0, a.y0) && u.contains(b.x1, b.y1));
+    }
+
     /// A single-row line whose glyphs carry consecutive chapter-relative anchors in `block`.
     fn anchored_line(s: &str, block: usize, start_off: usize) -> Vec<CharBox> {
         line(s, 0.0, 0.8, 0.10, 0.03)
