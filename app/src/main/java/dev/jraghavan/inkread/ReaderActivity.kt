@@ -383,6 +383,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
                 // decides what the stylus does (ADR-INKREAD-0010).
                 lastStylusMs = SystemClock.uptimeMillis()
                 mainHandler.removeCallbacks(fingerLongPress) // a stylus event ⇒ that finger was a palm
+                mainHandler.removeCallbacks(pendingCentreMenu) // ...and don't pop the bar mid-stroke (#54)
                 val a = event.actionMasked
                 if (a == MotionEvent.ACTION_DOWN || a == MotionEvent.ACTION_UP) {
                     diag { "DIAG stylus action=$a tool=$tool type=$toolType hist=${event.historySize}" }
@@ -548,6 +549,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         if (::colorPalette.isInitialized) colorPalette.dismiss()
         mainHandler.removeCallbacks(fingerLongPress) // drop any pending finger gesture on leaving
         mainHandler.removeCallbacks(longPress)
+        mainHandler.removeCallbacks(pendingCentreMenu) // don't pop the bar on a paused/finishing activity (#54)
         mainHandler.removeCallbacks(inkFlush) // the explicit flush below supersedes the debounce
         ink.teardown() // release the firmware ink claim + clear the overlay
         // Persist the reading position + flush ink when backgrounded (RR27/RR20) — engine thread.
@@ -1327,6 +1329,9 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         val third = w / 3f
         val zone = if (x < third) "PREV" else if (x > 2 * third) "NEXT" else "TOC"
         diag { "DIAG handleTap x=$x w=$w -> $zone (${currentLinks.size} links, no hit)" }
+        // An edge tap breaks any centre double-tap chain (so centre→edge→centre within the window
+        // isn't read as a double-tap-zoom) (#54).
+        if (zone != "TOC") lastCentreTapMs = 0L
         when (zone) {
             "PREV" -> queuePageTurn(-1)
             "NEXT" -> queuePageTurn(+1)
@@ -1829,6 +1834,9 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
     private fun lenToNorm(px: Float) = px / (viewW * zoom)
     /** Push the current zoom/pan to the core and re-render (engine thread). */
     private fun applyZoom() {
+        // Any zoom/pan change (pinch, +/- buttons, double-tap, pan) cancels a deferred centre menu so
+        // it can't pop the bar open after a zoom (#54). UI-thread; safe before the engine post.
+        mainHandler.removeCallbacks(pendingCentreMenu)
         engine.execute {
             if (docHandle != 0L) {
                 try { NativeBridge.nativeSetZoom(docHandle, zoom, panX, panY) } catch (e: RuntimeException) {}
