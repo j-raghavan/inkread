@@ -109,6 +109,11 @@ object NativeBridge {
      *  [WireCodec.decodeSelection]. */
     external fun nativeTextLineSpan(handle: Long, page: Int, sx: Float, sy: Float, ex: Float, ey: Float): ByteArray
 
+    /** The reflow-stable [start,end] PinPosition pair a selection rect covers on a reflowable page —
+     *  the Digest anchor (#46). Returns a JSON object `{"start":<pin>,"end":<pin>}`, or an EMPTY
+     *  string for fixed-layout PDF / an empty selection (caller falls back to a page anchor). */
+    external fun nativeSelectionPins(handle: Long, page: Int, x0: Float, y0: Float, x1: Float, y1: Float): String
+
     /**
      * Find [query] on `page` (RR2 in-document search), case-insensitive. Returns the search wire
      * (decode with [WireCodec.decodeSearch]): one match per occurrence with a snippet + highlight
@@ -307,6 +312,16 @@ data class SelBox(val x0: Float, val y0: Float, val x1: Float, val y1: Float)
 /** A text selection: the selected string + the boxes to highlight (RR11 / D3). */
 data class Selection(val text: String, val boxes: List<SelBox>) {
     val isEmpty: Boolean get() = text.isEmpty()
+
+    /** The selection's normalized bounding rect `[x0,y0,x1,y1]` (union of all boxes), or null when
+     *  empty — the rect handed to the reflow-stable anchor lookup (#46). */
+    fun boundsNorm(): FloatArray? {
+        if (boxes.isEmpty()) return null
+        return floatArrayOf(
+            boxes.minOf { it.x0 }, boxes.minOf { it.y0 },
+            boxes.maxOf { it.x1 }, boxes.maxOf { it.y1 },
+        )
+    }
 }
 
 /** One in-document search match on a page (RR2): highlight [boxes] + a context [snippet]. */

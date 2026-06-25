@@ -1247,6 +1247,39 @@ pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeTextLineSpa
     .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
 }
 
+// nativeSelectionPins(handle, page, x0,y0,x1,y1) : String — the reflow-stable [start,end] PinPosition
+// pair a selection rect covers on a reflowable page (the Digest anchor, #46). Returns a JSON object
+// `{"start":<pin>,"end":<pin>}`, or an EMPTY string for fixed-layout PDF / an empty selection (the
+// caller then falls back to a page anchor). Anchors to text locations, not pixels.
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeSelectionPins<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+    page: jint,
+    x0: jfloat,
+    y0: jfloat,
+    x1: jfloat,
+    y1: jfloat,
+) -> JString<'local> {
+    env.with_env(|env| -> jni::errors::Result<JString<'local>> {
+        let session = unsafe { session_mut(handle) }.map_err(|e| throw(env, &e))?;
+        let target = if page < 0 { 0usize } else { page as usize };
+        let json = match session.selection_pins(target, NormRect { x0, y0, x1, y1 }) {
+            // PageRange serializes to exactly `{"start":{…},"end":{…}}` (primitive-only → infallible);
+            // reuse it rather than hand-building the JSON.
+            Some((start, end)) => {
+                serde_json::to_string(&crate::position::PageRange::new(start, end))
+                    .unwrap_or_default()
+            }
+            None => String::new(),
+        };
+        env.new_string(json)
+    })
+    .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
+}
+
 /// Find `query` on `page` (RR2 in-document search). Returns the search wire (decode:
 /// `WireCodec.decodeSearch`): the page's matches as snippet + highlight boxes. The shell calls this
 /// page-by-page so the scan stays memory-bounded.

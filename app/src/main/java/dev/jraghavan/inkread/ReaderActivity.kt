@@ -2285,7 +2285,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
                     "Define" -> dict.defineSelectionText(snippet)
                     "Copy" -> copyTextToClipboard(snippet)
                     "Highlight" -> engine.execute { highlightTextBoxes(sel) }
-                    "Add to Digest" -> digest.addDigestText(currentPage, sel.text)
+                    "Add to Digest" -> digest.addDigestText(currentPage, sel.text, sel.boundsNorm())
                 }
             }
             // Any dismissal (action chosen or cancelled) clears the box overlay; a Highlight redraws

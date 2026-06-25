@@ -653,6 +653,33 @@ fn pdf_is_magnifiable_until_reflowed() {
     assert!(doc.is_magnifiable(), "fixed page magnifies again");
 }
 
+#[test]
+fn pdf_selection_pins_none_for_fixed_layout() {
+    let _s = pdfium_serial();
+    if !host_pdfium_available() {
+        eprintln!("SKIP pdf_selection_pins_none_for_fixed_layout: host libpdfium UNVERIFIED");
+        return;
+    }
+    let bytes = std::fs::read(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/minimal.pdf"
+    ))
+    .expect("fixture present");
+    let doc = PdfBackend::open(bytes).expect("open fixture");
+    // A fixed-layout PDF has a stable integer page, so there is no reflow-stable pin to mint — the
+    // digest keeps its page anchor (#46). selection_pins returns None regardless of the rect.
+    let whole = crate::document::text_select::NormRect {
+        x0: 0.0,
+        y0: 0.0,
+        x1: 1.0,
+        y1: 1.0,
+    };
+    assert!(
+        doc.selection_pins(0, whole).is_none(),
+        "no pin for fixed PDF"
+    );
+}
+
 /// Visual gate (ADR-INKREAD-0011): render the first reflowed pages of a real text PDF to BMPs for
 /// human inspection — the black-screencap Supernote can't self-verify, so we eyeball on the host.
 /// Run on demand: `INKREAD_REFLOW_PDF=/path/book.pdf cargo test -p reader-core

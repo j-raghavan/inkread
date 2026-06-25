@@ -70,7 +70,7 @@ class DigestController(private val host: Host) {
                 toast("No selectable text under the selection")
                 return@engineExecute
             }
-            val ok = insertDigest(path, page, text)
+            val ok = insertDigest(path, page, text, selectionAnchor(page, boundsNorm))
             toast(if (ok) "Added to Digest" else "Couldn't add to Digest")
         }
     }
@@ -78,8 +78,9 @@ class DigestController(private val host: Host) {
     /**
      * Save already-selected text on [page] to the Digest. Used by the printed-text lasso path, which
      * has resolved the selection itself — so no native extraction is needed, just the insert.
+     * [boundsNorm] (the selection's normalized bounding rect, or null) yields the reflow-stable anchor.
      */
-    fun addDigestText(page: Int, content: String) {
+    fun addDigestText(page: Int, content: String, boundsNorm: FloatArray?) {
         val path = host.currentDocPath
         val text = content.trim()
         if (path == null || host.docHandle == 0L || text.isEmpty()) {
@@ -87,8 +88,23 @@ class DigestController(private val host: Host) {
             return
         }
         host.engineExecute {
-            val ok = insertDigest(path, page, text)
+            val ok = insertDigest(path, page, text, boundsNorm?.let { selectionAnchor(page, it) })
             toast(if (ok) "Added to Digest" else "Couldn't add to Digest")
+        }
+    }
+
+    /**
+     * The reflow-stable `{"start":…,"end":…}` PinPosition anchor for the selection rect, or null for
+     * fixed-layout PDF / an empty selection (the core returns an empty string, #46). Engine thread.
+     */
+    private fun selectionAnchor(page: Int, boundsNorm: FloatArray): String? {
+        if (boundsNorm.size != 4) return null
+        return try {
+            NativeBridge.nativeSelectionPins(
+                host.docHandle, page, boundsNorm[0], boundsNorm[1], boundsNorm[2], boundsNorm[3],
+            ).ifEmpty { null }
+        } catch (e: RuntimeException) {
+            Log.e(TAG, "selectionPins failed: ${e.message}"); null
         }
     }
 
@@ -98,13 +114,13 @@ class DigestController(private val host: Host) {
      * nests `document_location_data` + `source_size`. `creation_time`/`last_modified_time` are left
      * for the provider to fill, exactly as the firmware does.
      */
-    private fun insertDigest(srcPath: String, page: Int, content: String): Boolean {
+    private fun insertDigest(srcPath: String, page: Int, content: String, anchorJson: String?): Boolean {
         val values = ContentValues().apply {
             put(COL_CONTENT, content)
             put(COL_SOURCE_TYPE, SOURCE_TYPE_DOCUMENT)
             put(COL_SOURCE_PATH, srcPath)
             put(COL_SOURCE_PAGE, page.toString())
-            put(COL_METADATA, buildMetadata(srcPath, page))
+            put(COL_METADATA, buildMetadata(srcPath, page, anchorJson))
         }
         return try {
             val uri = activity.contentResolver.insert(Uri.parse(INSERT_URI), values)
@@ -121,11 +137,12 @@ class DigestController(private val host: Host) {
 
     /**
      * `metadata` JSON. `document_location_data` is itself a JSON string — a `[{chapter,page,
-     * startPosition,endPosition}]` array (mupdf coordinate model). v1 emits page-only
-     * (`start=end=0`): the entry opens at [page] but doesn't restore a precise highlight span until
-     * we calibrate pdfium offsets against a real mupdf sample. `source_size` is the PDF byte size.
+     * startPosition,endPosition}]` array (mupdf coordinate model), emitted page-only (`start=end=0`):
+     * the entry opens at [page] but doesn't restore a precise PDF highlight span until we calibrate
+     * pdfium offsets against a real mupdf sample. `source_size` is the source byte size. For a
+     * reflowable doc, [anchorJson] adds an inkread-private reflow-stable PinPosition anchor (#46).
      */
-    private fun buildMetadata(srcPath: String, page: Int): String {
+    private fun buildMetadata(srcPath: String, page: Int, anchorJson: String?): String {
         val location = JSONArray().put(
             JSONObject()
                 .put("chapter", 0)
@@ -134,10 +151,18 @@ class DigestController(private val host: Host) {
                 .put("endPosition", 0),
         )
         val size = runCatching { File(srcPath).length() }.getOrDefault(0L)
-        return JSONObject()
+        val metadata = JSONObject()
             .put(KEY_DOCUMENT_LOCATION_DATA, location.toString())
             .put(KEY_SOURCE_SIZE, size)
-            .toString()
+        // An EPUB digest carries an inkread-private reflow-stable PinPosition anchor under our own key
+        // (#46). The stock Digest app ignores unknown keys and the vendor `document_location_data` is
+        // untouched, so fixed-layout PDF behaviour is unchanged. Parse defensively: a malformed anchor
+        // degrades to a page-only entry rather than failing the insert (RR21-FR3 — validate at the edge).
+        if (anchorJson != null) {
+            runCatching { metadata.put(KEY_INKREAD_ANCHOR, JSONObject(anchorJson)) }
+                .onFailure { Log.e(TAG, "bad digest anchor, page-only: ${it.message}") }
+        }
+        return metadata.toString()
     }
 
     private fun toast(msg: String) =
@@ -159,5 +184,8 @@ class DigestController(private val host: Host) {
 
         const val KEY_DOCUMENT_LOCATION_DATA = "document_location_data"
         const val KEY_SOURCE_SIZE = "source_size"
+
+        // inkread-private (not a vendor key): the reflow-stable PinPosition anchor for EPUB digests.
+        const val KEY_INKREAD_ANCHOR = "inkread_anchor"
     }
 }
