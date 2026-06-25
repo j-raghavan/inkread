@@ -253,10 +253,21 @@ pub fn word_at(chars: &[CharBox], x: f32, y: f32) -> Option<TextSelection> {
 /// "inside the loop" (it keeps a glyph at least half-covered along the axis the rect edge cuts —
 /// a corner clip can be lower, which is the intended tightening). Shared by [`text_in_rect`] and
 /// [`anchored_span`] so the highlight and its stored anchors never disagree on which glyphs are in.
+///
+/// Horizontal is always strict centre-in-range (precise column boundary). Vertical accepts EITHER
+/// the centre inside the rect (the normal case) OR the glyph's box straddling the rect's mid-line —
+/// so a **thin single-line drag** (a Define swipe whose bbox is shorter than the glyphs and may not
+/// reach their centres) still selects the line it runs along, without re-admitting a neighbouring
+/// line a tall lasso bbox only grazes (its mid-line lands on the line it's centred over, not the
+/// grazed one).
 fn glyph_selected(rect: &NormRect, glyph: &NormRect) -> bool {
     let cx = (glyph.x0 + glyph.x1) * 0.5;
+    if cx < rect.x0 || cx > rect.x1 {
+        return false;
+    }
     let cy = (glyph.y0 + glyph.y1) * 0.5;
-    rect.contains(cx, cy)
+    let rect_mid_y = (rect.y0 + rect.y1) * 0.5;
+    (cy >= rect.y0 && cy <= rect.y1) || (glyph.y0 <= rect_mid_y && rect_mid_y <= glyph.y1)
 }
 
 /// The text whose glyphs fall within `rect` (drag-highlight), in reading order, with one highlight
@@ -758,6 +769,26 @@ mod tests {
             },
         );
         assert!(sel.is_empty());
+    }
+
+    #[test]
+    fn text_in_rect_selects_a_thin_horizontal_drag_on_one_line() {
+        // Regression (#51 → Define drag-select): a single-line drag is a THIN rect along the text;
+        // its y-range sits inside the glyphs but need not straddle their centres. Centre-point alone
+        // dropped it (nothing selected); a glyph whose box contains the drag's mid-line is selected.
+        let chars = line("hello world", 0.0, 0.55, 0.10, 0.03); // glyphs y[.10,.13], centres y=.115
+        let rect = NormRect {
+            x0: 0.0,
+            y0: 0.118,
+            x1: 0.30,
+            y1: 0.126,
+        }; // a swipe just below the glyph centres
+        let sel = text_in_rect(&chars, rect);
+        assert!(
+            sel.text.starts_with("hello"),
+            "thin single-line drag selects the line's words, got '{}'",
+            sel.text
+        );
     }
 
     #[test]

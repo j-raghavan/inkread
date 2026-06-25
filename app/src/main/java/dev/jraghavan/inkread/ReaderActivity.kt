@@ -2183,13 +2183,22 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             y0 = minOf(y0, poly[i + 1]); y1 = maxOf(y1, poly[i + 1])
             i += 2
         }
-        // Open drag (lift far from start) spanning multiple lines → reading-order line span; a closed
-        // loop (lift returns near the start) → the bounding box of what was circled.
+        // A MULTI-LINE text selection always reads in reading order — intermediate lines whole, the
+        // last line clipped — whether the gesture was an open drag or a closed loop (a geometric
+        // bbox across lines would catch only the columns inside the loop, leaving intermediate lines
+        // partial). Use the drag's start→lift when it's a directional open drag; for a closed loop
+        // use its top-left→bottom-right corners so the span still reads top to bottom.
         val openDrag = kotlin.math.hypot(ex - sx, ey - sy) > OPEN_DRAG_FRAC
         val multiLine = (y1 - y0) > MULTILINE_DRAG_FRAC
-        if (openDrag && multiLine) {
-            presentLineSpanSelection(sx, sy, ex, ey, "No text under the selection")
+        if (multiLine) {
+            if (openDrag) presentLineSpanSelection(sx, sy, ex, ey, "No text under the selection")
+            // Closed loop: corner→corner. The last line is clipped to the loop's rightmost extent
+            // (x1), an approximation — for an irregular loop that may run a word or two past where the
+            // user closed it on the bottom line. Acceptable for circling a region; the directional
+            // open-drag path above clips precisely to the actual lift point.
+            else presentLineSpanSelection(x0, y0, x1, y1, "No text under the selection")
         } else {
+            // Single line → the dragged/circled span on that line (precise, horizontal).
             presentTextSelection(x0, y0, x1, y1, "Nothing under the loop — circle ink or printed words")
         }
     }

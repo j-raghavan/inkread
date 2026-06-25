@@ -288,6 +288,12 @@ impl Document for EpubBackend {
         text_select::text_in_rect(&self.page_chars(page), rect)
     }
 
+    fn text_line_span(&self, page: usize, start: (f32, f32), end: (f32, f32)) -> TextSelection {
+        // EPUB needs the reading-order line span too (it was falling through to the empty trait
+        // default — a multi-line drag selected nothing on a reflowed page) (#46 device finding).
+        text_select::text_line_span(&self.page_chars(page), start, end)
+    }
+
     fn search_page(&self, page: usize, query: &str) -> Vec<SearchMatch> {
         text_select::find_matches(&self.page_chars(page), query)
     }
@@ -533,6 +539,33 @@ mod tests {
         b.set_text_scale(1.7, 0).unwrap();
         assert_eq!(char_at(&b, &start), Some(sc), "start re-anchors");
         assert_eq!(char_at(&b, &end), Some(ec), "end re-anchors");
+    }
+
+    #[test]
+    fn text_line_span_selects_reflowed_lines() {
+        // Regression (#46 device finding): EpubBackend didn't override text_line_span, so a multi-line
+        // drag on a reflowed page hit the Document trait's empty default and selected nothing — the
+        // bbox path worked, the line-span path returned ''. The override must select real text.
+        let b = EpubBackend::open(SAMPLE.to_vec(), vp(400, 600)).unwrap();
+        let _ = render(&b, 0, 400, 600);
+        let sel = b.text_line_span(0, (0.05, 0.02), (0.60, 0.30)); // a drag down the top of page 0
+        assert!(
+            !sel.boxes.is_empty(),
+            "reflowed line-span produces highlight boxes"
+        );
+        // Correctness, not just wiring: the span must be REAL page text. Pull a word the page
+        // actually has and confirm the top-of-page span contains it (the first line is taken whole,
+        // so the page's opening words are in range) — a wrong-glyph override would not contain it.
+        let page_text: String = b.page_chars(0).iter().map(|c| c.ch).collect();
+        let word = page_text
+            .split_whitespace()
+            .find(|w| w.chars().all(|c| c.is_alphabetic()) && w.len() >= 4)
+            .expect("a real word on page 0");
+        assert!(
+            sel.text.contains(word),
+            "line-span selects actual page text containing {word:?}, got '{}'",
+            sel.text
+        );
     }
 
     #[test]
