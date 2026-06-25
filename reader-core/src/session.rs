@@ -716,6 +716,14 @@ impl ReaderSession {
         self.document.supports_reflow()
     }
 
+    /// Whether the **current** view honors zoom (a fixed-layout page that is not reflowed, RR25-FR3).
+    /// The shell gates its zoom entry points (pinch / +−buttons / double-tap) on this so a gesture on
+    /// a reflowable view can't strand the shell's zoom factor and skew tap hit-testing.
+    #[must_use]
+    pub fn is_magnifiable(&self) -> bool {
+        self.document.is_magnifiable()
+    }
+
     /// Toggle **reflow mode** on the open PDF (ADR-INKREAD-0011): reconstructs the text and flows it
     /// like a book so the font-size/line-spacing/alignment controls take effect; toggling off
     /// restores the fixed page. Preserves the reading position across the changing page count and

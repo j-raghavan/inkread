@@ -847,6 +847,12 @@ impl Document for PdfBackend {
         self.has_text_layer()
     }
 
+    fn is_magnifiable(&self) -> bool {
+        // A fixed PDF page magnifies; a reflowed one is laid out like text and ignores zoom
+        // (mirrors `render_zoom` and `set_reflow`'s zoom=1 reset, RR25-FR3).
+        !self.reflow_on()
+    }
+
     fn set_reflow(&self, on: bool, current_page: usize) -> Option<usize> {
         if on {
             // Already on → no-op jump. No text layer → can't reflow (scanned PDF needs OCR).

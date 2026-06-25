@@ -718,6 +718,22 @@ pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeSupportsRef
     .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
 }
 
+// nativeIsMagnifiable(handle) : boolean — whether the CURRENT view honors zoom (a fixed-layout page
+// that is not reflowed, RR25-FR3). The shell gates every zoom entry point on this so a pinch /
+// double-tap on a reflowable view can't strand its zoom factor and skew tap hit-testing.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeIsMagnifiable<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+) -> jboolean {
+    env.with_env(|env| -> jni::errors::Result<jboolean> {
+        let session = unsafe { session_mut(handle) }.map_err(|e| throw(env, &e))?;
+        Ok(session.is_magnifiable())
+    })
+    .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
+}
+
 // nativeSetReflow(handle, on) : int — toggle reflow mode on a text-layer PDF (ADR-INKREAD-0011):
 // reconstruct the page text and flow it like a book so font/spacing/alignment take effect; off
 // restores the fixed page. Returns the new current page index (page count changes across the
