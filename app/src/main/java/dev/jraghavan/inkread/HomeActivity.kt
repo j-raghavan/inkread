@@ -136,10 +136,19 @@ class HomeActivity : Activity() {
             isVerticalScrollBarEnabled = false
             addView(column)
         }
-        // A subtle top-corner gear → app Settings (export behaviour, help, about).
+        // Top corners: a Daily entry (left) → the newspaper front page, a gear (right) → Settings.
         return FrameLayout(this).apply {
             setBackgroundColor(Color.WHITE)
             addView(scroll, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+            addView(TextView(this@HomeActivity).apply {
+                text = "The Daily  ›"; setTextColor(ink); textSize = 12f; typeface = mono
+                letterSpacing = 0.12f; isAllCaps = true
+                val p = dp(8); setPadding(p, p, p, p)
+                isClickable = true
+                setOnClickListener { startActivity(Intent(this@HomeActivity, DailyActivity::class.java)) }
+            }, FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.TOP or Gravity.START).apply {
+                topMargin = dp(14); marginStart = dp(14)
+            })
             addView(ImageView(this@HomeActivity).apply {
                 setImageResource(R.drawable.ic_settings)
                 val p = dp(8); setPadding(p, p, p, p)
