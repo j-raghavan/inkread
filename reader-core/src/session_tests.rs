@@ -274,6 +274,112 @@ fn resume_clamps_to_document_range() {
     assert_eq!(s.current_page(), 4);
 }
 
+/// A reflowable-style stub that carries reflow-stable pins. `page_pin` encodes the page in the pin's
+/// `text_offset`; `pin_to_page` simulates a re-layout that shifts every page by +1 — so a resume that
+/// uses the pin lands one page past the saved integer, proving the pin path (not the int fallback)
+/// drives the re-anchor (#46).
+struct PinStub {
+    pages: usize,
+}
+impl Document for PinStub {
+    fn page_count(&self) -> usize {
+        self.pages
+    }
+    fn metadata(&self) -> DocumentMetadata {
+        DocumentMetadata {
+            title: None,
+            author: None,
+        }
+    }
+    fn render_page(&self, index: usize, buf: &mut PixelBuffer<'_>) -> CoreResult<()> {
+        if index >= self.pages {
+            return Err(CoreError::PageOutOfRange {
+                requested: index,
+                available: self.pages,
+            });
+        }
+        buf.fill_white();
+        Ok(())
+    }
+    fn toc(&self) -> Vec<TocEntry> {
+        Vec::new()
+    }
+    fn page_pin(&self, page: usize) -> Option<crate::position::PinPosition> {
+        Some(crate::position::PinPosition {
+            chapter_index: 0,
+            chapter_id: "c".into(),
+            chapter_start: 0,
+            chapter_end: i32::MAX,
+            node_position: 0,
+            text_offset: page as i32,
+            xpath: vec![],
+        })
+    }
+    fn pin_to_page(&self, pin: &crate::position::PinPosition) -> Option<usize> {
+        Some(pin.text_offset as usize + 1) // a re-layout shifted everything one page on
+    }
+}
+
+fn pin_store_session(pages: usize, store: Arc<dyn ReaderStore>, book: BookId) -> ReaderSession {
+    ReaderSession::with_document_and_store(
+        Box::new(PinStub { pages }),
+        DeviceCapabilities::supernote_full(),
+        Viewport::new(100, 120, 226),
+        store,
+        book,
+    )
+    .unwrap()
+}
+
+#[test]
+fn save_position_stores_a_pin_for_reflowable_and_resume_re_anchors_via_it() {
+    // #46/RR12-FR4: a reflowable position persists a PinPosition blob, and a later open re-anchors
+    // through it (pin_to_page) rather than trusting the stale integer page from a different layout.
+    let store: Arc<dyn ReaderStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+    let book = BookId::new("b").unwrap();
+    let mut a = pin_store_session(6, store.clone(), book.clone());
+    a.on_gesture(Gesture::NextPage);
+    a.on_gesture(Gesture::NextPage); // page 2
+    a.save_position().unwrap();
+
+    let loaded = store.load_position(&book).unwrap().unwrap();
+    assert_eq!(
+        loaded.page_index, 2,
+        "the integer page is still recorded as a fallback"
+    );
+    assert!(
+        loaded.resume_blob.is_some(),
+        "a reflowable position stores a pin blob"
+    );
+
+    let b = pin_store_session(6, store, book);
+    assert_eq!(
+        b.current_page(),
+        3,
+        "resume re-anchored via the pin (page 2 + the +1 re-layout shift), not the stale integer 2"
+    );
+}
+
+#[test]
+fn fixed_layout_position_stores_no_pin_and_resumes_by_page() {
+    // A fixed-layout doc (no pins) keeps the page-only behaviour — no blob, resume by integer page.
+    let store: Arc<dyn ReaderStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+    let book = BookId::new("b").unwrap();
+    let mut a = store_session(6, store.clone(), book.clone()); // StubDoc → no pins
+    a.on_gesture(Gesture::NextPage);
+    a.on_gesture(Gesture::NextPage); // page 2
+    a.save_position().unwrap();
+
+    let loaded = store.load_position(&book).unwrap().unwrap();
+    assert!(loaded.resume_blob.is_none(), "fixed-layout stores no pin");
+    let b = store_session(6, store, book);
+    assert_eq!(
+        b.current_page(),
+        2,
+        "fixed-layout resumes by the integer page"
+    );
+}
+
 // A store-less session: saving is a no-op (M0 path stays green).
 #[test]
 fn store_less_save_is_noop() {
