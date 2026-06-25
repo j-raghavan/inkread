@@ -115,6 +115,31 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
     /** Whether PDF reflow mode is on (ADR-INKREAD-0011). Session-scoped: defaults off on each open
      *  (the fixed page is the faithful view; reflow is an opt-in toggle on the Page tab). */
     @Volatile private var reflowOn = false
+    /** True while a reflow toggle's full-document repagination is running (guards re-toggle + drives
+     *  the "Reflowing…" notice). Large PDFs take seconds (#55). */
+    @Volatile private var reflowInProgress = false
+    private var reflowProgressDialog: Dialog? = null
+    /** Shows the "Reflowing…" notice — posted with a short delay so a fast reflow never flashes it. */
+    private val showReflowProgress = Runnable {
+        if (isFinishing || docHandle == 0L) return@Runnable
+        val d = resources.displayMetrics.density
+        fun px(v: Int) = (v * d).toInt()
+        val msg = TextView(this).apply {
+            text = "Reflowing…"
+            textSize = 16f
+            setTextColor(Ink.ink) // black text on the white card below
+            setPadding(px(28), px(22), px(28), px(22))
+        }
+        reflowProgressDialog = Dialog(this).apply {
+            requestWindowFeature(Window.FEATURE_NO_TITLE)
+            setCancelable(false)
+            setContentView(msg)
+            // Without an explicit light window background the dialog renders as a black box on this
+            // e-ink theme; use the app's white card (matches the other sheets) (#55).
+            window?.setBackgroundDrawable(Ink.cardBg())
+            runCatching { show() }
+        }
+    }
 
     // ---- dictionary (RR12 / D4) — owns the corpus handle + lookup/define/manage UI (SRP) ----
     private val dict = DictController(object : DictController.Host {
@@ -550,6 +575,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         mainHandler.removeCallbacks(fingerLongPress) // drop any pending finger gesture on leaving
         mainHandler.removeCallbacks(longPress)
         mainHandler.removeCallbacks(pendingCentreMenu) // don't pop the bar on a paused/finishing activity (#54)
+        dismissReflowProgress() // don't leak the "Reflowing…" dialog if backgrounded mid-reflow (#55)
         mainHandler.removeCallbacks(inkFlush) // the explicit flush below supersedes the debounce
         ink.teardown() // release the firmware ink claim + clear the overlay
         // Persist the reading position + flush ink when backgrounded (RR27/RR20) — engine thread.
@@ -2744,6 +2770,13 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
      *  reflowed PDF respects the user's font size / spacing / alignment; the page count and position
      *  change across the toggle, so refresh both. A `-1` means no text layer (scanned PDF). */
     private fun setReflowMode(on: Boolean) {
+        if (reflowInProgress) return // ignore a re-toggle while a reflow build is running
+        reflowInProgress = true
+        // Enabling reflow on a PDF re-extracts the text layer and repaginates the WHOLE document — on
+        // a large book that's several seconds. Show a "Reflowing…" notice if it doesn't finish
+        // quickly so the toggle doesn't look frozen; the delay means a small/fast doc never flashes
+        // the dialog (#55). The work itself is already off the UI thread (engine).
+        mainHandler.postDelayed(showReflowProgress, REFLOW_PROGRESS_DELAY_MS)
         engine.execute {
             val np = try { NativeBridge.nativeSetReflow(docHandle, on) } catch (e: RuntimeException) { -1 }
             if (np >= 0) {
@@ -2764,7 +2797,16 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             } else {
                 runOnUiThread { Toast.makeText(this, "This PDF has no text layer to reflow", Toast.LENGTH_SHORT).show() }
             }
+            runOnUiThread { dismissReflowProgress() }
         }
+    }
+
+    /** Dismiss the reflow "Reflowing…" notice (and cancel a not-yet-shown one); clears the guard. */
+    private fun dismissReflowProgress() {
+        mainHandler.removeCallbacks(showReflowProgress)
+        reflowProgressDialog?.let { runCatching { it.dismiss() } }
+        reflowProgressDialog = null
+        reflowInProgress = false
     }
 
     private fun lineSpacingPref(): Int =
@@ -2966,6 +3008,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         const val DOUBLE_TAP_ZOOM = 2.0f // zoom level a double-tap jumps to from fit (#54).
         const val DOUBLE_TAP_MS = 280L // max gap between the two taps of a double-tap (#54).
         const val DOUBLE_TAP_SLOP_PX = 60f // max distance between the two taps to count as a double-tap.
+        const val REFLOW_PROGRESS_DELAY_MS = 250L // show "Reflowing…" only if the build outlasts this (#55).
         const val SELECTION_HANDLE_PX = 8f // half-size of the square corner handles on the selection box.
         const val MULTILINE_DRAG_FRAC = 0.045f // drag vertical span (frac of height) above which it's a multi-line → line-span select.
         const val OPEN_DRAG_FRAC = 0.08f // lasso: start-to-lift distance (normalized) above which the gesture is an open drag (vs a closed loop).
