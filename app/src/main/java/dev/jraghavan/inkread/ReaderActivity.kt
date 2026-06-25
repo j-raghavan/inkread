@@ -245,6 +245,13 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
      *  jump the page. While set, single-finger pan/tap is suppressed until a fresh DOWN starts a clean
      *  gesture; reset on ACTION_DOWN (#49). */
     private var gestureWasMultiTouch = false
+    /** Last centre tap (uptime ms + view px) for double-tap-to-zoom detection (#54). */
+    private var lastCentreTapMs = 0L
+    private var lastCentreTapX = 0f
+    private var lastCentreTapY = 0f
+    /** A centre single-tap's action (open the bottom bar), deferred [DOUBLE_TAP_MS] so it can be
+     *  cancelled if a second tap turns it into a double-tap-zoom. Edge taps stay immediate (#54). */
+    private val pendingCentreMenu = Runnable { showBottomBar() }
     private val fingerLongPress = Runnable {
         // A genuine 500ms hold (UP cancels this for a tap; a beyond-slop MOVE cancels it for a
         // swipe). Mark it a long-press FIRST so the eventual UP never falls through to a page flip —
@@ -376,6 +383,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
                 // decides what the stylus does (ADR-INKREAD-0010).
                 lastStylusMs = SystemClock.uptimeMillis()
                 mainHandler.removeCallbacks(fingerLongPress) // a stylus event ⇒ that finger was a palm
+                mainHandler.removeCallbacks(pendingCentreMenu) // ...and don't pop the bar mid-stroke (#54)
                 val a = event.actionMasked
                 if (a == MotionEvent.ACTION_DOWN || a == MotionEvent.ACTION_UP) {
                     diag { "DIAG stylus action=$a tool=$tool type=$toolType hist=${event.historySize}" }
@@ -541,6 +549,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         if (::colorPalette.isInitialized) colorPalette.dismiss()
         mainHandler.removeCallbacks(fingerLongPress) // drop any pending finger gesture on leaving
         mainHandler.removeCallbacks(longPress)
+        mainHandler.removeCallbacks(pendingCentreMenu) // don't pop the bar on a paused/finishing activity (#54)
         mainHandler.removeCallbacks(inkFlush) // the explicit flush below supersedes the debounce
         ink.teardown() // release the firmware ink claim + clear the overlay
         // Persist the reading position + flush ink when backgrounded (RR27/RR20) — engine thread.
@@ -1285,6 +1294,9 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
                     val third = w / 3f
                     if (fingerDownX < third) { panY = 0f; fitThumb = null; queuePageTurn(-1) }
                     else if (fingerDownX > 2f * third) { panY = 0f; fitThumb = null; queuePageTurn(+1) }
+                    // Centre double-tap while zoomed → restore fit (#54); a single centre tap records
+                    // for double-tap detection but otherwise does nothing while zoomed.
+                    else if (isCentreDoubleTap(fingerDownX, fingerDownY)) doubleTapZoom(fingerDownX, fingerDownY)
                 }
             }
             return
@@ -1317,10 +1329,20 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         val third = w / 3f
         val zone = if (x < third) "PREV" else if (x > 2 * third) "NEXT" else "TOC"
         diag { "DIAG handleTap x=$x w=$w -> $zone (${currentLinks.size} links, no hit)" }
+        // An edge tap breaks any centre double-tap chain (so centre→edge→centre within the window
+        // isn't read as a double-tap-zoom) (#54).
+        if (zone != "TOC") lastCentreTapMs = 0L
         when (zone) {
             "PREV" -> queuePageTurn(-1)
             "NEXT" -> queuePageTurn(+1)
-            else -> showBottomBar()
+            else -> {
+                // Centre: a double-tap zooms toward the point (#54); a single tap opens the menu,
+                // deferred [DOUBLE_TAP_MS] so the first tap of a double-tap doesn't flash the bar open.
+                // (Edge page turns above stay immediate — no double-tap latency on navigation.)
+                mainHandler.removeCallbacks(pendingCentreMenu)
+                if (isCentreDoubleTap(x, y)) doubleTapZoom(x, y)
+                else mainHandler.postDelayed(pendingCentreMenu, DOUBLE_TAP_MS)
+            }
         }
     }
 
@@ -1812,6 +1834,9 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
     private fun lenToNorm(px: Float) = px / (viewW * zoom)
     /** Push the current zoom/pan to the core and re-render (engine thread). */
     private fun applyZoom() {
+        // Any zoom/pan change (pinch, +/- buttons, double-tap, pan) cancels a deferred centre menu so
+        // it can't pop the bar open after a zoom (#54). UI-thread; safe before the engine post.
+        mainHandler.removeCallbacks(pendingCentreMenu)
         engine.execute {
             if (docHandle != 0L) {
                 try { NativeBridge.nativeSetZoom(docHandle, zoom, panX, panY) } catch (e: RuntimeException) {}
@@ -1827,6 +1852,40 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         zoom = next
         if (zoom <= 1.01f) { zoom = 1f; panX = 0f; panY = 0f }
         applyZoom()
+    }
+
+    /**
+     * Double-tap zoom toggle (#54): from fit, zoom toward the tapped point ([DOUBLE_TAP_ZOOM]),
+     * anchoring the content under the tap with the same focal math as pinch-end; while zoomed, a
+     * double-tap restores fit. `(fx, fy)` is the tap in view pixels.
+     */
+    private fun doubleTapZoom(fx: Float, fy: Float) {
+        if (zoom > 1f) {
+            zoom = 1f; panX = 0f; panY = 0f
+            applyZoom()
+            return
+        }
+        captureFitThumb() // grab the fit thumb before leaving fit (for the zoom minimap)
+        val nx = vToNx(fx); val ny = vToNy(fy) // page point under the tap, at the current (fit) factor
+        zoom = DOUBLE_TAP_ZOOM.coerceIn(1f, MAX_ZOOM_UI)
+        val overX = viewW * (zoom - 1f); val overY = viewH * (zoom - 1f)
+        panX = if (overX > 0f) ((nx * viewW * zoom - fx) / overX).coerceIn(0f, 1f) else 0f
+        panY = if (overY > 0f) ((ny * viewH * zoom - fy) / overY).coerceIn(0f, 1f) else 0f
+        applyZoom()
+    }
+
+    /** True if `(x, y)` continues a recent tap into a double-tap (within [DOUBLE_TAP_MS] and
+     *  [DOUBLE_TAP_SLOP_PX] of the last centre tap). Records the tap as the potential first of a pair. */
+    private fun isCentreDoubleTap(x: Float, y: Float): Boolean {
+        val now = SystemClock.uptimeMillis()
+        val near = kotlin.math.hypot(x - lastCentreTapX, y - lastCentreTapY) < DOUBLE_TAP_SLOP_PX
+        val quick = now - lastCentreTapMs <= DOUBLE_TAP_MS
+        if (quick && near) {
+            lastCentreTapMs = 0L // consume — a third tap doesn't chain
+            return true
+        }
+        lastCentreTapMs = now; lastCentreTapX = x; lastCentreTapY = y
+        return false
     }
 
     // Live-preview state: during a pinch/pan we cheaply transform the CACHED page bitmap on the
@@ -2898,6 +2957,9 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         const val MAX_ZOOM_UI = 5f // matches the core's MAX_ZOOM clamp (RR5-FR3).
         const val PREVIEW_MS = 50L // min interval between live zoom/pan preview blits (e-ink cadence).
         const val ZOOM_STEP = 1.4f // +/- button zoom multiplier.
+        const val DOUBLE_TAP_ZOOM = 2.0f // zoom level a double-tap jumps to from fit (#54).
+        const val DOUBLE_TAP_MS = 280L // max gap between the two taps of a double-tap (#54).
+        const val DOUBLE_TAP_SLOP_PX = 60f // max distance between the two taps to count as a double-tap.
         const val SELECTION_HANDLE_PX = 8f // half-size of the square corner handles on the selection box.
         const val MULTILINE_DRAG_FRAC = 0.045f // drag vertical span (frac of height) above which it's a multi-line → line-span select.
         const val OPEN_DRAG_FRAC = 0.08f // lasso: start-to-lift distance (normalized) above which the gesture is an open drag (vs a closed loop).
