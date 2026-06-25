@@ -18,28 +18,45 @@ pub enum DocFormat {
     Pdf,
     /// Reflowable EPUB (a ZIP container).
     Epub,
+    /// Fixed-layout CBZ comic archive (a ZIP of page images).
+    Cbz,
     /// Plain text (`.txt`/`.text`). Has no magic signature — identified by extension only.
     Text,
 }
 
 /// PDF header marker (ISO 32000): a conforming file begins with `%PDF-`.
 const PDF_MAGIC: &[u8] = b"%PDF-";
-/// ZIP local-file-header signature. EPUB is a ZIP, so its first entry starts here.
+/// ZIP local-file-header signature. EPUB and CBZ are both ZIPs, so their first entry starts here.
 const ZIP_MAGIC: &[u8] = b"PK\x03\x04";
+/// The OCF `mimetype` payload a conforming EPUB stores (uncompressed) as its first entry — the
+/// authoritative signal that a ZIP is an EPUB rather than a CBZ comic archive.
+const EPUB_MIME: &[u8] = b"application/epub+zip";
+/// How far into a ZIP to look for [`EPUB_MIME`]: a spec EPUB places it in the first entry (~offset
+/// 38), so a small window is enough and keeps a CBZ's image data from being scanned.
+const EPUB_SNIFF_WINDOW: usize = 256;
 
 impl DocFormat {
     /// Identify the format from the **leading bytes**, or `None` when they match no known format.
     ///
     /// This is the authoritative signal: a positive match here is trusted over the extension, so a
-    /// mislabeled file still opens with the right backend. A ZIP container is reported as [`Self::Epub`]
-    /// (the only ZIP-based backend today). PDFs that carry leading junk before `%PDF-` (tolerated by
-    /// the spec) won't match here and fall back to the extension in [`Self::resolve`]. Plain text has
-    /// no reliable signature, so [`Self::Text`] is never sniffed — it is identified by extension only.
+    /// mislabeled file still opens with the right backend. A ZIP container is [`Self::Epub`] when it
+    /// carries the OCF `application/epub+zip` marker, else [`Self::Cbz`] (a comic archive). PDFs that
+    /// carry leading junk before `%PDF-` (tolerated by the spec) won't match here and fall back to the
+    /// extension in [`Self::resolve`]. Plain text has no reliable signature, so [`Self::Text`] is never
+    /// sniffed — it is identified by extension only.
     pub(crate) fn sniff(bytes: &[u8]) -> Option<DocFormat> {
         if bytes.starts_with(PDF_MAGIC) {
             Some(DocFormat::Pdf)
         } else if bytes.starts_with(ZIP_MAGIC) {
-            Some(DocFormat::Epub)
+            // EPUB and CBZ are both ZIP containers. A conforming EPUB stores its
+            // `application/epub+zip` mimetype marker in the leading bytes; a ZIP without it is a CBZ
+            // comic archive.
+            let head = &bytes[..bytes.len().min(EPUB_SNIFF_WINDOW)];
+            if head.windows(EPUB_MIME.len()).any(|w| w == EPUB_MIME) {
+                Some(DocFormat::Epub)
+            } else {
+                Some(DocFormat::Cbz)
+            }
         } else {
             None
         }
@@ -53,6 +70,8 @@ impl DocFormat {
             Some(DocFormat::Pdf)
         } else if ext.eq_ignore_ascii_case("epub") {
             Some(DocFormat::Epub)
+        } else if ext.eq_ignore_ascii_case("cbz") {
+            Some(DocFormat::Cbz)
         } else if ext.eq_ignore_ascii_case("txt") || ext.eq_ignore_ascii_case("text") {
             Some(DocFormat::Text)
         } else {
@@ -81,8 +100,13 @@ mod tests {
     }
 
     fn epub_bytes() -> Vec<u8> {
-        // ZIP local-file-header magic followed by arbitrary entry bytes.
-        b"PK\x03\x04\x14\x00\x00\x00mimetype".to_vec()
+        // ZIP local-file-header magic + the OCF `mimetype` entry a conforming EPUB stores first.
+        b"PK\x03\x04\x14\x00\x00\x00\x00\x00mimetypeapplication/epub+zip".to_vec()
+    }
+
+    fn cbz_bytes() -> Vec<u8> {
+        // A ZIP with no EPUB mimetype marker — a comic archive (entry name + a JPEG page).
+        b"PK\x03\x04\x14\x00\x00\x00\x00\x00page01.jpg\xff\xd8\xff\xe0".to_vec()
     }
 
     #[test]
@@ -93,6 +117,12 @@ mod tests {
     #[test]
     fn sniff_identifies_zip_as_epub() {
         assert_eq!(DocFormat::sniff(&epub_bytes()), Some(DocFormat::Epub));
+    }
+
+    #[test]
+    fn sniff_identifies_markerless_zip_as_cbz() {
+        // A ZIP without the EPUB mimetype marker is a CBZ comic archive.
+        assert_eq!(DocFormat::sniff(&cbz_bytes()), Some(DocFormat::Cbz));
     }
 
     #[test]
@@ -116,8 +146,26 @@ mod tests {
     #[test]
     fn from_extension_none_when_absent_or_unknown() {
         assert_eq!(DocFormat::from_extension("noextension"), None);
-        assert_eq!(DocFormat::from_extension("comic.cbz"), None);
+        assert_eq!(DocFormat::from_extension("archive.rar"), None);
         assert_eq!(DocFormat::from_extension(""), None);
+    }
+
+    #[test]
+    fn from_extension_identifies_cbz() {
+        assert_eq!(DocFormat::from_extension("comic.cbz"), Some(DocFormat::Cbz));
+        assert_eq!(DocFormat::from_extension("Comic.CBZ"), Some(DocFormat::Cbz));
+    }
+
+    #[test]
+    fn resolve_cbz_by_magic_and_extension() {
+        // A marker-less ZIP resolves to CBZ by magic, even named `.zip` or unnamed.
+        assert_eq!(
+            DocFormat::resolve("comic.cbz", &cbz_bytes()),
+            DocFormat::Cbz
+        );
+        assert_eq!(DocFormat::resolve("tempfile", &cbz_bytes()), DocFormat::Cbz);
+        // An EPUB (mimetype marker present) still wins as EPUB even with a stripped/odd name.
+        assert_eq!(DocFormat::resolve("book", &epub_bytes()), DocFormat::Epub);
     }
 
     #[test]

@@ -44,6 +44,13 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 # mlua with vendored Lua 5.4 (compiled from source via cc, like rusqlite `bundled`) — the embedded
 # plugin runtime (RR13). MIT-licensed (Lua itself is MIT) → AGPL-compatible (check-licenses.sh).
 mlua = { version = "0.11", features = ["lua54", "vendored"] }
+# CBZ comic-archive backend (#36): a ZIP of page images. Lean, pure-Rust, AGPL-compatible (all
+# MIT/Apache → auto-pass check-licenses.sh) and cross-compile clean for arm64 (no C/system libs).
+# `zip` only needs DEFLATE (comics are stored/deflated); no bzip2/zstd/aes. `jpeg-decoder` without
+# its default `rayon` so host tests stay single-threaded + deterministic.
+zip = { version = "2", default-features = false, features = ["deflate"] }
+jpeg-decoder = { version = "0.3", default-features = false }
+png = "0.17"
 
 [profile.release]
 # A reader on a battery e-ink device: optimize for size + speed, strip symbols.
