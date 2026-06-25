@@ -150,7 +150,7 @@ fn article_xhtml(issue: &Issue, i: usize) -> String {
     let body = format!(
         "<h1>{}</h1>\n<p class=\"byline\">{byline}</p>\n{}",
         esc(&art.title),
-        art.body_html // already clean, XHTML-compatible markup
+        art.body_html // trusted: caller's contract is already-clean, well-formed XHTML (not escaped)
     );
     xhtml(&art.title, &body)
 }

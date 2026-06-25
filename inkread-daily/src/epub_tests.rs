@@ -62,6 +62,25 @@ fn issue_metadata_and_article_text_survive_the_round_trip() {
 }
 
 #[test]
+fn malformed_body_html_is_currently_accepted_extraction_slice_must_sanitize() {
+    // KNOWN GAP (#66): body_html is injected RAW on the "already clean, well-formed XHTML" contract.
+    // The reader's parser (rbook) is lenient and accepts malformed markup today, so a bad body does
+    // NOT fail this host gate — it would reach the device, where reflow layout is the unknown. The
+    // extraction slice MUST guarantee well-formed XHTML (or this crate must sanitize) before any real
+    // fetched content is assembled. This test PINS the current leniency so a future switch to strict
+    // parsing surfaces here as a failure rather than silently — it documents the gap, not an endorsement.
+    let issue = Issue {
+        title: "t".to_string(),
+        date: "d".to_string(),
+        articles: vec![article("Bad", "Src", "<p>unclosed & a raw < here", None)],
+    };
+    assert!(
+        EpubPackage::open(assemble_epub(&issue)).is_ok(),
+        "rbook currently tolerates malformed body markup — see the #66 extraction slice"
+    );
+}
+
+#[test]
 fn an_empty_issue_still_assembles_a_valid_epub() {
     let issue = Issue {
         title: "inkread daily".to_string(),

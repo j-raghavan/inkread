@@ -6,7 +6,9 @@
 //! extraction slice) and produce these values — this crate only *assembles* them into an EPUB.
 
 /// A content source the user follows (RSS/Atom feed or a site). The fetch layer owns the network;
-/// this is just the persisted identity the shell stores and the assembly attributes articles to.
+/// this is the persisted identity the shell stores. **Ahead of its consumer:** defined here as the
+/// stable model type the fetch/persistence slice will read — assembly attributes articles by the
+/// flat [`Article::source`] byline today and does not reference this struct yet.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Source {
     /// Human-facing name shown as the article byline (e.g. "Hacker News").
