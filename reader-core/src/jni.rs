@@ -1248,9 +1248,9 @@ pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeTextLineSpa
 }
 
 // nativeSelectionPins(handle, page, x0,y0,x1,y1) : String — the reflow-stable [start,end] PinPosition
-// pair a selection rect covers on a reflowable page (the Digest/highlight anchor, #46). Returns a
-// JSON object `{"start":<pin>,"end":<pin>}`, or an EMPTY string for fixed-layout PDF / an empty
-// selection (the caller then falls back to a page anchor). Anchors to text locations, not pixels.
+// pair a selection rect covers on a reflowable page (the Digest anchor, #46). Returns a JSON object
+// `{"start":<pin>,"end":<pin>}`, or an EMPTY string for fixed-layout PDF / an empty selection (the
+// caller then falls back to a page anchor). Anchors to text locations, not pixels.
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
 pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeSelectionPins<'local>(
@@ -1267,12 +1267,11 @@ pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeSelectionPi
         let session = unsafe { session_mut(handle) }.map_err(|e| throw(env, &e))?;
         let target = if page < 0 { 0usize } else { page as usize };
         let json = match session.selection_pins(target, NormRect { x0, y0, x1, y1 }) {
+            // PageRange serializes to exactly `{"start":{…},"end":{…}}` (primitive-only → infallible);
+            // reuse it rather than hand-building the JSON.
             Some((start, end)) => {
-                format!(
-                    "{{\"start\":{},\"end\":{}}}",
-                    start.to_json(),
-                    end.to_json()
-                )
+                serde_json::to_string(&crate::position::PageRange::new(start, end))
+                    .unwrap_or_default()
             }
             None => String::new(),
         };

@@ -110,8 +110,8 @@ object NativeBridge {
     external fun nativeTextLineSpan(handle: Long, page: Int, sx: Float, sy: Float, ex: Float, ey: Float): ByteArray
 
     /** The reflow-stable [start,end] PinPosition pair a selection rect covers on a reflowable page —
-     *  the Digest/highlight anchor (#46). Returns a JSON object `{"start":<pin>,"end":<pin>}`, or an
-     *  EMPTY string for fixed-layout PDF / an empty selection (caller falls back to a page anchor). */
+     *  the Digest anchor (#46). Returns a JSON object `{"start":<pin>,"end":<pin>}`, or an EMPTY
+     *  string for fixed-layout PDF / an empty selection (caller falls back to a page anchor). */
     external fun nativeSelectionPins(handle: Long, page: Int, x0: Float, y0: Float, x1: Float, y1: Float): String
 
     /**

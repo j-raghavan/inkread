@@ -343,6 +343,21 @@ mod tests {
     }
 
     #[test]
+    fn page_range_serializes_to_the_selection_pins_wire_shape() {
+        // nativeSelectionPins reuses PageRange's JSON for the digest anchor (#46), which the shell
+        // consumes as `{"start":{…},"end":{…}}`. Pin that wire shape + a lossless round trip so the
+        // JNI contract can't drift silently.
+        let range = PageRange::new(pin(2, 100, 5, &[0, 3]), pin(2, 140, 9, &[0, 3]));
+        let json = serde_json::to_string(&range).expect("PageRange serializes");
+        assert!(
+            json.contains("\"start\"") && json.contains("\"end\""),
+            "wire shape carries start+end: {json}"
+        );
+        let back: PageRange = serde_json::from_str(&json).expect("round-trips");
+        assert_eq!(back, range, "selection-pins JSON round-trips losslessly");
+    }
+
+    #[test]
     fn page_range_contains_is_half_open() {
         // RR6-AC3: start inclusive, end exclusive; before/after excluded.
         let start = pin(0, 10, 0, &[1]);

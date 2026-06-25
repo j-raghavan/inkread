@@ -154,11 +154,13 @@ class DigestController(private val host: Host) {
         val metadata = JSONObject()
             .put(KEY_DOCUMENT_LOCATION_DATA, location.toString())
             .put(KEY_SOURCE_SIZE, size)
-        // Reflowable docs (EPUB / reflowed PDF) carry an inkread-private reflow-stable PinPosition
-        // anchor under our own key (#46). The stock Digest app ignores unknown keys and the vendor
-        // `document_location_data` is untouched, so fixed-layout PDF behaviour is unchanged.
+        // An EPUB digest carries an inkread-private reflow-stable PinPosition anchor under our own key
+        // (#46). The stock Digest app ignores unknown keys and the vendor `document_location_data` is
+        // untouched, so fixed-layout PDF behaviour is unchanged. Parse defensively: a malformed anchor
+        // degrades to a page-only entry rather than failing the insert (RR21-FR3 — validate at the edge).
         if (anchorJson != null) {
-            metadata.put(KEY_INKREAD_ANCHOR, JSONObject(anchorJson))
+            runCatching { metadata.put(KEY_INKREAD_ANCHOR, JSONObject(anchorJson)) }
+                .onFailure { Log.e(TAG, "bad digest anchor, page-only: ${it.message}") }
         }
         return metadata.toString()
     }
