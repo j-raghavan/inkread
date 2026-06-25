@@ -114,20 +114,22 @@ class HomeActivity : Activity() {
             column.addView(TextView(this).apply {
                 text = "Open a document to start your library."
                 setTextColor(textMuted); textSize = fs(16f); gravity = Gravity.CENTER
-                typeface = serif; setPadding(0, 0, 0, dim(20))
+                typeface = serif
             })
-            column.addView(openButton())
         } else {
             column.addView(heroCard(recents.first(), contentW))
-            if (recents.size >= 2) {
-                column.addView(spacer(dim(28)))
-                column.addView(eyebrowItalic("Recently on your shelf"))
-                column.addView(spacer(dim(16)))
-                column.addView(shelf(recents.take(3), contentW))
-            }
-            column.addView(spacer(dim(28)))
-            column.addView(openButton())
         }
+        // The InkRead Daily — the day's issue as a strip card (the design's in-flow Daily entry).
+        column.addView(spacer(dim(24)))
+        column.addView(dailyCard(contentW))
+        if (recents.size >= 2) {
+            column.addView(spacer(dim(28)))
+            column.addView(eyebrowItalic("Recently on your shelf"))
+            column.addView(spacer(dim(16)))
+            column.addView(shelf(recents.take(3), contentW))
+        }
+        column.addView(spacer(dim(28)))
+        column.addView(openButton())
         column.addView(spacerWeighted(phi))
         column.addView(closingMark())
 
@@ -136,19 +138,10 @@ class HomeActivity : Activity() {
             isVerticalScrollBarEnabled = false
             addView(column)
         }
-        // Top corners: a Daily entry (left) → the newspaper front page, a gear (right) → Settings.
+        // A subtle top-corner gear → app Settings (the Daily entry is the in-flow card below).
         return FrameLayout(this).apply {
             setBackgroundColor(Color.WHITE)
             addView(scroll, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
-            addView(TextView(this@HomeActivity).apply {
-                text = "The Daily  ›"; setTextColor(ink); textSize = 12f; typeface = mono
-                letterSpacing = 0.12f; isAllCaps = true
-                val p = dp(8); setPadding(p, p, p, p)
-                isClickable = true
-                setOnClickListener { startActivity(Intent(this@HomeActivity, DailyActivity::class.java)) }
-            }, FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.TOP or Gravity.START).apply {
-                topMargin = dp(14); marginStart = dp(14)
-            })
             addView(ImageView(this@HomeActivity).apply {
                 setImageResource(R.drawable.ic_settings)
                 val p = dp(8); setPadding(p, p, p, p)
@@ -172,7 +165,7 @@ class HomeActivity : Activity() {
             typeface = scriptBold; paint.isFakeBoldText = true; gravity = Gravity.CENTER
             includeFontPadding = false
         })
-        addView(eyebrow("·  v${versionName()}  ·").apply { gravity = Gravity.CENTER; setPadding(0, dim(10), 0, 0) })
+        addView(eyebrow("·  Super Reader · v${versionName()}  ·").apply { gravity = Gravity.CENTER; setPadding(0, dim(10), 0, 0) })
     }
 
     // ── Continue where you left off (the most-recent book) ───────────────────────────────────────
@@ -219,6 +212,68 @@ class HomeActivity : Activity() {
                     (layoutParams as LinearLayout.LayoutParams).topMargin = dim(8)
                 })
             }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f).apply { marginStart = gap })
+        }
+    }
+
+    // ── The InkRead Daily — the day's issue as a strip card (taps → DailyActivity) ───────────────
+
+    private fun dailyCard(contentW: Int): View {
+        val pad = dim(15)
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            background = outlined(dim(12))
+            isClickable = true
+            setOnClickListener { startActivity(Intent(this@HomeActivity, DailyActivity::class.java)) }
+            layoutParams = LinearLayout.LayoutParams(contentW, ViewGroup.LayoutParams.WRAP_CONTENT)
+
+            // Left masthead cell: THE / InkRead (script) / DAILY.
+            addView(LinearLayout(this@HomeActivity).apply {
+                orientation = LinearLayout.VERTICAL
+                gravity = Gravity.CENTER
+                setPadding(dim(14), pad, dim(12), pad)
+                addView(TextView(this@HomeActivity).apply {
+                    text = "THE"; setTextColor(ink); textSize = fs(8f); typeface = mono; letterSpacing = 0.28f
+                })
+                addView(TextView(this@HomeActivity).apply {
+                    text = "InkRead"; setTextColor(ink); textSize = fs(30f); typeface = script
+                    includeFontPadding = false
+                })
+                addView(TextView(this@HomeActivity).apply {
+                    text = "DAILY"; setTextColor(ink); textSize = fs(11f)
+                    typeface = Typeface.create(serif, Typeface.BOLD); letterSpacing = 0.4f
+                })
+            }, LinearLayout.LayoutParams(dim(132), ViewGroup.LayoutParams.MATCH_PARENT))
+
+            addView(View(this@HomeActivity).apply { setBackgroundColor(ink) },
+                LinearLayout.LayoutParams(maxOf(1, dp(1)), ViewGroup.LayoutParams.MATCH_PARENT))
+
+            // Middle: today's status. Honest first-run copy — no issue is compiled until the daily
+            // backend (fetch/assemble) lands; nothing decorative is faked.
+            addView(LinearLayout(this@HomeActivity).apply {
+                orientation = LinearLayout.VERTICAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(dim(16), pad, dim(12), pad)
+                addView(eyebrow("Today's Daily"))
+                addView(TextView(this@HomeActivity).apply {
+                    text = "No issue compiled yet"; setTextColor(ink); textSize = fs(19f); typeface = serif
+                    setPadding(0, dim(4), 0, 0); maxLines = 2; setLineSpacing(0f, 1.1f)
+                })
+                addView(TextView(this@HomeActivity).apply {
+                    text = "Add a few sources to start your daily issue"
+                    setTextColor(inkSoft); textSize = fs(13f); typeface = Typeface.create(serif, Typeface.ITALIC)
+                    setPadding(0, dim(3), 0, 0)
+                })
+            }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f))
+
+            // Right action.
+            addView(TextView(this@HomeActivity).apply {
+                text = "Set up →"; setTextColor(Color.WHITE); textSize = fs(14f)
+                typeface = Typeface.create(serif, Typeface.BOLD); gravity = Gravity.CENTER
+                setPadding(dim(18), dim(12), dim(18), dim(12))
+                background = GradientDrawable().apply { setColor(ink) }
+            }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.MATCH_PARENT).apply {
+                gravity = Gravity.CENTER_VERTICAL; marginEnd = dim(12)
+            })
         }
     }
 
