@@ -115,6 +115,11 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
     /** Whether PDF reflow mode is on (ADR-INKREAD-0011). Session-scoped: defaults off on each open
      *  (the fixed page is the faithful view; reflow is an opt-in toggle on the Page tab). */
     @Volatile private var reflowOn = false
+    /** Whether the current view honors zoom — a fixed-layout page that is not reflowed (#61, mirrors
+     *  the core's `is_magnifiable`). Gates every zoom entry point so a pinch/double-tap on a
+     *  reflowable view (EPUB, or a reflowed PDF) can't strand the shell's zoom. Refreshed on open and
+     *  on a reflow toggle. */
+    @Volatile private var magnifiable = false
     /** True while a reflow toggle's full-document repagination is running (guards re-toggle + drives
      *  the "Reflowing…" notice). Large PDFs take seconds (#55). */
     @Volatile private var reflowInProgress = false
@@ -758,6 +763,8 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             bookmarks = Bookmarks(File(filesDir, "bookmarks/${bookId.hashCode()}.json")).also { it.load() }
             currentBookId = bookId
             reflowOn = false // a fresh document opens in fixed-layout view (ADR-INKREAD-0011)
+            // A fixed-layout PDF magnifies; EPUB (always reflowed) does not (#61, RR25-FR3).
+            magnifiable = try { NativeBridge.nativeIsMagnifiable(docHandle) } catch (e: RuntimeException) { false }
             // Re-apply the saved reflow text scale (EPUB); a no-op (-1) on fixed-layout PDF.
             val savedScale = textScalePref()
             if (savedScale != 1.0f) {
@@ -1873,6 +1880,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
 
     /** Multiply the zoom (clamped); snap back to fit at ~1. Used by the +/- buttons and pinch-end. */
     private fun zoomBy(factor: Float) {
+        if (!magnifiable) return // a reflowed view ignores zoom; don't strand the shell factor (#61)
         val next = (zoom * factor).coerceIn(1f, MAX_ZOOM_UI)
         if (zoom <= 1f && next > 1f) captureFitThumb() // grab the fit thumb before leaving fit
         zoom = next
@@ -1886,6 +1894,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
      * double-tap restores fit. `(fx, fy)` is the tap in view pixels.
      */
     private fun doubleTapZoom(fx: Float, fy: Float) {
+        if (!magnifiable) return // reflowable view: a double-tap can't magnify (#61)
         if (zoom > 1f) {
             zoom = 1f; panX = 0f; panY = 0f
             applyZoom()
@@ -1940,6 +1949,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
     private val scaleDetector by lazy {
         android.view.ScaleGestureDetector(this, object : android.view.ScaleGestureDetector.SimpleOnScaleGestureListener() {
             override fun onScaleBegin(d: android.view.ScaleGestureDetector): Boolean {
+                if (!magnifiable) return false // a reflowed view ignores pinch-zoom (#61, RR25-FR3)
                 gestureStartZoom = zoom; liveScale = 1f; focusX = d.focusX; focusY = d.focusY
                 return true
             }
@@ -2790,6 +2800,10 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             val np = try { NativeBridge.nativeSetReflow(docHandle, on) } catch (e: RuntimeException) { -1 }
             if (np >= 0) {
                 reflowOn = on
+                // The reflow toggle changes magnifiability; the core resets its zoom on reflow-on, so
+                // drop any stranded shell zoom/pan to match and re-fit (#61).
+                magnifiable = try { NativeBridge.nativeIsMagnifiable(docHandle) } catch (e: RuntimeException) { !on }
+                if (!magnifiable && zoom != 1f) { zoom = 1f; panX = 0f; panY = 0f }
                 if (on) {
                     if (textScalePref() != 1.0f) {
                         try { NativeBridge.nativeSetTextScale(docHandle, textScalePref()) } catch (e: RuntimeException) {}

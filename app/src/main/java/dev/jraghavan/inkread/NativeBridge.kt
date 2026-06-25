@@ -184,6 +184,11 @@ object NativeBridge {
      *  enable/disable the Reflow control (false for scanned PDFs and for EPUB, already reflowable). */
     external fun nativeSupportsReflow(handle: Long): Boolean
 
+    /** Whether the CURRENT view honors zoom — a fixed-layout page that is not reflowed (RR25-FR3).
+     *  Gate every zoom entry point (pinch / +− / double-tap) on this so a gesture on a reflowable
+     *  view (EPUB, or a reflowed PDF) can't strand the shell's zoom factor and skew tap hit-testing. */
+    external fun nativeIsMagnifiable(handle: Long): Boolean
+
     /** Toggle reflow mode on a text-layer PDF (ADR-INKREAD-0011): reconstructs the page text and flows
      *  it like a book so font/spacing/alignment take effect; off restores the fixed page. Returns the
      *  new current page index (page count changes across the toggle), or -1 if reflow is unavailable.

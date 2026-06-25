@@ -300,6 +300,14 @@ pub trait Document {
         self.render_page(index, buf)
     }
 
+    /// Whether the **current** view honors pinch/zoom — true only when [`Self::render_zoom`] actually
+    /// magnifies (a fixed-layout page that is not reflowed, RR25-FR3). The shell gates every zoom
+    /// entry point on this so a pinch/double-tap on a reflowable view can't strand its zoom factor.
+    /// Default: `false` (the default `render_zoom` ignores zoom — reflowable backends, EPUB).
+    fn is_magnifiable(&self) -> bool {
+        false
+    }
+
     /// Render page `index` fit to `buf` per [`FitMode`], preserving the page aspect ratio (RR4).
     /// `pan_x`/`pan_y` are normalized `[0,1]` scroll positions used only when a mode overflows the
     /// viewport (e.g. `Width` on a tall page); centered when the page fits. Default: ignores fit and

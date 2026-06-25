@@ -553,6 +553,14 @@ mod tests {
     }
 
     #[test]
+    fn epub_is_never_magnifiable() {
+        // EPUB is always reflowed (font size, not zoom), so the shell must never magnify it (#61,
+        // RR25-FR3) — the trait default for a reflowable backend.
+        let b = EpubBackend::open(SAMPLE.to_vec(), vp(400, 600)).unwrap();
+        assert!(!b.is_magnifiable());
+    }
+
+    #[test]
     fn text_line_span_selects_reflowed_lines() {
         // Regression (#46 device finding): EpubBackend didn't override text_line_span, so a multi-line
         // drag on a reflowed page hit the Document trait's empty default and selected nothing — the

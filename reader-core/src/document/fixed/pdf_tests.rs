@@ -623,6 +623,36 @@ fn pdf_reflow_toggles_and_reflows_text() {
     assert!(doc.set_text_scale(1.0, 0).is_none(), "setters inert again");
 }
 
+#[test]
+fn pdf_is_magnifiable_until_reflowed() {
+    let _s = pdfium_serial();
+    if !host_pdfium_available() {
+        eprintln!("SKIP pdf_is_magnifiable_until_reflowed: host libpdfium UNVERIFIED");
+        return;
+    }
+    let bytes = std::fs::read(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/minimal.pdf"
+    ))
+    .expect("fixture present");
+    let doc = PdfBackend::open(bytes).expect("open fixture");
+
+    // A fixed-layout page honors zoom (#61, RR25-FR3).
+    assert!(doc.is_magnifiable(), "fixed PDF page magnifies");
+
+    // Record the viewport, then reflow → the view is laid out like text and no longer magnifies.
+    let (w, h) = (300u32, 400u32);
+    let mut warm = vec![0u8; (w * h * 4) as usize];
+    doc.render_page(0, &mut PixelBuffer::from_rgba(&mut warm, w, h).unwrap())
+        .expect("fixed render");
+    let target = doc.set_reflow(true, 0).expect("reflow enables");
+    assert!(!doc.is_magnifiable(), "reflowed PDF ignores zoom");
+
+    // Toggling reflow back off restores magnifiability.
+    doc.set_reflow(false, target).expect("reflow disables");
+    assert!(doc.is_magnifiable(), "fixed page magnifies again");
+}
+
 /// Visual gate (ADR-INKREAD-0011): render the first reflowed pages of a real text PDF to BMPs for
 /// human inspection — the black-screencap Supernote can't self-verify, so we eyeball on the host.
 /// Run on demand: `INKREAD_REFLOW_PDF=/path/book.pdf cargo test -p reader-core
