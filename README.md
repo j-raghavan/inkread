@@ -155,7 +155,7 @@ Two surfaces drive everything: a **bottom control bar** (tap the centre of the p
 | Jump to a page | Centre-tap → drag the **slider**, or tap the page number to type one |
 | Table of contents | Centre-tap → **Contents** → tap an entry to jump |
 | Bookmark a page | Tap the **top-right corner** (dog-ear); list them via **Marks** |
-| Zoom & pan | **Pinch** to zoom; a minimap (top-right) shows your viewport. Fit/zoom presets live under **Adjust → Zoom** |
+| Zoom & pan | **Pinch** — or **double-tap the centre** — to zoom toward a point; **double-tap again** to restore fit. A minimap (top-right) shows your viewport; while zoomed, edge taps still turn pages. Fit/zoom presets also under **Adjust → Zoom** |
 
 ### Search & dictionary
 
@@ -190,9 +190,16 @@ Ink is saved to a sidecar next to your document and re-loaded next time.
 
 ### Display & layout
 
-Centre-tap → **Adjust** opens a tabbed sheet: **Rotate** (portrait/landscape), **Crop**
-(auto-crop + margin), **Zoom** (fit mode + level), **Page** (text scale), **Font** (line
-spacing, alignment — EPUB), and **Display** (contrast). Settings are remembered per book.
+Centre-tap → **Adjust** opens a tabbed sheet, remembered per book:
+
+| Tab | Controls |
+|---|---|
+| **Rotate** | Screen orientation — **0° / 90° / 180° / 270°** (portrait, landscape, and both flips) |
+| **Font** | **Text size** — A− / A+ steppers plus **100%** (default) and **XL** presets, 60%–250% (reflowable books) |
+| **Page** | Line spacing + alignment (reflowable books) |
+| **Zoom** | Fit mode + zoom level |
+| **Crop** | Auto-crop white margins + margin size |
+| **Display** | Contrast / display enhancement |
 
 > **On the roadmap:** EPUB reflow controls, Lua plugins, and cross-document search are in the
 > core or specified but not yet exposed in the shipped app — see [Status](#status).

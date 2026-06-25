@@ -2870,6 +2870,12 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
                 val m = dp(10); setMargins(m, 0, m, 0)
             })
             addView(pill("A+") { if (idx < TEXT_SCALES.size - 1) { idx++; apply() } })
+            // Quick presets next to the steppers: jump straight to default / largest (#55).
+            fun preset(p: View) = addView(p, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { leftMargin = dp(8) })
+            preset(pill("100%") { idx = nearestScaleIndex(1.0f); apply() })
+            preset(pill("XL") { idx = TEXT_SCALES.size - 1; apply() })
         }
         return settingRow("Font Size", control)
     }
