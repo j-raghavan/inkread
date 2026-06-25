@@ -244,11 +244,29 @@ pub fn word_at(chars: &[CharBox], x: f32, y: f32) -> Option<TextSelection> {
     })
 }
 
+/// Whether a drag/lasso `rect` selects `glyph` — true when the glyph's **centre** lies inside `rect`.
+///
+/// Precision rule (#51): the predicate used to be bounding-box *intersection*, which selected any
+/// glyph the rect merely grazed at an edge — a loose lasso then swept in neighbouring-column or
+/// -line glyphs ("too generous", "picks the wrong stuff"). Requiring the centre inside drops
+/// edge-grazed glyphs while keeping any glyph at least half-covered, matching what a user means by
+/// "inside the loop" (it keeps a glyph at least half-covered along the axis the rect edge cuts —
+/// a corner clip can be lower, which is the intended tightening). Shared by [`text_in_rect`] and
+/// [`anchored_span`] so the highlight and its stored anchors never disagree on which glyphs are in.
+fn glyph_selected(rect: &NormRect, glyph: &NormRect) -> bool {
+    let cx = (glyph.x0 + glyph.x1) * 0.5;
+    let cy = (glyph.y0 + glyph.y1) * 0.5;
+    rect.contains(cx, cy)
+}
+
 /// The text whose glyphs fall within `rect` (drag-highlight), in reading order, with one highlight
 /// box per line run.
 #[must_use]
 pub fn text_in_rect(chars: &[CharBox], rect: NormRect) -> TextSelection {
-    let selected: Vec<&CharBox> = chars.iter().filter(|c| rect.intersects(&c.rect)).collect();
+    let selected: Vec<&CharBox> = chars
+        .iter()
+        .filter(|c| glyph_selected(&rect, &c.rect))
+        .collect();
     if selected.is_empty() {
         return TextSelection::default();
     }
@@ -288,7 +306,7 @@ pub fn text_in_rect(chars: &[CharBox], rect: NormRect) -> TextSelection {
 /// or its glyphs carry no anchor (a fixed-layout backend), so callers fall back to a page anchor.
 #[must_use]
 pub fn anchored_span(chars: &[CharBox], rect: NormRect) -> Option<(TextAnchor, TextAnchor)> {
-    let mut selected = chars.iter().filter(|c| rect.intersects(&c.rect));
+    let mut selected = chars.iter().filter(|c| glyph_selected(&rect, &c.rect));
     let start = selected.next()?.anchor?;
     // `end` is the last selected glyph's anchor; a single-glyph selection collapses to `start`.
     let end = selected.next_back().and_then(|c| c.anchor).unwrap_or(start);
@@ -740,6 +758,110 @@ mod tests {
             },
         );
         assert!(sel.is_empty());
+    }
+
+    #[test]
+    fn text_in_rect_excludes_an_edge_grazed_glyph_in_the_next_column() {
+        // #51 precision: glyph "a" is fully inside; "b" only straddles the rect's right edge (its box
+        // overlaps but its CENTRE is outside). The old bbox-intersect rule grabbed "b" too — the
+        // "too generous"/"picks the wrong stuff" lasso. Centre-point containment drops it.
+        let chars = line("ab", 0.0, 0.20, 0.10, 0.03); // a:[0,.10] c=.05, b:[.10,.20] c=.15
+        let rect = NormRect {
+            x0: 0.0,
+            y0: 0.09,
+            x1: 0.12, // right edge sits between a's centre (.05) and b's centre (.15)
+            y1: 0.14,
+        };
+        assert!(
+            rect.intersects(&chars[1].rect),
+            "b's box DOES graze the rect"
+        );
+        let sel = text_in_rect(&chars, rect);
+        assert_eq!(
+            sel.text, "a",
+            "only the glyph whose centre is inside is taken"
+        );
+    }
+
+    #[test]
+    fn text_in_rect_keeps_a_glyph_whose_box_pokes_out_but_center_is_in() {
+        // The positive complement: the rule is centre-IN, not full-box-containment. "a"'s box runs to
+        // x=0.10 (well past the rect's right edge at 0.06) yet its centre (0.05) is inside → kept.
+        // Guards against a future over-tightening to box-containment (which would drop it).
+        let chars = line("ab", 0.0, 0.20, 0.10, 0.03); // a:[0,.10] c=.05, b:[.10,.20] c=.15
+        let rect = NormRect {
+            x0: 0.0,
+            y0: 0.09,
+            x1: 0.06, // past a's centre (.05) but well short of a's right edge (.10)
+            y1: 0.14,
+        };
+        assert!(
+            chars[0].rect.x1 > rect.x1,
+            "a's box pokes past the rect edge"
+        );
+        assert_eq!(
+            text_in_rect(&chars, rect).text,
+            "a",
+            "centre-in glyph is kept"
+        );
+    }
+
+    #[test]
+    fn text_in_rect_center_exactly_on_the_edge_is_inclusive() {
+        // Boundary: a glyph whose centre lands exactly on the rect edge is selected (contains is
+        // inclusive). Pins the deterministic edge behaviour.
+        let chars = line("ab", 0.0, 0.20, 0.10, 0.03); // a centre .05, b centre .15
+        let rect = NormRect {
+            x0: 0.0,
+            y0: 0.09,
+            x1: 0.05, // exactly a's centre
+            y1: 0.14,
+        };
+        assert_eq!(
+            text_in_rect(&chars, rect).text,
+            "a",
+            "centre on the edge counts as inside"
+        );
+    }
+
+    #[test]
+    fn text_in_rect_excludes_a_grazed_neighbouring_line() {
+        // The vertical analogue: a rect that fully covers line 1 but only grazes line 2's top edge
+        // must not sweep line 2 in (the multi-column/line bleed users reported).
+        let mut chars = line("top", 0.0, 0.30, 0.100, 0.03); // y centre .115
+        chars.extend(line("bot", 0.0, 0.30, 0.135, 0.03)); // y centre .150
+        let rect = NormRect {
+            x0: 0.0,
+            y0: 0.09,
+            x1: 0.40,
+            y1: 0.137, // grazes "bot" (top .135) but is below its centre (.150)
+        };
+        let sel = text_in_rect(&chars, rect);
+        assert_eq!(sel.boxes.len(), 1, "only line 1, not the grazed line 2");
+        assert_eq!(sel.text, "top");
+    }
+
+    #[test]
+    fn anchored_span_uses_the_same_center_point_predicate() {
+        // The stored [start,end] anchors must agree with text_in_rect on which glyphs are in — an
+        // edge-grazed glyph is neither the start nor the end anchor.
+        let chars = anchored_line("ab", 2, 100); // a c=.2 {2,100}, b c=.6 {2,101}
+        let rect = NormRect {
+            x0: 0.0,
+            y0: 0.0,
+            x1: 0.5, // between a's centre (.2) and b's centre (.6)
+            y1: 1.0,
+        };
+        let (start, end) = anchored_span(&chars, rect).expect("a is selected");
+        let a = TextAnchor {
+            block: 2,
+            char_offset: 100,
+        };
+        assert_eq!(start, a);
+        assert_eq!(
+            end, a,
+            "the grazed glyph b is not pulled into the anchor span"
+        );
     }
 
     #[test]
