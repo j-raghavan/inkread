@@ -2192,6 +2192,10 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         val multiLine = (y1 - y0) > MULTILINE_DRAG_FRAC
         if (multiLine) {
             if (openDrag) presentLineSpanSelection(sx, sy, ex, ey, "No text under the selection")
+            // Closed loop: corner→corner. The last line is clipped to the loop's rightmost extent
+            // (x1), an approximation — for an irregular loop that may run a word or two past where the
+            // user closed it on the bottom line. Acceptable for circling a region; the directional
+            // open-drag path above clips precisely to the actual lift point.
             else presentLineSpanSelection(x0, y0, x1, y1, "No text under the selection")
         } else {
             // Single line → the dragged/circled span on that line (precise, horizontal).

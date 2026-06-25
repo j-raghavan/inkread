@@ -550,11 +550,22 @@ mod tests {
         let _ = render(&b, 0, 400, 600);
         let sel = b.text_line_span(0, (0.05, 0.02), (0.60, 0.30)); // a drag down the top of page 0
         assert!(
-            !sel.text.trim().is_empty(),
-            "reflowed line-span selects text, got '{}'",
+            !sel.boxes.is_empty(),
+            "reflowed line-span produces highlight boxes"
+        );
+        // Correctness, not just wiring: the span must be REAL page text. Pull a word the page
+        // actually has and confirm the top-of-page span contains it (the first line is taken whole,
+        // so the page's opening words are in range) — a wrong-glyph override would not contain it.
+        let page_text: String = b.page_chars(0).iter().map(|c| c.ch).collect();
+        let word = page_text
+            .split_whitespace()
+            .find(|w| w.chars().all(|c| c.is_alphabetic()) && w.len() >= 4)
+            .expect("a real word on page 0");
+        assert!(
+            sel.text.contains(word),
+            "line-span selects actual page text containing {word:?}, got '{}'",
             sel.text
         );
-        assert!(!sel.boxes.is_empty(), "and produces highlight boxes");
     }
 
     #[test]
