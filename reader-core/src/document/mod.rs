@@ -282,8 +282,9 @@ pub fn encode_search_wire(matches: &[SearchMatch]) -> Vec<u8> {
 ///   friends must reject anything else with `PageOutOfRange`.
 /// - **Render fills the whole buffer as opaque RGBA.** White-fill first, then rasterize, so no
 ///   pixel is left uninitialized and alpha is `0xFF` (RR4-FR3 / Amendment 3).
-/// - **`&self`, not `&mut self`.** Repagination/caches use interior mutability (e.g. `RefCell`)
-///   so the render path stays shared — mirror the existing backends rather than taking `&mut`.
+/// - **The render/repagination path is `&self`.** Repagination and caches use interior mutability
+///   (e.g. `RefCell`) so rendering stays shared — mirror the existing backends rather than taking
+///   `&mut self` (only an explicit mutation like `export_pdf` is `&mut self`).
 /// - **Defaults model a fixed-layout, non-reflowable page.** Reflow/zoom/crop/anchor hooks default
 ///   to the no-op/`None` behavior; a reflowable backend (EPUB) overrides them. Only override what
 ///   your format actually supports — see [`Self::is_magnifiable`], [`Self::supports_reflow`],

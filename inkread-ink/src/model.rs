@@ -717,9 +717,16 @@ mod tests {
                 "pressure={bad}"
             );
         }
-        // Exact-boundary values pass through unclamped.
+        // Exact-boundary values pass through unchanged; out-of-range x/y/pressure each clamp to the
+        // nearest edge of [0,1] (independently per axis).
         let edge = InkPoint::new(0.0, 1.0, 0.5, None, None, 0).unwrap();
         assert_eq!((edge.x, edge.y, edge.pressure), (0.0, 1.0, 0.5));
+        let clamped = InkPoint::new(3.0, -1.0, 5.0, None, None, 0).unwrap();
+        assert_eq!(
+            (clamped.x, clamped.y, clamped.pressure),
+            (1.0, 0.0, 1.0),
+            "each clamps to its edge"
+        );
         // A finite tilt is preserved on both axes; a non-finite tilt is dropped per-axis.
         let p = InkPoint::new(0.3, 0.4, 0.6, Some(0.2), Some(f32::NAN), 0).unwrap();
         assert_eq!(p.tilt_x, Some(0.2), "finite tilt_x kept");

@@ -563,11 +563,23 @@ mod tests {
             a.intersects(&rect(0.5, 0.0, 0.9, 0.5)),
             "edges touching counts (shared x=0.5)"
         );
-        assert!(!a.intersects(&rect(0.6, 0.0, 0.9, 0.5)), "x gap → disjoint");
+        let gap = rect(0.6, 0.0, 0.9, 0.5);
+        assert!(!a.intersects(&gap), "x gap → disjoint");
         assert!(!a.intersects(&rect(0.0, 0.6, 0.5, 0.9)), "y gap → disjoint");
-        // Symmetric: a∩b == b∩a.
+        // Symmetric for both the overlapping AND the disjoint case: a∩b == b∩a.
         let b = rect(0.4, 0.4, 0.9, 0.9);
-        assert_eq!(a.intersects(&b), b.intersects(&a));
+        assert_eq!(a.intersects(&b), b.intersects(&a), "overlap is symmetric");
+        assert_eq!(
+            a.intersects(&gap),
+            gap.intersects(&a),
+            "disjoint is symmetric"
+        );
+        // A zero-area rect (a point) still intersects a rect that covers it.
+        let point = rect(0.25, 0.25, 0.25, 0.25);
+        assert!(
+            a.intersects(&point) && point.intersects(&a),
+            "degenerate point inside"
+        );
     }
 
     #[test]
