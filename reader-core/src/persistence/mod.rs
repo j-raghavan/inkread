@@ -79,6 +79,14 @@ impl ReadingPosition {
         }
     }
 
+    /// Set the opaque resume blob (the reflow-stable `PinPosition` JSON, RR12-FR4 / #46). Chained
+    /// after [`Self::new`]; `None` leaves it page-only.
+    #[must_use]
+    pub fn with_resume_blob(mut self, blob: Option<Vec<u8>>) -> Self {
+        self.resume_blob = blob;
+        self
+    }
+
     /// Human-facing progress as `"current/total"` (1-based current), e.g. `"3/12"` (RR12-FR3).
     /// An empty document reads `"0/0"`.
     #[must_use]

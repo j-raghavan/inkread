@@ -163,10 +163,9 @@ impl EpubBackend {
     /// backend owns the chapter identity; the offset is carried in `text_offset` so `position_int()`
     /// orders within the chapter, and `xpath = [block]` re-anchors the source block (ADR-0012 D2).
     //
-    // `pin_at`/`page_pin`/`pin_to_page` are the PinPosition composition foundation (ADR-0012 Phase 1,
-    // step 2). They are exercised by tests now and consumed in the follow-ups — selection→pin-pair
-    // and the RR12 reading-position resume / Digest wiring — hence `allow(dead_code)` until then.
-    #[allow(dead_code)]
+    // `pin_at`/`page_pin`/`pin_to_page`/`selection_pins` are the PinPosition composition foundation
+    // (ADR-0012 Phase 1, step 2), now exposed through the `Document` trait for the RR12
+    // reading-position resume + Digest anchor wiring (#46).
     fn pin_at(&self, chapter: usize, anchor: TextAnchor) -> PinPosition {
         PinPosition {
             chapter_index: chapter as i32,
@@ -181,7 +180,6 @@ impl EpubBackend {
 
     /// The [`PinPosition`] a global `page` starts at — its first anchored glyph (RR8/RR12 reading
     /// position). `None` for an empty page (no glyphs to anchor).
-    #[allow(dead_code)]
     pub(crate) fn page_pin(&self, page: usize) -> Option<PinPosition> {
         let chapter = self.chapter_of(page);
         let anchor = self.page_chars(page).into_iter().find_map(|c| c.anchor)?;
@@ -191,7 +189,6 @@ impl EpubBackend {
     /// Resolve a [`PinPosition`] back to the global page that contains it after a re-layout — the
     /// re-anchoring that makes a highlight/Digest survive a font-size change (RR12-FR4). Picks, within
     /// the pin's chapter, the last page whose first anchored glyph is at or before the pin's offset.
-    #[allow(dead_code)]
     pub(crate) fn pin_to_page(&self, pin: &PinPosition) -> usize {
         let laid = self.laid.borrow();
         // Clamp a foreign/corrupt chapter index into range rather than scanning the whole book.
@@ -220,7 +217,6 @@ impl EpubBackend {
 
     /// The `[start, end]` [`PinPosition`] pair a selection rectangle covers on `page` — the anchor a
     /// highlight / note / Digest range stores (RR11-FR4 / RR12). `None` when nothing is selected.
-    #[allow(dead_code)]
     pub(crate) fn selection_pins(
         &self,
         page: usize,
@@ -317,6 +313,21 @@ impl Document for EpubBackend {
     fn set_alignment(&self, align_code: i32, current_page: usize) -> Option<usize> {
         self.align.set(Align::from_code(align_code));
         self.repaginate_keeping_chapter(current_page)
+    }
+
+    // Reflow-stable anchors (RR8/RR12, ADR-0012): expose the inherent pin machinery through the
+    // trait so the session can persist a resume/Digest locator that survives a re-layout. Fixed
+    // layout keeps the trait defaults (`None`); fully-qualified calls hit the inherent impls above.
+    fn page_pin(&self, page: usize) -> Option<PinPosition> {
+        EpubBackend::page_pin(self, page)
+    }
+
+    fn pin_to_page(&self, pin: &PinPosition) -> Option<usize> {
+        Some(EpubBackend::pin_to_page(self, pin))
+    }
+
+    fn selection_pins(&self, page: usize, rect: NormRect) -> Option<(PinPosition, PinPosition)> {
+        EpubBackend::selection_pins(self, page, rect)
     }
 }
 

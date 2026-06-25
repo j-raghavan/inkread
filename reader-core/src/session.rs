@@ -294,7 +294,18 @@ impl ReaderSession {
         self.apply_settings(&settings, Some(&book));
         if let Some(pos) = store.load_position(&book)? {
             let last = self.page_count().saturating_sub(1);
-            self.page = pos.page_index.min(last);
+            // Prefer the reflow-stable pin (RR12-FR4 / #46): a saved EPUB position re-anchors to the
+            // right page under the CURRENT pagination, surviving a font-size change since the last
+            // open. The integer page is the fallback (fixed-layout PDF, or a position saved before
+            // pins, or a malformed blob).
+            self.page = pos
+                .resume_blob
+                .as_deref()
+                .and_then(|b| std::str::from_utf8(b).ok())
+                .and_then(|s| crate::position::PinPosition::from_json(s).ok())
+                .and_then(|pin| self.document.pin_to_page(&pin))
+                .map(|p| p.min(last))
+                .unwrap_or_else(|| pos.page_index.min(last));
         }
         self.store = Some(store);
         self.book = Some(book);
@@ -312,12 +323,32 @@ impl ReaderSession {
             .with_avoid_flashing(settings.avoid_flashing(book));
     }
 
-    /// Persist the current reading position (RR12-FR3). A store-less session is a no-op.
+    /// Persist the current reading position (RR12-FR3). For a reflowable document it also stores the
+    /// page's reflow-stable [`PinPosition`] JSON in `resume_blob` so the next open re-anchors across
+    /// a font-size change (RR12-FR4 / #46); fixed-layout PDF stores the integer page only. A
+    /// store-less session is a no-op.
     pub fn save_position(&self) -> CoreResult<()> {
         if let (Some(store), Some(book)) = (&self.store, &self.book) {
-            store.save_position(book, &ReadingPosition::new(self.page, self.page_count()))?;
+            let blob = self
+                .document
+                .page_pin(self.page)
+                .map(|pin| pin.to_json().into_bytes());
+            let pos = ReadingPosition::new(self.page, self.page_count()).with_resume_blob(blob);
+            store.save_position(book, &pos)?;
         }
         Ok(())
+    }
+
+    /// The `[start, end]` reflow-stable anchor pair a selection rectangle covers on `page`, for a
+    /// reflowable document — the Digest/highlight locator (RR11-FR4 / #46). `None` for fixed-layout
+    /// PDF or an empty selection; the caller falls back to a page anchor.
+    #[must_use]
+    pub fn selection_pins(
+        &self,
+        page: usize,
+        rect: NormRect,
+    ) -> Option<(crate::position::PinPosition, crate::position::PinPosition)> {
+        self.document.selection_pins(page, rect)
     }
 
     /// The bounded render + cover caches (RR24). [`Self::render_current`] consults/fills the render

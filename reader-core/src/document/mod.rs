@@ -403,6 +403,33 @@ pub trait Document {
         None
     }
 
+    /// The reflow-stable [`PinPosition`](crate::position::PinPosition) a `page` starts at, for a
+    /// reflowable backend — a locator that survives a font-size / line-spacing / alignment change
+    /// (RR8/RR12). `None` for a fixed-layout format (its page index is already stable) or an empty
+    /// page. Default: none.
+    fn page_pin(&self, _page: usize) -> Option<crate::position::PinPosition> {
+        None
+    }
+
+    /// Resolve a [`PinPosition`](crate::position::PinPosition) back to the global page that contains
+    /// it under the CURRENT pagination — re-anchoring a saved location after a re-layout (RR12-FR4).
+    /// `None` for a fixed-layout format (it has no pins). Default: none.
+    fn pin_to_page(&self, _pin: &crate::position::PinPosition) -> Option<usize> {
+        None
+    }
+
+    /// The `[start, end]` [`PinPosition`](crate::position::PinPosition) pair a selection rectangle
+    /// covers on `page`, for a reflowable backend — the reflow-stable anchor a highlight / note /
+    /// Digest range stores (RR11-FR4 / RR12). `None` for a fixed-layout format or an empty
+    /// selection. Default: none.
+    fn selection_pins(
+        &self,
+        _page: usize,
+        _rect: NormRect,
+    ) -> Option<(crate::position::PinPosition, crate::position::PinPosition)> {
+        None
+    }
+
     /// Prefetch hint (RR4-FR7): the core may call this after rendering the current page so a
     /// backend can warm an internal handle for the likely-next page, making a page turn blit a
     /// ready buffer. Default: a no-op (backends opt in). Must never panic on a bad index.
