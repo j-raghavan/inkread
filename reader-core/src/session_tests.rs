@@ -96,6 +96,58 @@ fn page_turn_from_fit_resets_the_view() {
     assert_eq!(s.pan_y(), 0.0);
 }
 
+/// A stub that reports as reflow-capable and accepts the toggle — for the reflow zoom-reset test.
+struct ReflowStub {
+    pages: usize,
+}
+impl Document for ReflowStub {
+    fn page_count(&self) -> usize {
+        self.pages
+    }
+    fn metadata(&self) -> DocumentMetadata {
+        DocumentMetadata {
+            title: None,
+            author: None,
+        }
+    }
+    fn render_page(&self, index: usize, buf: &mut PixelBuffer<'_>) -> CoreResult<()> {
+        if index >= self.pages {
+            return Err(CoreError::PageOutOfRange {
+                requested: index,
+                available: self.pages,
+            });
+        }
+        buf.fill_white();
+        Ok(())
+    }
+    fn toc(&self) -> Vec<TocEntry> {
+        Vec::new()
+    }
+    fn supports_reflow(&self) -> bool {
+        true
+    }
+    fn set_reflow(&self, _on: bool, current_page: usize) -> Option<usize> {
+        Some(current_page)
+    }
+}
+
+#[test]
+fn reflow_toggle_drops_a_magnified_view_to_fit() {
+    // #52 review: toggling reflow while zoomed must reset to fit — a reflowed view is never
+    // magnified (RR25-FR3), and carrying zoom > 1 in would keep every reflowed turn off the cached
+    // fit render path (the magnified branch is uncached).
+    let mut s = ReaderSession::with_document(
+        Box::new(ReflowStub { pages: 3 }),
+        DeviceCapabilities::supernote_full(),
+        Viewport::new(100, 120, 226),
+    );
+    s.set_zoom(2.0, 0.5, 0.5);
+    assert!(s.set_reflow(true), "reflow toggle applied");
+    assert_eq!(s.zoom(), 1.0, "magnified view dropped to fit on reflow");
+    assert_eq!(s.pan_x(), 0.0);
+    assert_eq!(s.pan_y(), 0.0);
+}
+
 // Amendment 6 + RR3-AC1: gestures delegate to the policy so the promotion is consistent.
 #[test]
 fn gestures_drive_the_policy_promotion() {

@@ -696,6 +696,13 @@ impl ReaderSession {
                 self.page = new_page.min(self.page_count().saturating_sub(1));
                 *self.crop_cache.borrow_mut() = None; // page indices change meaning across the toggle
                 self.invalidate_render_cache(); // ...so do the cached page renders
+                                                // A reflowed view is never magnified (zoom is fixed-layout only, RR25-FR3). Drop a
+                                                // zoomed fixed-layout view to fit BEFORE the load (whose page-turn preserve would
+                                                // otherwise carry zoom > 1 into reflow mode — keeping the render off the cached fit
+                                                // path on every reflowed turn) (#52 review).
+                self.zoom = 1.0;
+                self.pan_x = 0.0;
+                self.pan_y = 0.0;
                 self.load_ink_for_current_page();
                 true
             }
@@ -1221,6 +1228,12 @@ impl ReaderSession {
         // column (pan_x), but land at the TOP of the new page (pan_y = 0) so a turn starts the same
         // column afresh. A magnified view is fixed-layout only (zoom > 1 never occurs in reflowed
         // text, RR25-FR3), so reflowed pages — always at fit — still reset cleanly.
+        //
+        // pan_x is a fraction of the magnified OVERSCAN, not an absolute column — so on a uniform
+        // PDF it lands the same column, but if the next page is narrower or a different layout
+        // (a title page, the last page) the same pan_x maps elsewhere. It stays numerically in
+        // range (clamped [0,1]); only the "same column" intent is approximate across a layout
+        // change. A precise mapping would need a column model the fixed-layout backend doesn't have.
         if self.zoom <= 1.0 + 1e-3 {
             self.zoom = 1.0;
             self.pan_x = 0.0;

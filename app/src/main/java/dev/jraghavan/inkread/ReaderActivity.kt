@@ -1276,9 +1276,15 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             } else {
                 val w = surfaceView.width.toFloat()
                 if (w > 0f) {
+                    // Follow a tapped link first (links are zoom/pan-aware via vToNx/vToNy) so a link
+                    // in the edge zone isn't swallowed as a page turn while zoomed (#52 review).
+                    val link = currentLinks.firstOrNull { it.contains(vToNx(fingerDownX), vToNy(fingerDownY)) }
+                    if (link != null) { followLink(link); return }
+                    // The minimap thumbnail is the OLD page's; drop it so the turn doesn't leave the
+                    // wrong page on screen (it re-captures on the next return to fit) (#52 review).
                     val third = w / 3f
-                    if (fingerDownX < third) { panY = 0f; queuePageTurn(-1) }
-                    else if (fingerDownX > 2f * third) { panY = 0f; queuePageTurn(+1) }
+                    if (fingerDownX < third) { panY = 0f; fitThumb = null; queuePageTurn(-1) }
+                    else if (fingerDownX > 2f * third) { panY = 0f; fitThumb = null; queuePageTurn(+1) }
                 }
             }
             return
