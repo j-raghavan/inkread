@@ -1262,13 +1262,24 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         // After a pinch, a 2→1 lift leaves a stale origin: commit no pan/tap for the trailing finger
         // (a fresh DOWN clears this latch and restarts clean panning) (#49).
         if (gestureWasMultiTouch) return
-        // Zoomed in: a drag pans the page; a still tap does nothing (no page-turn while zoomed).
+        // Zoomed in: a drag pans the page; a still tap in the L/R edge zone turns the page while
+        // KEEPING the zoom (#52), so a zoomed reader advances without zooming out and back. The core
+        // preserves zoom + column and resets to the top of the new page on a turn; mirror that
+        // top-reset locally (panY = 0) so the shell's pan stays in sync (no native read-back). Center
+        // stays a no-op while zoomed (it's content, not the menu).
         if (zoom > 1f) {
             if (fingerMoved) {
                 val overX = viewW * (zoom - 1f); val overY = viewH * (zoom - 1f)
                 if (overX > 0f) panX = (panX - (e.x - fingerDownX) / overX).coerceIn(0f, 1f)
                 if (overY > 0f) panY = (panY - (e.y - fingerDownY) / overY).coerceIn(0f, 1f)
                 applyZoom()
+            } else {
+                val w = surfaceView.width.toFloat()
+                if (w > 0f) {
+                    val third = w / 3f
+                    if (fingerDownX < third) { panY = 0f; queuePageTurn(-1) }
+                    else if (fingerDownX > 2f * third) { panY = 0f; queuePageTurn(+1) }
+                }
             }
             return
         }
