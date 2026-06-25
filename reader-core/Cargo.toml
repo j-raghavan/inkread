@@ -30,6 +30,10 @@ inkread-epub = { workspace = true }
 # through inkread-epub's layout via the shared ReflowView. Pure Rust; host-testable.
 inkread-pdftext = { workspace = true }
 pdfium-render = { workspace = true }
+# CBZ comic-archive backend (#36): ZIP of page images, decoded with the lean codec pair.
+zip = { workspace = true }
+jpeg-decoder = { workspace = true }
+png = { workspace = true }
 tiny-skia = { workspace = true }
 rusqlite = { workspace = true }
 serde = { workspace = true }

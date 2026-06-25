@@ -14,7 +14,7 @@ use device_eink::{DeviceCapabilities, Rect, RefreshCommand, RefreshPolicy};
 use std::sync::Arc;
 
 use crate::budget::{Caches, ResourceBudget, TrimLevel};
-use crate::document::fixed::PdfBackend;
+use crate::document::fixed::{CbzBackend, PdfBackend};
 use crate::document::{
     Document, DocumentMetadata, ExportMode, ExportStroke, FitMode, NormRect, PageInk, PageLink,
     TextSelection, TocEntry,
@@ -167,6 +167,26 @@ impl ReaderSession {
         Ok(Self::assemble(Box::new(document), caps, viewport, identity))
     }
 
+    /// Open a CBZ comic archive from bytes and build a session for `caps` on `viewport` (#36).
+    /// Fixed-layout, like PDF — the page list is the archive's image entries in reading order.
+    pub fn open_cbz(
+        bytes: Vec<u8>,
+        caps: DeviceCapabilities,
+        viewport: Viewport,
+    ) -> CoreResult<Self> {
+        let fingerprint = crate::persistence::identity::fingerprint(&bytes);
+        let size = bytes.len() as u64;
+        let document = CbzBackend::open(bytes)?;
+        let meta = document.metadata();
+        let identity = Some(DocIdentity {
+            fingerprint,
+            size,
+            title: meta.title,
+            author: meta.author,
+        });
+        Ok(Self::assemble(Box::new(document), caps, viewport, identity))
+    }
+
     /// Open an EPUB from bytes and build a session for `caps` on `viewport` (RR2-FR5). Reflowable:
     /// the backend paginates to the viewport on open and repaginates if it changes.
     pub fn open_epub(
@@ -283,6 +303,19 @@ impl ReaderSession {
         book: BookId,
     ) -> CoreResult<Self> {
         let mut session = Self::open_pdf(bytes, caps, viewport)?;
+        session.attach_store(store, book)?;
+        Ok(session)
+    }
+
+    /// Open a CBZ and attach a persistence store, resuming the saved position for `book` (#36).
+    pub fn open_cbz_with_store(
+        bytes: Vec<u8>,
+        caps: DeviceCapabilities,
+        viewport: Viewport,
+        store: Arc<dyn ReaderStore>,
+        book: BookId,
+    ) -> CoreResult<Self> {
+        let mut session = Self::open_cbz(bytes, caps, viewport)?;
         session.attach_store(store, book)?;
         Ok(session)
     }

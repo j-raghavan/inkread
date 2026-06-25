@@ -146,6 +146,7 @@ pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeOpenDocumen
 
         let opened = match DocFormat::resolve(&path, &bytes) {
             DocFormat::Epub => ReaderSession::open_epub(bytes, caps, viewport),
+            DocFormat::Cbz => ReaderSession::open_cbz(bytes, caps, viewport),
             DocFormat::Text => ReaderSession::open_txt(bytes, caps, viewport),
             DocFormat::Pdf => ReaderSession::open_pdf(bytes, caps, viewport),
         };
@@ -223,6 +224,9 @@ pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeOpenDocumen
         let opened = match DocFormat::resolve(&path, &bytes) {
             DocFormat::Epub => {
                 ReaderSession::open_epub_with_store(bytes, caps, viewport, store, book)
+            }
+            DocFormat::Cbz => {
+                ReaderSession::open_cbz_with_store(bytes, caps, viewport, store, book)
             }
             DocFormat::Text => {
                 ReaderSession::open_txt_with_store(bytes, caps, viewport, store, book)
