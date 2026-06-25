@@ -701,6 +701,39 @@ mod tests {
     }
 
     #[test]
+    fn point_validation_covers_every_boundary() {
+        // A non-finite x, y, OR pressure is rejected (NaN and infinity, all three coordinates).
+        for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            assert!(
+                InkPoint::new(bad, 0.0, 1.0, None, None, 0).is_err(),
+                "x={bad}"
+            );
+            assert!(
+                InkPoint::new(0.0, bad, 1.0, None, None, 0).is_err(),
+                "y={bad}"
+            );
+            assert!(
+                InkPoint::new(0.0, 0.0, bad, None, None, 0).is_err(),
+                "pressure={bad}"
+            );
+        }
+        // Exact-boundary values pass through unclamped.
+        let edge = InkPoint::new(0.0, 1.0, 0.5, None, None, 0).unwrap();
+        assert_eq!((edge.x, edge.y, edge.pressure), (0.0, 1.0, 0.5));
+        // A finite tilt is preserved on both axes; a non-finite tilt is dropped per-axis.
+        let p = InkPoint::new(0.3, 0.4, 0.6, Some(0.2), Some(f32::NAN), 0).unwrap();
+        assert_eq!(p.tilt_x, Some(0.2), "finite tilt_x kept");
+        assert_eq!(p.tilt_y, None, "NaN tilt_y dropped");
+        // Tilt is NOT clamped to [0,1] — it's an angle, any finite value is valid.
+        assert_eq!(
+            InkPoint::new(0.0, 0.0, 1.0, Some(-3.0), Some(42.0), 0)
+                .unwrap()
+                .tilt_x,
+            Some(-3.0)
+        );
+    }
+
+    #[test]
     fn tool_codes_round_trip() {
         for t in [Tool::Pen, Tool::Highlighter, Tool::Eraser] {
             assert_eq!(Tool::from_code(t.code()), Some(t));
