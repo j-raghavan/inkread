@@ -84,13 +84,15 @@ class DailyActivity : Activity() {
         page.addView(masthead())
         page.addView(folio(hasIssue, headlines.size, sources.size))
         page.addView(gap(dim(20)))
+        // The control panel (Read · Regenerate · Sources · Archive) sits up top, right under the
+        // folio — reachable at once and clear of the device's bottom home-button pane.
+        page.addView(todaysDesk(hasIssue, sources.size, issue))
+        page.addView(gap(dim(22)))
         when {
             hasIssue && headlines.isNotEmpty() -> page.addView(headlinesBlock(headlines, issue!!))
             sources.isNotEmpty() -> page.addView(compilePrompt(sources.size))
             else -> page.addView(emptyState())
         }
-        page.addView(gap(dim(22)))
-        page.addView(todaysDesk(hasIssue, sources.size, issue))
         page.addView(gap(dim(20)))
         page.addView(backIssuesStrip(backIssues))
         page.addView(gap(dim(22)))
