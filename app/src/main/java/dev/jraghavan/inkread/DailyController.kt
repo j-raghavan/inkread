@@ -23,8 +23,9 @@ import java.util.concurrent.TimeUnit
  */
 class DailyController(private val context: Context) {
 
-    /** A followed source: a display name (byline) + its feed URL. */
-    data class Source(val name: String, val url: String)
+    /** A followed source: a display name (byline) + its feed URL. [enabled] sources are the ones a
+     *  compile fetches; muting one (unchecking it) keeps it in the list without pulling it. */
+    data class Source(val name: String, val url: String, val enabled: Boolean = true)
 
     /** A compiled issue's headline. [index] is the article's position in the issue (0-based), so a
      *  tap can open the issue at that article. */
@@ -44,7 +45,8 @@ class DailyController(private val context: Context) {
             val arr = JSONArray(prefs().getString("sources", "[]"))
             (0 until arr.length()).map {
                 val o = arr.getJSONObject(it)
-                Source(o.optString("name"), o.optString("url"))
+                // Pre-existing stored sources have no "enabled" key → default to on.
+                Source(o.optString("name"), o.optString("url"), o.optBoolean("enabled", true))
             }
         }.getOrDefault(emptyList())
 
@@ -58,6 +60,16 @@ class DailyController(private val context: Context) {
     }
 
     fun removeSource(url: String) = save(sources().filterNot { it.url == url })
+
+    /** Mute/unmute a source without removing it (the Sources checklist). */
+    fun setSourceEnabled(url: String, enabled: Boolean) =
+        save(sources().map { if (it.url == url) it.copy(enabled = enabled) else it })
+
+    /** Persist an edited source list wholesale (enable/disable + removals from the Sources editor). */
+    fun setSources(list: List<Source>) = save(list)
+
+    /** The sources a compile actually fetches (muted ones excluded). */
+    fun enabledSources(): List<Source> = sources().filter { it.enabled }
 
     /** Bulk-add sources (the suggested-feeds picker), de-duped against what's already followed. */
     fun addSources(list: List<Source>) {
@@ -80,7 +92,9 @@ class DailyController(private val context: Context) {
 
     private fun save(list: List<Source>) {
         val arr = JSONArray()
-        list.forEach { arr.put(JSONObject().put("name", it.name).put("url", it.url)) }
+        list.forEach {
+            arr.put(JSONObject().put("name", it.name).put("url", it.url).put("enabled", it.enabled))
+        }
         prefs().edit().putString("sources", arr.toString()).apply()
     }
 
@@ -104,9 +118,9 @@ class DailyController(private val context: Context) {
     private var lastStatus = ""
 
     private fun compileBlocking(): Boolean {
-        val sources = sources()
-        if (sources.isEmpty()) {
-            lastStatus = "Add a source first"
+        val active = enabledSources()
+        if (active.isEmpty()) {
+            lastStatus = if (sources().isEmpty()) "Add a source first" else "All sources are muted"
             return false
         }
         val pool = Executors.newFixedThreadPool(MAX_PARALLEL)
@@ -114,7 +128,7 @@ class DailyController(private val context: Context) {
         var feedsReached = 0
         var itemsFound = 0
         try {
-            for (src in sources) {
+            for (src in active) {
                 val reached = booleanArrayOf(false)
                 val items = fetchFeedItems(src.url, reached)
                 if (reached[0]) feedsReached++

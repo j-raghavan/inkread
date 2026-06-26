@@ -10,6 +10,7 @@ import android.os.Bundle
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
+import android.widget.CheckBox
 import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ScrollView
@@ -446,26 +447,59 @@ class DailyActivity : Activity() {
             .show()
     }
 
+    /** Edit sources: a checklist (uncheck a row to mute it without losing it — e.g. disable NPR) with
+     *  a per-row Remove to drop it entirely. Saving applies mutes + removals in one pass. */
     private fun sourcesDialog() {
         val sources = daily.sources()
         if (sources.isEmpty()) {
             suggestedSourcesDialog()
             return
         }
-        val labels = sources.map { "${it.name}\n${it.url}" }.toTypedArray()
-        AlertDialog.Builder(this, R.style.InkDialog)
-            .setTitle("Sources")
-            .setItems(labels) { _, which ->
-                val s = sources[which]
-                AlertDialog.Builder(this, R.style.InkDialog)
-                    .setTitle(s.name)
-                    .setMessage(s.url)
-                    .setPositiveButton("Remove") { _, _ -> daily.removeSource(s.url); setContentView(buildView()) }
-                    .setNegativeButton("Keep", null)
-                    .show()
+        val enabled = sources.map { it.enabled }.toBooleanArray()
+        val removed = BooleanArray(sources.size)
+
+        val list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        sources.forEachIndexed { i, s ->
+            val row = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(0, dim(10), 0, dim(10))
             }
-            .setPositiveButton("Add sources") { _, _ -> suggestedSourcesDialog() }
-            .setNegativeButton("Close", null)
+            val cb = CheckBox(this).apply {
+                isChecked = s.enabled
+                setOnCheckedChangeListener { _, v -> enabled[i] = v }
+            }
+            val info = TextView(this).apply {
+                text = "${s.name}\n${s.url}"; setTextColor(ink); textSize = fs(13f); typeface = serif
+            }
+            val remove = TextView(this).apply {
+                text = "Remove"; setTextColor(ink); textSize = fs(11f); typeface = mono
+                letterSpacing = 0.1f; setPadding(dim(12), dim(6), dim(2), dim(6)); isClickable = true
+                setOnClickListener { removed[i] = true; row.visibility = View.GONE }
+            }
+            row.addView(cb)
+            row.addView(info, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+                .apply { marginStart = dim(8) })
+            row.addView(remove)
+            list.addView(row)
+            if (i < sources.size - 1) list.addView(blackRule(Ink.hair()))
+        }
+        val scroll = ScrollView(this).apply {
+            setPadding(dim(20), 0, dim(20), 0)
+            addView(list)
+        }
+        AlertDialog.Builder(this, R.style.InkDialog)
+            .setTitle("Sources — uncheck to mute")
+            .setView(scroll)
+            .setPositiveButton("Save") { _, _ ->
+                val updated = sources.mapIndexedNotNull { i, s ->
+                    if (removed[i]) null else s.copy(enabled = enabled[i])
+                }
+                daily.setSources(updated)
+                setContentView(buildView())
+            }
+            .setNeutralButton("Add") { _, _ -> suggestedSourcesDialog() }
+            .setNegativeButton("Cancel", null)
             .show()
     }
 
