@@ -58,6 +58,16 @@ class DailyController(private val context: Context) {
 
     fun removeSource(url: String) = save(sources().filterNot { it.url == url })
 
+    /** Bulk-add sources (the suggested-feeds picker), de-duped against what's already followed. */
+    fun addSources(list: List<Source>) {
+        val cur = sources()
+        save(cur + list.filterNot { s -> cur.any { it.url == s.url } })
+    }
+
+    /** A small curated catalog of well-known feeds, so a new user can start with one tap instead of
+     *  hunting for feed URLs. Shown as a default-on checklist. */
+    fun suggestedSources(): List<Source> = SUGGESTED
+
     private fun save(list: List<Source>) {
         val arr = JSONArray()
         list.forEach { arr.put(JSONObject().put("name", it.name).put("url", it.url)) }
@@ -91,12 +101,16 @@ class DailyController(private val context: Context) {
         }
         val pool = Executors.newFixedThreadPool(MAX_PARALLEL)
         val articles = JSONArray()
+        var feedsReached = 0
+        var itemsFound = 0
         try {
             for (src in sources) {
-                val feed = fetch(src.url) ?: continue
-                val items = runCatching { JSONArray(NativeBridge.nativeDailyParseFeed(feed)) }
-                    .getOrDefault(JSONArray())
+                val reached = booleanArrayOf(false)
+                val items = fetchFeedItems(src.url, reached)
+                if (reached[0]) feedsReached++
+                itemsFound += items.length()
                 val take = minOf(items.length(), PER_SOURCE)
+                Log.i(TAG, "feed ${src.url}: ${items.length()} items, fetching $take")
                 // Fetch this source's article pages in parallel.
                 val tasks = (0 until take).map { i ->
                     val item = items.getJSONObject(i)
@@ -119,8 +133,18 @@ class DailyController(private val context: Context) {
             pool.shutdown()
             pool.awaitTermination(2, TimeUnit.SECONDS)
         }
+        Log.i(TAG, "compile: feedsReached=$feedsReached itemsFound=$itemsFound articles=${articles.length()}")
+        // Specific failure messages so the cause is obvious without a logcat.
+        if (feedsReached == 0) {
+            lastStatus = "Couldn't reach any source (check Wi-Fi)"
+            return false
+        }
+        if (itemsFound == 0) {
+            lastStatus = "No feed found at that URL — paste a site's RSS/Atom link"
+            return false
+        }
         if (articles.length() == 0) {
-            lastStatus = "No articles could be fetched"
+            lastStatus = "Reached the feed but couldn't fetch any articles"
             return false
         }
         val issueJson = JSONObject()
@@ -128,10 +152,17 @@ class DailyController(private val context: Context) {
             .put("date", todayDisplay())
             .put("articles", articles)
             .toString()
-        val bytes = NativeBridge.nativeDailyAssemble(issueJson)
+        val bytes = try {
+            NativeBridge.nativeDailyAssemble(issueJson)
+        } catch (e: RuntimeException) {
+            Log.e(TAG, "assemble failed: ${e.message}")
+            lastStatus = "Couldn't assemble the issue"
+            return false
+        }
         val file = File(dailyDir(), "inkread-daily-${todayKey()}.epub")
         file.writeBytes(bytes)
         storeIssueMeta(articles, file)
+        Log.i(TAG, "compile OK: ${articles.length()} articles → ${file.name} (${bytes.size} bytes)")
         lastStatus = "Compiled ${articles.length()} articles"
         return true
     }
@@ -179,6 +210,66 @@ class DailyController(private val context: Context) {
         ).apply()
     }
 
+    // ── Feed resolution: a feed URL, or a site URL we auto-discover the feed from ─────────────────
+
+    /**
+     * Fetch a source's feed items. Accepts either a real RSS/Atom URL or a **site** URL: if the URL
+     * doesn't parse as a feed, look for a `<link rel="alternate" type="…rss/atom…">` in the page, then
+     * try common feed paths (`/feed`, `/rss`, …) — so a user can paste a site, not just a feed.
+     * `reached[0]` is set true if any URL responded (to distinguish "no network" from "not a feed").
+     */
+    private fun fetchFeedItems(url: String, reached: BooleanArray): JSONArray {
+        val body = fetch(url) ?: return JSONArray()
+        reached[0] = true
+        parseFeed(body)?.let { if (it.length() > 0) return it }
+        // Not a feed — discover one from the page, then fall back to common paths.
+        val candidates = buildList {
+            discoverFeedUrl(body, url)?.let { add(it) }
+            addAll(commonFeedPaths(url))
+        }.distinct()
+        for (c in candidates) {
+            if (c == url) continue
+            val b = fetch(c) ?: continue
+            parseFeed(b)?.let {
+                if (it.length() > 0) {
+                    Log.i(TAG, "discovered feed for $url -> $c (${it.length()} items)")
+                    return it
+                }
+            }
+        }
+        return JSONArray()
+    }
+
+    private fun parseFeed(xml: String): JSONArray? =
+        runCatching { JSONArray(NativeBridge.nativeDailyParseFeed(xml)) }.getOrNull()
+
+    /** Find a feed URL advertised in a page's `<link rel="alternate" type="…rss/atom+xml" href="…">`. */
+    private fun discoverFeedUrl(html: String, base: String): String? {
+        val link = Regex("<link\\b[^>]*>", RegexOption.IGNORE_CASE)
+        val typeRss = Regex("type=[\"'](application/(rss|atom)\\+xml)[\"']", RegexOption.IGNORE_CASE)
+        val href = Regex("href=[\"']([^\"']+)[\"']", RegexOption.IGNORE_CASE)
+        for (m in link.findAll(html)) {
+            val tag = m.value
+            if (typeRss.containsMatchIn(tag)) {
+                href.find(tag)?.groupValues?.get(1)?.let { return resolve(base, it) }
+            }
+        }
+        return null
+    }
+
+    /** Common feed paths to probe on a site's origin when no `<link>` is advertised. */
+    private fun commonFeedPaths(url: String): List<String> =
+        runCatching {
+            val u = URL(url)
+            val origin = "${u.protocol}://${u.host}"
+            listOf("/feed", "/rss", "/feed.xml", "/rss.xml", "/index.xml", "/atom.xml", "/feed/")
+                .map { origin + it }
+        }.getOrDefault(emptyList())
+
+    /** Resolve a possibly-relative href against a base URL. */
+    private fun resolve(base: String, href: String): String =
+        runCatching { URL(URL(base), href).toString() }.getOrDefault(href)
+
     // ── Fetch (HTTPS/HTTP, off the UI thread) ─────────────────────────────────────────────────────
 
     private fun fetch(url: String): String? {
@@ -188,8 +279,13 @@ class DailyController(private val context: Context) {
                 connectTimeout = TIMEOUT_MS
                 readTimeout = TIMEOUT_MS
                 instanceFollowRedirects = true
-                setRequestProperty("User-Agent", "inkread-daily/0.1")
-                setRequestProperty("Accept", "text/html,application/xhtml+xml,application/xml,application/rss+xml")
+                setRequestProperty("User-Agent", "Mozilla/5.0 (inkread-daily/0.1)")
+                setRequestProperty("Accept", "text/html,application/xhtml+xml,application/xml,application/rss+xml,*/*")
+            }
+            val code = conn.responseCode
+            if (code !in 200..299) {
+                Log.e(TAG, "fetch $url -> HTTP $code")
+                return null
             }
             conn.inputStream.use { input ->
                 val bytes = input.readBytes(MAX_BYTES)
@@ -222,6 +318,20 @@ class DailyController(private val context: Context) {
 
     private companion object {
         const val TAG = "DailyController"
+
+        /** Curated popular feeds for the suggested-sources picker (stable, well-known RSS/Atom). */
+        val SUGGESTED = listOf(
+            Source("Hacker News", "https://hnrss.org/frontpage"),
+            Source("Lobsters", "https://lobste.rs/rss"),
+            Source("Ars Technica", "https://feeds.arstechnica.com/arstechnica/index"),
+            Source("The Verge", "https://www.theverge.com/rss/index.xml"),
+            Source("TechCrunch", "https://techcrunch.com/feed/"),
+            Source("BBC News", "https://feeds.bbci.co.uk/news/rss.xml"),
+            Source("NPR News", "https://feeds.npr.org/1001/rss.xml"),
+            Source("Quanta Magazine", "https://api.quantamagazine.org/feed/"),
+            Source("Daring Fireball", "https://daringfireball.net/feeds/main"),
+            Source("Smashing Magazine", "https://www.smashingmagazine.com/feed/"),
+        )
         const val PER_SOURCE = 6 // articles taken per source
         const val MAX_PARALLEL = 4 // concurrent article fetches
         const val HEADLINES_SHOWN = 8 // headlines stored for the front page

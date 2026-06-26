@@ -246,10 +246,10 @@ class DailyActivity : Activity() {
             setTextColor(Ink.inkSoft); textSize = fs(16f); typeface = serifItalic
             gravity = Gravity.CENTER; setLineSpacing(0f, 1.4f); setPadding(dim(10), dim(8), dim(10), 0)
         })
-        addView(primaryButton("＋  Add your first source") { addSourceDialog() }.apply {
+        addView(primaryButton("＋  Choose your sources") { suggestedSourcesDialog() }.apply {
             (layoutParams as LinearLayout.LayoutParams).topMargin = dim(22)
         })
-        addView(label("RSS · Atom · paste a feed URL", 11f, 0.10f).apply {
+        addView(label("Popular feeds, ready to go · or a custom URL", 11f, 0.10f).apply {
             gravity = Gravity.CENTER; setPadding(0, dim(12), 0, 0)
         })
     }
@@ -363,7 +363,7 @@ class DailyActivity : Activity() {
 
     private fun compileFlow() {
         if (daily.sources().isEmpty()) {
-            addSourceDialog()
+            suggestedSourcesDialog()
             return
         }
         Toast.makeText(this, "Compiling today's issue…", Toast.LENGTH_SHORT).show()
@@ -373,6 +373,27 @@ class DailyActivity : Activity() {
                 if (ok) setContentView(buildView())
             }
         }
+    }
+
+    /** The suggested-feeds picker: a curated checklist, every feed checked by default (one-tap start).
+     *  Already-followed feeds are pre-checked; "Custom URL" drops to the free-text entry. */
+    private fun suggestedSourcesDialog() {
+        val all = daily.suggestedSources()
+        val following = daily.sources().map { it.url }.toSet()
+        val labels = all.map { it.name }.toTypedArray()
+        // Default ON for everything (per the design intent); already-added feeds also start checked.
+        val checked = BooleanArray(all.size) { true }
+        AlertDialog.Builder(this, R.style.InkDialog)
+            .setTitle("Popular sources")
+            .setMultiChoiceItems(labels, checked) { _, which, isChecked -> checked[which] = isChecked }
+            .setPositiveButton("Add selected") { _, _ ->
+                val picked = all.filterIndexed { i, _ -> checked[i] && all[i].url !in following }
+                if (picked.isNotEmpty()) daily.addSources(picked)
+                setContentView(buildView())
+            }
+            .setNeutralButton("Custom URL") { _, _ -> addSourceDialog() }
+            .setNegativeButton("Cancel", null)
+            .show()
     }
 
     private fun addSourceDialog() {
@@ -395,7 +416,7 @@ class DailyActivity : Activity() {
     private fun sourcesDialog() {
         val sources = daily.sources()
         if (sources.isEmpty()) {
-            addSourceDialog()
+            suggestedSourcesDialog()
             return
         }
         val labels = sources.map { "${it.name}\n${it.url}" }.toTypedArray()
@@ -410,7 +431,7 @@ class DailyActivity : Activity() {
                     .setNegativeButton("Keep", null)
                     .show()
             }
-            .setPositiveButton("Add source") { _, _ -> addSourceDialog() }
+            .setPositiveButton("Add sources") { _, _ -> suggestedSourcesDialog() }
             .setNegativeButton("Close", null)
             .show()
     }
