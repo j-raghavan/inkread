@@ -469,6 +469,9 @@ name = "inkread-daily"
 version = "0.1.0-m0"
 dependencies = [
  "inkread-epub",
+ "quick-xml 0.36.2",
+ "serde",
+ "serde_json",
  "zip 2.4.2",
 ]
 
@@ -928,6 +931,15 @@ checksum = "e0c5ccf5294c6ccd63a74f1565028353830a9c2f5eb0c682c355c471726a6e3f"
 
 [[package]]
 name = "quick-xml"
+version = "0.36.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f7649a7b4df05aed9ea7ec6f628c67c9953a43869b8bc50929569b2999d443fe"
+dependencies = [
+ "memchr",
+]
+
+[[package]]
+name = "quick-xml"
 version = "0.40.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2474bd2e5029e7ccb6abb2ba48cf2383a333851dedf495901544281590c7da7f"
@@ -952,7 +964,7 @@ checksum = "27704c60b69971656c5621e8523cbab07fee538d61d7ab21719da49546e13630"
 dependencies = [
  "indexmap",
  "percent-encoding",
- "quick-xml",
+ "quick-xml 0.40.1",
  "thiserror",
  "zip 8.6.0",
 ]
@@ -962,6 +974,7 @@ name = "reader-core"
 version = "0.1.0-m0"
 dependencies = [
  "device-eink",
+ "inkread-daily",
  "inkread-dict",
  "inkread-epub",
  "inkread-ink",

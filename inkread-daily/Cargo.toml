@@ -12,6 +12,11 @@ description = "inkread-daily (#66): turn feed/article sources into a self-contai
 # Writes the issue EPUB (a ZIP container). Already a workspace dependency (CBZ). Pure Rust,
 # AGPL-compatible, cross-compiles clean.
 zip = { workspace = true }
+# RSS/Atom feed parsing (#66 fetch slice) — pure-Rust pull parser.
+quick-xml = { workspace = true }
+# JSON at the JNI boundary: the shell hands the core a fetched issue (sources + article HTML) as JSON.
+serde = { workspace = true }
+serde_json = { workspace = true }
 
 [dev-dependencies]
 # Round-trip the assembled issue through the real EPUB parser the reader uses, so a malformed

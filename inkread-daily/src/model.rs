@@ -1,15 +1,17 @@
 //! The `inkread-daily` domain model (#66): the data a daily issue is built from.
 //!
-//! Deliberately tiny and dependency-free. A [`Source`] is a feed/site the user follows; an
-//! [`Article`] is one extracted, ready-to-read piece; an [`Issue`] is the compiled set for a day.
-//! Fetching feeds and extracting readable text happen at the edges (the Android shell / a later
-//! extraction slice) and produce these values — this crate only *assembles* them into an EPUB.
+//! Deliberately tiny. A [`Source`] is a feed/site the user follows; an [`Article`] is one extracted,
+//! ready-to-read piece; an [`Issue`] is the compiled set for a day. Fetching feeds happens in the
+//! Android shell; this crate parses feeds, extracts readable text, and assembles the EPUB. The types
+//! are serde-(de)serializable so the shell can hand the core a fetched issue as JSON over JNI.
+
+use serde::{Deserialize, Serialize};
 
 /// A content source the user follows (RSS/Atom feed or a site). The fetch layer owns the network;
 /// this is the persisted identity the shell stores. **Ahead of its consumer:** defined here as the
 /// stable model type the fetch/persistence slice will read — assembly attributes articles by the
 /// flat [`Article::source`] byline today and does not reference this struct yet.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Source {
     /// Human-facing name shown as the article byline (e.g. "Hacker News").
     pub name: String,
@@ -20,7 +22,7 @@ pub struct Source {
 /// One ready-to-read article in an issue: a title, the source it came from, the original URL, an
 /// optional published date (already formatted for display), and the **clean** body as simple,
 /// well-formed XHTML-compatible markup (paragraphs/headings) — the output of readability extraction.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Article {
     /// Article headline.
     pub title: String,
@@ -35,7 +37,7 @@ pub struct Article {
 }
 
 /// A compiled daily issue: a dated, titled set of articles in reading order.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Issue {
     /// Issue title (e.g. "inkread daily").
     pub title: String,
