@@ -130,6 +130,10 @@ class HomeActivity : Activity() {
         }
         column.addView(spacer(dim(28)))
         column.addView(openButton())
+        statChips()?.let {
+            column.addView(spacer(dim(16)))
+            column.addView(it)
+        }
         column.addView(spacerWeighted(phi))
         column.addView(closingMark())
 
@@ -413,6 +417,36 @@ class HomeActivity : Activity() {
                 background = GradientDrawable().apply { setColor(ink); cornerRadius = dim(4).toFloat() }
             }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, p.toFloat()))
             if (p < 100) addView(View(this@HomeActivity), LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, (100 - p).toFloat()))
+        }
+    }
+
+    /** The design's stat chips — outlined pills of REAL reading stats (streak · this week · pages).
+     *  Each chip appears only when it has data, so nothing is faked; null when there's nothing yet. */
+    private fun statChips(): View? {
+        val chips = buildList {
+            val streak = ReadingStats.streakDays(this@HomeActivity)
+            val minutes = ReadingStats.weekMinutes(this@HomeActivity)
+            val pages = ReadingStats.weekPages(this@HomeActivity)
+            if (streak > 0) add(if (streak == 1) "1-day streak" else "$streak-day streak")
+            if (minutes > 0) add("${ReadingStats.formatMinutes(minutes)} this week")
+            if (pages > 0) add(if (pages == 1) "1 page" else "$pages pages")
+        }
+        if (chips.isEmpty()) return null
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+            chips.forEachIndexed { i, c ->
+                addView(chip(c), LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+                    .apply { marginStart = if (i == 0) 0 else dim(10) })
+            }
+        }
+    }
+
+    private fun chip(text: String): View = TextView(this).apply {
+        this.text = text; setTextColor(ink); textSize = fs(13f); typeface = serif
+        gravity = Gravity.CENTER; setPadding(dim(16), dim(6), dim(16), dim(6))
+        background = GradientDrawable().apply {
+            setColor(Color.WHITE); setStroke(maxOf(1, dp(1)), ink); cornerRadius = dim(40).toFloat()
         }
     }
 
