@@ -424,6 +424,35 @@ mod tests {
         bytes
     }
 
+    /// Host preview (#66): render a compiled Daily issue EPUB to PNGs so the reading experience can
+    /// be eyeballed on a host (the e-ink screencap is black). Run:
+    ///   `INKREAD_ISSUE_EPUB=/path/issue.epub cargo test -p reader-core daily_render_dump -- --ignored --nocapture`
+    /// → writes `target/daily-preview/page-NN.png`. Driven by `scripts/daily-preview.sh`.
+    #[test]
+    #[ignore = "host preview: needs INKREAD_ISSUE_EPUB=<path>; run with --ignored --nocapture"]
+    fn daily_render_dump() {
+        let Ok(path) = std::env::var("INKREAD_ISSUE_EPUB") else {
+            eprintln!("SKIP daily_render_dump: set INKREAD_ISSUE_EPUB to a compiled issue .epub");
+            return;
+        };
+        let bytes = std::fs::read(&path).expect("issue epub readable");
+        let (w, h) = (790u32, 1024u32); // a readable portrait reading page
+        let b = EpubBackend::open(bytes, vp(w, h)).expect("open issue epub");
+        let out = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../target/daily-preview");
+        std::fs::create_dir_all(&out).unwrap();
+        let pages = b.page_count().min(10);
+        for i in 0..pages {
+            let px = render(&b, i, w, h);
+            let f = std::io::BufWriter::new(std::fs::File::create(out.join(format!("page-{i:02}.png"))).unwrap());
+            let mut enc = png::Encoder::new(f, w, h);
+            enc.set_color(png::ColorType::Rgba);
+            enc.set_depth(png::BitDepth::Eight);
+            enc.write_header().unwrap().write_image_data(&px).unwrap();
+        }
+        eprintln!("wrote {pages} page PNGs to {}", out.display());
+    }
+
     #[test]
     fn opens_paginates_and_exposes_metadata() {
         let b = EpubBackend::open(SAMPLE.to_vec(), vp(400, 600)).unwrap();

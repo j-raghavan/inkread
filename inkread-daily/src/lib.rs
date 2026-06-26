@@ -55,12 +55,17 @@ pub fn assemble_issue_from_json(json: &str) -> Result<Vec<u8>, String> {
     let articles = raw
         .articles
         .into_iter()
-        .map(|a| Article {
-            title: a.title,
-            source: a.source,
-            url: a.url,
-            published: a.published,
-            body_html: extract_readable(&a.html),
+        .map(|a| {
+            // The page's own <h1> usually repeats the article title; drop that leading paragraph so
+            // the title isn't shown twice (the issue already renders the title above the body).
+            let body_html = without_leading_title(&extract_readable(&a.html), &a.title);
+            Article {
+                title: a.title,
+                source: a.source,
+                url: a.url,
+                published: a.published,
+                body_html,
+            }
         })
         .collect();
     let issue = Issue {
@@ -69,6 +74,40 @@ pub fn assemble_issue_from_json(json: &str) -> Result<Vec<u8>, String> {
         articles,
     };
     Ok(assemble_epub(&issue))
+}
+
+/// Drop a leading `<p>…</p>` from `body` when it just repeats the article `title` (the page's own
+/// heading). Compares on alphanumerics only, so punctuation/escaping differences don't matter.
+fn without_leading_title(body: &str, title: &str) -> String {
+    let norm = |s: &str| {
+        s.chars()
+            .filter(|c| c.is_alphanumeric())
+            .flat_map(char::to_lowercase)
+            .collect::<String>()
+    };
+    let tnorm = norm(title);
+    if tnorm.len() < 6 {
+        return body.to_string(); // too short to match confidently
+    }
+    if let Some(end) = body.find("</p>") {
+        let first = body[..end].trim_start_matches("<p>");
+        let decoded = extract_readable_decode(first);
+        let fnorm = norm(&decoded);
+        if fnorm == tnorm || fnorm.starts_with(&tnorm) || tnorm.starts_with(&fnorm) {
+            return body[end + 4..].trim_start().to_string();
+        }
+    }
+    body.to_string()
+}
+
+/// Reverse the XHTML escaping of a single extracted block for comparison (mirror of the assembler's
+/// escape — `&amp;`/`&lt;`/… back to text).
+fn extract_readable_decode(s: &str) -> String {
+    s.replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&apos;", "'")
 }
 
 #[cfg(test)]
