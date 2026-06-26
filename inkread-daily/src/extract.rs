@@ -57,13 +57,24 @@ const MIN_BLOCK_CHARS: usize = 40;
 pub fn extract_readable(html: &str) -> String {
     let main = main_content(html);
     let mut out = String::new();
+    let mut last = String::new();
     for block in to_blocks(main) {
-        let t = collapse_ws(&block);
-        if t.chars().count() >= MIN_BLOCK_CHARS && !is_diagram_source(&t) {
-            out.push_str("<p>");
-            out.push_str(&escape(&t));
-            out.push_str("</p>\n");
+        let t = collapse_ws(&strip_zero_width(&block));
+        if t.chars().count() < MIN_BLOCK_CHARS || is_diagram_source(&t) || is_author_bio(&t) {
+            continue;
         }
+        // Newsletter / related-stories boilerplate marks the end of the article — drop it + the rest
+        // (the "Follow topics…" CTA and the trailing "More from …" link list).
+        if is_tail_boilerplate(&t) {
+            break;
+        }
+        if t == last {
+            continue; // drop a duplicated consecutive paragraph (e.g. a caption repeated)
+        }
+        last.clone_from(&t);
+        out.push_str("<p>");
+        out.push_str(&escape(&t));
+        out.push_str("</p>\n");
     }
     if out.is_empty() {
         out.push_str(
@@ -218,6 +229,68 @@ fn decode_numeric(s: &str) -> String {
     out
 }
 
+/// Strip zero-width / BOM characters that render as stray boxes ("8") on e-ink.
+fn strip_zero_width(s: &str) -> String {
+    s.chars()
+        .filter(|&c| {
+            !matches!(
+                c,
+                '\u{feff}' | '\u{200b}' | '\u{200c}' | '\u{200d}' | '\u{2060}'
+            )
+        })
+        .collect()
+}
+
+/// Whether a block begins the page's end-matter (newsletter CTA / related-stories list) — once hit,
+/// the rest of the page is dropped. Matched on a lowercased prefix to avoid mid-article false hits.
+fn is_tail_boilerplate(t: &str) -> bool {
+    let lower = t.to_ascii_lowercase();
+    const MARKERS: &[&str] = &[
+        "follow topics and authors",
+        "more from",
+        "most popular",
+        "related stories",
+        "related reading",
+        "sign up for the",
+        "subscribe to our",
+        "read more:",
+        "share this story",
+        "comments (",
+    ];
+    MARKERS.iter().any(|m| lower.starts_with(m))
+}
+
+/// Whether a short block reads as an author byline/bio ("X is a senior reporter … joined …") rather
+/// than article prose. Conservative: needs the "is a", a journalism role, and a bio cue, and stays
+/// short — so real sentences ("Linus is a software engineer who created Linux") don't match.
+fn is_author_bio(t: &str) -> bool {
+    if t.len() >= 400 {
+        return false;
+    }
+    let l = t.to_ascii_lowercase();
+    let role = [
+        "reporter",
+        "writer",
+        "editor",
+        "journalist",
+        "correspondent",
+        "columnist",
+    ]
+    .iter()
+    .any(|r| l.contains(r));
+    let cue = [
+        "joined",
+        "covers",
+        "covering",
+        "previously",
+        "is a senior",
+        "based in",
+    ]
+    .iter()
+    .any(|c| l.contains(c));
+    l.contains(" is a ") && role && cue
+}
+
 /// Whether a block is Mermaid/diagram source (which flattens to unreadable gibberish in prose).
 fn is_diagram_source(t: &str) -> bool {
     let head = t.split_whitespace().next().unwrap_or("");
@@ -300,6 +373,41 @@ mod tests {
         assert!(
             out.contains("children&apos;s") || out.contains("children's"),
             "{out}"
+        );
+    }
+
+    #[test]
+    fn drops_bom_dups_bio_and_tail_boilerplate() {
+        let html = "<article>\
+            <p>\u{feff}To make it easier to play games, one side shows a virtual gamepad with controls.</p>\
+            <p>To make it easier to play games, one side shows a virtual gamepad with controls.</p>\
+            <p>Jay Peters is a senior reporter covering technology. He joined The Verge in 2019.</p>\
+            <p>Android 17 is getting a dedicated gaming mode for foldables, a genuinely useful feature.</p>\
+            <p>Follow topics and authors from this story to see more like this in your feed.</p>\
+            <p>I drove the Slate Truck — there's more to it than EV minimalism</p>\
+            </article>";
+        let out = extract_readable(html);
+        assert!(!out.contains('\u{feff}'), "BOM stripped");
+        assert_eq!(
+            out.matches("one side shows a virtual gamepad").count(),
+            1,
+            "dedup: {out}"
+        );
+        assert!(
+            !out.contains("senior reporter"),
+            "author bio dropped: {out}"
+        );
+        assert!(
+            out.contains("Android 17 is getting"),
+            "real prose kept: {out}"
+        );
+        assert!(
+            !out.contains("Follow topics"),
+            "newsletter CTA dropped: {out}"
+        );
+        assert!(
+            !out.contains("Slate Truck"),
+            "trailing related link dropped: {out}"
         );
     }
 

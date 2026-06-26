@@ -143,8 +143,13 @@ fn title_page(issue: &Issue) -> String {
 /// One article document: headline, a source · date byline, then the clean article body.
 fn article_xhtml(issue: &Issue, i: usize) -> String {
     let art = &issue.articles[i];
-    let byline = match &art.published {
-        Some(d) => format!("{} · {}", esc(&art.source), esc(d)),
+    let byline = match art
+        .published
+        .as_deref()
+        .map(clean_date)
+        .filter(|d| !d.is_empty())
+    {
+        Some(d) => format!("{} · {}", esc(&art.source), esc(&d)),
         None => esc(&art.source),
     };
     let body = format!(
@@ -153,6 +158,21 @@ fn article_xhtml(issue: &Issue, i: usize) -> String {
         art.body_html // trusted: caller's contract is already-clean, well-formed XHTML (not escaped)
     );
     xhtml(&art.title, &body)
+}
+
+/// Turn a raw feed date into a short display date — drop the weekday prefix and the time/zone, so
+/// "Wed, 25 Jun 2026 18:33:54 +0000" → "25 Jun 2026" and "2026-06-25T18:33:54-04:00" → "2026-06-25".
+fn clean_date(s: &str) -> String {
+    let mut s = s.trim();
+    if let Some(idx) = s.find(", ") {
+        if idx <= 4 {
+            s = s[idx + 2..].trim(); // strip a leading weekday like "Wed, "
+        }
+    }
+    if let Some(t) = s.find('T') {
+        return s[..t].to_string(); // ISO-8601 → keep the date
+    }
+    s.split_whitespace().take(3).collect::<Vec<_>>().join(" ") // RFC-822 → "25 Jun 2026"
 }
 
 /// Wrap `body` (raw XHTML markup) in a minimal, well-formed XHTML document titled `title`.
