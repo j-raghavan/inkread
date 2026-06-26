@@ -18,6 +18,7 @@ fn main() {
 
     match mode.as_str() {
         "parse" => println!("{}", inkread_daily::parse_feed_json(&text)),
+        "dump" => print!("{}", inkread_daily::debug_dump_issue(&text)),
         "assemble" => match inkread_daily::assemble_issue_from_json(&text) {
             Ok(bytes) => std::io::stdout().write_all(&bytes).expect("write epub"),
             Err(e) => {
@@ -26,7 +27,7 @@ fn main() {
             }
         },
         other => {
-            eprintln!("usage: daily_cli parse|assemble   (got {other:?})");
+            eprintln!("usage: daily_cli parse|dump|assemble   (got {other:?})");
             std::process::exit(2);
         }
     }

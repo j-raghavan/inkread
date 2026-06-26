@@ -59,7 +59,7 @@ pub fn extract_readable(html: &str) -> String {
     let mut out = String::new();
     for block in to_blocks(main) {
         let t = collapse_ws(&block);
-        if t.chars().count() >= MIN_BLOCK_CHARS {
+        if t.chars().count() >= MIN_BLOCK_CHARS && !is_diagram_source(&t) {
             out.push_str("<p>");
             out.push_str(&escape(&t));
             out.push_str("</p>\n");
@@ -216,6 +216,27 @@ fn decode_numeric(s: &str) -> String {
         }
     }
     out
+}
+
+/// Whether a block is Mermaid/diagram source (which flattens to unreadable gibberish in prose).
+fn is_diagram_source(t: &str) -> bool {
+    let head = t.split_whitespace().next().unwrap_or("");
+    matches!(
+        head,
+        "flowchart"
+            | "sequenceDiagram"
+            | "gantt"
+            | "classDiagram"
+            | "stateDiagram"
+            | "stateDiagram-v2"
+            | "erDiagram"
+            | "journey"
+            | "mindmap"
+            | "gitGraph"
+            | "pie"
+    ) || ["graph TD", "graph LR", "graph RL", "graph BT"]
+        .iter()
+        .any(|g| t.starts_with(g))
 }
 
 /// Collapse runs of whitespace to single spaces and trim.

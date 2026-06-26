@@ -38,39 +38,46 @@ pub fn parse_feed(xml: &str) -> Vec<FeedItem> {
 
     loop {
         match reader.read_event() {
-            Ok(Event::Start(e)) | Ok(Event::Empty(e)) => {
-                match local_name(e.name().as_ref()).as_str() {
-                    "item" | "entry" => cur = Some(FeedItem::default()),
-                    "title" => field = Some(Field::Title),
-                    "link" => {
-                        // Atom carries the URL in the href attribute (RSS uses the element text).
-                        if let Some(c) = cur.as_mut() {
-                            if let Some(href) = attr(&e, b"href") {
-                                if c.url.is_empty() {
-                                    c.url = href;
-                                }
-                            }
+            // A self-closing element (e.g. Atom `<link href="…"/>`): grab the href, but DON'T set a
+            // text field — there is no body, so a later text node must not leak into it (the bug that
+            // put an author name in The Verge's URL).
+            Ok(Event::Empty(e)) => {
+                if local_name(e.name().as_ref()) == "link" {
+                    if let (Some(c), Some(href)) = (cur.as_mut(), attr(&e, b"href")) {
+                        if c.url.is_empty() {
+                            c.url = href;
                         }
-                        field = Some(Field::Link);
                     }
-                    "pubdate" | "published" | "updated" => field = Some(Field::Published),
-                    _ => {}
                 }
             }
+            Ok(Event::Start(e)) => match local_name(e.name().as_ref()).as_str() {
+                "item" | "entry" => cur = Some(FeedItem::default()),
+                "title" => field = Some(Field::Title),
+                "link" => {
+                    // Atom carries the URL in the href attribute (RSS uses the element text).
+                    if let (Some(c), Some(href)) = (cur.as_mut(), attr(&e, b"href")) {
+                        if c.url.is_empty() {
+                            c.url = href;
+                        }
+                    }
+                    field = Some(Field::Link);
+                }
+                "pubdate" | "published" | "updated" => field = Some(Field::Published),
+                _ => {}
+            },
             // Text and CData are distinct event types; funnel both through one applier.
             Ok(Event::Text(t)) => apply_text(&mut cur, field, &to_string(t.into_inner())),
             Ok(Event::CData(t)) => apply_text(&mut cur, field, &to_string(t.into_inner())),
-            Ok(Event::End(e)) => match local_name(e.name().as_ref()).as_str() {
-                "item" | "entry" => {
+            Ok(Event::End(e)) => {
+                if matches!(local_name(e.name().as_ref()).as_str(), "item" | "entry") {
                     if let Some(c) = cur.take() {
                         if !c.title.is_empty() || !c.url.is_empty() {
                             items.push(c);
                         }
                     }
                 }
-                "title" | "link" | "pubdate" | "published" | "updated" => field = None,
-                _ => {}
-            },
+                field = None; // any element close ends the active text field (no cross-element leak)
+            }
             Ok(Event::Eof) | Err(_) => break, // tolerant: stop on EOF or a malformed event
             _ => {}
         }
@@ -165,6 +172,20 @@ mod tests {
         assert!(!items.is_empty());
         assert_eq!(items[0].title, "Title & <b>markup</b>");
         assert_eq!(items[0].url, "https://x.test/c");
+    }
+
+    #[test]
+    fn self_closing_link_does_not_leak_following_text_into_the_url() {
+        // Regression (The Verge): a self-closing <link href/> must not leave the URL field "open" so
+        // a following <author><name> leaks into the URL.
+        let xml = r#"<feed xmlns="http://www.w3.org/2005/Atom">
+            <entry><title>Real title</title><link href="https://x.test/1"/>
+            <author><name>Sheena Vasani</name></author></entry></feed>"#;
+        let items = parse_feed(xml);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].url, "https://x.test/1");
+        assert_eq!(items[0].title, "Real title");
+        assert!(!items[0].url.contains("Sheena"));
     }
 
     #[test]

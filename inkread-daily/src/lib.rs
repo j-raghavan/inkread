@@ -76,6 +76,30 @@ pub fn assemble_issue_from_json(json: &str) -> Result<Vec<u8>, String> {
     Ok(assemble_epub(&issue))
 }
 
+/// Host-preview helper (#66): for each article in the fetched-issue JSON, print its title/source/URL
+/// and the **extracted body as plain text** — so the extraction quality of EVERY source can be
+/// reviewed on a host before shipping. Used by `daily_cli dump`.
+pub fn debug_dump_issue(json: &str) -> String {
+    let raw: RawIssue = match serde_json::from_str(json) {
+        Ok(r) => r,
+        Err(e) => return format!("issue json error: {e}"),
+    };
+    let mut out = String::new();
+    for (i, a) in raw.articles.iter().enumerate() {
+        let body = without_leading_title(&extract_readable(&a.html), &a.title);
+        // <p>…</p> → plain paragraphs; un-escape for readability.
+        let text = extract_readable_decode(&body.replace("<p>", "").replace("</p>", "\n"));
+        let words = text.split_whitespace().count();
+        out.push_str(&format!(
+            "\n════════ [{i}] {}  ·  {}  ·  {words} words\n   {}\n",
+            a.title, a.source, a.url
+        ));
+        out.push_str(text.trim());
+        out.push('\n');
+    }
+    out
+}
+
 /// Drop a leading `<p>…</p>` from `body` when it just repeats the article `title` (the page's own
 /// heading). Compares on alphanumerics only, so punctuation/escaping differences don't matter.
 fn without_leading_title(body: &str, title: &str) -> String {
