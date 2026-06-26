@@ -12,8 +12,8 @@
 
 use std::cell::{Cell, RefCell};
 
-use inkread_epub::layout::{paginate, Align, LayoutOpts, Page};
-use inkread_epub::render::{render_page as raster_page, AbFont, GrayCanvas};
+use inkread_epub::layout::{paginate_with, Align, Hyphenator, LayoutOpts, Page};
+use inkread_epub::render::{render_page as raster_page, AbFont, EnHyphenator, GrayCanvas};
 use inkread_epub::{parse_blocks, Block, EpubPackage, NavPoint};
 
 use crate::document::text_select::{self, CharBox, NormRect, TextAnchor, TextSelection};
@@ -24,7 +24,7 @@ use crate::render::PixelBuffer;
 
 /// Base body font size in device pixels at scale `1.0` (Supernote-class panel). The user's text
 /// scale multiplies this (RR2-FR5 font-size control).
-const BASE_FONT_PX: f32 = 38.0;
+const BASE_FONT_PX: f32 = 56.0;
 
 /// Clamp for the user text scale (font size). `1.0` = [`BASE_FONT_PX`].
 const MIN_SCALE: f32 = 0.6;
@@ -51,6 +51,8 @@ pub struct EpubBackend {
     meta: DocumentMetadata,
     /// The reading face (embedded default).
     font: AbFont,
+    /// Soft-hyphenation for justified/narrow lines (book typography, like KOReader).
+    hyph: EnHyphenator,
     /// User text scale (font size); `1.0` = [`BASE_FONT_PX`]. Drives repagination.
     scale: Cell<f32>,
     /// Line-spacing multiple (RR4 — default 1.4). Drives repagination.
@@ -74,14 +76,16 @@ impl EpubBackend {
             author: pkg.author.clone(),
         };
         let font = AbFont::default_font();
+        let hyph = EnHyphenator::new();
         let laid = layout_all(
             &chapters,
             &font,
+            &hyph,
             viewport.width,
             viewport.height,
             BASE_FONT_PX,
             1.4,
-            Align::Left,
+            Align::Justify,
         );
         Ok(Self {
             chapters,
@@ -89,9 +93,10 @@ impl EpubBackend {
             nav: pkg.toc,
             meta,
             font,
+            hyph,
             scale: Cell::new(1.0),
             line_spacing: Cell::new(1.4),
-            align: Cell::new(Align::Left),
+            align: Cell::new(Align::Justify),
             laid: RefCell::new(laid),
         })
     }
@@ -115,6 +120,7 @@ impl EpubBackend {
             let fresh = layout_all(
                 &self.chapters,
                 &self.font,
+                &self.hyph,
                 w,
                 h,
                 font_px,
@@ -136,6 +142,7 @@ impl EpubBackend {
         let fresh = layout_all(
             &self.chapters,
             &self.font,
+            &self.hyph,
             w,
             h,
             self.font_px(),
@@ -338,9 +345,11 @@ impl Document for EpubBackend {
 }
 
 /// Paginate every chapter for `(w, h, font_px, line_spacing, align)`; each chapter starts a page.
+#[allow(clippy::too_many_arguments)]
 fn layout_all(
     chapters: &[Vec<Block>],
     font: &AbFont,
+    hyph: &dyn Hyphenator,
     w: u32,
     h: u32,
     font_px: f32,
@@ -354,7 +363,7 @@ fn layout_all(
     let mut chapter_start = Vec::with_capacity(chapters.len());
     for blocks in chapters {
         chapter_start.push(pages.len());
-        let mut cps = paginate(blocks, &opts, font);
+        let mut cps = paginate_with(blocks, &opts, font, hyph);
         if cps.is_empty() {
             cps.push(Page::default()); // keep a 1:1 chapter→start mapping even for an empty chapter
         }
@@ -436,15 +445,22 @@ mod tests {
             return;
         };
         let bytes = std::fs::read(&path).expect("issue epub readable");
-        let (w, h) = (790u32, 1024u32); // a readable portrait reading page
+        let env_u32 = |k: &str, d: u32| {
+            std::env::var(k)
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(d)
+        };
+        let (w, h) = (env_u32("INKREAD_W", 790), env_u32("INKREAD_H", 1024)); // device panel for real preview
         let b = EpubBackend::open(bytes, vp(w, h)).expect("open issue epub");
-        let out = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../target/daily-preview");
+        let out = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../target/daily-preview");
         std::fs::create_dir_all(&out).unwrap();
         let pages = b.page_count().min(10);
         for i in 0..pages {
             let px = render(&b, i, w, h);
-            let f = std::io::BufWriter::new(std::fs::File::create(out.join(format!("page-{i:02}.png"))).unwrap());
+            let f = std::io::BufWriter::new(
+                std::fs::File::create(out.join(format!("page-{i:02}.png"))).unwrap(),
+            );
             let mut enc = png::Encoder::new(f, w, h);
             enc.set_color(png::ColorType::Rgba);
             enc.set_depth(png::BitDepth::Eight);
@@ -594,8 +610,10 @@ mod tests {
         // Regression (#46 device finding): EpubBackend didn't override text_line_span, so a multi-line
         // drag on a reflowed page hit the Document trait's empty default and selected nothing — the
         // bbox path worked, the line-span path returned ''. The override must select real text.
-        let b = EpubBackend::open(SAMPLE.to_vec(), vp(400, 600)).unwrap();
-        let _ = render(&b, 0, 400, 600);
+        // A realistic reading viewport (the default body size needs a real column; a tiny one would
+        // hyphenate/clip every word).
+        let b = EpubBackend::open(SAMPLE.to_vec(), vp(800, 1200)).unwrap();
+        let _ = render(&b, 0, 800, 1200);
         let sel = b.text_line_span(0, (0.05, 0.02), (0.60, 0.30)); // a drag down the top of page 0
         assert!(
             !sel.boxes.is_empty(),
@@ -633,8 +651,8 @@ mod tests {
 
     #[test]
     fn search_finds_text_on_the_page_it_lives_on() {
-        let b = EpubBackend::open(SAMPLE.to_vec(), vp(400, 600)).unwrap();
-        let _ = render(&b, 0, 400, 600);
+        let b = EpubBackend::open(SAMPLE.to_vec(), vp(800, 1200)).unwrap();
+        let _ = render(&b, 0, 800, 1200);
         // Pull a real word off page 0 and search for it.
         let text: String = b.page_chars(0).iter().map(|c| c.ch).collect();
         let word = text

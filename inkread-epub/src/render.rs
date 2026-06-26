@@ -15,8 +15,9 @@
 //! divergence note in [`layout`](crate::layout).
 
 use ab_glyph::{point, Font, FontVec, PxScale, ScaleFont};
+use hyphenation::{Hyphenator as _, Language, Load, Standard};
 
-use crate::layout::{LayoutOpts, Metrics, Page, SourceAnchor};
+use crate::layout::{Hyphenator, LayoutOpts, Metrics, Page, SourceAnchor};
 
 /// The bundled default reading face — Spectral Regular (SIL OFL 1.1; see `fonts/OFL.txt`).
 const DEFAULT_FONT: &[u8] = include_bytes!("../fonts/Spectral-Regular.ttf");
@@ -38,6 +39,38 @@ impl AbFont {
     #[must_use]
     pub fn from_bytes(bytes: Vec<u8>) -> Option<Self> {
         FontVec::try_from_vec(bytes).ok().map(|font| Self { font })
+    }
+}
+
+/// English (US) Knuth-Liang hyphenation — the same pattern model KOReader uses — so justified lines
+/// break long words like a book. Patterns are embedded (no filesystem); construction is fallible only
+/// if the bundled data is corrupt, so [`Self::new`] is infallible in practice.
+pub struct EnHyphenator {
+    dict: Standard,
+}
+
+impl EnHyphenator {
+    /// Load the embedded en-US patterns.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            dict: Standard::from_embedded(Language::EnglishUS)
+                .expect("embedded en-US patterns valid"),
+        }
+    }
+}
+
+impl Default for EnHyphenator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Hyphenator for EnHyphenator {
+    fn opportunities(&self, word: &str) -> Vec<usize> {
+        // `breaks` are byte offsets into `word` where a soft hyphen may be inserted (ascending). The
+        // dictionary enforces sensible left/right minimums, so short fragments don't occur.
+        self.dict.hyphenate(word).breaks
     }
 }
 

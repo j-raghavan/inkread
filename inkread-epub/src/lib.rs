@@ -20,8 +20,11 @@ pub mod content;
 pub mod layout;
 pub mod render;
 pub use content::{parse_blocks, Block, Inline, TextRun};
-pub use layout::{paginate, Align, LayoutLine, LayoutOpts, Metrics, Page, PlacedRun};
-pub use render::{page_glyphs, render_page, AbFont, GrayCanvas, PlacedGlyph};
+pub use layout::{
+    paginate, paginate_with, Align, Hyphenator, LayoutLine, LayoutOpts, Metrics, NoHyphen, Page,
+    PlacedRun,
+};
+pub use render::{page_glyphs, render_page, AbFont, EnHyphenator, GrayCanvas, PlacedGlyph};
 
 /// The error surface for EPUB parsing — mirrors `inkread-dict`'s shape so the `reader-core` adapter
 /// maps it uniformly. Never panics across the boundary (RR21-FR3).

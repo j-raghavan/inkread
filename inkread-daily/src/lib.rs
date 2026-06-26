@@ -117,7 +117,13 @@ fn without_leading_title(body: &str, title: &str) -> String {
         let first = body[..end].trim_start_matches("<p>");
         let decoded = extract_readable_decode(first);
         let fnorm = norm(&decoded);
-        if fnorm == tnorm || fnorm.starts_with(&tnorm) || tnorm.starts_with(&fnorm) {
+        // A title *echo* paragraph is ~title length. Only strip when the first paragraph essentially
+        // IS the title — never when it merely *begins* with the title word(s) but runs on into a real
+        // sentence (e.g. "Artificial intelligence (AI) is the capability of…"), which is body text.
+        let echo = fnorm == tnorm
+            || (fnorm.starts_with(&tnorm) && fnorm.len() <= tnorm.len() + tnorm.len() / 2)
+            || tnorm.starts_with(&fnorm);
+        if echo {
             return body[end + 4..].trim_start().to_string();
         }
     }
@@ -138,6 +144,28 @@ fn extract_readable_decode(s: &str) -> String {
 mod json_tests {
     use super::*;
     use inkread_epub::EpubPackage;
+
+    #[test]
+    fn keeps_first_paragraph_that_only_begins_with_the_title() {
+        // A real opening paragraph often starts with the subject (the title word) then runs on —
+        // it must NOT be mistaken for a duplicated heading and dropped.
+        let body = "<p>Artificial intelligence (AI) is the capability of computational systems to perform tasks.</p><p>Next.</p>";
+        let out = without_leading_title(body, "Artificial intelligence");
+        assert!(
+            out.contains("capability of computational systems"),
+            "body paragraph kept: {out}"
+        );
+    }
+
+    #[test]
+    fn strips_a_leading_paragraph_that_just_repeats_the_title() {
+        let body = "<p>Artificial intelligence</p><p>Real body.</p>";
+        let out = without_leading_title(body, "Artificial intelligence");
+        assert!(
+            out.starts_with("<p>Real body."),
+            "title echo dropped: {out}"
+        );
+    }
 
     #[test]
     fn assembles_an_issue_from_fetched_json_with_extraction() {
