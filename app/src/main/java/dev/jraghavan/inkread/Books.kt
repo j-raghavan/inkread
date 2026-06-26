@@ -73,6 +73,48 @@ object Books {
     /** A human title for a stored book file (drop the extension). */
     fun title(file: File): String = file.nameWithoutExtension
 
+    // ---- real document metadata (title/author/page position), captured by the reader on open ----
+
+    private fun meta(context: Context) =
+        context.getSharedPreferences("bookmeta", Context.MODE_PRIVATE)
+
+    /**
+     * Record the real document metadata for book `id` (from the core's `DocumentMetadata` + page
+     * count), so the home/library can show the actual title/author and reading position rather than
+     * the filename. Blank title/author are not stored (the filename stays the fallback).
+     */
+    fun setMeta(context: Context, id: String, title: String, author: String, pages: Int) {
+        if (id.isEmpty()) return
+        meta(context).edit().apply {
+            if (title.isNotBlank()) putString("$id.title", title.trim())
+            if (author.isNotBlank()) putString("$id.author", author.trim())
+            if (pages > 0) putInt("$id.pages", pages)
+        }.apply()
+    }
+
+    /** Record the current 0-based page for book `id` (written by the reader on save). */
+    fun setPage(context: Context, id: String, page: Int) {
+        if (id.isEmpty()) return
+        meta(context).edit().putInt("$id.page", page.coerceAtLeast(0)).apply()
+    }
+
+    /** The stored real title for book `id`, or null if unknown (caller falls back to the filename). */
+    fun metaTitle(context: Context, id: String): String? =
+        meta(context).getString("$id.title", null)?.ifBlank { null }
+
+    fun metaAuthor(context: Context, id: String): String? =
+        meta(context).getString("$id.author", null)?.ifBlank { null }
+
+    /** Total pages for book `id` (0 if unknown). */
+    fun metaPages(context: Context, id: String): Int = meta(context).getInt("$id.pages", 0)
+
+    /** Current 0-based page for book `id` (0 if unknown). */
+    fun metaPage(context: Context, id: String): Int = meta(context).getInt("$id.page", 0)
+
+    /** The display title for a recent: the real document title if captured, else the file name. */
+    fun displayTitle(context: Context, r: Recent): String =
+        metaTitle(context, r.id) ?: File(r.path).nameWithoutExtension
+
     // ---- first-page thumbnails (RR17-FR5) ----
 
     private fun thumbsDir(context: Context): File = File(context.filesDir, "thumbnails").apply { mkdirs() }

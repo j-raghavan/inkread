@@ -307,6 +307,35 @@ pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativePageCount<'
     .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
 }
 
+// nativeDocTitle(handle) : String — the document's title from its metadata, or "" if none. The
+// shell stores it so the library shows the real title (not the filename).
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeDocTitle<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+) -> JString<'local> {
+    env.with_env(|env| -> jni::errors::Result<JString<'local>> {
+        let session = unsafe { session_mut(handle) }.map_err(|e| throw(env, &e))?;
+        env.new_string(session.metadata().title.unwrap_or_default())
+    })
+    .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
+}
+
+// nativeDocAuthor(handle) : String — the document's author from its metadata, or "" if none.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeDocAuthor<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+) -> JString<'local> {
+    env.with_env(|env| -> jni::errors::Result<JString<'local>> {
+        let session = unsafe { session_mut(handle) }.map_err(|e| throw(env, &e))?;
+        env.new_string(session.metadata().author.unwrap_or_default())
+    })
+    .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
+}
+
 // =====================================================================================
 // nativeRenderPage(handle, directBuffer) — render the current page into the direct
 // ByteBuffer the shell locked. The PixelBuffer borrow never outlives this call (Amendment 5).

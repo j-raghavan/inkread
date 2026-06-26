@@ -112,6 +112,9 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
     @Volatile private var pageCount = 0
     /** Stable id of the open book (its file name); keys thumbnails + the bookmarks file. */
     @Volatile private var currentBookId = ""
+    /** Foreground reading-session start (elapsed ms) + the page it began on, for ReadingStats. */
+    private var sessionStartMs = 0L
+    private var sessionStartPage = 0
     /** Whether PDF reflow mode is on (ADR-INKREAD-0011). Session-scoped: defaults off on each open
      *  (the fixed page is the faithful view; reflow is an opt-in toggle on the Page tab). */
     @Volatile private var reflowOn = false
@@ -570,10 +573,19 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         // onWindowFocusChanged: the Supernote's window-focus events are flaky (the window can go
         // "Gone" right after launch), so onResume is the reliable foreground signal.
         applyToolInkState("resume")
+        // Start timing this foreground reading session (ReadingStats — streak + weekly chrome).
+        sessionStartMs = SystemClock.elapsedRealtime()
+        sessionStartPage = currentPage
     }
 
     override fun onPause() {
         super.onPause()
+        // Record the finished reading session (time read + pages advanced) before tearing down.
+        if (docHandle != 0L && sessionStartMs > 0L && currentBookId.isNotEmpty()) {
+            val minutes = ((SystemClock.elapsedRealtime() - sessionStartMs) / 60_000L).toInt()
+            ReadingStats.record(this, minutes, (currentPage - sessionStartPage).coerceAtLeast(0))
+        }
+        sessionStartMs = 0L
         if (::toolPalette.isInitialized) toolPalette.dismiss() // close any open palette popup
         if (::selectionToolbar.isInitialized) selectionToolbar.dismiss()
         if (::colorPalette.isInitialized) colorPalette.dismiss()
@@ -788,6 +800,15 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             }
             pageCount = NativeBridge.nativePageCount(docHandle)
             Books.pushRecent(this, bookId, path)
+            // Capture the real document metadata so the library shows the actual title/author + page
+            // position instead of the filename (the home redesign's real-data path).
+            try {
+                val t = NativeBridge.nativeDocTitle(docHandle)
+                val a = NativeBridge.nativeDocAuthor(docHandle)
+                Books.setMeta(this, bookId, t, a, pageCount)
+            } catch (e: RuntimeException) {
+                Log.e(TAG, "doc metadata failed: ${e.message}")
+            }
             Log.i(
                 TAG,
                 "opened $bookId: $pageCount pages, resumed at page ${NativeBridge.nativeCurrentPage(docHandle)}",
@@ -2988,10 +3009,11 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         } catch (e: RuntimeException) {
             Log.e(TAG, "save position failed: ${e.message}")
         }
-        // Record read progress for the home shelf (RR16/RR17).
+        // Record read progress + page position for the home shelf (RR16/RR17).
         val total = pageCount
         if (total > 0 && currentBookId.isNotEmpty()) {
             Books.setProgress(this, currentBookId, ((currentPage + 1) * 100) / total)
+            Books.setPage(this, currentBookId, currentPage)
         }
     }
 
