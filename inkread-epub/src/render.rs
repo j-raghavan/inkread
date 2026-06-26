@@ -127,8 +127,13 @@ pub fn render_page(page: &Page, opts: &LayoutOpts, font: &AbFont, canvas: &mut G
                         let py = oy + gy as i32;
                         canvas.blend(px, py, c);
                         if run.bold {
-                            // Synthesized bold: a 1px horizontal smear thickens the stem.
-                            canvas.blend(px + 1, py, c);
+                            // Synthesized bold: a horizontal smear thickens the stem. Scale the smear
+                            // with the font size so large headings read clearly bold (a fixed 1px is
+                            // invisible on a 68px title); inline body bold stays a subtle 1px.
+                            let weight = ((run.size_px / 26.0).round() as i32).clamp(1, 3);
+                            for dx in 1..=weight {
+                                canvas.blend(px + dx, py, c);
+                            }
                         }
                     });
                 }

@@ -162,24 +162,30 @@ pub fn paginate(blocks: &[Block], opts: &LayoutOpts, m: &dyn Metrics) -> Vec<Pag
     // Chapter-relative character cursor, advanced as source text is consumed in reading order, so
     // every placed run/glyph carries a font-invariant offset (ADR-INKREAD-0012).
     let mut cursor = 0usize;
+    // Book typography (KOReader/crengine epub.css model): paragraphs are set dense — a first-line
+    // indent of ~1.2em distinguishes them with NO blank line between (avoids the "too many white
+    // lines" web look). Headings are bold + scaled with a margin before (0.7em) and after (0.5em);
+    // the before-margin collapses at the top of a page.
+    let indent = opts.font_px * 1.2;
     for (block_index, block) in blocks.iter().enumerate() {
         match block {
             Block::Heading { level, content } => {
+                pager.gap_before(opts.font_px * 0.7);
                 let size = opts.font_px * heading_scale(*level);
                 pager.add_paragraph(content, size, 0.0, true, block_index, &mut cursor, m);
-                pager.gap(opts.para_gap);
+                pager.gap(opts.font_px * 0.5);
             }
             Block::Paragraph { content } => {
+                // First-line indent, no trailing gap — dense, book-like.
                 pager.add_paragraph(
                     content,
                     opts.font_px,
-                    0.0,
+                    indent,
                     false,
                     block_index,
                     &mut cursor,
                     m,
                 );
-                pager.gap(opts.para_gap);
             }
             Block::ListItem {
                 ordered,
@@ -192,7 +198,7 @@ pub fn paginate(blocks: &[Block], opts: &LayoutOpts, m: &dyn Metrics) -> Vec<Pag
                     "•".to_string()
                 };
                 pager.add_list_item(&marker, content, opts.font_px, block_index, &mut cursor, m);
-                pager.gap(opts.para_gap * 0.4);
+                pager.gap(opts.font_px * 0.15);
             }
             Block::Image { alt, .. } => {
                 // Phase 3 reserves a labelled placeholder; Phase 4 renders the decoded image at its
@@ -208,8 +214,9 @@ pub fn paginate(blocks: &[Block], opts: &LayoutOpts, m: &dyn Metrics) -> Vec<Pag
                     italic: true,
                     href: None,
                 })];
+                pager.gap_before(opts.font_px * 0.4);
                 pager.add_paragraph(&run, opts.font_px, 0.0, false, block_index, &mut cursor, m);
-                pager.gap(opts.para_gap);
+                pager.gap(opts.font_px * 0.4);
             }
             Block::Rule => pager.add_rule(opts.para_gap),
         }
@@ -254,6 +261,14 @@ impl<'o> Pager<'o> {
     /// Advance the vertical cursor by a block gap (never itself forces a page break).
     fn gap(&mut self, dy: f32) {
         self.cursor_y += dy;
+    }
+
+    /// A gap inserted BEFORE a block (heading/image), collapsed to nothing at the top of a page so
+    /// the page's top margin isn't doubled (margin-collapse, matching browser/crengine behaviour).
+    fn gap_before(&mut self, dy: f32) {
+        if self.cursor_y > 0.0 {
+            self.cursor_y += dy;
+        }
     }
 
     fn break_page(&mut self) {
