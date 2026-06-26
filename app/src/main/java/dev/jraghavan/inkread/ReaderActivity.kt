@@ -1967,6 +1967,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
     // Live-preview state: during a pinch/pan we cheaply transform the CACHED page bitmap on the
     // canvas (no pdfium, no JNI) for instant feedback, then re-render crisp once on gesture end.
     private var gestureStartZoom = 1f
+    private var pinchFont = false // this pinch adjusts font size (reflowable) vs. magnifies (fixed)
     private var liveScale = 1f
     private var focusX = 0f
     private var focusY = 0f
@@ -1990,12 +1991,15 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
     private val scaleDetector by lazy {
         android.view.ScaleGestureDetector(this, object : android.view.ScaleGestureDetector.SimpleOnScaleGestureListener() {
             override fun onScaleBegin(d: android.view.ScaleGestureDetector): Boolean {
-                if (!magnifiable) return false // a reflowed view ignores pinch-zoom (#61, RR25-FR3)
+                // Reflowable views can't magnify (#61, RR25-FR3); instead the pinch resizes the font
+                // (pinch out = larger, in = smaller), like KOReader. Fixed-layout views magnify.
+                pinchFont = !magnifiable
                 gestureStartZoom = zoom; liveScale = 1f; focusX = d.focusX; focusY = d.focusY
                 return true
             }
             override fun onScale(d: android.view.ScaleGestureDetector): Boolean {
                 liveScale *= d.scaleFactor
+                if (pinchFont) return true // font resize repaginates — too costly per frame; apply on end
                 val eff = (gestureStartZoom * liveScale).coerceIn(1f, MAX_ZOOM_UI) / gestureStartZoom
                 throttledPreview {
                     previewBitmap(android.graphics.Matrix().apply { postScale(eff, eff, focusX, focusY) })
@@ -2003,6 +2007,16 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
                 return true
             }
             override fun onScaleEnd(d: android.view.ScaleGestureDetector) {
+                if (pinchFont) {
+                    // Map the pinch ratio onto the font scale: pinch out 1.3x ≈ font 1.3x, snapped to
+                    // the nearest preset. A small/accidental pinch leaves the size unchanged.
+                    val cur = nearestScaleIndex(textScalePref())
+                    val target = nearestScaleIndex(
+                        (textScalePref() * liveScale).coerceIn(TEXT_SCALES.first(), TEXT_SCALES.last())
+                    )
+                    if (target != cur) applyReflowScale(target, announce = true)
+                    return
+                }
                 val newZoom = (gestureStartZoom * liveScale).coerceIn(1f, MAX_ZOOM_UI)
                 if (gestureStartZoom <= 1f && newZoom > 1f) captureFitThumb() // zoom field still ≤1 here
                 if (newZoom <= 1.01f) {
@@ -2953,14 +2967,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         }
         fun refresh() { value.text = "${(TEXT_SCALES[idx] * 100).toInt()}%" }
         refresh()
-        fun apply() {
-            setTextScalePref(TEXT_SCALES[idx]); refresh()
-            engine.execute {
-                val np = try { NativeBridge.nativeSetTextScale(docHandle, TEXT_SCALES[idx]) } catch (e: RuntimeException) { -1 }
-                if (np >= 0) { pageCount = NativeBridge.nativePageCount(docHandle); repaintPanel() }
-                else runOnUiThread { Toast.makeText(this, "Font size adjusts reflowable books (EPUB)", Toast.LENGTH_SHORT).show() }
-            }
-        }
+        fun apply() { refresh(); applyReflowScale(idx, warnIfFixed = true) }
         fun pill(t: String, on: () -> Unit) = TextView(this).apply {
             text = t; textSize = 16f; gravity = Gravity.CENTER; setTextColor(Color.BLACK)
             setPadding(dp(18), dp(10), dp(18), dp(10)); isClickable = true
@@ -3004,6 +3011,25 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
 
     private fun setOrientationPref(orientation: Int) =
         getSharedPreferences("display", MODE_PRIVATE).edit().putInt("orientation", orientation).apply()
+
+    /** Apply reflow font-size preset [rawIdx] (clamped): persist, repaginate off-thread, repaint.
+     *  Pinch-zoom on a reflowable view and the Font panel's A-/A+ both route here (DRY).
+     *  [announce] toasts the new size (pinch feedback); [warnIfFixed] toasts when the doc is
+     *  fixed-layout so the size can't change (Font panel feedback). */
+    private fun applyReflowScale(rawIdx: Int, announce: Boolean = false, warnIfFixed: Boolean = false) {
+        val idx = rawIdx.coerceIn(0, TEXT_SCALES.size - 1)
+        setTextScalePref(TEXT_SCALES[idx])
+        if (announce) runOnUiThread {
+            Toast.makeText(this, "Font ${(TEXT_SCALES[idx] * 100).toInt()}%", Toast.LENGTH_SHORT).show()
+        }
+        engine.execute {
+            val np = try { NativeBridge.nativeSetTextScale(docHandle, TEXT_SCALES[idx]) } catch (e: RuntimeException) { -1 }
+            if (np >= 0) { pageCount = NativeBridge.nativePageCount(docHandle); repaintPanel() }
+            else if (warnIfFixed) runOnUiThread {
+                Toast.makeText(this, "Font size adjusts reflowable books (EPUB)", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
 
     private fun textScalePref(): Float =
         getSharedPreferences("typography", MODE_PRIVATE).getFloat("scale", 1.0f)
