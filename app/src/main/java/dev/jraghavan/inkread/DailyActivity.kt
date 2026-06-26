@@ -74,35 +74,49 @@ class DailyActivity : Activity() {
         val sources = daily.sources()
         val backIssues = daily.backIssues()
 
-        val page = LinearLayout(this).apply {
+        // Fixed masthead: utility row, The InkRead Daily wordmark, folio, and the control panel
+        // (Read · Regenerate · Sources · Archive) stay pinned at the top; only the topics scroll.
+        val header = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(side, dim(26), side, dim(24))
-            layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+            setBackgroundColor(paper)
+            setPadding(side, dim(26), side, dim(14))
         }
+        header.addView(utilityRow())
+        header.addView(masthead())
+        header.addView(folio(hasIssue, headlines.size, sources.size))
+        header.addView(gap(dim(20)))
+        header.addView(todaysDesk(hasIssue, sources.size, issue))
+        header.addView(gap(dim(14)))
+        header.addView(blackRule(Ink.hair())) // divider between the pinned header and the scroll body
 
-        page.addView(utilityRow())
-        page.addView(masthead())
-        page.addView(folio(hasIssue, headlines.size, sources.size))
-        page.addView(gap(dim(20)))
-        // The control panel (Read · Regenerate · Sources · Archive) sits up top, right under the
-        // folio — reachable at once and clear of the device's bottom home-button pane.
-        page.addView(todaysDesk(hasIssue, sources.size, issue))
-        page.addView(gap(dim(22)))
+        // Scrollable body: headlines, back issues, footer.
+        val body = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(side, dim(18), side, dim(24))
+        }
         when {
-            hasIssue && headlines.isNotEmpty() -> page.addView(headlinesBlock(headlines, issue!!))
-            sources.isNotEmpty() -> page.addView(compilePrompt(sources.size))
-            else -> page.addView(emptyState())
+            hasIssue && headlines.isNotEmpty() -> body.addView(headlinesBlock(headlines, issue!!))
+            sources.isNotEmpty() -> body.addView(compilePrompt(sources.size))
+            else -> body.addView(emptyState())
         }
-        page.addView(gap(dim(20)))
-        page.addView(backIssuesStrip(backIssues))
-        page.addView(gap(dim(22)))
-        page.addView(folioFooter())
+        body.addView(gap(dim(20)))
+        body.addView(backIssuesStrip(backIssues))
+        body.addView(gap(dim(22)))
+        body.addView(folioFooter())
 
-        return ScrollView(this).apply {
+        val scroll = ScrollView(this).apply {
             setBackgroundColor(paper)
             isFillViewport = true
             isVerticalScrollBarEnabled = false
-            addView(page)
+            addView(body)
+        }
+
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(paper)
+            layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
+            addView(header)
+            addView(scroll, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
         }
     }
 
