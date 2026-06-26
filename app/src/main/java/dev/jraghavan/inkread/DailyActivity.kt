@@ -127,28 +127,25 @@ class DailyActivity : Activity() {
         setPadding(0, dim(14), 0, dim(4))
         addView(blackRule(dim(3)).apply { (layoutParams as LinearLayout.LayoutParams).bottomMargin = dim(12) })
         addView(label("The", 11f, 0.34f).apply { gravity = Gravity.CENTER })
+        // The wordmark, full-width and centred (no inkwell icon — it pushed the script off the edge).
+        addView(TextView(this@DailyActivity).apply {
+            text = "InkRead"; setTextColor(ink); textSize = fs(58f); typeface = script
+            includeFontPadding = false; paint.isFakeBoldText = true
+            gravity = Gravity.CENTER
+            setPadding(0, dim(2), 0, 0)
+        }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        // —— DAILY —— : gravity CENTER so the rules + word sit centred (was CENTER_VERTICAL → left).
         addView(LinearLayout(this@DailyActivity).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
-            setPadding(0, dim(2), 0, 0)
-            addView(android.widget.ImageView(this@DailyActivity).apply { setImageResource(R.mipmap.ic_launcher) },
-                LinearLayout.LayoutParams(dim(38), dim(38)).apply { marginEnd = dim(14); gravity = Gravity.CENTER_VERTICAL })
-            addView(TextView(this@DailyActivity).apply {
-                text = "InkRead"; setTextColor(ink); textSize = fs(64f); typeface = script
-                includeFontPadding = false; paint.isFakeBoldText = true
-            })
-        })
-        addView(LinearLayout(this@DailyActivity).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
             setPadding(0, dim(6), 0, 0)
-            addView(blackRule(dim(2)), LinearLayout.LayoutParams(dim(110), dim(2)))
+            addView(blackRule(dim(2)), LinearLayout.LayoutParams(dim(90), dim(2)).apply { gravity = Gravity.CENTER_VERTICAL })
             addView(TextView(this@DailyActivity).apply {
                 text = "DAILY"; setTextColor(ink); textSize = fs(22f); typeface = serifBold
                 letterSpacing = 0.45f; setPadding(dim(14), 0, dim(8), 0); includeFontPadding = false
             })
-            addView(blackRule(dim(2)), LinearLayout.LayoutParams(dim(110), dim(2)))
-        })
+            addView(blackRule(dim(2)), LinearLayout.LayoutParams(dim(90), dim(2)).apply { gravity = Gravity.CENTER_VERTICAL })
+        }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
     }
 
     // ── Folio ───────────────────────────────────────────────────────────────────────────────────
