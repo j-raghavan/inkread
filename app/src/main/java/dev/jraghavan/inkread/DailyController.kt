@@ -26,8 +26,9 @@ class DailyController(private val context: Context) {
     /** A followed source: a display name (byline) + its feed URL. */
     data class Source(val name: String, val url: String)
 
-    /** A compiled issue's headline (front-page line / TOC entry). */
-    data class Headline(val source: String, val title: String)
+    /** A compiled issue's headline. [index] is the article's position in the issue (0-based), so a
+     *  tap can open the issue at that article. */
+    data class Headline(val source: String, val title: String, val index: Int)
 
     /** A past issue on disk. */
     data class BackIssue(val dateLabel: String, val count: Int, val file: File)
@@ -192,7 +193,7 @@ class DailyController(private val context: Context) {
             val arr = o.optJSONArray("headlines") ?: JSONArray()
             (0 until arr.length()).map {
                 val h = arr.getJSONObject(it)
-                Headline(h.optString("source"), h.optString("title"))
+                Headline(h.optString("source"), h.optString("title"), h.optInt("index", it))
             }
         }.getOrDefault(emptyList())
 
@@ -210,7 +211,11 @@ class DailyController(private val context: Context) {
         val headlines = JSONArray()
         for (i in 0 until minOf(articles.length(), HEADLINES_SHOWN)) {
             val a = articles.getJSONObject(i)
-            headlines.put(JSONObject().put("source", a.optString("source")).put("title", a.optString("title")))
+            headlines.put(
+                JSONObject().put("source", a.optString("source"))
+                    .put("title", a.optString("title"))
+                    .put("index", i), // the article's position in the issue = its chapter order
+            )
         }
         prefs().edit().putString(
             "today",

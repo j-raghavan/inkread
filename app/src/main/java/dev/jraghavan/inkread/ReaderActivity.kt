@@ -813,6 +813,21 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
                 TAG,
                 "opened $bookId: $pageCount pages, resumed at page ${NativeBridge.nativeCurrentPage(docHandle)}",
             )
+            // Daily: a tapped headline opens the issue AT that article. The issue's TOC is
+            // [Cover, article0, article1, …], so article N is TOC entry N+1.
+            val dailyArticle = intent.getIntExtra(EXTRA_DAILY_ARTICLE, -1)
+            if (dailyArticle >= 0) {
+                try {
+                    val toc = WireCodec.decodeToc(NativeBridge.nativeToc(docHandle))
+                    toc.getOrNull(dailyArticle + 1)?.targetPage?.let { page ->
+                        NativeBridge.nativeJumpToPage(docHandle, page)
+                        currentPage = NativeBridge.nativeCurrentPage(docHandle)
+                        Log.i(TAG, "daily: jumped to article $dailyArticle → page $page")
+                    }
+                } catch (e: RuntimeException) {
+                    Log.e(TAG, "daily article jump failed: ${e.message}")
+                }
+            }
         }
     }
 
@@ -3112,5 +3127,6 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         const val EXTRA_PICK = "inkread.pick" // open the file picker on launch.
         const val EXTRA_BOOK_PATH = "inkread.book_path" // open this specific stored book…
         const val EXTRA_BOOK_ID = "inkread.book_id" // …with this stable id.
+        const val EXTRA_DAILY_ARTICLE = "inkread.daily_article" // open a Daily issue at this article index.
     }
 }

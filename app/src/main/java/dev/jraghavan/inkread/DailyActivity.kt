@@ -214,7 +214,7 @@ class DailyActivity : Activity() {
                 addView(TextView(this@DailyActivity).apply {
                     text = h.title; setTextColor(ink); textSize = fs(15f); typeface = serif
                     setLineSpacing(0f, 1.16f); setPadding(0, dim(10), 0, 0)
-                    isClickable = true; setOnClickListener { openIssue(issue) }
+                    isClickable = true; setOnClickListener { openIssue(issue, h.index) }
                 })
             }
         }
@@ -370,10 +370,12 @@ class DailyActivity : Activity() {
 
     // ── Actions ───────────────────────────────────────────────────────────────────────────────────
 
-    private fun openIssue(file: File) = startActivity(
+    /** Open the issue EPUB; when [articleIndex] >= 0, jump straight to that article inside it. */
+    private fun openIssue(file: File, articleIndex: Int = -1) = startActivity(
         Intent(this, ReaderActivity::class.java)
             .putExtra(ReaderActivity.EXTRA_BOOK_PATH, file.absolutePath)
-            .putExtra(ReaderActivity.EXTRA_BOOK_ID, file.name),
+            .putExtra(ReaderActivity.EXTRA_BOOK_ID, file.name)
+            .putExtra(ReaderActivity.EXTRA_DAILY_ARTICLE, articleIndex),
     )
 
     private fun compileFlow() {
