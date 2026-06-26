@@ -88,7 +88,8 @@ fn apply_text(cur: &mut Option<FeedItem>, field: Option<Field>, text: &str) {
     if let (Some(c), Some(f)) = (cur.as_mut(), field) {
         let t = text.trim();
         match f {
-            Field::Title => c.title.push_str(t),
+            // Decode entities so a headline reads "children's", not "children&#x27;s".
+            Field::Title => c.title.push_str(&crate::extract::decode_entities(t)),
             Field::Link => {
                 if c.url.is_empty() {
                     c.url.push_str(t);

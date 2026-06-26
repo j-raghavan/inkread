@@ -175,8 +175,9 @@ class HomeActivity : Activity() {
     // ── Continue where you left off (the most-recent book) ───────────────────────────────────────
 
     private fun heroCard(r: Books.Recent, contentW: Int): View {
-        val coverW = dim(114)
-        val coverH = dim(162)
+        // Covers reduced ~40% from the design's 114×162 — they were reading too large on device.
+        val coverW = dim(68)
+        val coverH = dim(97)
         val pad = dim(20)
         val gap = dim(20)
         return LinearLayout(this).apply {
@@ -270,11 +271,11 @@ class HomeActivity : Activity() {
                 setPadding(dim(16), pad, dim(12), pad)
                 addView(eyebrow("Today's Daily"))
                 addView(TextView(this@HomeActivity).apply {
-                    text = "No issue compiled yet"; setTextColor(ink); textSize = fs(19f); typeface = serif
+                    text = "Your daily reading"; setTextColor(ink); textSize = fs(19f); typeface = serif
                     setPadding(0, dim(4), 0, 0); maxLines = 2; setLineSpacing(0f, 1.1f)
                 })
                 addView(TextView(this@HomeActivity).apply {
-                    text = "Add a few sources to start your daily issue"
+                    text = "Feeds compiled into one calm issue, on device"
                     setTextColor(inkSoft); textSize = fs(13f); typeface = Typeface.create(serif, Typeface.ITALIC)
                     setPadding(0, dim(3), 0, 0)
                 })
@@ -282,7 +283,7 @@ class HomeActivity : Activity() {
 
             // Right action.
             addView(TextView(this@HomeActivity).apply {
-                text = "Set up →"; setTextColor(Color.WHITE); textSize = fs(14f)
+                text = "Open →"; setTextColor(Color.WHITE); textSize = fs(14f)
                 typeface = Typeface.create(serif, Typeface.BOLD); gravity = Gravity.CENTER
                 setPadding(dim(18), dim(12), dim(18), dim(12))
                 background = GradientDrawable().apply { setColor(ink) }
@@ -300,7 +301,9 @@ class HomeActivity : Activity() {
     private fun shelf(recents: List<Books.Recent>, contentW: Int): View {
         val gap = dim(22)
         val cells = recents.size.coerceAtMost(3)
-        val cellW = ((contentW - (cells - 1) * gap) / cells).coerceAtLeast(dp(72))
+        // ~40% smaller than full-width thirds (the shelf covers were reading too large); the row is
+        // centre-gravity so the smaller covers sit centered with margin.
+        val cellW = (((contentW - (cells - 1) * gap) / cells) * 0.6f).toInt().coerceAtLeast(dp(48))
 
         val covers = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL

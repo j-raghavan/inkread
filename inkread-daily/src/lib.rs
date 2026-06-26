@@ -83,7 +83,7 @@ mod json_tests {
             "date": "25 Jun 2026",
             "articles": [
                 {"title":"Hello","source":"Blog","url":"https://x.test/1",
-                 "html":"<html><body><script>x()</script><p>Body &amp; more.</p></body></html>"}
+                 "html":"<html><body><script>evil()</script><article><p>This is a real paragraph of article prose, long enough to survive extraction &amp; reading.</p></article></body></html>"}
             ]
         }"#;
         let bytes = assemble_issue_from_json(json).expect("assembles");
@@ -91,10 +91,10 @@ mod json_tests {
         assert_eq!(pkg.chapter_count(), 2, "title page + one article");
         let html: String = pkg.chapters.iter().map(|c| c.html.clone()).collect();
         assert!(
-            html.contains("Body &amp; more") || html.contains("Body & more"),
+            html.contains("real paragraph of article prose"),
             "extracted body present: {html}"
         );
-        assert!(!html.contains("x()"), "script dropped by extraction");
+        assert!(!html.contains("evil()"), "script dropped by extraction");
     }
 
     #[test]

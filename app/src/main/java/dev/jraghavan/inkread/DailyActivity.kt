@@ -53,6 +53,7 @@ class DailyActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        daily.ensureSeeded() // curated feeds ready on first run — no manual set-up
         setContentView(buildView())
     }
 
@@ -177,30 +178,47 @@ class DailyActivity : Activity() {
 
     // ── Populated front page: lead story + headline columns (headlines = the TOC) ────────────────
 
-    private fun headlinesBlock(headlines: List<DailyController.Headline>, issue: File): View =
+    /** The front page as the design wants it: headlines **grouped by source** into sections, laid
+     *  out in two columns (a newspaper index). Tapping any headline opens the issue. */
+    private fun headlinesBlock(headlines: List<DailyController.Headline>, issue: File): View {
+        // Group preserving first-seen source order.
+        val groups = LinkedHashMap<String, MutableList<DailyController.Headline>>()
+        headlines.forEach { groups.getOrPut(it.source) { mutableListOf() }.add(it) }
+
+        val left = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        val right = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        // Distribute sections across the two columns, roughly balancing by headline count.
+        var leftCount = 0
+        var rightCount = 0
+        groups.forEach { (source, list) ->
+            val target = if (leftCount <= rightCount) left else right
+            target.addView(sourceSection(source, list, issue))
+            if (target === left) leftCount += list.size + 2 else rightCount += list.size + 2
+        }
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            addView(left, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+            addView(View(this@DailyActivity), LinearLayout.LayoutParams(dim(22), 1))
+            addView(right, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        }
+    }
+
+    /** One source's section: a serif section head + rule, then its headlines (each opens the issue). */
+    private fun sourceSection(source: String, list: List<DailyController.Headline>, issue: File): View =
         LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            // Lead story — the first headline, large.
-            val lead = headlines.first()
-            addView(label(lead.source, 10f, 0.18f).apply { setPadding(0, dim(6), 0, dim(6)) })
+            setPadding(0, 0, 0, dim(22))
             addView(TextView(this@DailyActivity).apply {
-                text = lead.title; setTextColor(ink); textSize = fs(30f); typeface = serifBold
-                setLineSpacing(0f, 1.05f); isClickable = true; setOnClickListener { openIssue(issue) }
+                text = source; setTextColor(ink); textSize = fs(19f); typeface = serifBold
+                includeFontPadding = false
             })
-            addView(blackRule(Ink.hair()).apply { (layoutParams as LinearLayout.LayoutParams).topMargin = dim(16) })
-            // The rest, as a single column of source-tagged headlines (each opens the issue).
-            headlines.drop(1).forEach { h ->
-                addView(LinearLayout(this@DailyActivity).apply {
-                    orientation = LinearLayout.VERTICAL
-                    setPadding(0, dim(12), 0, dim(12))
+            addView(blackRule(maxOf(1, dp(1))).apply { (layoutParams as LinearLayout.LayoutParams).topMargin = dim(5) })
+            list.forEach { h ->
+                addView(TextView(this@DailyActivity).apply {
+                    text = h.title; setTextColor(ink); textSize = fs(15f); typeface = serif
+                    setLineSpacing(0f, 1.16f); setPadding(0, dim(10), 0, 0)
                     isClickable = true; setOnClickListener { openIssue(issue) }
-                    addView(label(h.source, 10f, 0.16f))
-                    addView(TextView(this@DailyActivity).apply {
-                        text = h.title; setTextColor(ink); textSize = fs(20f); typeface = serif
-                        setLineSpacing(0f, 1.1f); setPadding(0, dim(4), 0, 0)
-                    })
                 })
-                addView(blackRule(Ink.hair()))
             }
         }
 

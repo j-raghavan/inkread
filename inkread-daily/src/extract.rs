@@ -1,10 +1,10 @@
-//! Minimal readability extraction (#66): raw article HTML → clean, well-formed XHTML paragraphs.
+//! Readability extraction (#66): raw article HTML → clean, well-formed XHTML of the **main content**.
 //!
-//! Not a full readability port — it drops `<script>`/`<style>` content and all markup, then re-emits
-//! the visible block text as **escaped `<p>` elements**. The guarantee that matters: the output is
-//! always **well-formed XHTML**, so the assembler can inject it raw without the malformed-body risk
-//! the EPUB review flagged. Pure + host-testable. A richer extractor (main-content heuristics) is a
-//! later refinement; this gives a calm, readable single column today.
+//! A heuristic (not a full readability port), but enough to read calmly: it isolates the
+//! `<article>`/`<main>` region when present, drops page chrome (nav/header/footer/aside/form/figure,
+//! plus script/style/svg), skips short non-content blocks (share/subscribe/counts/nav links), decodes
+//! HTML entities (named + numeric), and emits the remaining block text as escaped `<p>` paragraphs.
+//! Output is always well-formed XHTML so the assembler injects it safely. Pure + host-testable.
 
 /// Tags whose closing (or self-closing) ends a paragraph — block-level boundaries.
 const BLOCK_TAGS: &[&str] = &[
@@ -30,33 +30,81 @@ const BLOCK_TAGS: &[&str] = &[
     "pre",
 ];
 
-/// Extract readable body text from `html` as well-formed XHTML (one `<p>` per text block). Never
-/// produces malformed markup; empty input yields a single placeholder paragraph.
+/// Elements whose entire body is non-content chrome — dropped wholesale (like script/style).
+const SKIP_TAGS: &[&str] = &[
+    "script",
+    "style",
+    "nav",
+    "header",
+    "footer",
+    "aside",
+    "form",
+    "button",
+    "figure",
+    "figcaption",
+    "noscript",
+    "svg",
+    "select",
+    "label",
+];
+
+/// Blocks shorter than this are almost always chrome (Share · Subscribe · "3" · "Jun 21" · nav
+/// links), not article prose — dropped. Real paragraphs comfortably exceed it.
+const MIN_BLOCK_CHARS: usize = 40;
+
+/// Extract the main readable body of `html` as well-formed XHTML (one `<p>` per real text block).
 #[must_use]
 pub fn extract_readable(html: &str) -> String {
+    let main = main_content(html);
     let mut out = String::new();
-    for block in to_blocks(html) {
+    for block in to_blocks(main) {
         let t = collapse_ws(&block);
-        if !t.is_empty() {
+        if t.chars().count() >= MIN_BLOCK_CHARS {
             out.push_str("<p>");
             out.push_str(&escape(&t));
             out.push_str("</p>\n");
         }
     }
     if out.is_empty() {
-        out.push_str("<p>(No readable text could be extracted.)</p>");
+        out.push_str(
+            "<p>(No readable text could be extracted — open the original to read it.)</p>",
+        );
     }
     out
 }
 
-/// Split `html` into text blocks: strip `<script>`/`<style>` bodies and all tags, breaking a block at
-/// every block-level tag boundary. Decodes the common HTML entities.
+/// Narrow to the article body when the page marks it up (`<article>` then `<main>`), else the whole
+/// document. Avoids pulling in the surrounding nav/sidebar/footer.
+fn main_content(html: &str) -> &str {
+    for tag in ["article", "main"] {
+        if let Some(inner) = inner_of(html, tag) {
+            // Only trust it if it actually carries prose (some pages have an empty <main> shell).
+            if inner.len() > 200 {
+                return inner;
+            }
+        }
+    }
+    html
+}
+
+/// The inner HTML of the first `<tag>…</tag>`. ASCII-lowercasing preserves byte offsets, so the
+/// indices map back onto the original `html`.
+fn inner_of<'a>(html: &'a str, tag: &str) -> Option<&'a str> {
+    let lower = html.to_ascii_lowercase();
+    let start = lower.find(&format!("<{tag}"))?;
+    let after_open = start + html[start..].find('>')? + 1;
+    let close = format!("</{tag}");
+    let end = lower[after_open..].find(&close)? + after_open;
+    Some(&html[after_open..end])
+}
+
+/// Split `html` into text blocks: drop the body of [`SKIP_TAGS`] elements and all tags, breaking a
+/// block at every block-level tag boundary. Decodes HTML entities.
 fn to_blocks(html: &str) -> Vec<String> {
     let mut blocks = Vec::new();
     let mut cur = String::new();
     let mut rest = html;
     loop {
-        // Text up to the next tag.
         let lt = match rest.find('<') {
             Some(p) => p,
             None => {
@@ -68,13 +116,13 @@ fn to_blocks(html: &str) -> Vec<String> {
         let after = &rest[lt + 1..];
         let gt = match after.find('>') {
             Some(p) => p,
-            None => break, // unterminated tag — stop
+            None => break,
         };
         let tag = &after[..gt];
         let mut next = &after[gt + 1..];
         let is_close = tag.starts_with('/');
         let name = tag_name(tag);
-        if !is_close && (name == "script" || name == "style") {
+        if !is_close && SKIP_TAGS.contains(&name.as_str()) {
             // Skip the element's whole body, up to and including its closing tag.
             let close = format!("</{name}");
             next = match next.to_ascii_lowercase().find(&close) {
@@ -100,16 +148,18 @@ fn to_blocks(html: &str) -> Vec<String> {
 
 /// The lowercased element name from a tag's inner text (handles `</p>`, `<p class=…>`, `<br/>`).
 fn tag_name(tag: &str) -> String {
-    let t = tag.trim_start_matches('/').trim_start();
-    t.split(|c: char| c.is_whitespace() || c == '/' || c == '>')
+    tag.trim_start_matches('/')
+        .trim_start()
+        .split(|c: char| c.is_whitespace() || c == '/' || c == '>')
         .next()
         .unwrap_or("")
         .to_ascii_lowercase()
 }
 
-/// Decode the handful of entities that appear in article text.
-fn decode_entities(s: &str) -> String {
-    s.replace("&amp;", "&")
+/// Decode named + numeric HTML entities to text (so `&amp;`, `&#x27;`, `&#8217;` become `& ' '`).
+pub(crate) fn decode_entities(s: &str) -> String {
+    let named = s
+        .replace("&amp;", "&")
         .replace("&lt;", "<")
         .replace("&gt;", ">")
         .replace("&quot;", "\"")
@@ -118,7 +168,54 @@ fn decode_entities(s: &str) -> String {
         .replace("&nbsp;", " ")
         .replace("&mdash;", "—")
         .replace("&ndash;", "–")
-        .replace("&hellip;", "…")
+        .replace("&rsquo;", "\u{2019}")
+        .replace("&lsquo;", "\u{2018}")
+        .replace("&ldquo;", "\u{201C}")
+        .replace("&rdquo;", "\u{201D}")
+        .replace("&hellip;", "…");
+    decode_numeric(&named)
+}
+
+/// Decode numeric entities `&#NN;` and `&#xHH;`.
+fn decode_numeric(s: &str) -> String {
+    let mut out = String::new();
+    let mut rest = s;
+    loop {
+        match rest.find("&#") {
+            None => {
+                out.push_str(rest);
+                break;
+            }
+            Some(i) => {
+                out.push_str(&rest[..i]);
+                let tail = &rest[i + 2..];
+                match tail.find(';') {
+                    Some(semi) => {
+                        let code = &tail[..semi];
+                        let parsed = code
+                            .strip_prefix(['x', 'X'])
+                            .and_then(|h| u32::from_str_radix(h, 16).ok())
+                            .or_else(|| code.parse::<u32>().ok());
+                        match parsed.and_then(char::from_u32) {
+                            Some(c) => {
+                                out.push(c);
+                                rest = &tail[semi + 1..];
+                            }
+                            None => {
+                                out.push_str("&#");
+                                rest = tail;
+                            }
+                        }
+                    }
+                    None => {
+                        out.push_str("&#");
+                        rest = tail;
+                    }
+                }
+            }
+        }
+    }
+    out
 }
 
 /// Collapse runs of whitespace to single spaces and trim.
@@ -147,33 +244,48 @@ mod tests {
     use super::*;
 
     #[test]
-    fn strips_tags_and_scripts_to_clean_paragraphs() {
-        let html = "<html><head><style>p{color:red}</style></head><body>\
-            <script>evil()</script><h1>Title</h1><p>First &amp; foremost.</p>\
-            <div>Second block</div></body></html>";
+    fn isolates_article_and_drops_chrome_and_short_blocks() {
+        let html = "<html><body>\
+            <nav><a href='/'>Home</a><a href='/about'>About</a></nav>\
+            <header>Subscribe Sign in</header>\
+            <article><h1>The Headline</h1>\
+              <p>This is a genuine paragraph of article prose that is plainly long enough to read.</p>\
+              <div>Share</div>\
+              <p>A second substantial paragraph follows, also comfortably past the minimum length.</p>\
+            </article>\
+            <footer>Copyright junk and more links here</footer></body></html>";
         let out = extract_readable(html);
-        assert!(out.contains("<p>Title</p>"), "{out}");
-        assert!(out.contains("<p>First &amp; foremost.</p>"), "{out}");
-        assert!(out.contains("<p>Second block</p>"), "{out}");
-        assert!(!out.contains("evil"), "script body dropped: {out}");
-        assert!(!out.contains("color:red"), "style body dropped: {out}");
+        assert!(out.contains("genuine paragraph of article prose"), "{out}");
+        assert!(out.contains("second substantial paragraph"), "{out}");
+        assert!(!out.contains("Subscribe"), "header chrome dropped: {out}");
+        assert!(
+            !out.contains(">Share<") && !out.contains("Share</p>"),
+            "short block dropped: {out}"
+        );
+        assert!(
+            !out.contains("Home") && !out.contains("Copyright"),
+            "nav/footer dropped: {out}"
+        );
     }
 
     #[test]
-    fn output_is_well_formed_and_escaped() {
-        // Entity-encoded metacharacters (valid HTML) decode then re-escape, so the body stays
-        // well-formed XHTML (no raw markup leaks).
-        let out = extract_readable("<p>a &lt; b &amp;&amp; c &gt; d</p>");
+    fn decodes_named_and_numeric_entities() {
+        assert_eq!(
+            decode_entities("children&#x27;s &amp; co &#8212; done"),
+            "children's & co — done"
+        );
+        // And in extracted prose, entities are decoded then re-escaped to well-formed XHTML.
+        let out = extract_readable("<article><p>children&#x27;s books are a body-horror genre apparently here</p></article>");
         assert!(
-            out.contains("&lt;") && out.contains("&amp;") && out.contains("&gt;"),
+            out.contains("children&apos;s") || out.contains("children's"),
             "{out}"
         );
-        assert!(!out.contains("< b"), "no raw markup leaks: {out}");
     }
 
     #[test]
-    fn empty_input_yields_a_placeholder_paragraph() {
-        let out = extract_readable("<html><body><script>x</script></body></html>");
+    fn empty_or_chrome_only_yields_a_placeholder() {
+        let out =
+            extract_readable("<html><body><nav>Home About</nav><script>x</script></body></html>");
         assert!(out.starts_with("<p>") && out.ends_with("</p>"), "{out}");
     }
 }

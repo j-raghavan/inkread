@@ -68,6 +68,15 @@ class DailyController(private val context: Context) {
      *  hunting for feed URLs. Shown as a default-on checklist. */
     fun suggestedSources(): List<Source> = SUGGESTED
 
+    /** Seed the curated feeds on first run so the Daily is ready to compile out of the box (no
+     *  "set up" step). Runs once; afterwards the user's edits stand even if they remove them all. */
+    fun ensureSeeded() {
+        val p = prefs()
+        if (p.getBoolean("seeded", false)) return
+        if (sources().isEmpty()) save(SUGGESTED)
+        p.edit().putBoolean("seeded", true).apply()
+    }
+
     private fun save(list: List<Source>) {
         val arr = JSONArray()
         list.forEach { arr.put(JSONObject().put("name", it.name).put("url", it.url)) }
@@ -332,9 +341,9 @@ class DailyController(private val context: Context) {
             Source("Daring Fireball", "https://daringfireball.net/feeds/main"),
             Source("Smashing Magazine", "https://www.smashingmagazine.com/feed/"),
         )
-        const val PER_SOURCE = 6 // articles taken per source
-        const val MAX_PARALLEL = 4 // concurrent article fetches
-        const val HEADLINES_SHOWN = 8 // headlines stored for the front page
+        const val PER_SOURCE = 5 // articles taken per source
+        const val MAX_PARALLEL = 6 // concurrent article fetches
+        const val HEADLINES_SHOWN = 60 // headlines stored for the front page (grouped by source)
         const val TIMEOUT_MS = 10_000
         const val MAX_BYTES = 2 * 1024 * 1024 // cap a fetched page at 2 MiB
     }

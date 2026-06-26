@@ -1603,6 +1603,11 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             })
             controls.addView(cell, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         }
+        // Reading a compiled Daily issue → a back-to-the-front-page control (DailyActivity is the
+        // parent in the back stack, so finishing returns to the article list).
+        if (requestedPath?.contains("/daily/") == true) {
+            control(R.drawable.ic_menu_contents, "Daily") { finish() }
+        }
         // "Home" already opens the library home, so a separate Library item here is redundant.
         control(R.drawable.ic_menu_home, "Home") { goHome() }
         // (Bookmark toggle moved to the top-right corner dog-ear; "Marks" lists them.)
