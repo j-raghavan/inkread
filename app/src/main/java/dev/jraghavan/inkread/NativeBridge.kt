@@ -75,6 +75,15 @@ object NativeBridge {
     /** The document's author from its metadata, or "" if none. */
     external fun nativeDocAuthor(handle: Long): String
 
+    /** Parse an RSS/Atom feed into a JSON array of {title,url,published} (#66). Standalone — no
+     *  document handle; the shell fetches the feed, the core parses it. "[]" on junk input. */
+    external fun nativeDailyParseFeed(xml: String): String
+
+    /** Assemble a daily-issue EPUB from the shell's fetched JSON ({title,date,articles:[{title,
+     *  source,url,html}]}); the core extracts readable text per article and composes the EPUB.
+     *  Returns the EPUB bytes; throws on malformed JSON (#66). */
+    external fun nativeDailyAssemble(issueJson: String): ByteArray
+
     /**
      * Render the current page into [directBuffer] — a DIRECT [ByteBuffer] of exactly
      * `width*height*4` bytes (RGBA). The core borrows it for the call only (Amendment 5).

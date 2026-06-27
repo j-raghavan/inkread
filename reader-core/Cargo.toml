@@ -23,6 +23,9 @@ device-eink = { workspace = true }
 # can add their own dictionaries (KOReader-style). Pure-Rust gzip backend; cross-compiles clean.
 inkread-dict = { workspace = true, features = ["import"] }
 inkread-ink = { workspace = true }
+# inkread-daily (#66): RSS/Atom parse + readability extraction + issue→EPUB assembly, reached over
+# the JNI bridge so the shell can compile a daily issue. Pure Rust; cross-compiles clean.
+inkread-daily = { workspace = true }
 # EPUB backend: parsing + reflow layout + glyph rasterization (RR2-FR5). Pure Rust; the EpubBackend
 # adapter (document/reflow) maps it to the Document trait.
 inkread-epub = { workspace = true }

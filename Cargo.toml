@@ -52,6 +52,8 @@ mlua = { version = "0.11", features = ["lua54", "vendored"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }
 jpeg-decoder = { version = "0.3", default-features = false }
 png = "0.17"
+# inkread-daily (#66): RSS/Atom feed parsing. Pure-Rust pull parser, MIT/Apache, cross-compiles clean.
+quick-xml = "0.36"
 
 [profile.release]
 # A reader on a battery e-ink device: optimize for size + speed, strip symbols.

@@ -336,6 +336,41 @@ pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeDocAuthor<'
     .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
 }
 
+// nativeDailyParseFeed(xml) : String — parse an RSS/Atom feed into a JSON array of
+// {title, url, published} (inkread-daily #66). Standalone (no document handle): the shell fetches
+// the feed, the core parses it. Returns "[]" on junk input; never panics.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeDailyParseFeed<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    xml: JString<'local>,
+) -> JString<'local> {
+    env.with_env(|env| -> jni::errors::Result<JString<'local>> {
+        let xml: String = xml.try_to_string(env)?;
+        env.new_string(inkread_daily::parse_feed_json(&xml))
+    })
+    .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
+}
+
+// nativeDailyAssemble(issueJson) : bytes — assemble a daily-issue EPUB from the shell's fetched
+// JSON ({title, date, articles:[{title, source, url, html}]}); the core extracts readable text from
+// each article's html and composes the EPUB (inkread-daily #66). Malformed JSON throws (RR21-FR3).
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeDailyAssemble<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    issue_json: JString<'local>,
+) -> JByteArray<'local> {
+    env.with_env(|env| -> jni::errors::Result<JByteArray<'local>> {
+        let json: String = issue_json.try_to_string(env)?;
+        match inkread_daily::assemble_issue_from_json(&json) {
+            Ok(bytes) => env.byte_array_from_slice(&bytes),
+            Err(msg) => Err(throw(env, &CoreError::InvalidArgument(msg))),
+        }
+    })
+    .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
+}
+
 // =====================================================================================
 // nativeRenderPage(handle, directBuffer) — render the current page into the direct
 // ByteBuffer the shell locked. The PixelBuffer borrow never outlives this call (Amendment 5).

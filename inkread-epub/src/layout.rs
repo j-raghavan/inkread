@@ -26,6 +26,25 @@ pub trait Metrics {
     fn advance(&self, text: &str, size_px: f32, bold: bool, italic: bool) -> f32;
 }
 
+/// Soft-hyphenation opportunities for a word, so justified/narrow lines break long words like a book
+/// rather than leaving loose gaps (KOReader uses Knuth-Liang patterns; Phase 4 supplies them).
+/// Abstracted like [`Metrics`] so layout stays host-testable without a pattern dictionary.
+pub trait Hyphenator {
+    /// Byte offsets within `word` where a hyphen may be inserted (each `0 < i < word.len()`), in
+    /// ascending order. An empty result means "never break this word".
+    fn opportunities(&self, word: &str) -> Vec<usize>;
+}
+
+/// A hyphenator that never breaks a word — the default ([`paginate`]) and what the pure layout tests
+/// use for deterministic wrapping.
+pub struct NoHyphen;
+
+impl Hyphenator for NoHyphen {
+    fn opportunities(&self, _word: &str) -> Vec<usize> {
+        Vec::new()
+    }
+}
+
 /// Viewport + typography for a layout pass (all pixels). Repagination on a font-size or margin
 /// Horizontal text alignment for reflowed lines (RR4 — KOReader's "Alignment").
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -155,31 +174,50 @@ fn heading_scale(level: u8) -> f32 {
     }
 }
 
-/// Paginate a chapter's blocks into pages for the viewport `opts`, measuring text via `m`.
+/// Paginate a chapter's blocks into pages for the viewport `opts`, measuring text via `m`. No
+/// hyphenation (use [`paginate_with`] to soft-hyphenate justified/narrow lines like a book).
 #[must_use]
 pub fn paginate(blocks: &[Block], opts: &LayoutOpts, m: &dyn Metrics) -> Vec<Page> {
-    let mut pager = Pager::new(opts);
+    paginate_with(blocks, opts, m, &NoHyphen)
+}
+
+/// As [`paginate`], but with a [`Hyphenator`] so long words can be soft-hyphenated to tighten
+/// justified/narrow lines (book typography, matching KOReader).
+#[must_use]
+pub fn paginate_with(
+    blocks: &[Block],
+    opts: &LayoutOpts,
+    m: &dyn Metrics,
+    hyph: &dyn Hyphenator,
+) -> Vec<Page> {
+    let mut pager = Pager::new(opts, hyph);
     // Chapter-relative character cursor, advanced as source text is consumed in reading order, so
     // every placed run/glyph carries a font-invariant offset (ADR-INKREAD-0012).
     let mut cursor = 0usize;
+    // Book typography (KOReader/crengine epub.css model): paragraphs are set dense — a first-line
+    // indent of ~1.2em distinguishes them with NO blank line between (avoids the "too many white
+    // lines" web look). Headings are bold + scaled with a margin before (0.7em) and after (0.5em);
+    // the before-margin collapses at the top of a page.
+    let indent = opts.font_px * 1.2;
     for (block_index, block) in blocks.iter().enumerate() {
         match block {
             Block::Heading { level, content } => {
+                pager.gap_before(opts.font_px * 0.7);
                 let size = opts.font_px * heading_scale(*level);
                 pager.add_paragraph(content, size, 0.0, true, block_index, &mut cursor, m);
-                pager.gap(opts.para_gap);
+                pager.gap(opts.font_px * 0.5);
             }
             Block::Paragraph { content } => {
+                // First-line indent, no trailing gap — dense, book-like.
                 pager.add_paragraph(
                     content,
                     opts.font_px,
-                    0.0,
+                    indent,
                     false,
                     block_index,
                     &mut cursor,
                     m,
                 );
-                pager.gap(opts.para_gap);
             }
             Block::ListItem {
                 ordered,
@@ -192,7 +230,7 @@ pub fn paginate(blocks: &[Block], opts: &LayoutOpts, m: &dyn Metrics) -> Vec<Pag
                     "•".to_string()
                 };
                 pager.add_list_item(&marker, content, opts.font_px, block_index, &mut cursor, m);
-                pager.gap(opts.para_gap * 0.4);
+                pager.gap(opts.font_px * 0.15);
             }
             Block::Image { alt, .. } => {
                 // Phase 3 reserves a labelled placeholder; Phase 4 renders the decoded image at its
@@ -208,8 +246,9 @@ pub fn paginate(blocks: &[Block], opts: &LayoutOpts, m: &dyn Metrics) -> Vec<Pag
                     italic: true,
                     href: None,
                 })];
+                pager.gap_before(opts.font_px * 0.4);
                 pager.add_paragraph(&run, opts.font_px, 0.0, false, block_index, &mut cursor, m);
-                pager.gap(opts.para_gap);
+                pager.gap(opts.font_px * 0.4);
             }
             Block::Rule => pager.add_rule(opts.para_gap),
         }
@@ -220,15 +259,17 @@ pub fn paginate(blocks: &[Block], opts: &LayoutOpts, m: &dyn Metrics) -> Vec<Pag
 /// Accumulates lines into pages, breaking when the content box is full.
 struct Pager<'o> {
     opts: &'o LayoutOpts,
+    hyph: &'o dyn Hyphenator,
     pages: Vec<Page>,
     current: Vec<LayoutLine>,
     cursor_y: f32,
 }
 
 impl<'o> Pager<'o> {
-    fn new(opts: &'o LayoutOpts) -> Self {
+    fn new(opts: &'o LayoutOpts, hyph: &'o dyn Hyphenator) -> Self {
         Self {
             opts,
+            hyph,
             pages: Vec::new(),
             current: Vec::new(),
             cursor_y: 0.0,
@@ -254,6 +295,14 @@ impl<'o> Pager<'o> {
     /// Advance the vertical cursor by a block gap (never itself forces a page break).
     fn gap(&mut self, dy: f32) {
         self.cursor_y += dy;
+    }
+
+    /// A gap inserted BEFORE a block (heading/image), collapsed to nothing at the top of a page so
+    /// the page's top margin isn't doubled (margin-collapse, matching browser/crengine behaviour).
+    fn gap_before(&mut self, dy: f32) {
+        if self.cursor_y > 0.0 {
+            self.cursor_y += dy;
+        }
     }
 
     fn break_page(&mut self) {
@@ -294,6 +343,7 @@ impl<'o> Pager<'o> {
             block,
             cursor,
             m,
+            self.hyph,
         );
         let line_h = size * self.opts.line_spacing;
         let n = lines.len();
@@ -336,6 +386,7 @@ impl<'o> Pager<'o> {
             block,
             cursor,
             m,
+            self.hyph,
         );
         // Prepend the marker to the first line at the content origin (hanging indent).
         if let Some(first) = lines.first_mut() {
@@ -488,8 +539,8 @@ fn align_line(
 }
 
 /// Greedy line-break: returns each line as its positioned runs (x relative to content origin; the
-/// body is offset by `indent`). Words wider than the available width are placed on their own line
-/// (not split — hyphenation is a later refinement).
+/// body is offset by `indent`). A word that won't fit is soft-hyphenated via `hyph` when a break
+/// point fits the remaining space; otherwise it wraps whole (a word too wide even alone overflows).
 #[allow(clippy::too_many_arguments)]
 fn break_lines(
     inlines: &[Inline],
@@ -500,6 +551,7 @@ fn break_lines(
     block: usize,
     cursor: &mut usize,
     m: &dyn Metrics,
+    hyph: &dyn Hyphenator,
 ) -> Vec<Vec<PlacedRun>> {
     let avail = (content_w - indent).max(1.0);
     let space_w = m.advance(" ", size, false, false);
@@ -525,31 +577,64 @@ fn break_lines(
                 href,
                 anchor,
             } => {
-                let ww = m.advance(text, size, bold, italic);
-                let place = |x: f32, cur: &mut Vec<PlacedRun>| {
-                    cur.push(PlacedRun {
-                        x: indent + x,
-                        text: text.to_string(),
-                        size_px: size,
-                        bold,
-                        italic,
-                        href: href.map(str::to_string),
-                        anchor,
-                    });
-                };
-                if cur.is_empty() {
-                    place(0.0, &mut cur);
-                    x = ww;
-                } else {
-                    let lead = if need_space { space_w } else { 0.0 };
-                    if x + lead + ww > avail {
-                        lines.push(std::mem::take(&mut cur));
-                        place(0.0, &mut cur);
-                        x = ww;
+                // Place the token, splitting it across lines at hyphenation points as needed. `rest`
+                // is the suffix still to place; `off` is how many of the token's chars precede it (so
+                // the suffix run keeps a font-invariant anchor); only the `first` fragment carries the
+                // inter-word space (ADR-INKREAD-0012).
+                let mut rest = text;
+                let mut off = 0usize;
+                let mut first = true;
+                while !rest.is_empty() {
+                    let lead = if first && need_space && !cur.is_empty() {
+                        space_w
                     } else {
-                        place(x + lead, &mut cur);
-                        x += lead + ww;
+                        0.0
+                    };
+                    let start = if cur.is_empty() { 0.0 } else { x + lead };
+                    let room = avail - start;
+                    let rest_w = m.advance(rest, size, bold, italic);
+                    let anchor = SourceAnchor {
+                        block: anchor.block,
+                        char_offset: anchor.char_offset + off,
+                    };
+                    let push = |cur: &mut Vec<PlacedRun>, txt: String, px: f32| {
+                        cur.push(PlacedRun {
+                            x: indent + px,
+                            text: txt,
+                            size_px: size,
+                            bold,
+                            italic,
+                            href: href.map(str::to_string),
+                            anchor,
+                        });
+                    };
+                    if rest_w <= room {
+                        push(&mut cur, rest.to_string(), start);
+                        x = start + rest_w;
+                        break;
                     }
+                    if let Some((head, head_chars)) =
+                        hyphenate_fit(rest, room, hyph, m, size, bold, italic)
+                    {
+                        push(&mut cur, format!("{head}-"), start);
+                        lines.push(std::mem::take(&mut cur));
+                        rest = &rest[head.len()..];
+                        off += head_chars;
+                        first = false;
+                        x = 0.0;
+                        continue;
+                    }
+                    if !cur.is_empty() {
+                        // Wrap the whole remaining word to a fresh line, then retry it there.
+                        lines.push(std::mem::take(&mut cur));
+                        first = false;
+                        x = 0.0;
+                        continue;
+                    }
+                    // Fresh line, no break point, still too wide → place it overflowing.
+                    push(&mut cur, rest.to_string(), 0.0);
+                    x = rest_w;
+                    break;
                 }
                 need_space = false;
             }
@@ -559,6 +644,37 @@ fn break_lines(
         lines.push(cur);
     }
     lines
+}
+
+/// The longest prefix of `word` ending at a hyphenation opportunity whose text plus a trailing
+/// hyphen fits within `room` px; returns `(head, head_char_count)`, or `None` if none fits.
+fn hyphenate_fit<'w>(
+    word: &'w str,
+    room: f32,
+    hyph: &dyn Hyphenator,
+    m: &dyn Metrics,
+    size: f32,
+    bold: bool,
+    italic: bool,
+) -> Option<(&'w str, usize)> {
+    if room <= 0.0 {
+        return None;
+    }
+    let hyphen_w = m.advance("-", size, bold, italic);
+    let mut best: Option<(&str, usize)> = None;
+    // Opportunities are ascending, so heads grow; keep the largest that fits, stop once one overflows.
+    for b in hyph.opportunities(word) {
+        if b == 0 || b >= word.len() {
+            continue;
+        }
+        let head = &word[..b];
+        if m.advance(head, size, bold, italic) + hyphen_w <= room {
+            best = Some((head, head.chars().count()));
+        } else {
+            break;
+        }
+    }
+    best
 }
 
 #[cfg(test)]
@@ -786,6 +902,56 @@ mod tests {
             (1, 5, "after".into()),
             "marker consumed no offset"
         );
+    }
+
+    /// A test hyphenator allowing breaks at fixed byte offsets (regardless of the word).
+    struct HyphenAt(Vec<usize>);
+    impl Hyphenator for HyphenAt {
+        fn opportunities(&self, _word: &str) -> Vec<usize> {
+            self.0.clone()
+        }
+    }
+
+    fn narrow_para() -> LayoutOpts {
+        // Mono 10px → 5px/char; content 60 wide, paragraph indent 12 → 48px usable.
+        LayoutOpts {
+            page_w: 60.0,
+            page_h: 10_000.0,
+            margin: 0.0,
+            font_px: 10.0,
+            line_spacing: 1.0,
+            para_gap: 0.0,
+            align: Align::Left,
+        }
+    }
+
+    #[test]
+    fn long_word_hyphenates_and_suffix_keeps_its_anchor() {
+        // "hyphenation" (11 chars = 55px) overflows the 48px column; a break after 5 bytes fits
+        // ("hyphe" 25px + hyphen 5px = 30 ≤ 48), so it splits and the suffix anchors after the prefix.
+        let pages = paginate_with(
+            &[para("hyphenation")],
+            &narrow_para(),
+            &Mono,
+            &HyphenAt(vec![5]),
+        );
+        let runs: Vec<_> = pages[0].lines.iter().flat_map(|l| l.runs.iter()).collect();
+        assert_eq!(runs[0].text, "hyphe-", "prefix carries a trailing hyphen");
+        assert_eq!(runs[1].text, "nation", "suffix continues on the next line");
+        assert_eq!(runs[0].anchor.char_offset, 0);
+        assert_eq!(
+            runs[1].anchor.char_offset, 5,
+            "suffix anchored at prefix length (reflow-stable)"
+        );
+    }
+
+    #[test]
+    fn default_paginate_never_hyphenates() {
+        // The default ([`NoHyphen`]) places an overflowing word whole, on its own line.
+        let pages = paginate(&[para("hyphenation")], &narrow_para(), &Mono);
+        let runs: Vec<_> = pages[0].lines.iter().flat_map(|l| l.runs.iter()).collect();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].text, "hyphenation");
     }
 
     #[test]

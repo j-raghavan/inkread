@@ -175,8 +175,9 @@ class HomeActivity : Activity() {
     // ── Continue where you left off (the most-recent book) ───────────────────────────────────────
 
     private fun heroCard(r: Books.Recent, contentW: Int): View {
-        val coverW = dim(114)
-        val coverH = dim(162)
+        // Covers reduced ~40% from the design's 114×162 — they were reading too large on device.
+        val coverW = dim(68)
+        val coverH = dim(97)
         val pad = dim(20)
         val gap = dim(20)
         return LinearLayout(this).apply {
@@ -236,58 +237,58 @@ class HomeActivity : Activity() {
         val pad = dim(15)
         return LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL // the masthead cell drives the height; others centre
             background = outlined(dim(12))
             isClickable = true
             setOnClickListener { startActivity(Intent(this@HomeActivity, DailyActivity::class.java)) }
             layoutParams = LinearLayout.LayoutParams(contentW, ViewGroup.LayoutParams.WRAP_CONTENT)
 
-            // Left masthead cell: THE / InkRead (script) / DAILY.
+            // Left masthead cell: THE / InkRead (script) / DAILY. WRAP height — it sizes the row.
             addView(LinearLayout(this@HomeActivity).apply {
                 orientation = LinearLayout.VERTICAL
-                gravity = Gravity.CENTER
+                gravity = Gravity.CENTER_HORIZONTAL
                 setPadding(dim(14), pad, dim(12), pad)
                 addView(TextView(this@HomeActivity).apply {
                     text = "THE"; setTextColor(ink); textSize = fs(8f); typeface = mono; letterSpacing = 0.28f
+                    gravity = Gravity.CENTER
                 })
                 addView(TextView(this@HomeActivity).apply {
-                    text = "InkRead"; setTextColor(ink); textSize = fs(30f); typeface = script
-                    includeFontPadding = false
+                    text = "InkRead"; setTextColor(ink); textSize = fs(26f); typeface = script
+                    includeFontPadding = false; gravity = Gravity.CENTER
                 })
                 addView(TextView(this@HomeActivity).apply {
-                    text = "DAILY"; setTextColor(ink); textSize = fs(11f)
+                    text = "DAILY"; setTextColor(ink); textSize = fs(11f); gravity = Gravity.CENTER
                     typeface = Typeface.create(serif, Typeface.BOLD); letterSpacing = 0.4f
                 })
-            }, LinearLayout.LayoutParams(dim(132), ViewGroup.LayoutParams.MATCH_PARENT))
+            }, LinearLayout.LayoutParams(dim(120), ViewGroup.LayoutParams.WRAP_CONTENT))
 
             addView(View(this@HomeActivity).apply { setBackgroundColor(ink) },
-                LinearLayout.LayoutParams(maxOf(1, dp(1)), ViewGroup.LayoutParams.MATCH_PARENT))
+                LinearLayout.LayoutParams(maxOf(1, dp(1)), dim(64)))
 
-            // Middle: today's status. Honest first-run copy — no issue is compiled until the daily
-            // backend (fetch/assemble) lands; nothing decorative is faked.
+            // Middle: today's status (centred vertically within the row).
             addView(LinearLayout(this@HomeActivity).apply {
                 orientation = LinearLayout.VERTICAL
-                gravity = Gravity.CENTER_VERTICAL
                 setPadding(dim(16), pad, dim(12), pad)
                 addView(eyebrow("Today's Daily"))
                 addView(TextView(this@HomeActivity).apply {
-                    text = "No issue compiled yet"; setTextColor(ink); textSize = fs(19f); typeface = serif
+                    text = "Your daily reading"; setTextColor(ink); textSize = fs(19f); typeface = serif
                     setPadding(0, dim(4), 0, 0); maxLines = 2; setLineSpacing(0f, 1.1f)
                 })
                 addView(TextView(this@HomeActivity).apply {
-                    text = "Add a few sources to start your daily issue"
+                    text = "Feeds compiled into one calm issue, on device"
                     setTextColor(inkSoft); textSize = fs(13f); typeface = Typeface.create(serif, Typeface.ITALIC)
                     setPadding(0, dim(3), 0, 0)
                 })
-            }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f))
+            }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
 
-            // Right action.
+            // Right action (WRAP height, centred — not full-height, which made it a black bar).
             addView(TextView(this@HomeActivity).apply {
-                text = "Set up →"; setTextColor(Color.WHITE); textSize = fs(14f)
+                text = "Open →"; setTextColor(Color.WHITE); textSize = fs(14f)
                 typeface = Typeface.create(serif, Typeface.BOLD); gravity = Gravity.CENTER
-                setPadding(dim(18), dim(12), dim(18), dim(12))
-                background = GradientDrawable().apply { setColor(ink) }
-            }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.MATCH_PARENT).apply {
-                gravity = Gravity.CENTER_VERTICAL; marginEnd = dim(12)
+                setPadding(dim(18), dim(10), dim(18), dim(10))
+                background = GradientDrawable().apply { setColor(ink); cornerRadius = dim(6).toFloat() }
+            }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                marginEnd = dim(12)
             })
         }
     }
@@ -300,7 +301,9 @@ class HomeActivity : Activity() {
     private fun shelf(recents: List<Books.Recent>, contentW: Int): View {
         val gap = dim(22)
         val cells = recents.size.coerceAtMost(3)
-        val cellW = ((contentW - (cells - 1) * gap) / cells).coerceAtLeast(dp(72))
+        // ~40% smaller than full-width thirds (the shelf covers were reading too large); the row is
+        // centre-gravity so the smaller covers sit centered with margin.
+        val cellW = (((contentW - (cells - 1) * gap) / cells) * 0.6f).toInt().coerceAtLeast(dp(48))
 
         val covers = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
