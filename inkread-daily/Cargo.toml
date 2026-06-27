@@ -14,6 +14,10 @@ description = "inkread-daily (#66): turn feed/article sources into a self-contai
 zip = { workspace = true }
 # RSS/Atom feed parsing (#66 fetch slice) — pure-Rust pull parser.
 quick-xml = { workspace = true }
+# Readability extraction parses article HTML with a real parser (html5ever) rather than a hand-rolled
+# tag scanner — comments/CDATA/malformed nesting are handled correctly. Same crates inkread-epub uses.
+scraper = { version = "0.27", default-features = false }
+ego-tree = "0.11"
 # JSON at the JNI boundary: the shell hands the core a fetched issue (sources + article HTML) as JSON.
 serde = { workspace = true }
 serde_json = { workspace = true }
