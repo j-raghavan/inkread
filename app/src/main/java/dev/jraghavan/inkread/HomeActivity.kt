@@ -75,6 +75,7 @@ class HomeActivity : Activity() {
         super.onCreate(savedInstanceState)
         setContentView(buildView())
         shelfSig = shelfSignature()
+        DailyAutoCompileWorker.schedule(this) // a fresh Daily issue compiles each morning (#66)
     }
 
     override fun onResume() {

@@ -288,6 +288,13 @@ class DailyActivity : Activity() {
 
     // ── Today's Desk ──────────────────────────────────────────────────────────────────────────────
 
+    /** "Compiled 5:02 AM" from the last compile time, or just "Compiled" if the time is unknown. */
+    private fun compiledStamp(): String {
+        val at = daily.lastCompiledAt()
+        if (at <= 0L) return "Compiled"
+        return "Compiled ${SimpleDateFormat("h:mm a", Locale.getDefault()).format(Date(at))}"
+    }
+
     private fun todaysDesk(hasIssue: Boolean, sources: Int, issue: File?): View {
         val header = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -295,7 +302,7 @@ class DailyActivity : Activity() {
             setPadding(dim(16), dim(8), dim(16), dim(8))
             addView(label("Today's Desk", 11f, 0.2f).apply { setTextColor(paper) })
             addView(weighted())
-            addView(label(if (hasIssue) "Compiled" else "Awaiting sources", 11f, 0.1f).apply { setTextColor(paper) })
+            addView(label(if (hasIssue) compiledStamp() else "Awaiting sources", 11f, 0.1f).apply { setTextColor(paper) })
         }
         val controls = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL

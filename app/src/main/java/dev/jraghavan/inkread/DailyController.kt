@@ -115,6 +115,13 @@ class DailyController(private val context: Context) {
         }
     }
 
+    /** Blocking compile for the background scheduler ([DailyAutoCompileWorker]); call off the UI
+     *  thread. Returns whether an issue was produced. */
+    fun compileSync(): Boolean = compileBlocking()
+
+    /** Epoch millis of the last successful compile (0 if never). Drives the "Compiled HH:MM" stamp. */
+    fun lastCompiledAt(): Long = prefs().getLong("compiledAtMillis", 0L)
+
     private var lastStatus = ""
 
     private fun compileBlocking(): Boolean {
@@ -186,6 +193,7 @@ class DailyController(private val context: Context) {
         val file = File(dailyDir(), "inkread-daily-${todayKey()}.epub")
         file.writeBytes(bytes)
         storeIssueMeta(articles, file)
+        prefs().edit().putLong("compiledAtMillis", System.currentTimeMillis()).apply()
         Log.i(TAG, "compile OK: ${articles.length()} articles → ${file.name} (${bytes.size} bytes)")
         lastStatus = "Compiled ${articles.length()} articles"
         return true
