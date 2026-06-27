@@ -125,6 +125,16 @@ fn to_blocks(html: &str) -> Vec<String> {
         };
         cur.push_str(&rest[..lt]);
         let after = &rest[lt + 1..];
+        // HTML comment: skip to the matching `-->`. Its body can contain `>` (e.g. `->` arrows,
+        // `=>`, `<!--[if gt IE]>`), which a naive next-`>` scan would mistake for the tag end and
+        // leak the comment text (the "->->-> Top Sources: None -->" artifact).
+        if let Some(body) = after.strip_prefix("!--") {
+            rest = match body.find("-->") {
+                Some(end) => &body[end + 3..],
+                None => break, // unterminated comment → drop the remainder
+            };
+            continue;
+        }
         let gt = match after.find('>') {
             Some(p) => p,
             None => break,
@@ -359,6 +369,30 @@ mod tests {
         assert!(
             !out.contains("Home") && !out.contains("Copyright"),
             "nav/footer dropped: {out}"
+        );
+    }
+
+    #[test]
+    fn html_comments_with_inner_gt_are_stripped_not_leaked() {
+        // An HTML comment whose body contains `>` (arrows / conditional comments) must not leak —
+        // the regression behind the "->->-> Top Sources: None -->" artifact in the reader.
+        let html = "<article>\
+            <!-- ->->->->->->-> Top Sources: None -->\
+            <p>Zuckerberg's increasingly bizarre war on whistleblowers begins here, plainly.</p>\
+            <!--[if gt IE 8]><p>conditional-comment junk</p><![endif]-->\
+            <p>And a second real paragraph of prose, comfortably past the minimum length.</p>\
+            </article>";
+        let out = extract_readable(html);
+        assert!(out.contains("bizarre war on whistleblowers"), "{out}");
+        assert!(out.contains("second real paragraph"), "{out}");
+        assert!(!out.contains("Top Sources"), "comment text leaked: {out}");
+        assert!(
+            !out.contains("-->") && !out.contains("->->"),
+            "arrows leaked: {out}"
+        );
+        assert!(
+            !out.contains("conditional-comment"),
+            "conditional comment leaked: {out}"
         );
     }
 
