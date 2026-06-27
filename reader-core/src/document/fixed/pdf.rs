@@ -172,6 +172,10 @@ pub struct PdfBackend {
     /// The last viewport (panel) size rendered at — the initial pagination guess when reflow is
     /// enabled, so the position-preserving jump lands correctly (the first render then confirms it).
     last_viewport: Cell<(u32, u32)>,
+    /// Reused temp buffer for the aspect-fit / crop composite (a per-page render previously allocated
+    /// a fresh ~viewport-sized buffer each time). Interior mutability so the `&self` render paths can
+    /// grow + reuse it; render is serialized on the engine thread, so a single borrow is never aliased.
+    fit_scratch: RefCell<Vec<u8>>,
 }
 
 impl PdfBackend {
@@ -186,7 +190,34 @@ impl PdfBackend {
             document,
             reflow: RefCell::new(None),
             last_viewport: Cell::new((0, 0)),
+            fit_scratch: RefCell::new(Vec::new()),
         })
+    }
+
+    /// Render a `tw×th` page image via `render` into the reused [`Self::fit_scratch`] buffer, then
+    /// composite it centered into `buf`. Reuses the scratch across page renders so the common fit/crop
+    /// path doesn't allocate (and free) a fresh ~viewport-sized buffer every turn. `render` fully
+    /// overwrites the `tw×th` window, so no clear is needed.
+    fn composite_via_scratch(
+        &self,
+        buf: &mut PixelBuffer<'_>,
+        tw: i32,
+        th: i32,
+        pan_x: f32,
+        pan_y: f32,
+        render: impl FnOnce(&mut PixelBuffer<'_>) -> CoreResult<()>,
+    ) -> CoreResult<()> {
+        let need = (tw as usize) * (th as usize) * 4;
+        let mut scratch = self.fit_scratch.borrow_mut();
+        if scratch.len() < need {
+            scratch.resize(need, 0);
+        }
+        {
+            let mut tbuf = PixelBuffer::from_rgba(&mut scratch[..need], tw as u32, th as u32)?;
+            render(&mut tbuf)?;
+        }
+        composite_centered(buf, &scratch[..need], tw, th, pan_x, pan_y);
+        Ok(())
     }
 
     /// The number of source (fixed-layout) pages in the document.
@@ -519,20 +550,16 @@ impl Document for PdfBackend {
             return self.render_page(index, buf);
         }
 
-        // Render the page aspect-correct into a temp buffer, then composite it into the white page.
+        // Render the page aspect-correct into the reused scratch, then composite into the white page.
         let (tw, th) = fit_dims(aspect, bw, bh, mode);
-        let mut tmp = vec![0u8; (tw as usize) * (th as usize) * 4];
-        {
-            let mut tbuf = PixelBuffer::from_rgba(&mut tmp, tw as u32, th as u32)?;
-            self.render_with_config(index, &mut tbuf, |w, h| {
+        self.composite_via_scratch(buf, tw, th, pan_x, pan_y, |tbuf| {
+            self.render_with_config(index, tbuf, |w, h| {
                 PdfRenderConfig::new()
                     .set_target_size(w, h)
                     .set_format(PdfBitmapFormat::BGRA)
                     .set_reverse_byte_order(true)
-            })?;
-        }
-        composite_centered(buf, &tmp, tw, th, pan_x, pan_y);
-        Ok(())
+            })
+        })
     }
 
     #[allow(clippy::too_many_arguments)] // mirrors the render params + the crop window
@@ -677,13 +704,9 @@ impl Document for PdfBackend {
         let s = tw as f32 / crop_w_pt;
         let off_x = (x0 * pw * s).round() as i32;
         let off_y = (y0 * ph * s).round() as i32;
-        let mut tmp = vec![0u8; (tw as usize) * (th as usize) * 4];
-        {
-            let mut tbuf = PixelBuffer::from_rgba(&mut tmp, tw as u32, th as u32)?;
-            self.render_region(index, &mut tbuf, s, off_x, off_y)?;
-        }
-        composite_centered(buf, &tmp, tw, th, pan_x, pan_y);
-        Ok(())
+        self.composite_via_scratch(buf, tw, th, pan_x, pan_y, |tbuf| {
+            self.render_region(index, tbuf, s, off_x, off_y)
+        })
     }
 
     fn render_zoom(
