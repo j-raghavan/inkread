@@ -1,10 +1,15 @@
-<!-- inkwell brand mark — a simple ink bottle silhouette (tinted to ink at runtime). -->
+<!-- inkwell brand mark — an outlined ink bottle (light stroke, not a solid silhouette). Tinted at
+     runtime; the thin outline reads lighter than a filled glyph on the e-ink panel. -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="24dp"
     android:height="24dp"
     android:viewportWidth="24"
     android:viewportHeight="24">
     <path
-        android:fillColor="#000000"
-        android:pathData="M9,4h6v2h-6z M8,6h8l2,4H6z M6,10h12v7a2,2 0 0 1 -2,2H8a2,2 0 0 1 -2,-2z" />
+        android:fillColor="#00000000"
+        android:strokeColor="#000000"
+        android:strokeWidth="1.5"
+        android:strokeLineJoin="round"
+        android:strokeLineCap="round"
+        android:pathData="M5,11h14v5a3,3 0 0 1 -3,3H8a3,3 0 0 1 -3,-3z M9,8h6v3h-6z" />
 </vector>
