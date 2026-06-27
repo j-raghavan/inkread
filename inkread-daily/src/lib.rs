@@ -196,7 +196,7 @@ mod json_tests {
     #[test]
     fn parse_feed_json_round_trips() {
         let json = parse_feed_json(
-            r#"<rss><channel><item><title>T</title><link>https://x.test/1</link></item></channel></rss>"#,
+            r#"<rss version="2.0"><channel><item><title>T</title><link>https://x.test/1</link></item></channel></rss>"#,
         );
         assert!(
             json.contains("\"title\":\"T\"") && json.contains("https://x.test/1"),
