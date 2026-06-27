@@ -1377,8 +1377,10 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             val dx = e.x - fingerDownX
             val dy = e.y - fingerDownY
             val w = surfaceView.width.toFloat()
-            val minDist = if (w > 0f) w * 0.12f else 120f
-            if (kotlin.math.abs(dx) > minDist && kotlin.math.abs(dx) > kotlin.math.abs(dy) * 1.4f) {
+            val minDist = (w * 0.06f).coerceAtLeast(90f) // a comfortable flick, not a screen-width drag
+            val horizontal = kotlin.math.abs(dx) > minDist && kotlin.math.abs(dx) > kotlin.math.abs(dy) * 1.2f
+            diag { "DIAG finger swipe dx=$dx dy=$dy min=$minDist horizontal=$horizontal" }
+            if (horizontal) {
                 fitThumb = null
                 queuePageTurn(if (dx < 0f) +1 else -1)
             }
