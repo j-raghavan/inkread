@@ -28,7 +28,7 @@ const BASE_FONT_PX: f32 = 56.0;
 
 /// Clamp for the user text scale (font size). `1.0` = [`BASE_FONT_PX`].
 const MIN_SCALE: f32 = 0.6;
-const MAX_SCALE: f32 = 2.5;
+const MAX_SCALE: f32 = 3.0;
 
 /// A pagination of the whole book for one (viewport, font-size) — recomputed on a metrics change.
 struct Laid {

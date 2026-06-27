@@ -797,8 +797,8 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             // Re-apply the saved render quality (RR4); default 1.
             try { NativeBridge.nativeSetRenderQuality(docHandle, renderQualityPref()) } catch (e: RuntimeException) {}
             // Re-apply saved reflow line-spacing + alignment (RR4; EPUB only — PDF returns -1).
-            if (lineSpacingPref() != 1) {
-                try { NativeBridge.nativeSetLineSpacing(docHandle, LINE_SPACINGS[lineSpacingPref()]) } catch (e: RuntimeException) {}
+            if (kotlin.math.abs(lineSpacingMult() - DEFAULT_LINE_SPACING) > 0.001f) {
+                try { NativeBridge.nativeSetLineSpacing(docHandle, lineSpacingMult()) } catch (e: RuntimeException) {}
             }
             if (alignmentPref() != 0) {
                 try { NativeBridge.nativeSetAlignment(docHandle, alignmentPref()) } catch (e: RuntimeException) {}
@@ -3050,9 +3050,9 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
                 setReflowMode(which == 1)
             }))
         }
-        container.addView(settingRow("Line Spacing", segmented(listOf("Small", "Medium", "Large"), lineSpacingPref()) { which ->
-            setLineSpacingPref(which)
-            diag { "DIAG line spacing=$which" }
+        container.addView(settingRow("Line Spacing", segmented(LINE_SPACING_LABELS, lineSpacingIndex()) { which ->
+            setLineSpacingMult(LINE_SPACINGS[which])
+            diag { "DIAG line spacing=${LINE_SPACINGS[which]}" }
             applyReflow { NativeBridge.nativeSetLineSpacing(docHandle, LINE_SPACINGS[which]) }
         }))
         container.addView(settingRow("Alignment", segmented(listOf("Left", "Justify", "Center", "Right"), alignmentPref()) { which ->
@@ -3086,8 +3086,8 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
                     if (textScalePref() != 1.0f) {
                         try { NativeBridge.nativeSetTextScale(docHandle, textScalePref()) } catch (e: RuntimeException) {}
                     }
-                    if (lineSpacingPref() != 1) {
-                        try { NativeBridge.nativeSetLineSpacing(docHandle, LINE_SPACINGS[lineSpacingPref()]) } catch (e: RuntimeException) {}
+                    if (kotlin.math.abs(lineSpacingMult() - DEFAULT_LINE_SPACING) > 0.001f) {
+                        try { NativeBridge.nativeSetLineSpacing(docHandle, lineSpacingMult()) } catch (e: RuntimeException) {}
                     }
                     if (alignmentPref() != 0) {
                         try { NativeBridge.nativeSetAlignment(docHandle, alignmentPref()) } catch (e: RuntimeException) {}
@@ -3110,11 +3110,24 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         reflowInProgress = false
     }
 
-    private fun lineSpacingPref(): Int =
-        getSharedPreferences("typography", MODE_PRIVATE).getInt("line_spacing", 1).coerceIn(0, 2)
+    /** The saved line-spacing multiplier (value-based; new key, so a changed option set never
+     *  mis-maps an old index). Defaults to the core default 1.4. */
+    private fun lineSpacingMult(): Float =
+        getSharedPreferences("typography", MODE_PRIVATE)
+            .getInt("line_spacing_x100", (DEFAULT_LINE_SPACING * 100).toInt()) / 100f
 
-    private fun setLineSpacingPref(i: Int) =
-        getSharedPreferences("typography", MODE_PRIVATE).edit().putInt("line_spacing", i).apply()
+    private fun setLineSpacingMult(m: Float) =
+        getSharedPreferences("typography", MODE_PRIVATE)
+            .edit().putInt("line_spacing_x100", Math.round(m * 100)).apply()
+
+    /** The segmented index for the saved multiplier (nearest [LINE_SPACINGS] entry; default Medium). */
+    private fun lineSpacingIndex(): Int {
+        val m = lineSpacingMult()
+        val i = LINE_SPACINGS.indexOfFirst { kotlin.math.abs(it - m) < 0.001f }
+        return if (i >= 0) i else {
+            LINE_SPACINGS.indexOfFirst { kotlin.math.abs(it - DEFAULT_LINE_SPACING) < 0.001f }.coerceAtLeast(0)
+        }
+    }
 
     private fun alignmentPref(): Int =
         getSharedPreferences("typography", MODE_PRIVATE).getInt("alignment", 0).coerceIn(0, 3)
@@ -3177,14 +3190,14 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
 
     /** A reading style preset (1.10): a bundle of (text scale, line-spacing index, contrast step,
      *  night). Font/spacing are no-ops on fixed-layout PDFs; contrast/night apply to both. */
-    private data class StyleSpec(val scale: Float, val spacing: Int, val contrast: Int, val night: Boolean)
+    private data class StyleSpec(val scale: Float, val spacing: Float, val contrast: Int, val night: Boolean)
 
     private fun styleSpec(name: String): StyleSpec = when (name) {
-        "Bold" -> StyleSpec(1.0f, 1, 4, false) // darker text (heavier ink)
-        "Night" -> StyleSpec(1.0f, 1, 0, true) // inverted (light on dark)
-        "Outdoor" -> StyleSpec(1.0f, 1, CONTRAST_MAX, false) // maximum contrast
-        "Relaxed" -> StyleSpec(1.15f, 2, 0, false) // larger + airier
-        else -> StyleSpec(1.0f, 1, 0, false) // Original — defaults
+        "Bold" -> StyleSpec(1.0f, DEFAULT_LINE_SPACING, 4, false) // darker text (heavier ink)
+        "Night" -> StyleSpec(1.0f, DEFAULT_LINE_SPACING, 0, true) // inverted (light on dark)
+        "Outdoor" -> StyleSpec(1.0f, DEFAULT_LINE_SPACING, CONTRAST_MAX, false) // maximum contrast
+        "Relaxed" -> StyleSpec(1.15f, 1.7f, 0, false) // larger + airier
+        else -> StyleSpec(1.0f, DEFAULT_LINE_SPACING, 0, false) // Original — defaults
     }
 
     /** The "Style" tab: one-tap presets that bundle font size, spacing, contrast, and night. */
@@ -3206,13 +3219,13 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         val s = styleSpec(name)
         setStylePresetPref(name)
         setTextScalePref(s.scale)
-        setLineSpacingPref(s.spacing)
+        setLineSpacingMult(s.spacing)
         setContrastPref(s.contrast)
         setNightPref(s.night)
         engine.execute {
             try {
                 NativeBridge.nativeSetTextScale(docHandle, s.scale)
-                NativeBridge.nativeSetLineSpacing(docHandle, LINE_SPACINGS[s.spacing])
+                NativeBridge.nativeSetLineSpacing(docHandle, s.spacing)
                 NativeBridge.nativeSetContrast(docHandle, s.contrast)
                 NativeBridge.nativeSetNight(docHandle, s.night)
                 pageCount = NativeBridge.nativePageCount(docHandle)
@@ -3389,7 +3402,11 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         const val MULTILINE_DRAG_FRAC = 0.045f // drag vertical span (frac of height) above which it's a multi-line → line-span select.
         const val OPEN_DRAG_FRAC = 0.08f // lasso: start-to-lift distance (normalized) above which the gesture is an open drag (vs a closed loop).
         const val CONTRAST_MAX = 8 // mirrors reader-core render::contrast::MAX_CONTRAST_STEP (RR4).
-        val LINE_SPACINGS = floatArrayOf(1.2f, 1.4f, 1.7f) // Small / Medium / Large (RR4).
+        // Line-spacing multipliers (RR4), tight → loose. Stored as the value (not the index) so this
+        // set can grow without corrupting saved prefs. 1.4 = the core default.
+        val LINE_SPACINGS = floatArrayOf(1.0f, 1.1f, 1.2f, 1.4f, 1.7f)
+        val LINE_SPACING_LABELS = listOf("Tightest", "Tighter", "Small", "Medium", "Large")
+        const val DEFAULT_LINE_SPACING = 1.4f
         val STYLE_PRESETS = listOf("Original", "Bold", "Night", "Outdoor", "Relaxed") // 1.10
         const val HIGHLIGHT_WIDTH_PX = 30f // wide marker band (vs INK_STROKE_WIDTH for the pen).
         const val STROKE_PAUSE_MS = 600L // commit a stroke after this pen-pause (swallowed-UP net).
@@ -3401,7 +3418,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
 
         // Core ink seam constants (ADR-INKREAD-0010). Tool codes mirror `inkread_ink::Tool::code`.
         /** Reflow font-size steps (multiples of the core's base body size); 1.0 = default. */
-        val TEXT_SCALES = floatArrayOf(0.6f, 0.7f, 0.8f, 0.9f, 1.0f, 1.15f, 1.3f, 1.5f, 1.75f, 2.0f, 2.5f)
+        val TEXT_SCALES = floatArrayOf(0.6f, 0.7f, 0.8f, 0.9f, 1.0f, 1.15f, 1.3f, 1.5f, 1.75f, 2.0f, 2.5f, 3.0f)
         const val CORE_TOOL_PEN = 0
         const val CORE_TOOL_HIGHLIGHTER = 1
         const val CORE_TOOL_ERASER = 2
