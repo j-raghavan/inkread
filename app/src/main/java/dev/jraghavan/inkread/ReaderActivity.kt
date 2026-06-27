@@ -1371,7 +1371,19 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             return
         }
         if (fingerLookupFired) { fingerLookupFired = false; return } // the hold already looked up
-        if (fingerMoved) return // a swipe or rejected palm — not a tap
+        if (fingerMoved) {
+            // Not zoomed: a horizontal swipe turns the page (swipe left → next, right → previous),
+            // a more-vertical or short drag does nothing. Tap zones still work for precise turns.
+            val dx = e.x - fingerDownX
+            val dy = e.y - fingerDownY
+            val w = surfaceView.width.toFloat()
+            val minDist = if (w > 0f) w * 0.12f else 120f
+            if (kotlin.math.abs(dx) > minDist && kotlin.math.abs(dx) > kotlin.math.abs(dy) * 1.4f) {
+                fitThumb = null
+                queuePageTurn(if (dx < 0f) +1 else -1)
+            }
+            return // a swipe (handled above) or rejected palm — not a tap
+        }
         if (SystemClock.uptimeMillis() - lastStylusMs > PALM_REJECT_MS && strokeBuf.isEmpty()) {
             handleTap(fingerDownX, fingerDownY)
         } else {

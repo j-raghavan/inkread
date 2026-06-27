@@ -1,0 +1,7 @@
+Copyright 2022 The Noto Project Authors (https://github.com/notofonts/music)
+
+NotoMusic-Regular.ttf is bundled as a fallback face for glyphs the primary reading
+face (Spectral) does not cover — e.g. the Musical Symbols Unicode block.
+
+This Font Software is licensed under the SIL Open Font License, Version 1.1 — the
+same license as Spectral. The full license text is in OFL.txt in this directory.

@@ -66,6 +66,7 @@ class ToolPalette(
                 marginEnd = dp(6)
             },
         )
+        container.alpha = IDLE_ALPHA // see-through while reading so it doesn't cover the text
         render()
     }
 
@@ -125,7 +126,9 @@ class ToolPalette(
                 MotionEvent.ACTION_DOWN -> {
                     downX = e.rawX; downY = e.rawY
                     startTx = container.translationX; startTy = container.translationY
-                    moved = false; true
+                    moved = false
+                    container.alpha = 1f // opaque while in use, so it's crisp to grab/drag
+                    true
                 }
                 MotionEvent.ACTION_MOVE -> {
                     val dx = e.rawX - downX; val dy = e.rawY - downY
@@ -140,6 +143,7 @@ class ToolPalette(
                     true
                 }
                 MotionEvent.ACTION_UP -> {
+                    container.alpha = IDLE_ALPHA // fade back so it doesn't sit over the text
                     if (moved) { reattach(); onChrome() } // re-add forces an EPD refresh at the new spot
                     else { expanded = !expanded; render(); reattach(); onChrome() }
                     true
@@ -193,5 +197,10 @@ class ToolPalette(
     /** Collapse the pill (call from the host's onPause) — it stays docked, never removed. */
     fun dismiss() {
         if (expanded) { expanded = false; render() }
+    }
+
+    private companion object {
+        /** Resting opacity of the docked puck — translucent so the text behind it stays readable. */
+        const val IDLE_ALPHA = 0.55f
     }
 }

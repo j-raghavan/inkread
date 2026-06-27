@@ -14,7 +14,7 @@
 //! faces and full shaping (ligatures, complex scripts) are later refinements — see the module's
 //! divergence note in [`layout`](crate::layout).
 
-use ab_glyph::{point, Font, FontVec, PxScale, ScaleFont};
+use ab_glyph::{point, Font, FontVec, GlyphId, PxScale, ScaleFont};
 use hyphenation::{Hyphenator as _, Language, Load, Standard};
 
 use crate::layout::{Hyphenator, LayoutOpts, Metrics, Page, SourceAnchor};
@@ -22,23 +22,49 @@ use crate::layout::{Hyphenator, LayoutOpts, Metrics, Page, SourceAnchor};
 /// The bundled default reading face — Spectral Regular (SIL OFL 1.1; see `fonts/OFL.txt`).
 const DEFAULT_FONT: &[u8] = include_bytes!("../fonts/Spectral-Regular.ttf");
 
+/// Fallback face for glyphs the reading face lacks — e.g. musical symbols (𝄞) in books like
+/// *Project Hail Mary*, which Spectral has no glyphs for and would otherwise draw as `.notdef`
+/// boxes. Noto Music (SIL OFL 1.1) covers the Musical Symbols block.
+const FALLBACK_FONT: &[u8] = include_bytes!("../fonts/NotoMusic-Regular.ttf");
+
 /// A font for measuring + rasterizing reflow text. Owns its bytes (so it is `Send + Sync`, usable
-/// from the `reader-core` document handle across the JNI thread).
+/// from the `reader-core` document handle across the JNI thread). A primary reading face plus
+/// fallback faces consulted, in order, for any character the primary doesn't cover.
 pub struct AbFont {
     font: FontVec,
+    fallbacks: Vec<FontVec>,
 }
 
 impl AbFont {
-    /// The embedded default reading face.
+    /// The embedded default reading face, with the bundled symbol fallback.
     #[must_use]
     pub fn default_font() -> Self {
-        Self::from_bytes(DEFAULT_FONT.to_vec()).expect("bundled Spectral font is valid")
+        let font = FontVec::try_from_vec(DEFAULT_FONT.to_vec()).expect("bundled Spectral font is valid");
+        let fallbacks = FontVec::try_from_vec(FALLBACK_FONT.to_vec())
+            .into_iter()
+            .collect();
+        Self { font, fallbacks }
     }
 
-    /// Load a face from owned TTF/OTF bytes (e.g. a user-chosen font); `None` if unparseable.
+    /// Load a face from owned TTF/OTF bytes (e.g. a user-chosen font); `None` if unparseable. No
+    /// fallback chain — used where a single explicit face is wanted.
     #[must_use]
     pub fn from_bytes(bytes: Vec<u8>) -> Option<Self> {
-        FontVec::try_from_vec(bytes).ok().map(|font| Self { font })
+        FontVec::try_from_vec(bytes)
+            .ok()
+            .map(|font| Self { font, fallbacks: Vec::new() })
+    }
+
+    /// The face to render `ch` with: the primary if it has the glyph, else the first fallback that
+    /// does, else the primary (so an unknown glyph still renders the primary's `.notdef`).
+    fn face_for(&self, ch: char) -> &FontVec {
+        if self.font.glyph_id(ch).0 != 0 {
+            return &self.font;
+        }
+        self.fallbacks
+            .iter()
+            .find(|f| f.glyph_id(ch).0 != 0)
+            .unwrap_or(&self.font)
     }
 }
 
@@ -76,16 +102,21 @@ impl Hyphenator for EnHyphenator {
 
 impl Metrics for AbFont {
     fn advance(&self, text: &str, size_px: f32, _bold: bool, _italic: bool) -> f32 {
-        let sf = self.font.as_scaled(PxScale::from(size_px));
+        let scale = PxScale::from(size_px);
         let mut width = 0.0;
-        let mut prev = None;
+        // Track the previous glyph's face so kerning is only applied within the same face.
+        let mut prev: Option<(&FontVec, GlyphId)> = None;
         for ch in text.chars() {
-            let id = self.font.glyph_id(ch);
-            if let Some(p) = prev {
-                width += sf.kern(p, id);
+            let face = self.face_for(ch);
+            let sf = face.as_scaled(scale);
+            let id = face.glyph_id(ch);
+            if let Some((pf, pid)) = prev {
+                if std::ptr::eq(pf, face) {
+                    width += sf.kern(pid, id);
+                }
             }
             width += sf.h_advance(id);
-            prev = Some(id);
+            prev = Some((face, id));
         }
         width
     }
@@ -141,18 +172,21 @@ pub fn render_page(page: &Page, opts: &LayoutOpts, font: &AbFont, canvas: &mut G
         }
         for run in &line.runs {
             let scale = PxScale::from(run.size_px);
-            let sf = font.font.as_scaled(scale);
-            let ascent = sf.ascent();
-            let baseline = margin + line.top + ascent;
+            // Baseline from the primary face so fallback glyphs sit on the same line as the text.
+            let baseline = margin + line.top + font.font.as_scaled(scale).ascent();
             let mut pen_x = margin + run.x;
-            let mut prev = None;
+            let mut prev: Option<(&FontVec, GlyphId)> = None;
             for ch in run.text.chars() {
-                let id = font.font.glyph_id(ch);
-                if let Some(p) = prev {
-                    pen_x += sf.kern(p, id);
+                let face = font.face_for(ch);
+                let sf = face.as_scaled(scale);
+                let id = face.glyph_id(ch);
+                if let Some((pf, pid)) = prev {
+                    if std::ptr::eq(pf, face) {
+                        pen_x += sf.kern(pid, id);
+                    }
                 }
                 let glyph = id.with_scale_and_position(scale, point(pen_x, baseline));
-                if let Some(outlined) = font.font.outline_glyph(glyph) {
+                if let Some(outlined) = face.outline_glyph(glyph) {
                     let bb = outlined.px_bounds();
                     let (ox, oy) = (bb.min.x as i32, bb.min.y as i32);
                     outlined.draw(|gx, gy, c| {
@@ -171,7 +205,7 @@ pub fn render_page(page: &Page, opts: &LayoutOpts, font: &AbFont, canvas: &mut G
                     });
                 }
                 pen_x += sf.h_advance(id);
-                prev = Some(id);
+                prev = Some((face, id));
             }
         }
     }
@@ -210,7 +244,7 @@ pub fn page_glyphs(page: &Page, opts: &LayoutOpts, font: &AbFont) -> Vec<PlacedG
         let y1 = y0 + line.height;
         let mut prev_run_end: Option<(f32, SourceAnchor)> = None;
         for run in &line.runs {
-            let sf = font.font.as_scaled(PxScale::from(run.size_px));
+            let scale = PxScale::from(run.size_px);
             let run_start = margin + run.x;
             // Bridge the gap to the previous run on this line with a space glyph, anchored just past
             // the previous run's last character (its char_offset + its length = the space position).
@@ -227,12 +261,16 @@ pub fn page_glyphs(page: &Page, opts: &LayoutOpts, font: &AbFont) -> Vec<PlacedG
                 }
             }
             let mut pen_x = run_start;
-            let mut prev = None;
+            let mut prev: Option<(&FontVec, GlyphId)> = None;
             // The glyph's chapter-relative offset = the run's first-char offset + its index in the run.
             for (i, ch) in run.text.chars().enumerate() {
-                let id = font.font.glyph_id(ch);
-                if let Some(p) = prev {
-                    pen_x += sf.kern(p, id);
+                let face = font.face_for(ch);
+                let sf = face.as_scaled(scale);
+                let id = face.glyph_id(ch);
+                if let Some((pf, pid)) = prev {
+                    if std::ptr::eq(pf, face) {
+                        pen_x += sf.kern(pid, id);
+                    }
                 }
                 let adv = sf.h_advance(id);
                 out.push(PlacedGlyph {
@@ -247,7 +285,7 @@ pub fn page_glyphs(page: &Page, opts: &LayoutOpts, font: &AbFont) -> Vec<PlacedG
                     },
                 });
                 pen_x += adv;
-                prev = Some(id);
+                prev = Some((face, id));
             }
             let run_end_anchor = SourceAnchor {
                 block: run.anchor.block,
@@ -278,6 +316,26 @@ mod tests {
 
     fn ink_count(c: &GrayCanvas) -> usize {
         c.pixels.iter().filter(|&&p| p < 250).count()
+    }
+
+    #[test]
+    fn fallback_face_covers_a_glyph_the_primary_lacks() {
+        let f = AbFont::default_font();
+        // G-clef (U+1D11E): Spectral has no glyph (→ .notdef box), Noto Music does. With the
+        // fallback chain, face_for must resolve to a face that has it, and it must advance + render.
+        let clef = '\u{1D11E}';
+        assert_eq!(f.font.glyph_id(clef).0, 0, "Spectral has no clef glyph (would box)");
+        assert_ne!(
+            f.face_for(clef).glyph_id(clef).0,
+            0,
+            "the fallback supplies a real clef glyph"
+        );
+        // It contributes positive width and inks pixels (not a blank .notdef).
+        assert!(f.advance("\u{1D11E}", 40.0, false, false) > 0.0);
+        let pages = paginate(&[paragraph("\u{1D11E}")], &LayoutOpts::new(300.0, 300.0, 40.0), &f);
+        let mut canvas = GrayCanvas::new(300, 300);
+        render_page(&pages[0], &LayoutOpts::new(300.0, 300.0, 40.0), &f, &mut canvas);
+        assert!(ink_count(&canvas) > 0, "the clef renders actual ink");
     }
 
     #[test]
