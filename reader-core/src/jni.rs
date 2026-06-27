@@ -411,6 +411,26 @@ pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeRenderPage<
 }
 
 // =====================================================================================
+// nativePrefetchPage(handle, page) — render `page` into the session's render cache WITHOUT
+// displaying it, so a turn to it is a cache hit (RR24 read-ahead). Best-effort: a prefetch
+// failure is swallowed (it must never disturb reading). Mutates the cache, so engine-thread only.
+// =====================================================================================
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativePrefetchPage<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+    page: jint,
+) {
+    env.with_env(|env| -> jni::errors::Result<()> {
+        let session = unsafe { session_mut(handle) }.map_err(|e| throw(env, &e))?;
+        let _ = session.prefetch_page(page.max(0) as usize); // best-effort; never throws
+        Ok(())
+    })
+    .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
+}
+
+// =====================================================================================
 // nativeOnGesture(handle, code) : ByteArray  — apply the gesture, return the encoded
 // RefreshCommand stream (Fork 2, Amendment 6). Returns an empty array on an unknown code
 // (after throwing), per the resolve default.
