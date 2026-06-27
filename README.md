@@ -55,21 +55,34 @@ https://github.com/user-attachments/assets/4381ee07-3683-45ef-9fa4-9ed7cdd11295
   ## Features
 
   **Reading**
-  - Reads **PDF** and **EPUB**
-  - Reflowable text with adjustable font size
+  - Reads **PDF**, **EPUB**, **CBZ** (comics/manga), and **plain text** — files are detected by
+    content, not just their extension
+  - **Reflowable reading for both PDF and EPUB** — flip Reflow on and the text re-wraps to your
+    screen instead of pinch-zooming a fixed layout
+  - **Choose a font family** from bundled open-source faces (serif / sans / mono)
+  - Adjustable **font size** (60%–300%), **line spacing**, and **alignment**
+  - **Swipe** or tap the page edge to turn pages
   - Pinch-to-zoom with a page navigator (minimap + zoom controls)
-  - Table of contents navigation
+  - Table of contents navigation with **in-chapter reading progress**
   - Bookmarks and go-to-page
-  - Page display controls: rotate, crop, contrast, margins
+  - **Reflow-stable resume** — reopens exactly where you left off, even after a font/size change
+  - Display controls: rotate, crop, **contrast**, margins, **night mode**, and quick **reading-style presets**
+
+  **InkRead Daily** — your reading companion
+  - A clean **daily issue** compiled from your **RSS feeds, blogs, and read-later** sources
+  - **Compiled automatically every day, on device** — the first build takes a few seconds while it
+    pulls from **10 preloaded sources**; **add your own** or **disable** any of the pre-seeded ones
+  - Front-page headlines with **read / unread** tracking and readable article extraction (just the prose)
 
   **Handwriting & annotation**
-  - Movable, floating tool palette
+  - Floating tool palette that opens as a collapsed **inkwell puck** — drag to move, tap to expand
   - Pen — write directly on the page with the stylus
   - Highlighter
   - Four ink colours (black, blue, red, green), switchable in-window
   - Adjustable stroke thickness
   - Eraser
   - Lasso select — circle ink or text to move, copy, delete, or look up
+  - **Annotations list** — every handwritten note in one place; tap to jump to it
   - Undo / redo
 
   **Text tools**
@@ -83,7 +96,8 @@ https://github.com/user-attachments/assets/4381ee07-3683-45ef-9fa4-9ed7cdd11295
   - Overwrite the original PDF in place, or save a separate `-annotated` copy
   - Offline-first — no network unless explicitly enabled
 
-  **Platform**
+  **Fast & native**
+  - A **cache-based pagination engine** with **next-page read-ahead** keeps page turns quick on e-ink
   - Built for the Supernote family (RK3566, Android 11)
   - Kotlin/Android shell + a Rust core (over JNI) that owns parsing, layout, rendering, the refresh policy, and the ink model
   - Licensed under **AGPL-3.0**
@@ -100,6 +114,7 @@ https://github.com/user-attachments/assets/4381ee07-3683-45ef-9fa4-9ed7cdd11295
 | Handwriting on documents | **First-class** (core ink model) | Minimal | **First-class** |
 | Annotation portability | **Written into the PDF** + portable sidecar | Sidecar metadata | Proprietary, locked-in |
 | Document reading (PDF reflow, dictionary) | Yes | **Mature** | Limited |
+| Daily reading companion (RSS → on-device issue) | **Built-in** (InkRead Daily) | Plugin (NewsDownloader) | No |
 | E-ink refresh control | Vendor-neutral policy in core | **Excellent** | Native / vendor-optimal |
 | Extensibility | Native Lua API + selected KOReader-shim | **Huge Lua ecosystem** | None (closed) |
 | Architecture | Rust core, host-testable | C + Lua | Closed-source |
@@ -115,9 +130,11 @@ reuses its plugin *style* (a selected `.koplugin` shim) but ships its own Rust-n
 
 ## Status
 
-Pre-1.0, **milestone M0**. The Rust workspace (parse · reflow · ink · refresh policy · dictionary ·
-Lua runtime) builds and tests green on the host; device bring-up on the Supernote is in progress.
-APIs and formats will change. Roadmap milestones run M0 → M2 (*Daily Driver v1*) and beyond.
+Pre-1.0, in **active beta** (v0.5.x). The Rust workspace (parse · reflow · ink · refresh policy ·
+dictionary · Lua runtime) builds and tests green on the host, **and the app runs on the Supernote**
+(Manta / Nomad / A5X / A6X): reading, reflow, handwriting, dictionary, export, and **InkRead Daily**
+all work on-device. APIs and formats may still change. Roadmap milestones run toward *Daily Driver v1*
+and beyond.
 
 ## Quick start
 
@@ -141,19 +158,34 @@ Prebuilt APKs are attached to each [GitHub Release](https://github.com/j-raghava
 ## Using inkread
 
 Open a document from the **home screen** (*Open a Document*, or pick up where you left off
-from the *Continue reading* card). PDFs and EPUBs are supported. Your reading position, ink,
-and per-book settings are saved automatically and restored when you reopen.
+from the *Continue reading* card) — **PDF, EPUB, CBZ, and plain text** are supported. Or tap the
+**InkRead Daily** card to read today's auto-compiled issue. Your reading position, ink, and per-book
+settings are saved automatically and restored when you reopen.
 
 Two surfaces drive everything: a **bottom control bar** (tap the centre of the page) and a
-**floating tool palette** docked to the right edge (drag the grip to move it, tap to collapse).
+**floating tool palette** that sits as a small **inkwell puck** on the page (drag it to move, tap to
+expand the tools, tap again to collapse).
+
+### InkRead Daily
+
+A calm daily reading companion that turns your feeds into a single e-ink issue — built on device,
+no cloud.
+
+- Open the **InkRead Daily** card on the home screen. It **compiles a fresh issue automatically each
+  day**; the **first build takes a few seconds** while it fetches and lays out your sources.
+- Out of the box it pulls from **10 preloaded sources**. Open **Daily → Sources** to **add your own**
+  (RSS / Atom / blog URL) or **disable** any of the pre-seeded ones.
+- The front page lists headlines with **read / unread** marks; tap one to read the cleaned-up article
+  (just the prose), with all the usual reading controls below.
 
 ### Reading & navigation
 
 | Action | How |
 |---|---|
-| Turn page | Tap the **left third** (back) or **right third** (forward) |
+| Turn page | **Swipe** left/right, or tap the **left third** (back) / **right third** (forward) |
+| Reflow a PDF/EPUB | Centre-tap → **Adjust → Page → Reflow: On** — text re-wraps to your screen and font settings |
 | Jump to a page | Centre-tap → drag the **slider**, or tap the page number to type one |
-| Table of contents | Centre-tap → **Contents** → tap an entry to jump |
+| Table of contents | Centre-tap → **Contents** → tap an entry to jump; your in-chapter progress shows on the bar |
 | Bookmark a page | Tap the **top-right corner** (dog-ear); list them via **Marks** |
 | Zoom & pan | **Pinch** — or **double-tap the centre** — to zoom toward a point; **double-tap again** to restore fit. A minimap (top-right) shows your viewport; while zoomed, edge taps still turn pages. Fit/zoom presets also under **Adjust → Zoom** |
 
@@ -178,7 +210,9 @@ Pick a tool from the floating palette. Tap a tool again to reveal its options (e
 | **Lasso** | Draw a loop around your writing to select it. A floating toolbar then offers **move, cut, copy, paste, delete, select-all**, and **Add to Digest**. (Loop over printed text instead and it selects the text.) |
 | **Define** | Tap a word to look it up, or drag to select text for **Copy / Define / Highlight / Add to Digest**. |
 
-Ink is saved to a sidecar next to your document and re-loaded next time.
+Ink is saved to a sidecar next to your document and re-loaded next time. Centre-tap → **Notes** opens
+the **annotations list** — every handwritten note across the book in one place; tap one to jump
+straight to its page.
 
 ### Saving your work elsewhere
 
@@ -195,14 +229,14 @@ Centre-tap → **Adjust** opens a tabbed sheet, remembered per book:
 | Tab | Controls |
 |---|---|
 | **Rotate** | Screen orientation — **0° / 90° / 180° / 270°** (portrait, landscape, and both flips) |
-| **Font** | **Text size** — A− / A+ steppers plus **100%** (default) and **XL** presets, 60%–250% (reflowable books) |
-| **Page** | Line spacing + alignment (reflowable books) |
+| **Font** | **Typeface** — pick a bundled font family (serif / sans / mono); **Text size** — A− / A+ steppers plus **100%** (default) and **XL** presets, 60%–300% (reflowable books) |
+| **Page** | **Reflow** on/off, line spacing + alignment (reflowable books) |
 | **Zoom** | Fit mode + zoom level |
 | **Crop** | Auto-crop white margins + margin size |
-| **Display** | Contrast / display enhancement |
+| **Display** | Contrast / display enhancement, **night mode** (inverted), and **reading-style presets** |
 
-> **On the roadmap:** EPUB reflow controls, Lua plugins, and cross-document search are in the
-> core or specified but not yet exposed in the shipped app — see [Status](#status).
+> **On the roadmap:** Lua plugins and cross-document search are in the core or specified but not yet
+> exposed in the shipped app — see [Status](#status).
 
 ## Architecture
 
