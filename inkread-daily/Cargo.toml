@@ -17,6 +17,7 @@ quick-xml = { workspace = true }
 # JSON at the JNI boundary: the shell hands the core a fetched issue (sources + article HTML) as JSON.
 serde = { workspace = true }
 serde_json = { workspace = true }
+feed-rs = "2.3.1"
 
 [dev-dependencies]
 # Round-trip the assembled issue through the real EPUB parser the reader uses, so a malformed
