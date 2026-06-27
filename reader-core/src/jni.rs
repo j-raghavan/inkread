@@ -768,6 +768,39 @@ pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeSetTextScal
     .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
 }
 
+// nativeSetFont(handle, fontId) : int — reflow font family (RR4); repaginates EPUB. Returns the new
+// page index, or -1 for a fixed-layout PDF. Re-render after.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeSetFont<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+    font_id: jint,
+) -> jint {
+    env.with_env(|env| -> jni::errors::Result<jint> {
+        let session = unsafe { session_mut(handle) }.map_err(|e| throw(env, &e))?;
+        if session.set_font(font_id) {
+            Ok(session.current_page() as jint)
+        } else {
+            Ok(-1)
+        }
+    })
+    .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
+}
+
+// nativeFontNames() : String — the bundled reading-face display names, newline-joined, in id order
+// (the index = the font_id for nativeSetFont). Static; no handle. Drives the font picker.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeFontNames<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+) -> JString<'local> {
+    env.with_env(|env| -> jni::errors::Result<JString<'local>> {
+        env.new_string(inkread_epub::reading_font_names().join("\n"))
+    })
+    .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
+}
+
 // nativeSetLineSpacing(handle, mult) : int — reflow line spacing (RR4); repaginates EPUB. Returns
 // the new page index, or -1 for a fixed-layout PDF. Re-render after.
 #[unsafe(no_mangle)]

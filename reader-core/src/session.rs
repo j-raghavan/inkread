@@ -783,6 +783,20 @@ impl ReaderSession {
         }
     }
 
+    /// Set the reflow font family (`font_id` indexes the bundled faces); repaginates + keeps the
+    /// chapter. Returns false for a fixed-layout document (RR4 — font select). Re-render after.
+    pub fn set_font(&mut self, font_id: i32) -> bool {
+        match self.document.set_font(font_id, self.page) {
+            Some(new_page) => {
+                self.page = new_page.min(self.page_count().saturating_sub(1));
+                self.invalidate_render_cache(); // a new face re-lays-out → page bitmaps are stale
+                self.load_ink_for_current_page();
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Set the reflow line-spacing multiplier (RR4); repaginates EPUB preserving the chapter.
     /// `false` for a fixed-layout PDF. Re-render after.
     pub fn set_line_spacing(&mut self, mult: f32) -> bool {

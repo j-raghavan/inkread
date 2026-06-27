@@ -22,6 +22,29 @@ use crate::layout::{Hyphenator, LayoutOpts, Metrics, Page, SourceAnchor};
 /// The bundled default reading face — Spectral Regular (SIL OFL 1.1; see `fonts/OFL.txt`).
 const DEFAULT_FONT: &[u8] = include_bytes!("../fonts/Spectral-Regular.ttf");
 
+/// The selectable reading faces (the open-source set KOReader ships, Latin Regular weights — bold is
+/// synthesized). `id` is the index; id 0 = the default. Licenses are noted in LICENSES-3RDPARTY.md.
+const READING_FONTS: &[(&str, &[u8])] = &[
+    ("Spectral", DEFAULT_FONT), // OFL 1.1 (serif, default)
+    (
+        "Noto Serif",
+        include_bytes!("../fonts/NotoSerif-Regular.ttf"),
+    ), // OFL 1.1
+    ("Noto Sans", include_bytes!("../fonts/NotoSans-Regular.ttf")), // OFL 1.1
+    ("Free Serif", include_bytes!("../fonts/FreeSerif.ttf")), // GPL-3.0 + font exception
+    ("Free Sans", include_bytes!("../fonts/FreeSans.ttf")), // GPL-3.0 + font exception
+    ("Droid Mono", include_bytes!("../fonts/DroidSansMono.ttf")), // Apache-2.0
+];
+
+/// Display names of the selectable reading faces, in `id` order (for the shell's font picker).
+#[must_use]
+pub fn reading_font_names() -> Vec<String> {
+    READING_FONTS
+        .iter()
+        .map(|(n, _)| (*n).to_string())
+        .collect()
+}
+
 /// Fallback face for glyphs the reading face lacks — e.g. musical symbols (𝄞) in books like
 /// *Project Hail Mary*, which Spectral has no glyphs for and would otherwise draw as `.notdef`
 /// boxes. Noto Music (SIL OFL 1.1) covers the Musical Symbols block.
@@ -36,11 +59,20 @@ pub struct AbFont {
 }
 
 impl AbFont {
-    /// The embedded default reading face, with the bundled symbol fallback.
+    /// The embedded default reading face (Spectral), with the bundled symbol fallback.
     #[must_use]
     pub fn default_font() -> Self {
-        let font =
-            FontVec::try_from_vec(DEFAULT_FONT.to_vec()).expect("bundled Spectral font is valid");
+        Self::for_face(0)
+    }
+
+    /// The reading face for `id` (index into the bundled set; out-of-range → the default), each with
+    /// the same Noto Music glyph fallback so missing glyphs (e.g. musical symbols) still render.
+    #[must_use]
+    pub fn for_face(id: usize) -> Self {
+        let bytes = READING_FONTS.get(id).map_or(DEFAULT_FONT, |&(_, b)| b);
+        let font = FontVec::try_from_vec(bytes.to_vec())
+            .or_else(|_| FontVec::try_from_vec(DEFAULT_FONT.to_vec()))
+            .expect("a bundled reading face is valid");
         let fallbacks = FontVec::try_from_vec(FALLBACK_FONT.to_vec())
             .into_iter()
             .collect();

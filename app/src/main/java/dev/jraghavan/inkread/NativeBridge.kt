@@ -177,6 +177,13 @@ object NativeBridge {
      *  fixed-layout document (PDF) that does not reflow. Re-render after calling. */
     external fun nativeSetTextScale(handle: Long, scale: Float): Int
 
+    /** Set the reflow font family ([fontId] indexes [nativeFontNames]); repaginates EPUB preserving
+     *  the chapter. Returns the new page index, or -1 for a fixed-layout PDF. Re-render after. */
+    external fun nativeSetFont(handle: Long, fontId: Int): Int
+
+    /** The bundled reading-face display names, newline-joined, in id order (index = the font id). */
+    external fun nativeFontNames(): String
+
     /** Set the display-enhancement contrast [step] (0 = off; RR4). Applied as a post-render pixel
      *  remap (works on PDF + EPUB); re-render after calling. */
     external fun nativeSetContrast(handle: Long, step: Int)

@@ -436,6 +436,13 @@ pub trait Document {
         None
     }
 
+    /// Set the reflow **font family** (`font_id` = index into the bundled reading faces) and
+    /// repaginate, preserving the chapter (RR4). Returns the new page, or `None` for a fixed-layout
+    /// format (PDF). Default: unsupported.
+    fn set_font(&self, _font_id: i32, _current_page: usize) -> Option<usize> {
+        None
+    }
+
     /// Whether this document can be **reflowed** — true for a fixed-layout PDF that carries a text
     /// layer (ADR-INKREAD-0011), false for one without (a pure scan: needs OCR, out of scope) and
     /// false for already-reflowable formats (EPUB is always reflowed; the toggle is meaningless).

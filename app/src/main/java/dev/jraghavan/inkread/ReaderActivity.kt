@@ -786,6 +786,10 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
                 val np = try { NativeBridge.nativeSetTextScale(docHandle, savedScale) } catch (e: RuntimeException) { -1 }
                 if (np >= 0) Log.i(TAG, "applied text scale $savedScale → page $np")
             }
+            // Re-apply the saved reflow typeface (EPUB); default face 0 (a no-op on fixed-layout PDF).
+            if (fontPref() != 0) {
+                try { NativeBridge.nativeSetFont(docHandle, fontPref()) } catch (e: RuntimeException) {}
+            }
             // Re-apply the saved display contrast (RR4); 0 = off (a no-op in the core).
             try { NativeBridge.nativeSetContrast(docHandle, contrastPref()) } catch (e: RuntimeException) {}
             // Re-apply night mode (invert); default off (RR4 / style presets).
@@ -3286,8 +3290,30 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             preset(pill("100%") { idx = nearestScaleIndex(1.0f); apply() })
             preset(pill("XL") { idx = TEXT_SCALES.size - 1; apply() })
         }
-        return settingRow("Font Size", control)
+        val container = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        // Typeface picker — the bundled reading faces (EPUB/reflow; a toast on fixed-layout PDF).
+        val faces = try {
+            NativeBridge.nativeFontNames().split("\n").filter { it.isNotBlank() }
+        } catch (e: RuntimeException) { emptyList() }
+        if (faces.isNotEmpty()) {
+            container.addView(settingRow("Typeface", segmented(faces, fontPref().coerceIn(0, faces.size - 1)) { which ->
+                setFontPref(which)
+                engine.execute {
+                    val np = try { NativeBridge.nativeSetFont(docHandle, which) } catch (e: RuntimeException) { -1 }
+                    if (np >= 0) { pageCount = NativeBridge.nativePageCount(docHandle); repaintPanel() }
+                    else runOnUiThread { Toast.makeText(this, "Typeface adjusts reflowable books (EPUB)", Toast.LENGTH_SHORT).show() }
+                }
+            }))
+        }
+        container.addView(settingRow("Font Size", control))
+        return container
     }
+
+    private fun fontPref(): Int =
+        getSharedPreferences("typography", MODE_PRIVATE).getInt("font_id", 0)
+
+    private fun setFontPref(id: Int) =
+        getSharedPreferences("typography", MODE_PRIVATE).edit().putInt("font_id", id).apply()
 
     /** Set + persist the screen orientation; the resize re-renders the page (engine via surfaceChanged). */
     private fun applyOrientation(orientation: Int) {
