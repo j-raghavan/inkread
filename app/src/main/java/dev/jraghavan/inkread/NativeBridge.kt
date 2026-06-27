@@ -68,6 +68,13 @@ object NativeBridge {
     /** Page count of the open document. */
     external fun nativePageCount(handle: Long): Int
 
+    /** The document's title from its metadata, or "" if none — stored so the library shows the real
+     *  title instead of the filename. */
+    external fun nativeDocTitle(handle: Long): String
+
+    /** The document's author from its metadata, or "" if none. */
+    external fun nativeDocAuthor(handle: Long): String
+
     /**
      * Render the current page into [directBuffer] — a DIRECT [ByteBuffer] of exactly
      * `width*height*4` bytes (RGBA). The core borrows it for the call only (Amendment 5).

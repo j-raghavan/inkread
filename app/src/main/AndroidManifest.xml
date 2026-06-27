@@ -49,5 +49,11 @@
             android:name=".SettingsActivity"
             android:exported="false"
             android:configChanges="orientation|screenSize|keyboardHidden" />
+
+        <!-- The InkRead Daily front page (#66), launched from the Home masthead (not exported). -->
+        <activity
+            android:name=".DailyActivity"
+            android:exported="false"
+            android:configChanges="orientation|screenSize|keyboardHidden" />
     </application>
 </manifest>

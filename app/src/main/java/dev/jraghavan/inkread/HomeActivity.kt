@@ -114,19 +114,25 @@ class HomeActivity : Activity() {
             column.addView(TextView(this).apply {
                 text = "Open a document to start your library."
                 setTextColor(textMuted); textSize = fs(16f); gravity = Gravity.CENTER
-                typeface = serif; setPadding(0, 0, 0, dim(20))
+                typeface = serif
             })
-            column.addView(openButton())
         } else {
             column.addView(heroCard(recents.first(), contentW))
-            if (recents.size >= 2) {
-                column.addView(spacer(dim(28)))
-                column.addView(eyebrowItalic("Recently on your shelf"))
-                column.addView(spacer(dim(16)))
-                column.addView(shelf(recents.take(3), contentW))
-            }
+        }
+        // The InkRead Daily — the day's issue as a strip card (the design's in-flow Daily entry).
+        column.addView(spacer(dim(24)))
+        column.addView(dailyCard(contentW))
+        if (recents.size >= 2) {
             column.addView(spacer(dim(28)))
-            column.addView(openButton())
+            column.addView(eyebrowItalic("Recently on your shelf"))
+            column.addView(spacer(dim(16)))
+            column.addView(shelf(recents.take(3), contentW))
+        }
+        column.addView(spacer(dim(28)))
+        column.addView(openButton())
+        statChips()?.let {
+            column.addView(spacer(dim(16)))
+            column.addView(it)
         }
         column.addView(spacerWeighted(phi))
         column.addView(closingMark())
@@ -136,7 +142,7 @@ class HomeActivity : Activity() {
             isVerticalScrollBarEnabled = false
             addView(column)
         }
-        // A subtle top-corner gear → app Settings (export behaviour, help, about).
+        // A subtle top-corner gear → app Settings (the Daily entry is the in-flow card below).
         return FrameLayout(this).apply {
             setBackgroundColor(Color.WHITE)
             addView(scroll, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
@@ -163,7 +169,7 @@ class HomeActivity : Activity() {
             typeface = scriptBold; paint.isFakeBoldText = true; gravity = Gravity.CENTER
             includeFontPadding = false
         })
-        addView(eyebrow("·  v${versionName()}  ·").apply { gravity = Gravity.CENTER; setPadding(0, dim(10), 0, 0) })
+        addView(eyebrow("·  Super Reader · v${versionName()}  ·").apply { gravity = Gravity.CENTER; setPadding(0, dim(10), 0, 0) })
     }
 
     // ── Continue where you left off (the most-recent book) ───────────────────────────────────────
@@ -190,16 +196,27 @@ class HomeActivity : Activity() {
                     typeface = Typeface.create(serif, Typeface.ITALIC)
                 })
                 addView(TextView(this@HomeActivity).apply {
-                    text = r.title; setTextColor(ink); textSize = fs(26f); typeface = serif
-                    maxLines = 3; setLineSpacing(0f, 1.1f); setPadding(0, dim(7), 0, 0)
+                    text = Books.displayTitle(this@HomeActivity, r); setTextColor(ink); textSize = fs(26f)
+                    typeface = serif; maxLines = 3; setLineSpacing(0f, 1.1f); setPadding(0, dim(7), 0, 0)
                 })
+                Books.metaAuthor(this@HomeActivity, r.id)?.let { author ->
+                    addView(TextView(this@HomeActivity).apply {
+                        text = author; setTextColor(inkSoft); textSize = fs(15f)
+                        typeface = Typeface.create(serif, Typeface.ITALIC); setPadding(0, dim(5), 0, 0)
+                    })
+                }
                 addView(spacerWeighted(1f))
                 val percent = Books.progress(this@HomeActivity, r.id)
+                val pages = Books.metaPages(this@HomeActivity, r.id)
+                // "page N / M · X% complete" when the page count is known, else just the percentage.
+                val progressLabel = if (pages > 0)
+                    "page ${Books.metaPage(this@HomeActivity, r.id) + 1} / $pages · $percent%"
+                else "$percent% complete"
                 addView(LinearLayout(this@HomeActivity).apply {
                     orientation = LinearLayout.HORIZONTAL
                     gravity = Gravity.CENTER_VERTICAL
                     setPadding(0, dim(14), 0, 0)
-                    addView(eyebrow("$percent% complete"))
+                    addView(eyebrow(progressLabel))
                     addView(spacerWeighted(1f))
                     addView(TextView(this@HomeActivity).apply {
                         text = "Resume →"; setTextColor(ink); textSize = fs(15f); typeface = serif
@@ -210,6 +227,68 @@ class HomeActivity : Activity() {
                     (layoutParams as LinearLayout.LayoutParams).topMargin = dim(8)
                 })
             }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f).apply { marginStart = gap })
+        }
+    }
+
+    // ── The InkRead Daily — the day's issue as a strip card (taps → DailyActivity) ───────────────
+
+    private fun dailyCard(contentW: Int): View {
+        val pad = dim(15)
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            background = outlined(dim(12))
+            isClickable = true
+            setOnClickListener { startActivity(Intent(this@HomeActivity, DailyActivity::class.java)) }
+            layoutParams = LinearLayout.LayoutParams(contentW, ViewGroup.LayoutParams.WRAP_CONTENT)
+
+            // Left masthead cell: THE / InkRead (script) / DAILY.
+            addView(LinearLayout(this@HomeActivity).apply {
+                orientation = LinearLayout.VERTICAL
+                gravity = Gravity.CENTER
+                setPadding(dim(14), pad, dim(12), pad)
+                addView(TextView(this@HomeActivity).apply {
+                    text = "THE"; setTextColor(ink); textSize = fs(8f); typeface = mono; letterSpacing = 0.28f
+                })
+                addView(TextView(this@HomeActivity).apply {
+                    text = "InkRead"; setTextColor(ink); textSize = fs(30f); typeface = script
+                    includeFontPadding = false
+                })
+                addView(TextView(this@HomeActivity).apply {
+                    text = "DAILY"; setTextColor(ink); textSize = fs(11f)
+                    typeface = Typeface.create(serif, Typeface.BOLD); letterSpacing = 0.4f
+                })
+            }, LinearLayout.LayoutParams(dim(132), ViewGroup.LayoutParams.MATCH_PARENT))
+
+            addView(View(this@HomeActivity).apply { setBackgroundColor(ink) },
+                LinearLayout.LayoutParams(maxOf(1, dp(1)), ViewGroup.LayoutParams.MATCH_PARENT))
+
+            // Middle: today's status. Honest first-run copy — no issue is compiled until the daily
+            // backend (fetch/assemble) lands; nothing decorative is faked.
+            addView(LinearLayout(this@HomeActivity).apply {
+                orientation = LinearLayout.VERTICAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(dim(16), pad, dim(12), pad)
+                addView(eyebrow("Today's Daily"))
+                addView(TextView(this@HomeActivity).apply {
+                    text = "No issue compiled yet"; setTextColor(ink); textSize = fs(19f); typeface = serif
+                    setPadding(0, dim(4), 0, 0); maxLines = 2; setLineSpacing(0f, 1.1f)
+                })
+                addView(TextView(this@HomeActivity).apply {
+                    text = "Add a few sources to start your daily issue"
+                    setTextColor(inkSoft); textSize = fs(13f); typeface = Typeface.create(serif, Typeface.ITALIC)
+                    setPadding(0, dim(3), 0, 0)
+                })
+            }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f))
+
+            // Right action.
+            addView(TextView(this@HomeActivity).apply {
+                text = "Set up →"; setTextColor(Color.WHITE); textSize = fs(14f)
+                typeface = Typeface.create(serif, Typeface.BOLD); gravity = Gravity.CENTER
+                setPadding(dim(18), dim(12), dim(18), dim(12))
+                background = GradientDrawable().apply { setColor(ink) }
+            }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.MATCH_PARENT).apply {
+                gravity = Gravity.CENTER_VERTICAL; marginEnd = dim(12)
+            })
         }
     }
 
@@ -299,7 +378,7 @@ class HomeActivity : Activity() {
         }
         if (!spine) {
             return TextView(this).apply {
-                text = r.title; setTextColor(textSecondary); textSize = fs(12f); typeface = serif
+                text = Books.displayTitle(this@HomeActivity, r); setTextColor(textSecondary); textSize = fs(12f); typeface = serif
                 gravity = Gravity.CENTER; setPadding(dim(8), dim(8), dim(8), dim(8))
                 background = GradientDrawable().apply {
                     setColor(Color.parseColor("#EFEFEF")); setStroke(maxOf(1, dp(1)), ink)
@@ -315,7 +394,7 @@ class HomeActivity : Activity() {
             addView(View(this@HomeActivity).apply { setBackgroundColor(Color.WHITE) },
                 LinearLayout.LayoutParams(dim(4), ViewGroup.LayoutParams.MATCH_PARENT))
             addView(TextView(this@HomeActivity).apply {
-                text = r.title; setTextColor(Color.WHITE); textSize = fs(15f); typeface = serif
+                text = Books.displayTitle(this@HomeActivity, r); setTextColor(Color.WHITE); textSize = fs(15f); typeface = serif
                 gravity = Gravity.BOTTOM; setLineSpacing(0f, 1.12f)
                 setPadding(dim(12), dim(12), dim(12), dim(12))
                 layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f)
@@ -338,6 +417,36 @@ class HomeActivity : Activity() {
                 background = GradientDrawable().apply { setColor(ink); cornerRadius = dim(4).toFloat() }
             }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, p.toFloat()))
             if (p < 100) addView(View(this@HomeActivity), LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, (100 - p).toFloat()))
+        }
+    }
+
+    /** The design's stat chips — outlined pills of REAL reading stats (streak · this week · pages).
+     *  Each chip appears only when it has data, so nothing is faked; null when there's nothing yet. */
+    private fun statChips(): View? {
+        val chips = buildList {
+            val streak = ReadingStats.streakDays(this@HomeActivity)
+            val minutes = ReadingStats.weekMinutes(this@HomeActivity)
+            val pages = ReadingStats.weekPages(this@HomeActivity)
+            if (streak > 0) add(if (streak == 1) "1-day streak" else "$streak-day streak")
+            if (minutes > 0) add("${ReadingStats.formatMinutes(minutes)} this week")
+            if (pages > 0) add(if (pages == 1) "1 page" else "$pages pages")
+        }
+        if (chips.isEmpty()) return null
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+            chips.forEachIndexed { i, c ->
+                addView(chip(c), LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+                    .apply { marginStart = if (i == 0) 0 else dim(10) })
+            }
+        }
+    }
+
+    private fun chip(text: String): View = TextView(this).apply {
+        this.text = text; setTextColor(ink); textSize = fs(13f); typeface = serif
+        gravity = Gravity.CENTER; setPadding(dim(16), dim(6), dim(16), dim(6))
+        background = GradientDrawable().apply {
+            setColor(Color.WHITE); setStroke(maxOf(1, dp(1)), ink); cornerRadius = dim(40).toFloat()
         }
     }
 
