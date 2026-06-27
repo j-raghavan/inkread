@@ -119,6 +119,9 @@ pub struct ReaderSession {
     /// Contrast/display-enhancement step (`0` = off; RR4 — KOReader's "Contrast"). Applied as a
     /// per-pixel remap after render so faint scans read better on e-ink.
     contrast: u8,
+    /// Night mode: invert the rendered page (light text on dark) after contrast (RR4). Part of the
+    /// cache key so a cached page isn't served at the wrong polarity.
+    night: bool,
     /// How a fixed-layout page is fit to the viewport (RR4 — KOReader's "Fit"). Default: contain.
     fit_mode: FitMode,
     /// Auto-crop the page's white margins (RR4 — KOReader Crop = auto). `false` = full page.
@@ -284,6 +287,7 @@ impl ReaderSession {
             clipboard: Vec::new(),
             identity,
             contrast: 0,
+            night: false,
             fit_mode: FitMode::Page,
             crop_auto: false,
             crop_margin: 0,
@@ -489,6 +493,9 @@ impl ReaderSession {
                 buf,
                 crate::render::contrast::step_to_gamma(self.contrast),
             );
+            if self.night {
+                crate::render::gray::invert_in_place(buf);
+            }
             return Ok(());
         }
         // Non-magnified page render — the page-turn / revisit case. The rendered bytes are a pure
@@ -546,6 +553,9 @@ impl ReaderSession {
             buf,
             crate::render::contrast::step_to_gamma(self.contrast),
         );
+        if self.night {
+            crate::render::gray::invert_in_place(buf); // light-on-dark (night mode)
+        }
         Ok(())
     }
 
@@ -590,7 +600,7 @@ impl ReaderSession {
             self.page as u32,
             1.0,
             0,
-            false,
+            self.night, // invert flag — night pages cache separately from day
             crate::render::DitherMode::None,
             1.0,
         )
@@ -647,6 +657,17 @@ impl ReaderSession {
     #[must_use]
     pub fn contrast(&self) -> u8 {
         self.contrast
+    }
+
+    /// Enable/disable night mode (invert the page; RR4). Re-render to apply.
+    pub fn set_night(&mut self, on: bool) {
+        self.night = on;
+    }
+
+    /// Whether night mode (invert) is on.
+    #[must_use]
+    pub fn night(&self) -> bool {
+        self.night
     }
 
     /// Set the page fit mode (RR4 — KOReader's "Fit"). Re-render to apply.

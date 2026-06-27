@@ -655,6 +655,23 @@ pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeSetContrast
     .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
 }
 
+// nativeSetNight(handle, on) — night mode: invert the page after contrast (RR4). The shell
+// re-renders afterward. Never throws.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeSetNight<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+    on: jboolean,
+) {
+    env.with_env(|env| -> jni::errors::Result<()> {
+        let session = unsafe { session_mut(handle) }.map_err(|e| throw(env, &e))?;
+        session.set_night(on);
+        Ok(())
+    })
+    .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
+}
+
 // nativeSetFit(handle, mode) — page fit mode (0=Page/contain, 1=Width, 2=Height; RR4). Aspect-
 // preserving; the shell re-renders afterward. Never throws (mode decoded leniently).
 #[unsafe(no_mangle)]
@@ -992,7 +1009,7 @@ pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeInkPages<'l
             .map(|p| p as jint)
             .collect();
         let arr = env.new_int_array(pages.len())?;
-        env.set_int_array_region(&arr, 0, &pages)?;
+        arr.set_region(env, 0, &pages)?;
         Ok(arr)
     })
     .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
