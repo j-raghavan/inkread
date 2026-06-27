@@ -1598,6 +1598,20 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         return "Ch ${idx + 1}/${ch.size} · ${ch[idx].second}"
     }
 
+    /** In-chapter position "3/24" — the current page within the current chapter (this chapter's start
+     *  → the next chapter's start; the last chapter runs to the end of the document). Null with no
+     *  chapters, or before the first chapter start (front matter). */
+    private fun inChapterPosition(): String? {
+        val ch = chapters
+        if (ch.isEmpty()) return null
+        val idx = ch.indexOfLast { it.first <= currentPage }
+        if (idx < 0) return null
+        val start = ch[idx].first
+        val end = if (idx + 1 < ch.size) ch[idx + 1].first else pageCount
+        val total = (end - start).coerceAtLeast(1)
+        return "${currentPage - start + 1}/$total"
+    }
+
     /** Drop any lasso selection when the page changes — the ids belong to the old page (engine). */
     private fun dropSelectionForPageChange() {
         if (selectedIds.isEmpty()) return
@@ -1705,16 +1719,25 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             },
         )
         // Current-chapter line under the scrubber: orients the reader and makes the ‹‹/›› obvious.
-        // Tap → open the full Contents sheet. Shown only when the document has chapters.
+        // Left = "Ch i/n · Title" (ellipsized); right = in-chapter "p/q" (stays visible). Tap → the
+        // full Contents sheet. Shown only when the document has chapters.
         currentChapterLabel()?.let { lbl ->
-            container.addView(TextView(this).apply {
-                text = lbl
-                setTextColor(Ink.inkSoft); textSize = 12f; typeface = Ink.serif
-                gravity = Gravity.CENTER; maxLines = 1
-                ellipsize = android.text.TextUtils.TruncateAt.END
+            container.addView(LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
                 setPadding(dp(24), 0, dp(24), dp(8))
                 isClickable = true
                 setOnClickListener { dialog.dismiss(); showContentsLazy() }
+                addView(TextView(this@ReaderActivity).apply {
+                    text = lbl; setTextColor(Ink.inkSoft); textSize = 12f; typeface = Ink.serif
+                    maxLines = 1; ellipsize = android.text.TextUtils.TruncateAt.END
+                }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+                inChapterPosition()?.let { pos ->
+                    addView(TextView(this@ReaderActivity).apply {
+                        text = pos; setTextColor(Ink.muted); textSize = 12f; typeface = Ink.mono
+                        setPadding(dp(10), 0, 0, 0)
+                    })
+                }
             })
         }
 
