@@ -252,6 +252,9 @@ object NativeBridge {
     /** Strokes on [page] in the draw-wire (decode with [WireCodec.decodeStrokes]) — for baking. */
     external fun nativeInkStrokesForDraw(handle: Long, page: Int): ByteArray
 
+    /** The 0-based pages that carry ink, sorted — drives the handwritten-notes annotations list. */
+    external fun nativeInkPages(handle: Long): IntArray
+
     /** Undo / redo the last ink edit on the current page (autosaves). Returns whether it changed. */
     external fun nativeInkUndo(handle: Long): Boolean
     external fun nativeInkRedo(handle: Long): Boolean

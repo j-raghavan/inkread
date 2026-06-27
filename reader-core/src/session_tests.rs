@@ -727,6 +727,23 @@ fn ink_saves_and_reloads_across_sessions() {
 }
 
 #[test]
+fn ink_pages_lists_inked_pages_sorted() {
+    // Drives the annotations list: ink on pages 0, 3, 1 (out of order) → sorted [0, 1, 3].
+    let store: Arc<dyn InkStore> = Arc::new(MemInkStore::new());
+    let mut s = session(5, DeviceCapabilities::supernote_full());
+    s.attach_ink_store(store).unwrap();
+    assert!(s.ink_pages().unwrap().is_empty(), "no ink yet");
+
+    draw(&mut s, &[(0.1, 0.1), (0.2, 0.2)]); // page 0
+    s.jump_to_page(3);
+    draw(&mut s, &[(0.3, 0.3), (0.4, 0.4)]); // page 3
+    s.jump_to_page(1);
+    draw(&mut s, &[(0.5, 0.5), (0.6, 0.6)]); // page 1
+
+    assert_eq!(s.ink_pages().unwrap(), vec![0, 1, 3], "inked pages, sorted");
+}
+
+#[test]
 fn ink_undo_redo_autosaves_to_store() {
     let store: Arc<dyn InkStore> = Arc::new(MemInkStore::new());
     let mut s = session(1, DeviceCapabilities::supernote_full());

@@ -975,6 +975,29 @@ pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeInkStrokesF
     .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
 }
 
+// nativeInkPages(handle) : int[] — the 0-based pages that carry ink, sorted (RR6). Drives the
+// annotations list. Mutates nothing; engine-thread only (the session is not thread-safe).
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeInkPages<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+) -> JIntArray<'local> {
+    env.with_env(|env| -> jni::errors::Result<JIntArray<'local>> {
+        let session = unsafe { session_mut(handle) }.map_err(|e| throw(env, &e))?;
+        let pages: Vec<jint> = session
+            .ink_pages()
+            .map_err(|e| throw(env, &e))?
+            .into_iter()
+            .map(|p| p as jint)
+            .collect();
+        let arr = env.new_int_array(pages.len())?;
+        env.set_int_array_region(&arr, 0, &pages)?;
+        Ok(arr)
+    })
+    .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
+}
+
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeInkStrokesForDraw<'local>(
     mut env: EnvUnowned<'local>,
