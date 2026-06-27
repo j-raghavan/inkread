@@ -110,6 +110,8 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
     private var bookmarks: Bookmarks? = null
     /** Total pages in the open doc; cached so the bottom-bar slider can read it on the UI thread. */
     @Volatile private var pageCount = 0
+    /** Chapter start pages (top-level resolved TOC targets, sorted) for chapter prev/next (1.7). */
+    @Volatile private var chapterStarts: List<Int> = emptyList()
     /** Stable id of the open book (its file name); keys thumbnails + the bookmarks file. */
     @Volatile private var currentBookId = ""
     /** Foreground reading-session start (elapsed ms) + the page it began on, for ReadingStats. */
@@ -813,19 +815,29 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
                 TAG,
                 "opened $bookId: $pageCount pages, resumed at page ${NativeBridge.nativeCurrentPage(docHandle)}",
             )
+            // Decode the TOC once: it drives both chapter prev/next (1.7) and the Daily per-article
+            // jump. Chapter starts = top-level resolved targets (fall back to all targets for a flat
+            // TOC), de-duped + sorted by page.
+            val toc = try {
+                WireCodec.decodeToc(NativeBridge.nativeToc(docHandle))
+            } catch (e: RuntimeException) {
+                Log.e(TAG, "toc failed: ${e.message}"); emptyList()
+            }
+            val tops = toc.filter { it.depth == 0 }.mapNotNull { it.targetPage }
+            chapterStarts = (if (tops.isNotEmpty()) tops else toc.mapNotNull { it.targetPage })
+                .distinct().sorted()
             // Daily: a tapped headline opens the issue AT that article. The issue's TOC is
             // [Cover, article0, article1, …], so article N is TOC entry N+1.
             val dailyArticle = intent.getIntExtra(EXTRA_DAILY_ARTICLE, -1)
             if (dailyArticle >= 0) {
-                try {
-                    val toc = WireCodec.decodeToc(NativeBridge.nativeToc(docHandle))
-                    toc.getOrNull(dailyArticle + 1)?.targetPage?.let { page ->
+                toc.getOrNull(dailyArticle + 1)?.targetPage?.let { page ->
+                    try {
                         NativeBridge.nativeJumpToPage(docHandle, page)
                         currentPage = NativeBridge.nativeCurrentPage(docHandle)
                         Log.i(TAG, "daily: jumped to article $dailyArticle → page $page")
+                    } catch (e: RuntimeException) {
+                        Log.e(TAG, "daily article jump failed: ${e.message}")
                     }
-                } catch (e: RuntimeException) {
-                    Log.e(TAG, "daily article jump failed: ${e.message}")
                 }
             }
         }
@@ -1557,6 +1569,23 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         }
     }
 
+    /** Jump to the previous (`dir<0`) / next (`dir>0`) chapter start relative to the current page
+     *  (1.7). No-op with a brief toast at the document ends or when the doc has no chapters. */
+    private fun chapterJump(dir: Int) {
+        val starts = chapterStarts
+        if (starts.isEmpty()) {
+            Toast.makeText(this, "No chapters in this document", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val cur = currentPage
+        val target = if (dir > 0) starts.firstOrNull { it > cur } else starts.lastOrNull { it < cur }
+        if (target != null) {
+            postJump(target)
+        } else {
+            Toast.makeText(this, if (dir > 0) "Last chapter" else "First chapter", Toast.LENGTH_SHORT).show()
+        }
+    }
+
     /** Drop any lasso selection when the page changes — the ids belong to the old page (engine). */
     private fun dropSelectionForPageChange() {
         if (selectedIds.isEmpty()) return
@@ -1645,12 +1674,21 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
                 override fun onStopTrackingTouch(sb: SeekBar) { dialog.dismiss(); postJump(sb.progress) }
             })
         }
+        // Double-chevron chapter jumps flank the scrubber (distinct from single-page edge taps),
+        // shown only when the document has a table of contents (1.7).
+        fun chapterBtn(glyph: String, dir: Int) = TextView(this).apply {
+            text = glyph; setTextColor(Ink.ink); textSize = 20f; typeface = Ink.serifBold
+            gravity = Gravity.CENTER; setPadding(dp(8), dp(2), dp(8), dp(2)); isClickable = true
+            setOnClickListener { dialog.dismiss(); chapterJump(dir) }
+        }
         container.addView(
             LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
                 setPadding(dp(16), dp(12), dp(16), dp(6))
+                if (chapterStarts.isNotEmpty()) addView(chapterBtn("‹‹", -1))
                 addView(seek, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+                if (chapterStarts.isNotEmpty()) addView(chapterBtn("››", +1))
                 addView(pageLabel, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { marginStart = dp(12) })
             },
         )
@@ -3131,6 +3169,8 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         bookmarks = null // bookmarks are persisted on toggle; drop the per-book store
         selectedIds = IntArray(0) // ink is persisted by the core to its sidecar
         selectionBounds = FloatArray(0)
+        chapterStarts = emptyList() // recomputed on the next open
+
         val h = docHandle
         docHandle = 0L // zero BEFORE the call so a re-entrant close is a no-op (Amendment 2)
         if (h == 0L) return
