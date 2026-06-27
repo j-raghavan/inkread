@@ -49,8 +49,8 @@ pub struct EpubBackend {
     nav: Vec<NavPoint>,
     /// Title/author.
     meta: DocumentMetadata,
-    /// The reading face (embedded default).
-    font: AbFont,
+    /// The reading face; `RefCell` so the `&self` font-family setter can swap it (RR4 / font select).
+    font: RefCell<AbFont>,
     /// Soft-hyphenation for justified/narrow lines (book typography, like KOReader).
     hyph: EnHyphenator,
     /// User text scale (font size); `1.0` = [`BASE_FONT_PX`]. Drives repagination.
@@ -92,7 +92,7 @@ impl EpubBackend {
             chapter_keys,
             nav: pkg.toc,
             meta,
-            font,
+            font: RefCell::new(font),
             hyph,
             scale: Cell::new(1.0),
             line_spacing: Cell::new(1.4),
@@ -119,7 +119,7 @@ impl EpubBackend {
         if needs {
             let fresh = layout_all(
                 &self.chapters,
-                &self.font,
+                &self.font.borrow(),
                 &self.hyph,
                 w,
                 h,
@@ -141,7 +141,7 @@ impl EpubBackend {
         };
         let fresh = layout_all(
             &self.chapters,
-            &self.font,
+            &self.font.borrow(),
             &self.hyph,
             w,
             h,
@@ -163,7 +163,7 @@ impl EpubBackend {
             return Vec::new();
         };
         // Shared with the PDF-reflow backend so the glyph→CharBox + anchor mapping lives once.
-        crate::document::reflow_view::page_charboxes(page, &laid.opts, &self.font)
+        crate::document::reflow_view::page_charboxes(page, &laid.opts, &self.font.borrow())
     }
 
     /// Frame a chapter-relative [`TextAnchor`] into a full [`PinPosition`] (RR6) for `chapter`. The
@@ -262,7 +262,7 @@ impl Document for EpubBackend {
         })?;
         buf.fill_white();
         let mut canvas = GrayCanvas::new(buf.width(), buf.height());
-        raster_page(page, &laid.opts, &self.font, &mut canvas);
+        raster_page(page, &laid.opts, &self.font.borrow(), &mut canvas);
         // Expand 8-bit grayscale → opaque RGBA (CHANNEL_ORDER r,g,b,a). One byte → three equal.
         let dst = buf.bytes_mut();
         for (i, &g) in canvas.pixels.iter().enumerate() {
@@ -325,6 +325,12 @@ impl Document for EpubBackend {
 
     fn set_alignment(&self, align_code: i32, current_page: usize) -> Option<usize> {
         self.align.set(Align::from_code(align_code));
+        self.repaginate_keeping_chapter(current_page)
+    }
+
+    fn set_font(&self, font_id: i32, current_page: usize) -> Option<usize> {
+        // Swap the reading face, then repaginate (new metrics → new line breaks), keeping the chapter.
+        *self.font.borrow_mut() = AbFont::for_face(font_id.max(0) as usize);
         self.repaginate_keeping_chapter(current_page)
     }
 
@@ -522,6 +528,24 @@ mod tests {
         assert_eq!(new_page, b.toc()[1].target_page.unwrap());
         // PDF-style fixed layout would return None; EPUB returns Some.
         assert!(b.set_text_scale(1.0, 0).is_some());
+    }
+
+    #[test]
+    fn set_font_repaginates_and_lists_faces() {
+        let b = EpubBackend::open(SAMPLE.to_vec(), vp(400, 600)).unwrap();
+        let _ = render(&b, 0, 400, 600);
+        let ch2_start = b.toc()[1].target_page.unwrap();
+        // Switching the reading face repaginates (EPUB → Some), landing back at chapter 2's start.
+        let new_page = b.set_font(2, ch2_start).unwrap();
+        assert_eq!(new_page, b.toc()[1].target_page.unwrap());
+        // An out-of-range id falls back to the default face, still repaginating.
+        assert!(b.set_font(999, 0).is_some());
+        // The bundled set is exposed for the picker (Spectral + the KOReader OSS faces).
+        let names = inkread_epub::reading_font_names();
+        assert!(
+            names.len() >= 4 && names[0] == "Spectral",
+            "faces: {names:?}"
+        );
     }
 
     /// The source character a pin currently resolves to: the glyph on `pin_to_page(pin)` whose anchor

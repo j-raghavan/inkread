@@ -188,6 +188,12 @@ the dependency set changes.
 |------|--------|---------|
 | Pinyon Script | github.com/SorkinType/Pinyon (Google Fonts) | SIL Open Font License 1.1 |
 | Spectral | github.com/productiontype/Spectral (Google Fonts) | SIL Open Font License 1.1 |
+| Noto Music | github.com/notofonts/music | SIL Open Font License 1.1 |
+| Noto Serif | github.com/koreader/koreader-fonts (notofonts) | SIL Open Font License 1.1 |
+| Noto Sans | github.com/koreader/koreader-fonts (notofonts) | SIL Open Font License 1.1 |
+| Droid Sans Mono | github.com/koreader/koreader-fonts | Apache License 2.0 |
+| FreeSerif | github.com/koreader/koreader-fonts (GNU FreeFont) | GPL-3.0 with font exception |
+| FreeSans | github.com/koreader/koreader-fonts (GNU FreeFont) | GPL-3.0 with font exception |
 
 Pinyon Script is bundled at `app/src/main/assets/fonts/pinyon_script.ttf` for the home-screen
 "Library" heading (Spencerian-inspired). © The Pinyon Script Project Authors; SIL OFL 1.1
@@ -196,3 +202,10 @@ Pinyon Script is bundled at `app/src/main/assets/fonts/pinyon_script.ttf` for th
 Spectral (Regular) is bundled at `inkread-epub/fonts/Spectral-Regular.ttf` and embedded in the
 reflow renderer (`inkread-epub::render`) as the default EPUB reading face. © Production Type; SIL
 OFL 1.1 — the full license ships alongside the font at `inkread-epub/fonts/OFL.txt`.
+
+The selectable reading faces (font picker) + the glyph fallback are also bundled under
+`inkread-epub/fonts/` and embedded in the reflow renderer: **Noto Serif / Noto Sans / Noto Music**
+(© The Noto Project Authors, SIL OFL 1.1), **Droid Sans Mono** (© Google, Apache-2.0), and
+**FreeSerif / FreeSans** (© the GNU FreeFont contributors, GPL-3.0 with the font embedding
+exception — one-way compatible with this project's AGPL-3.0). All are the open-source faces KOReader
+ships; each redistributed with attribution per its license.
