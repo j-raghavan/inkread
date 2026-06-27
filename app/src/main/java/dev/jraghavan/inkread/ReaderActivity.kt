@@ -1777,6 +1777,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         control(R.drawable.ic_menu_home, "Home") { goHome() }
         // (Bookmark toggle moved to the top-right corner dog-ear; "Marks" lists them.)
         control(R.drawable.ic_menu_marks, "Marks") { showBookmarks() }
+        control(R.drawable.ic_tool_pen, "Notes") { showAnnotations() }
         control(R.drawable.ic_menu_contents, "Contents") { showContentsLazy() }
         control(R.drawable.ic_menu_search, "Search") { search.showSearchDialog() }
         // Quick zoom (circle −/+ icons — not magnifiers, which are reserved for Search). Also in Adjust → Zoom.
@@ -1870,6 +1871,75 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
                 }
             }
         }
+    }
+
+    /** Handwritten-notes annotations list (1.5): fetch inked pages + their stroke counts off-thread,
+     *  then show a tap-to-jump list. */
+    private fun showAnnotations() {
+        engine.execute {
+            if (docHandle == 0L) return@execute
+            val pages = try {
+                NativeBridge.nativeInkPages(docHandle)
+            } catch (e: RuntimeException) {
+                Log.e(TAG, "ink pages failed: ${e.message}"); IntArray(0)
+            }
+            val items = pages.map { p ->
+                val count = try {
+                    WireCodec.decodeStrokes(NativeBridge.nativeInkStrokesForDraw(docHandle, p)).size
+                } catch (e: RuntimeException) { 0 }
+                p to count
+            }
+            runOnUiThread {
+                if (items.isEmpty()) {
+                    Toast.makeText(this, "No handwritten notes yet", Toast.LENGTH_SHORT).show()
+                } else {
+                    showAnnotationsList(items)
+                }
+            }
+        }
+    }
+
+    /** The inked pages as a scrollable "Page N · M notes" list; tap a row to jump there. */
+    private fun showAnnotationsList(items: List<Pair<Int, Int>>) {
+        val d = resources.displayMetrics.density
+        fun dp(v: Int) = (v * d).toInt()
+        val dialog = Dialog(this).apply { requestWindowFeature(Window.FEATURE_NO_TITLE) }
+        val outer = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(24), dp(22), dp(24), dp(14))
+        }
+        outer.addView(Ink.eyebrow(this, "Annotations"))
+        outer.addView(Ink.gap(this, 10))
+        outer.addView(Ink.rule(this))
+        outer.addView(Ink.gap(this, 4))
+        val list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        items.forEachIndexed { i, (page, count) ->
+            if (i > 0) list.addView(View(this).apply { setBackgroundColor(Ink.hairline) },
+                LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, Ink.hair()))
+            list.addView(LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(dp(4), dp(14), dp(4), dp(14))
+                isClickable = true
+                setOnClickListener { dialog.dismiss(); postJump(page) }
+                addView(TextView(this@ReaderActivity).apply {
+                    text = "Page ${page + 1}"
+                    setTextColor(Ink.ink); textSize = 17f; typeface = Ink.serifBold
+                }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+                addView(TextView(this@ReaderActivity).apply {
+                    text = if (count == 1) "1 note" else "$count notes"
+                    setTextColor(Ink.muted); textSize = 12f; typeface = Ink.mono
+                })
+            })
+        }
+        outer.addView(ScrollView(this).apply { addView(list) },
+            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, (resources.displayMetrics.heightPixels * 0.7f).toInt()))
+        dialog.setContentView(outer)
+        dialog.window?.apply {
+            setLayout((resources.displayMetrics.widthPixels * 0.82f).toInt(), ViewGroup.LayoutParams.WRAP_CONTENT)
+            setBackgroundDrawable(Ink.cardBg())
+        }
+        dialog.show()
     }
 
     /** The document's table of contents (RR11-FR2), shown as a scrollable list from the popup. */

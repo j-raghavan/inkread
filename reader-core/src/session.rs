@@ -1041,6 +1041,21 @@ impl ReaderSession {
         }
     }
 
+    /// Pages that carry ink, sorted ascending (RR6) — drives the annotations list. The store's saved
+    /// pages plus the open page when its live (possibly not-yet-saved) layer has strokes.
+    pub fn ink_pages(&self) -> CoreResult<Vec<usize>> {
+        let mut pages = match &self.ink {
+            Some(store) => store.pages_with_ink()?,
+            None => Vec::new(),
+        };
+        if !self.ink_strokes().is_empty() && !pages.contains(&self.page) {
+            pages.push(self.page);
+        }
+        pages.sort_unstable();
+        pages.dedup();
+        Ok(pages)
+    }
+
     /// Begin a stroke (RR6). Pen/Highlighter accumulate points; Eraser removes strokes under each
     /// subsequent point. `width` is the stroke width (ink) or the erase radius (eraser).
     pub fn ink_begin_stroke(
