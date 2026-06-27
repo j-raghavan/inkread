@@ -867,6 +867,13 @@ impl Document for PdfBackend {
             .map(|v| v.set_alignment(align_code, current_page))
     }
 
+    fn set_font(&self, font_id: i32, current_page: usize) -> Option<usize> {
+        self.reflow
+            .borrow()
+            .as_ref()
+            .map(|v| v.set_font(font_id, current_page))
+    }
+
     fn supports_reflow(&self) -> bool {
         self.has_text_layer()
     }

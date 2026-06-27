@@ -67,8 +67,8 @@ struct Laid {
 pub(crate) struct ReflowView {
     /// Reading-order units (PDF source pages) as content blocks.
     units: Vec<Vec<Block>>,
-    /// The reading face (embedded default — shared with the EPUB path).
-    font: AbFont,
+    /// The reading face (shared with the EPUB path); `RefCell` so the `&self` font setter can swap it.
+    font: RefCell<AbFont>,
     /// User text scale (font size); `1.0` = [`BASE_FONT_PX`].
     scale: Cell<f32>,
     /// Line-spacing multiple (RR4 — default 1.4).
@@ -96,7 +96,7 @@ impl ReflowView {
         );
         Self {
             units,
-            font,
+            font: RefCell::new(font),
             scale: Cell::new(1.0),
             line_spacing: Cell::new(1.4),
             align: Cell::new(Align::Left),
@@ -142,7 +142,7 @@ impl ReflowView {
         if needs {
             let fresh = layout_all(
                 &self.units,
-                &self.font,
+                &self.font.borrow(),
                 w,
                 h,
                 font_px,
@@ -163,7 +163,7 @@ impl ReflowView {
         };
         let fresh = layout_all(
             &self.units,
-            &self.font,
+            &self.font.borrow(),
             w,
             h,
             self.font_px(),
@@ -186,7 +186,7 @@ impl ReflowView {
         })?;
         buf.fill_white();
         let mut canvas = GrayCanvas::new(buf.width(), buf.height());
-        raster_page(page, &laid.opts, &self.font, &mut canvas);
+        raster_page(page, &laid.opts, &self.font.borrow(), &mut canvas);
         let dst = buf.bytes_mut();
         for (i, &g) in canvas.pixels.iter().enumerate() {
             let o = i * 4;
@@ -207,7 +207,7 @@ impl ReflowView {
         };
         // Reconstructed-PDF blocks flow through the same paginator, so glyphs carry an anchor over
         // the *reflowed* unit (ADR-INKREAD-0012 Decision 3) — shared with the EPUB backend.
-        page_charboxes(page, &laid.opts, &self.font)
+        page_charboxes(page, &laid.opts, &self.font.borrow())
     }
 
     /// Set the text scale (font size) and repaginate, returning the preserved-position page.
@@ -235,6 +235,12 @@ impl ReflowView {
     /// Set the alignment and repaginate, returning the preserved-position page.
     pub(crate) fn set_alignment(&self, align_code: i32, current_page: usize) -> usize {
         self.align.set(Align::from_code(align_code));
+        self.repaginate_keeping_unit(current_page)
+    }
+
+    /// Swap the reading face and repaginate, returning the preserved-position page.
+    pub(crate) fn set_font(&self, font_id: i32, current_page: usize) -> usize {
+        *self.font.borrow_mut() = AbFont::for_face(font_id.max(0) as usize);
         self.repaginate_keeping_unit(current_page)
     }
 }
