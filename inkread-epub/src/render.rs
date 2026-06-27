@@ -39,7 +39,8 @@ impl AbFont {
     /// The embedded default reading face, with the bundled symbol fallback.
     #[must_use]
     pub fn default_font() -> Self {
-        let font = FontVec::try_from_vec(DEFAULT_FONT.to_vec()).expect("bundled Spectral font is valid");
+        let font =
+            FontVec::try_from_vec(DEFAULT_FONT.to_vec()).expect("bundled Spectral font is valid");
         let fallbacks = FontVec::try_from_vec(FALLBACK_FONT.to_vec())
             .into_iter()
             .collect();
@@ -50,9 +51,10 @@ impl AbFont {
     /// fallback chain — used where a single explicit face is wanted.
     #[must_use]
     pub fn from_bytes(bytes: Vec<u8>) -> Option<Self> {
-        FontVec::try_from_vec(bytes)
-            .ok()
-            .map(|font| Self { font, fallbacks: Vec::new() })
+        FontVec::try_from_vec(bytes).ok().map(|font| Self {
+            font,
+            fallbacks: Vec::new(),
+        })
     }
 
     /// The face to render `ch` with: the primary if it has the glyph, else the first fallback that
@@ -324,7 +326,11 @@ mod tests {
         // G-clef (U+1D11E): Spectral has no glyph (→ .notdef box), Noto Music does. With the
         // fallback chain, face_for must resolve to a face that has it, and it must advance + render.
         let clef = '\u{1D11E}';
-        assert_eq!(f.font.glyph_id(clef).0, 0, "Spectral has no clef glyph (would box)");
+        assert_eq!(
+            f.font.glyph_id(clef).0,
+            0,
+            "Spectral has no clef glyph (would box)"
+        );
         assert_ne!(
             f.face_for(clef).glyph_id(clef).0,
             0,
@@ -332,9 +338,18 @@ mod tests {
         );
         // It contributes positive width and inks pixels (not a blank .notdef).
         assert!(f.advance("\u{1D11E}", 40.0, false, false) > 0.0);
-        let pages = paginate(&[paragraph("\u{1D11E}")], &LayoutOpts::new(300.0, 300.0, 40.0), &f);
+        let pages = paginate(
+            &[paragraph("\u{1D11E}")],
+            &LayoutOpts::new(300.0, 300.0, 40.0),
+            &f,
+        );
         let mut canvas = GrayCanvas::new(300, 300);
-        render_page(&pages[0], &LayoutOpts::new(300.0, 300.0, 40.0), &f, &mut canvas);
+        render_page(
+            &pages[0],
+            &LayoutOpts::new(300.0, 300.0, 40.0),
+            &f,
+            &mut canvas,
+        );
         assert!(ink_count(&canvas) > 0, "the clef renders actual ink");
     }
 
