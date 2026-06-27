@@ -5,6 +5,14 @@
 //! plus script/style/svg), skips short non-content blocks (share/subscribe/counts/nav links), decodes
 //! HTML entities (named + numeric), and emits the remaining block text as escaped `<p>` paragraphs.
 //! Output is always well-formed XHTML so the assembler injects it safely. Pure + host-testable.
+//!
+//! The HTML is parsed with `scraper` (html5ever) — the same parser `inkread-epub` uses — rather than
+//! a hand-rolled tag scanner: comments, CDATA, conditional comments, and malformed nesting are
+//! handled by the parser, so comment bodies (e.g. `->` arrows) can never leak into the prose.
+
+use ego_tree::NodeRef;
+use scraper::node::Node;
+use scraper::{ElementRef, Html};
 
 /// Tags whose closing (or self-closing) ends a paragraph — block-level boundaries.
 const BLOCK_TAGS: &[&str] = &[
@@ -55,10 +63,9 @@ const MIN_BLOCK_CHARS: usize = 40;
 /// Extract the main readable body of `html` as well-formed XHTML (one `<p>` per real text block).
 #[must_use]
 pub fn extract_readable(html: &str) -> String {
-    let main = main_content(html);
     let mut out = String::new();
     let mut last = String::new();
-    for block in to_blocks(main) {
+    for block in to_blocks(html) {
         let t = collapse_ws(&strip_zero_width(&block));
         if t.chars().count() < MIN_BLOCK_CHARS || is_diagram_source(&t) || is_author_bio(&t) {
             continue;
@@ -84,87 +91,81 @@ pub fn extract_readable(html: &str) -> String {
     out
 }
 
-/// Narrow to the article body when the page marks it up (`<article>` then `<main>`), else the whole
-/// document. Avoids pulling in the surrounding nav/sidebar/footer.
-fn main_content(html: &str) -> &str {
-    for tag in ["article", "main"] {
-        if let Some(inner) = inner_of(html, tag) {
-            // Only trust it if it actually carries prose (some pages have an empty <main> shell).
-            if inner.len() > 200 {
-                return inner;
-            }
-        }
-    }
-    html
-}
-
-/// The inner HTML of the first `<tag>…</tag>`. ASCII-lowercasing preserves byte offsets, so the
-/// indices map back onto the original `html`.
-fn inner_of<'a>(html: &'a str, tag: &str) -> Option<&'a str> {
-    let lower = html.to_ascii_lowercase();
-    let start = lower.find(&format!("<{tag}"))?;
-    let after_open = start + html[start..].find('>')? + 1;
-    let close = format!("</{tag}");
-    let end = lower[after_open..].find(&close)? + after_open;
-    Some(&html[after_open..end])
-}
-
-/// Split `html` into text blocks: drop the body of [`SKIP_TAGS`] elements and all tags, breaking a
-/// block at every block-level tag boundary. Decodes HTML entities.
+/// Split `html` into text blocks. Parses with html5ever, narrows to the article body, then walks the
+/// tree: text accumulates into the current block, [`BLOCK_TAGS`] elements end it, and [`SKIP_TAGS`]
+/// subtrees are dropped. Comments/CDATA/doctype nodes are never text, so they cannot leak. The parser
+/// already decodes entities in text nodes, so no manual entity pass is needed here.
 fn to_blocks(html: &str) -> Vec<String> {
+    let doc = Html::parse_document(html);
+    let start = main_node(doc.tree.root());
     let mut blocks = Vec::new();
     let mut cur = String::new();
-    let mut rest = html;
-    loop {
-        let lt = match rest.find('<') {
-            Some(p) => p,
-            None => {
-                cur.push_str(rest);
-                break;
-            }
-        };
-        cur.push_str(&rest[..lt]);
-        let after = &rest[lt + 1..];
-        let gt = match after.find('>') {
-            Some(p) => p,
-            None => break,
-        };
-        let tag = &after[..gt];
-        let mut next = &after[gt + 1..];
-        let is_close = tag.starts_with('/');
-        let name = tag_name(tag);
-        if !is_close && SKIP_TAGS.contains(&name.as_str()) {
-            // Skip the element's whole body, up to and including its closing tag.
-            let close = format!("</{name}");
-            next = match next.to_ascii_lowercase().find(&close) {
-                Some(rel) => match next[rel..].find('>') {
-                    Some(g) => &next[rel + g + 1..],
-                    None => "",
-                },
-                None => "",
-            };
-        } else if BLOCK_TAGS.contains(&name.as_str()) && !cur.trim().is_empty() {
-            blocks.push(std::mem::take(&mut cur));
-        }
-        if next.is_empty() {
-            break;
-        }
-        rest = next;
-    }
+    walk(start, &mut cur, &mut blocks);
     if !cur.trim().is_empty() {
         blocks.push(cur);
     }
-    blocks.into_iter().map(|b| decode_entities(&b)).collect()
+    blocks
 }
 
-/// The lowercased element name from a tag's inner text (handles `</p>`, `<p class=…>`, `<br/>`).
-fn tag_name(tag: &str) -> String {
-    tag.trim_start_matches('/')
-        .trim_start()
-        .split(|c: char| c.is_whitespace() || c == '/' || c == '>')
-        .next()
-        .unwrap_or("")
-        .to_ascii_lowercase()
+/// Narrow to the article body when the page marks it up (`<article>` then `<main>`), else `<body>`
+/// (or the root). Only trusts the region if it actually carries prose — some pages ship an empty
+/// `<main>` shell. Avoids pulling in the surrounding nav/sidebar/footer.
+fn main_node(root: NodeRef<Node>) -> NodeRef<Node> {
+    for tag in ["article", "main"] {
+        if let Some(n) = find_element(root, tag) {
+            if text_len(n) > 200 {
+                return n;
+            }
+        }
+    }
+    find_element(root, "body").unwrap_or(root)
+}
+
+/// Depth-first search for the first element named `name`.
+fn find_element<'a>(node: NodeRef<'a, Node>, name: &str) -> Option<NodeRef<'a, Node>> {
+    for child in node.children() {
+        if let Node::Element(el) = child.value() {
+            if el.name() == name {
+                return Some(child);
+            }
+        }
+        if let Some(found) = find_element(child, name) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+/// Total length of all descendant text under `node` (used to tell a prose region from an empty shell).
+fn text_len(node: NodeRef<Node>) -> usize {
+    ElementRef::wrap(node)
+        .map(|e| e.text().map(str::len).sum())
+        .unwrap_or(0)
+}
+
+/// Walk block-level structure under `node`, emitting block text into `blocks`. Loose inline text
+/// accumulates in `cur` and flushes at each block boundary; [`SKIP_TAGS`] subtrees are skipped whole.
+fn walk(node: NodeRef<Node>, cur: &mut String, blocks: &mut Vec<String>) {
+    for child in node.children() {
+        match child.value() {
+            Node::Text(t) => cur.push_str(t),
+            Node::Element(el) => {
+                let name = el.name();
+                if SKIP_TAGS.contains(&name) {
+                    continue; // chrome (script/style/nav/…) — drop the whole subtree
+                }
+                let is_block = BLOCK_TAGS.contains(&name);
+                if is_block && !cur.trim().is_empty() {
+                    blocks.push(std::mem::take(cur));
+                }
+                walk(child, cur, blocks);
+                if is_block && !cur.trim().is_empty() {
+                    blocks.push(std::mem::take(cur));
+                }
+            }
+            _ => {} // Comment / Doctype / ProcessingInstruction — never content
+        }
+    }
 }
 
 /// Decode named + numeric HTML entities to text (so `&amp;`, `&#x27;`, `&#8217;` become `& ' '`).
@@ -359,6 +360,30 @@ mod tests {
         assert!(
             !out.contains("Home") && !out.contains("Copyright"),
             "nav/footer dropped: {out}"
+        );
+    }
+
+    #[test]
+    fn html_comments_with_inner_gt_are_stripped_not_leaked() {
+        // An HTML comment whose body contains `>` (arrows / conditional comments) must not leak —
+        // the regression behind the "->->-> Top Sources: None -->" artifact in the reader.
+        let html = "<article>\
+            <!-- ->->->->->->-> Top Sources: None -->\
+            <p>Zuckerberg's increasingly bizarre war on whistleblowers begins here, plainly.</p>\
+            <!--[if gt IE 8]><p>conditional-comment junk</p><![endif]-->\
+            <p>And a second real paragraph of prose, comfortably past the minimum length.</p>\
+            </article>";
+        let out = extract_readable(html);
+        assert!(out.contains("bizarre war on whistleblowers"), "{out}");
+        assert!(out.contains("second real paragraph"), "{out}");
+        assert!(!out.contains("Top Sources"), "comment text leaked: {out}");
+        assert!(
+            !out.contains("-->") && !out.contains("->->"),
+            "arrows leaked: {out}"
+        );
+        assert!(
+            !out.contains("conditional-comment"),
+            "conditional comment leaked: {out}"
         );
     }
 

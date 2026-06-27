@@ -665,9 +665,11 @@ dependencies = [
 name = "inkread-daily"
 version = "0.1.0-m0"
 dependencies = [
+ "ego-tree",
  "feed-rs",
  "inkread-epub",
  "quick-xml 0.36.2",
+ "scraper",
  "serde",
  "serde_json",
  "zip 2.4.2",
