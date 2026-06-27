@@ -872,6 +872,10 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         val bmp = bitmap ?: return
         if (handle == 0L) return
 
+        // Render-path timing (Rendering M1 observability): core render → copy → composite → blit.
+        // Cheap to measure; per-render detail is gated behind diag, and any render that approaches
+        // the e-ink budget is surfaced at I-level so slowness shows up without a debug build.
+        val tStart = SystemClock.elapsedRealtime()
         try {
             buf.clear()
             NativeBridge.nativeRenderPage(handle, buf)
@@ -879,8 +883,10 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             Log.e(TAG, "render failed: ${e.message}")
             return
         }
+        val tCore = SystemClock.elapsedRealtime()
         buf.rewind()
         bmp.copyPixelsFromBuffer(buf)
+        val tCopy = SystemClock.elapsedRealtime()
         currentPage = NativeBridge.nativeCurrentPage(handle)
         // Bake the CORE's strokes for this page onto the rendered page (RR6) before blitting.
         pageStrokes = try {
@@ -906,7 +912,16 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         if (currentPage == 0 && currentBookId.isNotEmpty() && !Books.thumbFile(this, currentBookId).exists()) {
             Books.saveThumbnail(this, currentBookId, bmp)
         }
+        val tComposite = SystemClock.elapsedRealtime()
         blit { canvas -> canvas.drawBitmap(bmp, 0f, 0f, null) }
+        val tBlit = SystemClock.elapsedRealtime()
+        val core = tCore - tStart; val copy = tCopy - tCore
+        val composite = tComposite - tCopy; val blitMs = tBlit - tComposite; val total = tBlit - tStart
+        // One concise line per render (renders are low-frequency — once per page turn/settle). This is
+        // the on-app cost; the panel's async EPD waveform refresh isn't observable from here. A render
+        // at/over the e-ink budget is flagged SLOW inline.
+        val slow = if (total >= SLOW_RENDER_MS) " SLOW" else ""
+        Log.i(TAG, "render p=$currentPage: core=$core copy=$copy composite=$composite blit=$blitMs total=${total}ms$slow")
         if (!deferLinks) refreshCurrentLinks()
     }
 
@@ -3175,6 +3190,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         const val PASTE_OFFSET = 0.03f // normalized offset so a paste lands just beside the source.
         const val FINGER_LONG_PRESS_MS = 500L // finger held ~still this long on a word → look it up.
         const val FINGER_MOVE_SLOP_PX = 24f // finger travel beyond this = a swipe, not a tap/hold.
+        const val SLOW_RENDER_MS = 250L // a render+blit at/over this approaches the e-ink budget — log it.
         // Contact major ≥ this fraction of the panel height ⇒ a palm. Lowered from 0.12 to 0.06
         // (≈154px on a 2560px panel) per on-device PALMDIAG capture: resting palms reported
         // touch-major ≈ 140–240px, well under the old 307px gate, so the very first palm leaked

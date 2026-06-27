@@ -528,6 +528,15 @@ impl ReaderSession {
             buf,
             crate::render::contrast::step_to_gamma(self.contrast),
         );
+        // Grayscale + dithering are deliberately NOT applied here. The shell blits this RGBA buffer
+        // to a SurfaceView and the Supernote's EPD controller does the waveform grayscale + dithering
+        // in hardware; pre-quantizing in the core would double-process (fighting the panel) for no
+        // gain. The `render::gray` module (to_grayscale / DitherMode) is retained for host/emulator
+        // rendering + golden tests, and for a future direct-framebuffer path (KOReader-style fb
+        // ioctl) that WOULD bypass the panel's conversion and need to dither itself — that is the only
+        // path where the DitherMode setting becomes live. The cache key fixes DitherMode::None to keep
+        // the key honest about this. (Reflow/EPUB is already grayscale-native via inkread-epub's
+        // GrayCanvas; this note is about the fixed-layout/PDF RGBA path.)
         if cacheable {
             self.caches.render().insert(key, buf.bytes().to_vec());
         }

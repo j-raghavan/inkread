@@ -216,7 +216,10 @@ pub mod registry {
             K::NightFlashInterval => (Int(6), Global),
             K::AvoidFlashing => (Bool(false), Global),
             K::NightMode => (Bool(false), Global),
-            K::DitherMode => (Int(1), Global), // ordered, the e-ink default
+            // Ordered by default, but RESERVED: the fixed-layout blit path delegates grayscale +
+            // dithering to the EPD panel (see Session::render_current), so this only becomes live on a
+            // future direct-framebuffer path. Kept plumbed so that switch is a one-line change.
+            K::DitherMode => (Int(1), Global),
             K::FontSize => (Int(100), PerBook),
             K::FontFamily => (Text(String::new()), PerBook),
             K::LineSpacing => (Int(100), PerBook),
