@@ -219,6 +219,20 @@ class DailyController(private val context: Context) {
             }
         }.getOrDefault(emptyList())
 
+    /** Whether article [index] of today's issue has been opened. Keyed by date so marks reset daily. */
+    fun isRead(index: Int): Boolean =
+        prefs().getStringSet("readArticles", emptySet())!!.contains("${todayKey()}#$index")
+
+    /** Mark article [index] of today's issue as read; prunes other days' marks so the set stays small. */
+    fun markRead(index: Int) {
+        val today = todayKey()
+        val next = prefs().getStringSet("readArticles", emptySet())!!
+            .filter { it.startsWith("$today#") } // drop stale days
+            .toMutableSet()
+            .apply { add("$today#$index") }
+        prefs().edit().putStringSet("readArticles", next).apply()
+    }
+
     /** Past issues (excluding today), most-recent first. */
     fun backIssues(): List<BackIssue> {
         val today = todayKey()
