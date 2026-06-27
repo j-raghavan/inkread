@@ -228,10 +228,21 @@ class DailyActivity : Activity() {
             })
             addView(blackRule(maxOf(1, dp(1))).apply { (layoutParams as LinearLayout.LayoutParams).topMargin = dim(5) })
             list.forEach { h ->
-                addView(TextView(this@DailyActivity).apply {
-                    text = h.title; setTextColor(ink); textSize = fs(15f); typeface = serif
-                    setLineSpacing(0f, 1.16f); setPadding(0, dim(10), 0, 0)
-                    isClickable = true; setOnClickListener { openIssue(issue, h.index) }
+                val read = daily.isRead(h.index)
+                addView(LinearLayout(this@DailyActivity).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    setPadding(0, dim(10), 0, 0)
+                    isClickable = true
+                    setOnClickListener { daily.markRead(h.index); openIssue(issue, h.index) }
+                    // Fixed-width gutter: a filled dot for unread, blank for read — titles stay aligned.
+                    addView(TextView(this@DailyActivity).apply {
+                        text = if (read) "" else "●"; setTextColor(ink); textSize = fs(9f)
+                        typeface = serif; width = dim(16); setPadding(0, dim(5), 0, 0)
+                    })
+                    addView(TextView(this@DailyActivity).apply {
+                        text = h.title; setTextColor(if (read) Ink.muted else ink); textSize = fs(15f)
+                        typeface = serif; setLineSpacing(0f, 1.16f)
+                    }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
                 })
             }
         }
