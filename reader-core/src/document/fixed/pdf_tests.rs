@@ -521,6 +521,45 @@ fn render_fit_page_letterboxes_and_preserves_aspect() {
     assert!(px.chunks_exact(4).all(|p| p[3] == 0xFF), "opaque");
 }
 
+// Golden/regression safety net for render-path scratch reuse: render_fit must be byte-identical
+// across repeated calls — even after an intervening render at a DIFFERENT size, the failure mode if a
+// reused scratch buffer leaked stale pixels. Pins real-PDF render output without a version-fragile
+// golden image.
+#[test]
+fn render_fit_is_deterministic_across_intervening_sizes() {
+    let _g = pdfium_serial();
+    if !host_pdfium_available() {
+        eprintln!("SKIP render_fit_deterministic: host libpdfium UNVERIFIED");
+        return;
+    }
+    let bytes = std::fs::read(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/minimal.pdf"
+    ))
+    .expect("fixture present");
+    let doc = PdfBackend::open(bytes).unwrap();
+    let (w, h) = (220u32, 300u32);
+    let render_fit = |doc: &PdfBackend| {
+        let mut px = vec![0u8; (w * h * 4) as usize];
+        let mut pb = PixelBuffer::from_rgba(&mut px, w, h).unwrap();
+        doc.render_fit(0, &mut pb, FitMode::Page, 0.0, 0.0).unwrap();
+        px
+    };
+    let first = render_fit(&doc);
+    // A larger intervening render grows any shared scratch; a stale tail must not bleed into the next.
+    {
+        let (bw, bh) = (360u32, 460u32);
+        let mut px = vec![0u8; (bw * bh * 4) as usize];
+        let mut pb = PixelBuffer::from_rgba(&mut px, bw, bh).unwrap();
+        doc.render_fit(0, &mut pb, FitMode::Page, 0.0, 0.0).unwrap();
+    }
+    let second = render_fit(&doc);
+    assert_eq!(
+        first, second,
+        "render_fit is byte-identical regardless of a prior render's size"
+    );
+}
+
 // RR4 Crop: content_bbox finds a box tighter than the full page (text doesn't fill the sheet),
 // and render_cropped renders that region without error.
 #[test]
