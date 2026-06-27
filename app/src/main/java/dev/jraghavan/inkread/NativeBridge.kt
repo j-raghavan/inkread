@@ -181,6 +181,9 @@ object NativeBridge {
      *  remap (works on PDF + EPUB); re-render after calling. */
     external fun nativeSetContrast(handle: Long, step: Int)
 
+    /** Night mode: invert the page (light-on-dark) after contrast (RR4). Re-render after calling. */
+    external fun nativeSetNight(handle: Long, on: Boolean)
+
     /** Update the render viewport after a surface resize / screen rotation (RR21-FR4). Required so
      *  the core renders into the new buffer size (PDF re-renders, EPUB repaginates). Re-render after. */
     external fun nativeSetViewport(handle: Long, width: Int, height: Int, dpi: Int)

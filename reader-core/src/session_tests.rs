@@ -1349,6 +1349,29 @@ fn contrast_darkens_a_gray_page_after_render() {
 }
 
 #[test]
+fn night_mode_inverts_the_page() {
+    let mut s = ReaderSession::with_document(
+        Box::new(GrayDoc(80)),
+        DeviceCapabilities::supernote_full(),
+        Viewport::new(8, 8, 226),
+    );
+    let mut bytes = vec![0u8; 8 * 8 * 4];
+    {
+        let mut buf = PixelBuffer::from_rgba(&mut bytes, 8, 8).unwrap();
+        s.render_current(&mut buf).unwrap();
+    }
+    assert_eq!(bytes[0], 80, "day: the gray page renders as-is");
+
+    s.set_night(true);
+    {
+        let mut buf = PixelBuffer::from_rgba(&mut bytes, 8, 8).unwrap();
+        s.render_current(&mut buf).unwrap(); // night caches separately (invert in the key)
+    }
+    assert_eq!(bytes[0], 255 - 80, "night: the page is inverted");
+    assert_eq!(bytes[3], 0xFF, "alpha preserved");
+}
+
+#[test]
 fn prefetch_warms_the_next_page_without_changing_the_displayed_one() {
     let mut s = session(3, DeviceCapabilities::supernote_full());
     let mut bytes = vec![0u8; 100 * 120 * 4];

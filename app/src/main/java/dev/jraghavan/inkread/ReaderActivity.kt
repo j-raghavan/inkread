@@ -788,6 +788,8 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             }
             // Re-apply the saved display contrast (RR4); 0 = off (a no-op in the core).
             try { NativeBridge.nativeSetContrast(docHandle, contrastPref()) } catch (e: RuntimeException) {}
+            // Re-apply night mode (invert); default off (RR4 / style presets).
+            try { NativeBridge.nativeSetNight(docHandle, nightPref()) } catch (e: RuntimeException) {}
             // Re-apply the saved page fit mode (RR4); default Page/contain.
             try { NativeBridge.nativeSetFit(docHandle, fitPref()) } catch (e: RuntimeException) {}
             // Re-apply the saved auto-crop + margin (RR4); default off.
@@ -2804,6 +2806,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         val content = android.widget.FrameLayout(this)
 
         val panels: List<Triple<String, Int, () -> View>> = listOf(
+            Triple("Style", R.drawable.ic_menu_adjust) { stylePanel() },
             Triple("Rotate", R.drawable.ic_menu_rotate) { rotationPanel() },
             Triple("Crop", R.drawable.ic_menu_crop) { cropPanel() },
             Triple("Zoom", R.drawable.ic_menu_fit) { zoomPanel() },
@@ -3172,6 +3175,66 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         return container
     }
 
+    /** A reading style preset (1.10): a bundle of (text scale, line-spacing index, contrast step,
+     *  night). Font/spacing are no-ops on fixed-layout PDFs; contrast/night apply to both. */
+    private data class StyleSpec(val scale: Float, val spacing: Int, val contrast: Int, val night: Boolean)
+
+    private fun styleSpec(name: String): StyleSpec = when (name) {
+        "Bold" -> StyleSpec(1.0f, 1, 4, false) // darker text (heavier ink)
+        "Night" -> StyleSpec(1.0f, 1, 0, true) // inverted (light on dark)
+        "Outdoor" -> StyleSpec(1.0f, 1, CONTRAST_MAX, false) // maximum contrast
+        "Relaxed" -> StyleSpec(1.15f, 2, 0, false) // larger + airier
+        else -> StyleSpec(1.0f, 1, 0, false) // Original — defaults
+    }
+
+    /** The "Style" tab: one-tap presets that bundle font size, spacing, contrast, and night. */
+    private fun stylePanel(): View {
+        val container = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        container.addView(
+            settingRow(
+                "Preset",
+                segmented(STYLE_PRESETS, STYLE_PRESETS.indexOf(stylePresetPref()).coerceAtLeast(0)) { which ->
+                    applyStylePreset(STYLE_PRESETS[which])
+                },
+            ),
+        )
+        return container
+    }
+
+    /** Apply + persist a style preset: set every knob, then repaginate/re-render. */
+    private fun applyStylePreset(name: String) {
+        val s = styleSpec(name)
+        setStylePresetPref(name)
+        setTextScalePref(s.scale)
+        setLineSpacingPref(s.spacing)
+        setContrastPref(s.contrast)
+        setNightPref(s.night)
+        engine.execute {
+            try {
+                NativeBridge.nativeSetTextScale(docHandle, s.scale)
+                NativeBridge.nativeSetLineSpacing(docHandle, LINE_SPACINGS[s.spacing])
+                NativeBridge.nativeSetContrast(docHandle, s.contrast)
+                NativeBridge.nativeSetNight(docHandle, s.night)
+                pageCount = NativeBridge.nativePageCount(docHandle)
+            } catch (e: RuntimeException) {
+                Log.e(TAG, "style preset apply failed: ${e.message}")
+            }
+            repaintPanel()
+        }
+    }
+
+    private fun nightPref(): Boolean =
+        getSharedPreferences("display", MODE_PRIVATE).getBoolean("night", false)
+
+    private fun setNightPref(on: Boolean) =
+        getSharedPreferences("display", MODE_PRIVATE).edit().putBoolean("night", on).apply()
+
+    private fun stylePresetPref(): String =
+        getSharedPreferences("display", MODE_PRIVATE).getString("style_preset", "Original") ?: "Original"
+
+    private fun setStylePresetPref(name: String) =
+        getSharedPreferences("display", MODE_PRIVATE).edit().putString("style_preset", name).apply()
+
     private fun renderQualityPref(): Int =
         getSharedPreferences("display", MODE_PRIVATE).getInt("render_quality", 1).coerceIn(0, 2)
 
@@ -3327,6 +3390,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         const val OPEN_DRAG_FRAC = 0.08f // lasso: start-to-lift distance (normalized) above which the gesture is an open drag (vs a closed loop).
         const val CONTRAST_MAX = 8 // mirrors reader-core render::contrast::MAX_CONTRAST_STEP (RR4).
         val LINE_SPACINGS = floatArrayOf(1.2f, 1.4f, 1.7f) // Small / Medium / Large (RR4).
+        val STYLE_PRESETS = listOf("Original", "Bold", "Night", "Outdoor", "Relaxed") // 1.10
         const val HIGHLIGHT_WIDTH_PX = 30f // wide marker band (vs INK_STROKE_WIDTH for the pen).
         const val STROKE_PAUSE_MS = 600L // commit a stroke after this pen-pause (swallowed-UP net).
         const val INK_FLUSH_MS = 1500L // trailing-edge delay before the deferred ink autosave fsyncs.
