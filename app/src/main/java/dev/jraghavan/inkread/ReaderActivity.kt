@@ -110,8 +110,9 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
     private var bookmarks: Bookmarks? = null
     /** Total pages in the open doc; cached so the bottom-bar slider can read it on the UI thread. */
     @Volatile private var pageCount = 0
-    /** Chapter start pages (top-level resolved TOC targets, sorted) for chapter prev/next (1.7). */
-    @Volatile private var chapterStarts: List<Int> = emptyList()
+    /** Chapters as (start page, title) from the top-level resolved TOC, sorted — drives chapter
+     *  prev/next + the current-chapter label in the reading bar (1.7/1.8). */
+    @Volatile private var chapters: List<Pair<Int, String>> = emptyList()
     /** Stable id of the open book (its file name); keys thumbnails + the bookmarks file. */
     @Volatile private var currentBookId = ""
     /** Foreground reading-session start (elapsed ms) + the page it began on, for ReadingStats. */
@@ -823,9 +824,11 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             } catch (e: RuntimeException) {
                 Log.e(TAG, "toc failed: ${e.message}"); emptyList()
             }
-            val tops = toc.filter { it.depth == 0 }.mapNotNull { it.targetPage }
-            chapterStarts = (if (tops.isNotEmpty()) tops else toc.mapNotNull { it.targetPage })
-                .distinct().sorted()
+            val tops = toc.filter { it.depth == 0 && it.targetPage != null }
+            chapters = (if (tops.isNotEmpty()) tops else toc.filter { it.targetPage != null })
+                .map { it.targetPage!! to it.title }
+                .distinctBy { it.first }
+                .sortedBy { it.first }
             // Daily: a tapped headline opens the issue AT that article. The issue's TOC is
             // [Cover, article0, article1, …], so article N is TOC entry N+1.
             val dailyArticle = intent.getIntExtra(EXTRA_DAILY_ARTICLE, -1)
@@ -1572,7 +1575,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
     /** Jump to the previous (`dir<0`) / next (`dir>0`) chapter start relative to the current page
      *  (1.7). No-op with a brief toast at the document ends or when the doc has no chapters. */
     private fun chapterJump(dir: Int) {
-        val starts = chapterStarts
+        val starts = chapters.map { it.first }
         if (starts.isEmpty()) {
             Toast.makeText(this, "No chapters in this document", Toast.LENGTH_SHORT).show()
             return
@@ -1584,6 +1587,15 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         } else {
             Toast.makeText(this, if (dir > 0) "Last chapter" else "First chapter", Toast.LENGTH_SHORT).show()
         }
+    }
+
+    /** "Ch 2/9 · The Crossing" for the chapter the current page sits in, or null if the doc has no
+     *  chapters. The current chapter is the last one whose start page is ≤ the current page. */
+    private fun currentChapterLabel(): String? {
+        val ch = chapters
+        if (ch.isEmpty()) return null
+        val idx = ch.indexOfLast { it.first <= currentPage }.coerceAtLeast(0)
+        return "Ch ${idx + 1}/${ch.size} · ${ch[idx].second}"
     }
 
     /** Drop any lasso selection when the page changes — the ids belong to the old page (engine). */
@@ -1686,12 +1698,25 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
                 setPadding(dp(16), dp(12), dp(16), dp(6))
-                if (chapterStarts.isNotEmpty()) addView(chapterBtn("‹‹", -1))
+                if (chapters.isNotEmpty()) addView(chapterBtn("‹‹", -1))
                 addView(seek, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-                if (chapterStarts.isNotEmpty()) addView(chapterBtn("››", +1))
+                if (chapters.isNotEmpty()) addView(chapterBtn("››", +1))
                 addView(pageLabel, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { marginStart = dp(12) })
             },
         )
+        // Current-chapter line under the scrubber: orients the reader and makes the ‹‹/›› obvious.
+        // Tap → open the full Contents sheet. Shown only when the document has chapters.
+        currentChapterLabel()?.let { lbl ->
+            container.addView(TextView(this).apply {
+                text = lbl
+                setTextColor(Ink.inkSoft); textSize = 12f; typeface = Ink.serif
+                gravity = Gravity.CENTER; maxLines = 1
+                ellipsize = android.text.TextUtils.TruncateAt.END
+                setPadding(dp(24), 0, dp(24), dp(8))
+                isClickable = true
+                setOnClickListener { dialog.dismiss(); showContentsLazy() }
+            })
+        }
 
         // Control row: flat, evenly-weighted icon+label cells.
         val controls = LinearLayout(this).apply {
@@ -3169,7 +3194,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         bookmarks = null // bookmarks are persisted on toggle; drop the per-book store
         selectedIds = IntArray(0) // ink is persisted by the core to its sidecar
         selectionBounds = FloatArray(0)
-        chapterStarts = emptyList() // recomputed on the next open
+        chapters = emptyList() // recomputed on the next open
 
         val h = docHandle
         docHandle = 0L // zero BEFORE the call so a re-entrant close is a no-op (Amendment 2)
