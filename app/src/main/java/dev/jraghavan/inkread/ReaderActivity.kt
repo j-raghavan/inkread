@@ -1291,6 +1291,9 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             diag { "DIAG palm-reject down pc=${e.pointerCount} major=${e.getTouchMajor(0)}" }
             fingerIsPalm = true // latch: MOVE/UP bail, so a rejected palm never pans (esp. zoomed in)
             fingerMoved = true // also neutralise the tap/long-press paths
+            // Record the origin anyway: a flat fingertip swipe can read as palm-sized, so UP recovers
+            // a clearly-horizontal travel with the pen away as a page-turn (see onFingerUp).
+            fingerDownX = e.x; fingerDownY = e.y
             return
         }
         fingerIsPalm = false
@@ -1336,6 +1339,22 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         // lift within PALM_REJECT_MS of pen activity is the writing hand; same RR19 rule the tap path
         // already applies below, here extended to the zoomed-in pan commit). This is the core of the
         // "resting hand pans/zooms the page" fix (#49).
+        // Recover a swipe mis-flagged as a palm: a single-finger contact that travelled clearly
+        // horizontally while the pen stayed away is a deliberate page-turn, not a resting palm (palms
+        // accompany pen writing). Thresholds are STRICTER than a normal swipe (longer, more strongly
+        // horizontal) so a real resting palm — which barely moves — never turns the page.
+        if (fingerIsPalm && !penActiveForPinch() && !gestureWasMultiTouch && zoom <= 1f) {
+            val dx = e.x - fingerDownX
+            val dy = e.y - fingerDownY
+            val w = surfaceView.width.toFloat()
+            val minDist = (w * 0.10f).coerceAtLeast(140f)
+            if (kotlin.math.abs(dx) > minDist && kotlin.math.abs(dx) > kotlin.math.abs(dy) * 2.0f) {
+                fingerIsPalm = false; fitThumb = null
+                diag { "DIAG palm-swipe recovered dx=$dx dy=$dy" }
+                queuePageTurn(if (dx < 0f) +1 else -1)
+                return
+            }
+        }
         if (fingerIsPalm || penActiveForPinch()) { fingerIsPalm = false; return }
         // After a pinch, a 2→1 lift leaves a stale origin: commit no pan/tap for the trailing finger
         // (a fresh DOWN clears this latch and restarts clean panning) (#49).
