@@ -6,7 +6,7 @@
 # RR1-AC3: bare `cargo test -p reader-core` builds with `jni` absent from the resolved graph.
 [workspace]
 resolver = "2"
-members = ["build-dict", "device-eink", "inkread-dict", "inkread-epub", "inkread-ink", "inkread-lua", "inkread-pdftext", "reader-core"]
+members = ["build-dict", "device-eink", "inkread-daily", "inkread-dict", "inkread-epub", "inkread-ink", "inkread-lua", "inkread-pdftext", "reader-core"]
 
 [workspace.package]
 version = "0.1.0-m0"
@@ -19,6 +19,7 @@ repository = "https://github.com/j-raghavan/inkread"
 [workspace.dependencies]
 # Internal crates.
 device-eink = { path = "device-eink" }
+inkread-daily = { path = "inkread-daily" }
 inkread-dict = { path = "inkread-dict" }
 inkread-epub = { path = "inkread-epub" }
 inkread-ink = { path = "inkread-ink" }
