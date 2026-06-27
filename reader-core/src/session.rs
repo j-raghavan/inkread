@@ -506,6 +506,26 @@ impl ReaderSession {
                 }
             }
         }
+        self.render_fit_pixels(buf)?;
+        // Grayscale + dithering are deliberately NOT applied here. The shell blits this RGBA buffer
+        // to a SurfaceView and the Supernote's EPD controller does the waveform grayscale + dithering
+        // in hardware; pre-quantizing in the core would double-process (fighting the panel) for no
+        // gain. The `render::gray` module (to_grayscale / DitherMode) is retained for host/emulator
+        // rendering + golden tests, and for a future direct-framebuffer path (KOReader-style fb
+        // ioctl) that WOULD bypass the panel's conversion and need to dither itself — that is the only
+        // path where the DitherMode setting becomes live. The cache key fixes DitherMode::None to keep
+        // the key honest about this. (Reflow/EPUB is already grayscale-native via inkread-epub's
+        // GrayCanvas; this note is about the fixed-layout/PDF RGBA path.)
+        if cacheable {
+            self.caches.render().insert(key, buf.bytes().to_vec());
+        }
+        Ok(())
+    }
+
+    /// Rasterize the current page's fit/crop pixels (honoring render-quality supersampling) and apply
+    /// contrast, into `buf`. The shared core of [`Self::render_current`]'s non-magnified path and
+    /// [`Self::prefetch_page`]; touches neither the cache nor zoom.
+    fn render_fit_pixels(&self, buf: &mut PixelBuffer<'_>) -> CoreResult<()> {
         let q = render_quality_factor(self.render_quality);
         if (q - 1.0).abs() < 1e-3 {
             self.render_fit_or_crop(buf)?;
@@ -521,25 +541,44 @@ impl ReaderSession {
             }
             crate::render::resample::resample_bilinear(&tmp, qw, qh, buf);
         }
-        // Display enhancement (RR4): remap pixels for contrast after the backend renders. The
-        // cached buffer is the final displayed pixels (the key carries the contrast step), so a
-        // later serve needs no re-apply.
+        // Display enhancement (RR4): remap pixels for contrast after the backend renders.
         crate::render::contrast::apply_contrast(
             buf,
             crate::render::contrast::step_to_gamma(self.contrast),
         );
-        // Grayscale + dithering are deliberately NOT applied here. The shell blits this RGBA buffer
-        // to a SurfaceView and the Supernote's EPD controller does the waveform grayscale + dithering
-        // in hardware; pre-quantizing in the core would double-process (fighting the panel) for no
-        // gain. The `render::gray` module (to_grayscale / DitherMode) is retained for host/emulator
-        // rendering + golden tests, and for a future direct-framebuffer path (KOReader-style fb
-        // ioctl) that WOULD bypass the panel's conversion and need to dither itself — that is the only
-        // path where the DitherMode setting becomes live. The cache key fixes DitherMode::None to keep
-        // the key honest about this. (Reflow/EPUB is already grayscale-native via inkread-epub's
-        // GrayCanvas; this note is about the fixed-layout/PDF RGBA path.)
-        if cacheable {
-            self.caches.render().insert(key, buf.bytes().to_vec());
+        Ok(())
+    }
+
+    /// Render-ahead: rasterize `page` into the render cache **without displaying it**, so a turn to it
+    /// is a cache hit (the biggest page-turn cost is the pdfium/reflow raster — RR24). No-op when
+    /// magnified (only fit pages are cached) or when the page is already warm. Meant to be called on
+    /// the engine thread right after the visible page is rendered, so it never delays the current turn
+    /// (and if the reader turns before it finishes, the queued render simply serves the next turn).
+    pub fn prefetch_page(&mut self, page: usize) -> CoreResult<()> {
+        if self.zoom > 1.0 + 1e-3 {
+            return Ok(());
         }
+        let page = page.min(self.page_count().saturating_sub(1));
+        let saved = self.page;
+        self.page = page;
+        let result = self.prefetch_current_into_cache();
+        self.page = saved; // never leave the displayed page changed, even on error
+        result
+    }
+
+    /// Render the (temporarily swapped-in) current page into the cache if not already present.
+    fn prefetch_current_into_cache(&mut self) -> CoreResult<()> {
+        let key = self.render_cache_key();
+        if self.caches.render().get(&key).is_some() {
+            return Ok(()); // already warm — nothing to do
+        }
+        let (w, h) = (self.viewport.width, self.viewport.height);
+        let mut scratch = vec![0u8; (w as usize) * (h as usize) * 4];
+        {
+            let mut buf = PixelBuffer::from_rgba(&mut scratch, w, h)?;
+            self.render_fit_pixels(&mut buf)?;
+        }
+        self.caches.render().insert(key, scratch);
         Ok(())
     }
 

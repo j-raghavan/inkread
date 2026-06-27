@@ -1330,3 +1330,35 @@ fn contrast_darkens_a_gray_page_after_render() {
     );
     assert_eq!(bytes[3], 0xFF, "alpha preserved");
 }
+
+#[test]
+fn prefetch_warms_the_next_page_without_changing_the_displayed_one() {
+    let mut s = session(3, DeviceCapabilities::supernote_full());
+    let mut bytes = vec![0u8; 100 * 120 * 4];
+    {
+        let mut buf = PixelBuffer::from_rgba(&mut bytes, 100, 120).unwrap();
+        s.render_current(&mut buf).unwrap(); // page 0 → one cache entry
+    }
+    let base = s.caches().render().len();
+    assert_eq!(s.current_page(), 0);
+
+    s.prefetch_page(1).unwrap();
+    assert_eq!(
+        s.current_page(),
+        0,
+        "prefetch must not change the displayed page"
+    );
+    assert!(
+        s.caches().render().len() > base,
+        "prefetch warmed a new page: {} -> {}",
+        base,
+        s.caches().render().len()
+    );
+
+    // Re-prefetching a warm page adds nothing; an out-of-range page clamps and never panics.
+    let warm = s.caches().render().len();
+    s.prefetch_page(1).unwrap();
+    assert_eq!(s.caches().render().len(), warm, "re-prefetch is a no-op");
+    s.prefetch_page(999).unwrap();
+    assert_eq!(s.current_page(), 0);
+}

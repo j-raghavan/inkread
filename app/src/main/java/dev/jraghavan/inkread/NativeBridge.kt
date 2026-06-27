@@ -75,6 +75,10 @@ object NativeBridge {
     /** The document's author from its metadata, or "" if none. */
     external fun nativeDocAuthor(handle: Long): String
 
+    /** Render [page] into the session's render cache without displaying it, so a turn to it is a
+     *  cache hit (read-ahead). Best-effort — a failure is swallowed in the core. Engine-thread only. */
+    external fun nativePrefetchPage(handle: Long, page: Int)
+
     /** Parse an RSS/Atom feed into a JSON array of {title,url,published} (#66). Standalone — no
      *  document handle; the shell fetches the feed, the core parses it. "[]" on junk input. */
     external fun nativeDailyParseFeed(xml: String): String

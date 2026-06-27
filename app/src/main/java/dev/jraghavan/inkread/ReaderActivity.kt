@@ -922,6 +922,17 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         // at/over the e-ink budget is flagged SLOW inline.
         val slow = if (total >= SLOW_RENDER_MS) " SLOW" else ""
         Log.i(TAG, "render p=$currentPage: core=$core copy=$copy composite=$composite blit=$blitMs total=${total}ms$slow")
+        // Read-ahead: warm the next page (in the direction of travel) into the core's render cache,
+        // off the critical path — the next turn then hits the cache (core≈0), attacking the render's
+        // biggest cost. Deduped so chrome repaints of the same page don't re-enqueue.
+        val ahead = currentPage + lastTurnDir
+        if (zoom <= 1f && ahead in 0 until pageCount && ahead != lastPrefetchedPage) {
+            lastPrefetchedPage = ahead
+            engine.execute {
+                val h = docHandle
+                if (h != 0L) runCatching { NativeBridge.nativePrefetchPage(h, ahead) }
+            }
+        }
         if (!deferLinks) refreshCurrentLinks()
     }
 
@@ -1473,8 +1484,13 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
     private var pendingPageDelta = 0
     /** True while a coalesced jump is rendering; taps accumulate instead of enqueuing more (UI thread). */
     private var turnInFlight = false
+    /** Direction of travel (+1 forward / -1 back); biases read-ahead. Forward by default. */
+    @Volatile private var lastTurnDir = 1
+    /** Last page handed to read-ahead — dedupes prefetch enqueues across chrome repaints of one page. */
+    private var lastPrefetchedPage = -1
 
     private fun queuePageTurn(delta: Int) {
+        if (delta != 0) lastTurnDir = if (delta < 0) -1 else 1
         pendingPageDelta += delta
         flushPageTurns()
     }
