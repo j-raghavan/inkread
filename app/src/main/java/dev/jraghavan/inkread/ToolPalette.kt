@@ -52,7 +52,9 @@ class ToolPalette(
     private fun dp(v: Int) = (v * density).toInt()
     private val touchSlop = ViewConfiguration.get(activity).scaledTouchSlop
 
-    private var expanded = true
+    // Opens collapsed (a small circular inkwell puck) so it never covers the text on document open;
+    // tap to expand into the tool strip.
+    private var expanded = false
     private val container = LinearLayout(activity).apply { orientation = LinearLayout.VERTICAL }
 
     init {
@@ -73,18 +75,42 @@ class ToolPalette(
     /** Rounded white pill with a black keyline — high contrast on e-ink (Inkwell card language). */
     private fun pill() = Ink.cardBg(22)
 
+    /** A circular white puck with a black keyline — the collapsed form (the inkwell mark). */
+    private fun circle() = GradientDrawable().apply {
+        shape = GradientDrawable.OVAL
+        setColor(Ink.paper)
+        setStroke(Ink.keyline(), Ink.ink)
+    }
+
     private fun render() {
-        container.background = pill()
-        container.setPadding(dp(5), dp(7), dp(5), dp(7))
         container.removeAllViews()
-        container.addView(handle())
         if (expanded) {
+            container.background = pill()
+            container.setPadding(dp(5), dp(7), dp(5), dp(7))
+            container.addView(handle()) // grip: collapse / move
             container.addView(divider())
             for (tool in Tool.values()) container.addView(iconButton(tool))
             container.addView(divider())
             container.addView(actionButton(R.drawable.ic_sel_undo, "Undo", onUndo))
             container.addView(actionButton(R.drawable.ic_sel_redo, "Redo", onRedo))
+        } else {
+            // Collapsed: a circular inkwell puck — tap to expand, drag to move.
+            container.background = circle()
+            container.setPadding(0, 0, 0, 0)
+            container.addView(collapsedPuck())
         }
+    }
+
+    /** The collapsed puck: the inkwell brand mark in the circle (tap = expand, drag = move). */
+    private fun collapsedPuck(): ImageView = ImageView(activity).apply {
+        setImageResource(R.drawable.ic_inkwell)
+        setColorFilter(Ink.ink)
+        val pad = dp(15)
+        setPadding(pad, pad, pad, pad)
+        val side = dp(60)
+        layoutParams = LinearLayout.LayoutParams(side, side)
+        contentDescription = "Tools — tap to open, drag to move"
+        applyDragToggle(this)
     }
 
     /** A hairline separator between the handle, the tools, and the undo/redo actions. */
@@ -119,9 +145,16 @@ class ToolPalette(
         layoutParams = LinearLayout.LayoutParams(side, side).apply {
             val m = dp(2); setMargins(m, m, m, m)
         }
-        contentDescription = if (expanded) "Collapse / move tools" else "Expand / move tools"
+        contentDescription = "Collapse / move tools"
+        applyDragToggle(this)
+    }
+
+    /** Shared touch behaviour for the grip + the collapsed puck: drag moves the pill (clamped to the
+     *  host), a tap toggles collapsed/expanded. Opaque while touched, faded back on release. */
+    @android.annotation.SuppressLint("ClickableViewAccessibility")
+    private fun applyDragToggle(v: View) {
         var downX = 0f; var downY = 0f; var startTx = 0f; var startTy = 0f; var moved = false
-        setOnTouchListener { _, e ->
+        v.setOnTouchListener { _, e ->
             when (e.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
                     downX = e.rawX; downY = e.rawY
