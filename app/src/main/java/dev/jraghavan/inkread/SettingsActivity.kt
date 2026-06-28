@@ -91,6 +91,32 @@ class SettingsActivity : Activity() {
             },
         )
 
+        // ── Updates (ADR-INKREAD-0014) ───────────────────────────────────────────────
+        column.addView(spacer(dp(34)))
+        column.addView(eyebrow("Updates"))
+        column.addView(spacer(dp(12)))
+        column.addView(
+            toggleRow(
+                title = "Check for updates automatically",
+                desc = "On launch, check GitHub for a newer release and offer to install it. " +
+                    "inkread is sideloaded, so there is no store to deliver fixes. A single check, " +
+                    "never background polling.",
+                on = AppSettings.autoUpdateCheck(this),
+            ) { onAutoCheckTapped() },
+        )
+        column.addView(spacer(dp(18)))
+        column.addView(
+            toggleRow(
+                title = "Install updates automatically",
+                desc = "When a newer release is found, download and verify it and go straight to " +
+                    "install — skipping the prompt. Android still shows its own final install " +
+                    "confirmation. Off by default.",
+                on = AppSettings.autoInstallUpdates(this),
+            ) { onAutoInstallTapped() },
+        )
+        column.addView(spacer(dp(18)))
+        column.addView(actionRow("Check for updates now") { UpdateGate.checkNow(this) })
+
         // ── How it works ───────────────────────────────────────────────────────────
         column.addView(spacer(dp(34)))
         column.addView(eyebrow("How it works"))
@@ -135,7 +161,35 @@ class SettingsActivity : Activity() {
             .show()
     }
 
+    /** Toggling auto-check off also disables auto-install (UPD-FR8) — the latter needs the check. */
+    private fun onAutoCheckTapped() {
+        val on = !AppSettings.autoUpdateCheck(this)
+        AppSettings.setAutoUpdateCheck(this, on)
+        if (!on) AppSettings.setAutoInstallUpdates(this, false)
+        refresh()
+    }
+
+    /** Turning auto-install on implies auto-check on (it has nothing to act on otherwise). */
+    private fun onAutoInstallTapped() {
+        val on = !AppSettings.autoInstallUpdates(this)
+        AppSettings.setAutoInstallUpdates(this, on)
+        if (on) AppSettings.setAutoUpdateCheck(this, true)
+        refresh()
+    }
+
     // ── Pieces ──────────────────────────────────────────────────────────────────────
+
+    /** A tappable action with a title on the left and an outlined affordance pill on the right. */
+    private fun actionRow(title: String, onTap: () -> Unit): View =
+        LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            isClickable = true; setOnClickListener { onTap() }
+            addView(TextView(this@SettingsActivity).apply {
+                text = title; setTextColor(ink); textSize = 17f; typeface = serif
+            }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { marginEnd = dp(16) })
+            addView(pill("Check", false))
+        }
 
     /** A setting with a title + description on the left and an On/Off pill on the right. */
     private fun toggleRow(title: String, desc: String, on: Boolean, onTap: () -> Unit): View =

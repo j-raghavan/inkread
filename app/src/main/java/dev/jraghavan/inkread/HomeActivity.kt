@@ -85,6 +85,7 @@ class HomeActivity : Activity() {
             setContentView(buildView()) // refresh covers + progress after returning from the reader
             shelfSig = sig
         }
+        UpdateGate.maybeCheckOnLaunch(this) // throttled GitHub release check (ADR-INKREAD-0014)
     }
 
     /** A stable digest of what the shelf renders — recents order + per-book read progress. */
