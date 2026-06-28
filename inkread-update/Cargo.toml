@@ -1,0 +1,17 @@
+[package]
+name = "inkread-update"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "inkread-update (ADR-INKREAD-0014): decide whether a fetched GitHub releases/latest payload is a newer build than the installed one, and surface its APK + checksum asset URLs. Pure, host-testable, IO- and vendor-free (IR-7) — the Android shell does the fetch/download/install."
+
+[dependencies]
+# Semver comparison of the release tag against the installed version (the decision's core).
+semver = { workspace = true }
+# Parse the GitHub releases/latest payload the shell fetched, and emit the decision JSON the JNI
+# bridge hands back to Kotlin — the same string-over-JNI contract inkread-daily uses.
+serde = { workspace = true }
+serde_json = { workspace = true }

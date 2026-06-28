@@ -6,7 +6,7 @@
 # RR1-AC3: bare `cargo test -p reader-core` builds with `jni` absent from the resolved graph.
 [workspace]
 resolver = "2"
-members = ["build-dict", "device-eink", "inkread-daily", "inkread-dict", "inkread-epub", "inkread-ink", "inkread-lua", "inkread-pdftext", "reader-core"]
+members = ["build-dict", "device-eink", "inkread-daily", "inkread-dict", "inkread-epub", "inkread-ink", "inkread-lua", "inkread-pdftext", "inkread-update", "reader-core"]
 
 [workspace.package]
 version = "0.1.0-m0"
@@ -25,6 +25,7 @@ inkread-epub = { path = "inkread-epub" }
 inkread-ink = { path = "inkread-ink" }
 inkread-lua = { path = "inkread-lua" }
 inkread-pdftext = { path = "inkread-pdftext" }
+inkread-update = { path = "inkread-update" }
 reader-core = { path = "reader-core" }
 
 # External — versions verified against docs.rs at implementation time.
@@ -54,6 +55,9 @@ jpeg-decoder = { version = "0.3", default-features = false }
 png = "0.17"
 # inkread-daily (#66): RSS/Atom feed parsing. Pure-Rust pull parser, MIT/Apache, cross-compiles clean.
 quick-xml = "0.36"
+# inkread-update (ADR-INKREAD-0014): semver comparison of the installed version against the GitHub
+# release tag. Pure Rust, MIT/Apache (AGPL-compatible → auto-passes check-licenses.sh).
+semver = "1"
 
 [profile.release]
 # A reader on a battery e-ink device: optimize for size + speed, strip symbols.
