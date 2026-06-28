@@ -44,7 +44,7 @@ class UpdateInstallReceiver : BroadcastReceiver() {
 
     /** Drop the staged APK once the session is terminal — never leave it in cache. */
     private fun clearCache(context: Context) {
-        runCatching { File(context.cacheDir, "updates").deleteRecursively() }
+        runCatching { File(context.cacheDir, UpdateController.UPDATE_DIR).deleteRecursively() }
     }
 
     private companion object {

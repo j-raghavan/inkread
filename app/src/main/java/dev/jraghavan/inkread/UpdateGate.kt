@@ -20,6 +20,12 @@ object UpdateGate {
      *  screen should never wait on the network (UPD-FR6). */
     private const val THROTTLE_MS = 6L * 60 * 60 * 1000 // 6 hours
 
+    /** One reusable daemon thread for all update I/O — never blocks the UI, never leaks a thread per
+     *  check (and a daemon never holds the JVM alive). Update work is sequential, so one suffices. */
+    private val io = Executors.newSingleThreadExecutor { r ->
+        Thread(r, "inkread-update").apply { isDaemon = true }
+    }
+
     /** On-launch check (from [HomeActivity.onResume]): honours the auto-check toggle + throttle. */
     fun maybeCheckOnLaunch(activity: Activity) {
         val ctx = activity.applicationContext
@@ -38,20 +44,39 @@ object UpdateGate {
     private fun runCheck(activity: Activity, manual: Boolean) {
         val ctx = activity.applicationContext
         val controller = UpdateController(ctx)
-        Executors.newSingleThreadExecutor().execute {
-            val available = controller.check()
-            AppSettings.setUpdateLastCheckMs(ctx, System.currentTimeMillis())
+        io.execute {
+            val result = controller.check()
+            // Only a check that actually reached the server advances the throttle — an offline launch
+            // must stay free to retry the moment connectivity returns (UPD-FR9).
+            if (result !is UpdateController.CheckResult.Failed) {
+                AppSettings.setUpdateLastCheckMs(ctx, System.currentTimeMillis())
+            }
             onUi(activity) {
-                when {
-                    available == null -> if (manual) toast(activity, "inkread is up to date")
-                    // A skipped version stays silent on an automatic check, but a manual check always
-                    // surfaces it (the reader explicitly asked).
-                    !manual && available.version == AppSettings.updateSkipVersion(ctx) -> Unit
-                    !manual && AppSettings.autoInstallEffective(ctx) && controller.canRequestInstall() ->
-                        downloadThenInstall(activity, controller, available)
-                    else -> showPrompt(activity, controller, available)
+                when (result) {
+                    is UpdateController.CheckResult.Failed ->
+                        if (manual) toast(activity, "Couldn't check for updates")
+                    is UpdateController.CheckResult.UpToDate ->
+                        if (manual) toast(activity, "inkread is up to date")
+                    is UpdateController.CheckResult.Update -> onUpdate(activity, controller, result.available, manual, ctx)
                 }
             }
+        }
+    }
+
+    /** Route a found update: a skipped version stays silent on an automatic check (a manual one
+     *  always surfaces it); auto-install goes straight to download+install; otherwise prompt. */
+    private fun onUpdate(
+        activity: Activity,
+        controller: UpdateController,
+        a: UpdateController.Available,
+        manual: Boolean,
+        ctx: android.content.Context,
+    ) {
+        when {
+            !manual && a.version == AppSettings.updateSkipVersion(ctx) -> Unit
+            !manual && AppSettings.autoInstallEffective(ctx) && controller.canRequestInstall() ->
+                downloadThenInstall(activity, controller, a)
+            else -> showPrompt(activity, controller, a)
         }
     }
 
@@ -81,7 +106,7 @@ object UpdateGate {
     /** Download + verify off the UI thread, then hand the verified APK to the system installer. */
     private fun downloadThenInstall(activity: Activity, controller: UpdateController, a: UpdateController.Available) {
         toast(activity, "Downloading v${a.version}…")
-        Executors.newSingleThreadExecutor().execute {
+        io.execute {
             val apk = controller.downloadAndVerify(a)
             onUi(activity) {
                 if (apk == null) {

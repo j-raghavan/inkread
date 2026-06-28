@@ -12,8 +12,6 @@ import android.provider.Settings
 import android.util.Log
 import org.json.JSONObject
 import java.io.File
-import java.net.HttpURLConnection
-import java.net.URL
 
 /**
  * The Android shell's half of the in-app self-updater (ADR-INKREAD-0014). The network and the
@@ -36,6 +34,17 @@ class UpdateController(private val context: Context) {
         val sha256Url: String,
     )
 
+    /**
+     * The outcome of a [check]: a newer release, nothing newer, or the check never reached the
+     * server. Distinguishing [Failed] from [UpToDate] lets the UX avoid burning the throttle on an
+     * offline launch and report "couldn't check" vs "up to date" honestly (UPD-FR9).
+     */
+    sealed interface CheckResult {
+        data class Update(val available: Available) : CheckResult
+        object UpToDate : CheckResult
+        object Failed : CheckResult
+    }
+
     /** The installed `versionName` (the basis for the semver comparison), or "" if unavailable. */
     fun installedVersion(): String =
         runCatching { context.packageManager.getPackageInfo(context.packageName, 0).versionName }
@@ -43,24 +52,28 @@ class UpdateController(private val context: Context) {
             .orEmpty()
 
     /**
-     * Fetch `releases/latest` and ask the core whether it is newer. Returns the [Available] update,
-     * or `null` when offline / rate-limited / nothing newer / no installable asset (UPD-FR9: any
-     * failure is a silent no-op). Blocking — call off the UI thread.
+     * Fetch `releases/latest` and ask the core whether it is newer. [CheckResult.Failed] means the
+     * server was never reached (offline / rate-limited / bad local version) — the caller leaves the
+     * throttle untouched; [CheckResult.UpToDate] means the server answered with nothing installable.
+     * Blocking — call off the UI thread.
      */
-    fun check(): Available? {
+    fun check(): CheckResult {
         val installed = installedVersion()
-        if (installed.isEmpty()) return null
-        val json = fetchText(LATEST_RELEASE_URL, ACCEPT_GITHUB) ?: return null
+        if (installed.isEmpty()) return CheckResult.Failed
+        val json = HttpFetch.getText(LATEST_RELEASE_URL, USER_AGENT, ACCEPT_GITHUB, TIMEOUT_MS, MAX_TEXT_BYTES)
+            ?: return CheckResult.Failed
         val decision = runCatching { JSONObject(NativeBridge.nativeUpdateDecide(installed, json)) }
-            .getOrNull() ?: return null
-        if (!decision.optBoolean("updateAvailable", false)) return null
+            .getOrNull() ?: return CheckResult.Failed
+        if (!decision.optBoolean("updateAvailable", false)) return CheckResult.UpToDate
         val apkUrl = decision.optString("apkUrl")
-        if (apkUrl.isEmpty()) return null
-        return Available(
-            version = decision.optString("version"),
-            notes = decision.optString("notes"),
-            apkUrl = apkUrl,
-            sha256Url = decision.optString("sha256Url"),
+        if (apkUrl.isEmpty()) return CheckResult.UpToDate
+        return CheckResult.Update(
+            Available(
+                version = decision.optString("version"),
+                notes = decision.optString("notes"),
+                apkUrl = apkUrl,
+                sha256Url = decision.optString("sha256Url"),
+            ),
         )
     }
 
@@ -85,7 +98,7 @@ class UpdateController(private val context: Context) {
         val dir = File(context.cacheDir, UPDATE_DIR).apply { mkdirs() }
         // One slot, overwritten each attempt — never accumulate stale APKs.
         val apk = File(dir, "update.apk")
-        if (!download(a.apkUrl, apk)) {
+        if (!HttpFetch.download(a.apkUrl, apk, USER_AGENT, TIMEOUT_MS, MAX_APK_BYTES)) {
             apk.delete()
             return null
         }
@@ -98,7 +111,11 @@ class UpdateController(private val context: Context) {
 
         // Checksum gate: a *published* digest must match; an *absent* one falls back to signer-pin
         // alone (UPD-FR3) — distinguish the two so a missing file is not silently treated as a pass.
-        val checksumText = if (a.sha256Url.isNotEmpty()) fetchText(a.sha256Url, null) else null
+        val checksumText = if (a.sha256Url.isNotEmpty()) {
+            HttpFetch.getText(a.sha256Url, USER_AGENT, null, TIMEOUT_MS, MAX_TEXT_BYTES)
+        } else {
+            null
+        }
         if (UpdateVerify.expectedShaFrom(checksumText) != null &&
             !UpdateVerify.matchesPublishedSha(apkBytes, checksumText)
         ) {
@@ -140,76 +157,6 @@ class UpdateController(private val context: Context) {
         }
     }
 
-    // ── network ───────────────────────────────────────────────────────────────────────────────────
-
-    /** GET [url] as text (capped); `null` on any non-2xx / IO error. [accept] sets the Accept header. */
-    private fun fetchText(url: String, accept: String?): String? = try {
-        val conn = open(url, accept)
-        if (conn.responseCode in 200..299) {
-            conn.inputStream.use { String(it.readBytes(MAX_TEXT_BYTES), Charsets.UTF_8) }
-        } else {
-            Log.w(TAG, "fetch $url -> HTTP ${conn.responseCode}")
-            null
-        }
-    } catch (e: Exception) {
-        Log.w(TAG, "fetch $url failed: ${e.message}")
-        null
-    }
-
-    /** Stream [url] to [dest] (capped); `false` on any non-2xx / IO error / oversize. */
-    private fun download(url: String, dest: File): Boolean = try {
-        val conn = open(url, null)
-        if (conn.responseCode !in 200..299) {
-            Log.w(TAG, "download $url -> HTTP ${conn.responseCode}")
-            false
-        } else {
-            conn.inputStream.use { input ->
-                dest.outputStream().use { out ->
-                    var total = 0L
-                    val buf = ByteArray(64 * 1024)
-                    while (true) {
-                        val n = input.read(buf)
-                        if (n < 0) break
-                        total += n
-                        if (total > MAX_APK_BYTES) {
-                            Log.w(TAG, "download $url exceeds ${MAX_APK_BYTES}B cap")
-                            return false
-                        }
-                        out.write(buf, 0, n)
-                    }
-                }
-            }
-            true
-        }
-    } catch (e: Exception) {
-        Log.w(TAG, "download $url failed: ${e.message}")
-        false
-    }
-
-    private fun open(url: String, accept: String?): HttpURLConnection =
-        (URL(url).openConnection() as HttpURLConnection).apply {
-            connectTimeout = TIMEOUT_MS
-            readTimeout = TIMEOUT_MS
-            instanceFollowRedirects = true
-            setRequestProperty("User-Agent", USER_AGENT)
-            if (accept != null) setRequestProperty("Accept", accept)
-        }
-
-    /** Bounded `readBytes` so a hostile/huge response cannot exhaust memory (mirrors DailyController). */
-    private fun java.io.InputStream.readBytes(cap: Int): ByteArray {
-        val out = java.io.ByteArrayOutputStream()
-        val buf = ByteArray(16 * 1024)
-        var total = 0
-        while (true) {
-            val n = read(buf)
-            if (n < 0) break
-            total += n
-            if (total > cap) break
-            out.write(buf, 0, n)
-        }
-        return out.toByteArray()
-    }
-
     // ── signer extraction (signing-cert API moved at API 28) ───────────────────────────────────────
 
     private fun installedSignerCerts(): List<ByteArray> = runCatching {
@@ -233,10 +180,11 @@ class UpdateController(private val context: Context) {
     @Suppress("DEPRECATION")
     private fun certBytesOf(info: PackageInfo): List<ByteArray> =
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-            val signers = info.signingInfo ?: return emptyList()
-            val sigs = if (signers.hasMultipleSigners()) signers.apkContentsSigners
-            else signers.signingCertificateHistory
-            sigs?.map { it.toByteArray() }.orEmpty()
+            // apkContentsSigners = the certs the package is CURRENTLY signed by, symmetric for an
+            // installed app and a downloaded archive. signingCertificateHistory would add the
+            // on-device rotation lineage the archive lacks, which certsMatch's size-equality would
+            // then falsely reject (a legit update after any future key rotation).
+            info.signingInfo?.apkContentsSigners?.map { it.toByteArray() }.orEmpty()
         } else {
             info.signatures?.map { it.toByteArray() }.orEmpty()
         }
@@ -251,7 +199,9 @@ class UpdateController(private val context: Context) {
         private const val USER_AGENT = "inkread-updater"
         private const val ACTION_INSTALLED = "dev.jraghavan.inkread.UPDATE_INSTALLED"
 
-        private const val UPDATE_DIR = "updates"
+        /** Private cache subdir holding the single staged APK — shared with [UpdateInstallReceiver]
+         *  so its post-install cleanup targets the same directory. */
+        const val UPDATE_DIR = "updates"
         private const val TIMEOUT_MS = 15_000
         private const val MAX_TEXT_BYTES = 512 * 1024 // release JSON / checksum line
         private const val MAX_APK_BYTES = 200L * 1024 * 1024 // APK ceiling (guards a hostile stream)
