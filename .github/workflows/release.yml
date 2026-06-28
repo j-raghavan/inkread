@@ -6,9 +6,10 @@ name: Release
 # the dictionary corpus is staged → Gradle assembles the APK. The APK is attached to the
 # Release so anyone can sideload it without a toolchain.
 #
-# NOTE (M0 / ADR Decision 3): the "release" variant is self-signed with the debug key for
-# sideload bring-up. A real release signingConfig lands in M4 (RR29-FR2) — wire the keystore
-# in via repo secrets here when it does.
+# SIGNING (RR29-FR2 / ADR-INKREAD-0014 Decision 0): when the repo secret INKREAD_KEYSTORE_BASE64
+# (+ INKREAD_KEYSTORE_PASSWORD / INKREAD_KEY_ALIAS / INKREAD_KEY_PASSWORD) is set, the APK is
+# production-signed with the stable inkread release key — the prerequisite for the in-app
+# self-updater. Without the secret it falls back to the debug key (and the updater stays inert).
 
 on:
   push:
@@ -117,10 +118,43 @@ jobs:
           sed -i "s/^version = \".*\"/version = \"$VERSION\"/" Cargo.toml
           echo "reader-core crate version → $(grep '^version = ' Cargo.toml)"
 
+      # --- Decode the release signing keystore (RR29-FR2 / ADR-INKREAD-0014 Decision 0) ---
+      # The self-updater requires a STABLE release key: Android rejects an update whose signer
+      # differs from the installed app. When the INKREAD_KEYSTORE_BASE64 secret is set, decode it to
+      # an ephemeral file under RUNNER_TEMP (never committed) and export the signing vars that
+      # app/build.gradle.kts reads; absent the secret, the build falls back to the debug key and the
+      # updater stays inert (signer-pin fails closed). Passwords go via $GITHUB_ENV, which is masked
+      # and not printed — they never appear in logs.
+      - name: Set up release signing
+        id: signing
+        env:
+          KEYSTORE_BASE64: ${{ secrets.INKREAD_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.INKREAD_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.INKREAD_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.INKREAD_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ -z "${KEYSTORE_BASE64:-}" ]; then
+            echo "::warning::No INKREAD_KEYSTORE_BASE64 secret — the release APK will be DEBUG-signed and cannot auto-update an existing install. Add the four INKREAD_* signing secrets to enable production signing."
+            echo "signed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          ks="$RUNNER_TEMP/inkread-release.jks"
+          echo "$KEYSTORE_BASE64" | base64 --decode > "$ks"
+          {
+            echo "INKREAD_KEYSTORE_FILE=$ks"
+            echo "INKREAD_KEYSTORE_PASSWORD=$KEYSTORE_PASSWORD"
+            echo "INKREAD_KEY_ALIAS=$KEY_ALIAS"
+            echo "INKREAD_KEY_PASSWORD=$KEY_PASSWORD"
+          } >> "$GITHUB_ENV"
+          echo "signed=true" >> "$GITHUB_OUTPUT"
+          echo "Release keystore staged for signing."
+
       # --- Build the APK via the canonical script (Rust core + pdfium + dict + Gradle) ---
       # Gradle reads ORG_GRADLE_PROJECT_<name> env vars as project properties, so the tag's
       # version lands in the APK's versionName/versionCode (see app/build.gradle.kts) — no
-      # change to buildApk.sh needed. versionCode uses the monotonic CI run number.
+      # change to buildApk.sh needed. versionCode uses the monotonic CI run number. The signing
+      # vars exported above (when present) flow in via $GITHUB_ENV → the release signingConfig.
       - name: Build APK (./buildApk.sh)
         env:
           ORG_GRADLE_PROJECT_inkreadVersionName: ${{ steps.ver.outputs.version }}
@@ -165,8 +199,6 @@ jobs:
             adb install -r inkread-${{ steps.ver.outputs.tag }}.apk
             ```
 
-            > This build is self-signed with the debug key for sideload bring-up (M0, ADR
-            > Decision 3). Verify the attached `.sha256` before installing. A production-signed
-            > release lands in M4 (RR29-FR2).
+            > ${{ steps.signing.outputs.signed == 'true' && 'Production-signed with the inkread release key — installs and in-app updates verify against it. Verify the attached `.sha256` before installing.' || 'This build is DEBUG-signed for sideload bring-up; it cannot update an existing install in place. Verify the attached `.sha256` before installing.' }}
 
             ---

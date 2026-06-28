@@ -28,12 +28,37 @@ android {
     // libreader.so + libpdfium.so are staged into src/main/jniLibs/ by buildApk.sh.
     sourceSets["main"].jniLibs.srcDirs("src/main/jniLibs")
 
+    // Release signing (RR29-FR2 / ADR-INKREAD-0014 Decision 0). The keystore is supplied by CI via
+    // env vars (release.yml decodes a repo secret to a file); local/dev builds leave them unset and
+    // fall back to the debug key for sideload bring-up. A STABLE release key is the prerequisite for
+    // the in-app self-updater: Android rejects an update whose signer differs from the installed app.
+    val keystorePath = System.getenv("INKREAD_KEYSTORE_FILE")
+        ?: project.findProperty("inkreadKeystoreFile") as String?
+    signingConfigs {
+        create("release") {
+            if (!keystorePath.isNullOrBlank()) {
+                storeFile = file(keystorePath)
+                storePassword = System.getenv("INKREAD_KEYSTORE_PASSWORD")
+                    ?: project.findProperty("inkreadKeystorePassword") as String?
+                keyAlias = System.getenv("INKREAD_KEY_ALIAS")
+                    ?: project.findProperty("inkreadKeyAlias") as String?
+                keyPassword = System.getenv("INKREAD_KEY_PASSWORD")
+                    ?: project.findProperty("inkreadKeyPassword") as String?
+            }
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = false
-            // M0 is self-signed via the default debug key for sideload bring-up (ADR
-            // Decision 3); a real release signingConfig is wired in M4 (RR29-FR2).
-            signingConfig = signingConfigs.getByName("debug")
+            // Production-sign when a keystore is configured (CI); otherwise self-sign with the debug
+            // key for local sideload bring-up. The self-updater stays inert (signer-pin fails closed)
+            // until a release-key build is the installed one.
+            signingConfig = if (!keystorePath.isNullOrBlank()) {
+                signingConfigs.getByName("release")
+            } else {
+                signingConfigs.getByName("debug")
+            }
         }
     }
 
