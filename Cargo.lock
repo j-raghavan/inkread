@@ -1235,6 +1235,7 @@ dependencies = [
  "inkread-epub",
  "inkread-ink",
  "inkread-pdftext",
+ "inkread-update",
  "jni",
  "jpeg-decoder",
  "pdfium-render",

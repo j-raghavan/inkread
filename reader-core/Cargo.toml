@@ -26,6 +26,9 @@ inkread-ink = { workspace = true }
 # inkread-daily (#66): RSS/Atom parse + readability extraction + issue→EPUB assembly, reached over
 # the JNI bridge so the shell can compile a daily issue. Pure Rust; cross-compiles clean.
 inkread-daily = { workspace = true }
+# inkread-update (ADR-INKREAD-0014): the self-updater's pure decision, reached over the JNI bridge —
+# the shell fetches the GitHub release JSON, the core decides if it is newer. Pure Rust.
+inkread-update = { workspace = true }
 # EPUB backend: parsing + reflow layout + glyph rasterization (RR2-FR5). Pure Rust; the EpubBackend
 # adapter (document/reflow) maps it to the Document trait.
 inkread-epub = { workspace = true }
