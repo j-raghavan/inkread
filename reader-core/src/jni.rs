@@ -371,6 +371,25 @@ pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeDailyAssemb
     .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
 }
 
+// nativeUpdateDecide(installedVersion, releaseJson) : String — decide whether a fetched GitHub
+// releases/latest payload is a newer build than the installed one (ADR-INKREAD-0014 UPD-FR2). The
+// shell does the network fetch; the core only compares (semver) and returns the decision JSON
+// (`{"updateAvailable":…}`). Junk in -> `{"updateAvailable":false}`, never a throw (RR21-FR3).
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeUpdateDecide<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    installed_version: JString<'local>,
+    release_json: JString<'local>,
+) -> JString<'local> {
+    env.with_env(|env| -> jni::errors::Result<JString<'local>> {
+        let installed: String = installed_version.try_to_string(env)?;
+        let json: String = release_json.try_to_string(env)?;
+        env.new_string(inkread_update::decide(&installed, &json))
+    })
+    .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
+}
+
 // =====================================================================================
 // nativeRenderPage(handle, directBuffer) — render the current page into the direct
 // ByteBuffer the shell locked. The PixelBuffer borrow never outlives this call (Amendment 5).

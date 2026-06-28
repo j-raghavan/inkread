@@ -6,6 +6,11 @@
     <!-- Opt-in online dictionary fallback (Wiktionary) for non-bundled languages (RR12 / D4). -->
     <uses-permission android:name="android.permission.INTERNET" />
 
+    <!-- In-app self-update (ADR-INKREAD-0014): a sideloaded build has no store to push fixes, so it
+         checks GitHub Releases and installs a newer signed APK via PackageInstaller. The OS still
+         shows its own final install confirmation (no device-owner ⇒ no silent install). -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+
     <!-- All-files access (ADR-INKREAD-0005): the PDF export writes the annotated copy into a
          public, Partner-synced folder (e.g. /storage/emulated/0/EXPORT) so it reaches the desktop.
          Granted via Settings → All files access (Android 11+); sideloaded-app scope. -->
@@ -56,5 +61,11 @@
             android:name=".DailyActivity"
             android:exported="false"
             android:configChanges="orientation|screenSize|keyboardHidden" />
+
+        <!-- Self-update install callback (ADR-INKREAD-0014): receives the PackageInstaller session
+             result and launches the OS install-confirmation intent. Internal only. -->
+        <receiver
+            android:name=".UpdateInstallReceiver"
+            android:exported="false" />
     </application>
 </manifest>

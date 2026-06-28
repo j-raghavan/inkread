@@ -5,7 +5,6 @@ import android.util.Log
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
-import java.net.HttpURLConnection
 import java.net.URL
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -322,44 +321,8 @@ class DailyController(private val context: Context) {
 
     // ── Fetch (HTTPS/HTTP, off the UI thread) ─────────────────────────────────────────────────────
 
-    private fun fetch(url: String): String? {
-        if (url.isBlank()) return null
-        return try {
-            val conn = (URL(url).openConnection() as HttpURLConnection).apply {
-                connectTimeout = TIMEOUT_MS
-                readTimeout = TIMEOUT_MS
-                instanceFollowRedirects = true
-                setRequestProperty("User-Agent", "Mozilla/5.0 (inkread-daily/0.1)")
-                setRequestProperty("Accept", "text/html,application/xhtml+xml,application/xml,application/rss+xml,*/*")
-            }
-            val code = conn.responseCode
-            if (code !in 200..299) {
-                Log.e(TAG, "fetch $url -> HTTP $code")
-                return null
-            }
-            conn.inputStream.use { input ->
-                val bytes = input.readBytes(MAX_BYTES)
-                String(bytes, Charsets.UTF_8)
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "fetch failed: $url — ${e.message}")
-            null
-        }
-    }
-
-    /** Read up to [cap] bytes, then stop (a runaway page never exhausts memory). */
-    private fun java.io.InputStream.readBytes(cap: Int): ByteArray {
-        val out = java.io.ByteArrayOutputStream()
-        val buf = ByteArray(16 * 1024)
-        var total = 0
-        while (total < cap) {
-            val n = read(buf)
-            if (n < 0) break
-            out.write(buf, 0, n)
-            total += n
-        }
-        return out.toByteArray()
-    }
+    private fun fetch(url: String): String? =
+        HttpFetch.getText(url, FETCH_USER_AGENT, FETCH_ACCEPT, TIMEOUT_MS, MAX_BYTES)
 
     private fun todayKey(): String = SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date())
     private fun todayDisplay(): String = SimpleDateFormat("EEEE, MMMM d, yyyy", Locale.getDefault()).format(Date())
@@ -387,5 +350,7 @@ class DailyController(private val context: Context) {
         const val HEADLINES_SHOWN = 60 // headlines stored for the front page (grouped by source)
         const val TIMEOUT_MS = 10_000
         const val MAX_BYTES = 2 * 1024 * 1024 // cap a fetched page at 2 MiB
+        const val FETCH_USER_AGENT = "Mozilla/5.0 (inkread-daily/0.1)"
+        const val FETCH_ACCEPT = "text/html,application/xhtml+xml,application/xml,application/rss+xml,*/*"
     }
 }

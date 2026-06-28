@@ -88,6 +88,12 @@ object NativeBridge {
      *  Returns the EPUB bytes; throws on malformed JSON (#66). */
     external fun nativeDailyAssemble(issueJson: String): ByteArray
 
+    /** Decide whether [releaseJson] (a fetched GitHub releases/latest payload) is a newer build than
+     *  [installedVersion] (BuildConfig.VERSION_NAME). Standalone — the shell fetches, the core
+     *  semver-compares and returns the decision JSON `{updateAvailable,version,notes,apkUrl,
+     *  sha256Url}` (ADR-INKREAD-0014). Junk in -> `{"updateAvailable":false}`. */
+    external fun nativeUpdateDecide(installedVersion: String, releaseJson: String): String
+
     /**
      * Render the current page into [directBuffer] — a DIRECT [ByteBuffer] of exactly
      * `width*height*4` bytes (RGBA). The core borrows it for the call only (Amendment 5).
