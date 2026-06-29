@@ -81,10 +81,10 @@ dependencies {
     // (1.16+) demands compileSdk 35+ and AGP 9.1+, which is a deliberate migration — see dependabot
     // ignores. Bump these together with compileSdk + AGP, not piecemeal.
     implementation("androidx.core:core-ktx:1.13.1")
-    implementation("androidx.appcompat:appcompat:1.7.0")
+    implementation("androidx.appcompat:appcompat:1.7.1")
     // Background scheduler for the daily auto-compile (#66). 2.9.x is the last line that builds
     // against compileSdk 34 (2.10+ needs SDK 35) — bump with compileSdk + AGP, not piecemeal.
-    implementation("androidx.work:work-runtime-ktx:2.9.1")
+    implementation("androidx.work:work-runtime-ktx:2.11.2")
 
     // Host JVM unit tests for pure logic (e.g. PalmFilter) — run via :app:testDebugUnitTest, no
     // emulator/device needed (an emulator can't simulate the Supernote EMR pen anyway).
