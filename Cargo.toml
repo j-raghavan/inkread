@@ -54,7 +54,7 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 jpeg-decoder = { version = "0.3", default-features = false }
 png = "0.17"
 # inkread-daily (#66): RSS/Atom feed parsing. Pure-Rust pull parser, MIT/Apache, cross-compiles clean.
-quick-xml = "0.36"
+quick-xml = "0.40"
 # inkread-update (ADR-INKREAD-0014): semver comparison of the installed version against the GitHub
 # release tag. Pure Rust, MIT/Apache (AGPL-compatible → auto-passes check-licenses.sh).
 semver = "1"
