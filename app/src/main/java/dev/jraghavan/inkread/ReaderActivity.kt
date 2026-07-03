@@ -133,23 +133,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
     /** Shows the "Reflowing…" notice — posted with a short delay so a fast reflow never flashes it. */
     private val showReflowProgress = Runnable {
         if (isFinishing || docHandle == 0L) return@Runnable
-        val d = resources.displayMetrics.density
-        fun px(v: Int) = (v * d).toInt()
-        val msg = TextView(this).apply {
-            text = "Reflowing…"
-            textSize = 16f
-            setTextColor(Ink.ink) // black text on the white card below
-            setPadding(px(28), px(22), px(28), px(22))
-        }
-        reflowProgressDialog = Dialog(this).apply {
-            requestWindowFeature(Window.FEATURE_NO_TITLE)
-            setCancelable(false)
-            setContentView(msg)
-            // Without an explicit light window background the dialog renders as a black box on this
-            // e-ink theme; use the app's white card (matches the other sheets) (#55).
-            window?.setBackgroundDrawable(Ink.cardBg())
-            runCatching { show() }
-        }
+        reflowProgressDialog = Ink.progressDialog(this, "Reflowing…")
     }
 
     // ---- dictionary (RR12 / D4) — owns the corpus handle + lookup/define/manage UI (SRP) ----

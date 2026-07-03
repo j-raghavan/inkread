@@ -1,5 +1,6 @@
 package dev.jraghavan.inkread
 
+import android.app.Dialog
 import android.content.Context
 import android.graphics.Color
 import android.graphics.Typeface
@@ -7,6 +8,7 @@ import android.graphics.drawable.GradientDrawable
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
+import android.view.Window
 import android.widget.LinearLayout
 import android.widget.TextView
 
@@ -96,6 +98,26 @@ object Ink {
     fun gap(ctx: Context, h: Int): View =
         View(ctx).apply {
             layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(h))
+        }
+
+    /** A non-cancelable busy notice ("Reflowing…", "Compiling…") on the white card, shown
+     *  immediately; the caller keeps the returned dialog and dismisses it when the work completes.
+     *  The explicit light window background matters: without it the dialog renders as a black box
+     *  on this e-ink theme (#55). */
+    fun progressDialog(ctx: Context, message: String): Dialog =
+        Dialog(ctx).apply {
+            requestWindowFeature(Window.FEATURE_NO_TITLE)
+            setCancelable(false)
+            setContentView(
+                TextView(ctx).apply {
+                    text = message
+                    textSize = 16f
+                    setTextColor(ink)
+                    setPadding(dp(28), dp(22), dp(28), dp(22))
+                },
+            )
+            window?.setBackgroundDrawable(cardBg())
+            runCatching { show() }
         }
 
     /** A pill button — filled (black) for the primary action, outlined for secondary. */
