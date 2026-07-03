@@ -820,6 +820,40 @@ pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeFontNames<'
     .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
 }
 
+// nativeRegisterFallbackFont(fontBytes, ttcIndex) : boolean — register a runtime fallback face
+// (raw TTF/OTF/TTC bytes, e.g. a device CJK font) consulted for glyphs the reading faces lack, for
+// documents opened after the call. `ttcIndex` selects the face inside a TrueType collection (0 for
+// a plain TTF/OTF). Static; no handle — the chain is process-wide, so the shell registers once at
+// startup. Returns false — never throws — for bytes that don't parse or an out-of-range index
+// (RR21-FR3: validate at the boundary).
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeRegisterFallbackFont<
+    'local,
+>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    font_bytes: JByteArray<'local>,
+    ttc_index: jint,
+) -> jni::sys::jboolean {
+    env.with_env(|env| -> jni::errors::Result<jni::sys::jboolean> {
+        // A failed array conversion (null array etc.) also maps to `false` rather than `?`-ing
+        // into a thrown RuntimeException — keeps the "never throws" contract airtight.
+        let ok = match (
+            env.convert_byte_array(&font_bytes),
+            u32::try_from(ttc_index),
+        ) {
+            (Ok(bytes), Ok(index)) => inkread_epub::register_fallback_font(bytes, index),
+            _ => false, // unreadable bytes / negative index are invalid input, not an error
+        };
+        Ok(if ok {
+            jni::sys::JNI_TRUE
+        } else {
+            jni::sys::JNI_FALSE
+        })
+    })
+    .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
+}
+
 // nativeSetLineSpacing(handle, mult) : int — reflow line spacing (RR4); repaginates EPUB. Returns
 // the new page index, or -1 for a fixed-layout PDF. Re-render after.
 #[unsafe(no_mangle)]

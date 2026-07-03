@@ -750,6 +750,9 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
      * resume per document (RR12 / RR27). The store lives under app storage.
      */
     private fun openBook(path: String, bookId: String) {
+        // System fallback faces (CJK etc.) must be in the core's chain before the document builds
+        // its reflow view — fonts registered later only affect documents opened after them.
+        FallbackFonts.ensureRegistered()
         val capsBytes = WireCodec.encodeCapabilities(adapter.capabilities())
         NativeBridge.nativeInit(capsBytes)
         val dbPath = File(filesDir, "reader.db").absolutePath

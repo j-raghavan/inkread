@@ -14,6 +14,8 @@
 //! faces and full shaping (ligatures, complex scripts) are later refinements — see the module's
 //! divergence note in [`layout`](crate::layout).
 
+use std::sync::{Arc, OnceLock, RwLock};
+
 use ab_glyph::{point, Font, FontVec, GlyphId, PxScale, ScaleFont};
 use hyphenation::{Hyphenator as _, Language, Load, Standard};
 
@@ -50,12 +52,66 @@ pub fn reading_font_names() -> Vec<String> {
 /// boxes. Noto Music (SIL OFL 1.1) covers the Musical Symbols block.
 const FALLBACK_FONT: &[u8] = include_bytes!("../fonts/NotoMusic-Regular.ttf");
 
+/// The bundled symbol fallback, parsed once and shared — every [`AbFont`] construction (each face
+/// switch, each reflow view) reuses it instead of re-parsing the TTF.
+fn bundled_fallback() -> Arc<FontVec> {
+    static BUNDLED: OnceLock<Arc<FontVec>> = OnceLock::new();
+    BUNDLED
+        .get_or_init(|| {
+            Arc::new(
+                FontVec::try_from_vec(FALLBACK_FONT.to_vec())
+                    .expect("bundled fallback face is valid"),
+            )
+        })
+        .clone()
+}
+
+/// Fallback faces registered at runtime, in registration order. Process-wide by design: fonts are
+/// immutable shared assets and `AbFont` values are rebuilt on every face switch/repagination, so a
+/// registry lets each construction pick the chain up without threading state through every call
+/// site (sessions, reflow views, the daily assembler).
+fn extra_fallbacks() -> &'static RwLock<Vec<Arc<FontVec>>> {
+    static EXTRA: OnceLock<RwLock<Vec<Arc<FontVec>>>> = OnceLock::new();
+    EXTRA.get_or_init(|| RwLock::new(Vec::new()))
+}
+
+/// Register a runtime fallback face from raw TTF/OTF/TTC bytes for **all subsequently built**
+/// [`AbFont`]s — the shell hands over faces the bundled set lacks (e.g. a device CJK font) so
+/// scripts outside the bundled coverage stop rendering as `.notdef` boxes. `collection_index`
+/// selects the face inside a TrueType collection (`0` for plain TTF/OTF). Returns `false` — never
+/// panics — if the bytes don't parse or the index is out of range; already-built `AbFont`s are
+/// unaffected (the shell registers at startup, before any document opens).
+pub fn register_fallback_font(bytes: Vec<u8>, collection_index: u32) -> bool {
+    let Ok(font) = FontVec::try_from_vec_and_index(bytes, collection_index) else {
+        return false;
+    };
+    let mut extras = match extra_fallbacks().write() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(), // a font Vec can't be half-written; keep going
+    };
+    extras.push(Arc::new(font));
+    true
+}
+
+/// The full fallback chain for a new [`AbFont`]: the bundled symbol face first (stable ordering —
+/// runtime registrations can extend but never pre-empt bundled coverage), then runtime faces in
+/// registration order.
+fn fallback_chain() -> Vec<Arc<FontVec>> {
+    let extras = match extra_fallbacks().read() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    std::iter::once(bundled_fallback())
+        .chain(extras.iter().cloned())
+        .collect()
+}
+
 /// A font for measuring + rasterizing reflow text. Owns its bytes (so it is `Send + Sync`, usable
 /// from the `reader-core` document handle across the JNI thread). A primary reading face plus
 /// fallback faces consulted, in order, for any character the primary doesn't cover.
 pub struct AbFont {
     font: FontVec,
-    fallbacks: Vec<FontVec>,
+    fallbacks: Vec<Arc<FontVec>>,
 }
 
 impl AbFont {
@@ -66,26 +122,28 @@ impl AbFont {
     }
 
     /// The reading face for `id` (index into the bundled set; out-of-range → the default), each with
-    /// the same Noto Music glyph fallback so missing glyphs (e.g. musical symbols) still render.
+    /// the shared fallback chain (bundled Noto Music + any runtime-registered faces) so missing
+    /// glyphs — musical symbols, scripts the bundled set lacks — still render.
     #[must_use]
     pub fn for_face(id: usize) -> Self {
         let bytes = READING_FONTS.get(id).map_or(DEFAULT_FONT, |&(_, b)| b);
         let font = FontVec::try_from_vec(bytes.to_vec())
             .or_else(|_| FontVec::try_from_vec(DEFAULT_FONT.to_vec()))
             .expect("a bundled reading face is valid");
-        let fallbacks = FontVec::try_from_vec(FALLBACK_FONT.to_vec())
-            .into_iter()
-            .collect();
-        Self { font, fallbacks }
+        Self {
+            font,
+            fallbacks: fallback_chain(),
+        }
     }
 
-    /// Load a face from owned TTF/OTF bytes (e.g. a user-chosen font); `None` if unparseable. No
-    /// fallback chain — used where a single explicit face is wanted.
+    /// Load a face from owned TTF/OTF bytes (e.g. a user-chosen font); `None` if unparseable. Gets
+    /// the same shared fallback chain as the bundled faces — a custom primary shouldn't lose
+    /// symbol/script coverage.
     #[must_use]
     pub fn from_bytes(bytes: Vec<u8>) -> Option<Self> {
         FontVec::try_from_vec(bytes).ok().map(|font| Self {
             font,
-            fallbacks: Vec::new(),
+            fallbacks: fallback_chain(),
         })
     }
 
@@ -98,6 +156,7 @@ impl AbFont {
         self.fallbacks
             .iter()
             .find(|f| f.glyph_id(ch).0 != 0)
+            .map(|f| f.as_ref())
             .unwrap_or(&self.font)
     }
 }
@@ -383,6 +442,64 @@ mod tests {
             &mut canvas,
         );
         assert!(ink_count(&canvas) > 0, "the clef renders actual ink");
+    }
+
+    /// Test-only Noto Sans SC subsets (SIL OFL 1.1; see LICENSES-3RDPARTY.md) — a plain TTF with a
+    /// handful of Han glyphs, and a 2-face TTC whose face 0 is Latin-only and face 1 carries the
+    /// same Han glyphs (so collection-index selection is observable).
+    ///
+    /// The registry these tests feed is process-global with no reset, and tests run in parallel:
+    /// only assert *positively* (a registered glyph resolves). A test asserting a codepoint does
+    /// NOT resolve through the chain would be order-dependent and flaky — probe the parsed face
+    /// directly instead (see `ttc_collection_index_selects_the_face`).
+    const CJK_SUBSET: &[u8] = include_bytes!("../fonts/test/NotoSansSC-subset.ttf");
+    const CJK_TTC: &[u8] = include_bytes!("../fonts/test/NotoSansSC-test.ttc");
+
+    #[test]
+    fn registered_fallback_supplies_cjk_glyphs() {
+        // Before the CJK face is reachable no bundled face covers Han — the primary would render
+        // `.notdef` tofu (the reported bug). After registration every newly built AbFont resolves
+        // Han to the registered face, and it advances + inks.
+        let han = '\u{4F60}'; // 你
+        assert!(register_fallback_font(CJK_SUBSET.to_vec(), 0));
+        let f = AbFont::default_font();
+        assert_eq!(f.font.glyph_id(han).0, 0, "Spectral has no Han glyph");
+        assert_ne!(
+            f.face_for(han).glyph_id(han).0,
+            0,
+            "the registered fallback supplies 你"
+        );
+        assert!(f.advance("你好", 24.0, false, false) > 0.0);
+        let opts = LayoutOpts::new(300.0, 300.0, 24.0);
+        let pages = paginate(&[paragraph("你好")], &opts, &f);
+        let mut canvas = GrayCanvas::new(300, 300);
+        render_page(&pages[0], &opts, &f, &mut canvas);
+        assert!(ink_count(&canvas) > 0, "Han glyphs render actual ink");
+        // from_bytes primaries share the chain too (a custom face keeps script coverage).
+        let custom = AbFont::from_bytes(DEFAULT_FONT.to_vec()).unwrap();
+        assert_ne!(custom.face_for(han).glyph_id(han).0, 0);
+    }
+
+    #[test]
+    fn ttc_collection_index_selects_the_face() {
+        let han = '\u{4E16}'; // 世
+                              // The index picks a distinct face — probe the parsed faces directly (registry-independent,
+                              // so this stays order-safe against the other registering tests): face 0 is Latin-only,
+                              // face 1 carries the Han glyphs.
+        let face0 = FontVec::try_from_vec_and_index(CJK_TTC.to_vec(), 0).unwrap();
+        let face1 = FontVec::try_from_vec_and_index(CJK_TTC.to_vec(), 1).unwrap();
+        assert_eq!(face0.glyph_id(han).0, 0, "TTC face 0 has no 世");
+        assert_ne!(face1.glyph_id(han).0, 0, "TTC face 1 supplies 世");
+        // And the registry honors the index end-to-end: register Latin-only face 0 first, then
+        // face 1 — resolution through the chain can therefore only come from the index-1 face.
+        assert!(register_fallback_font(CJK_TTC.to_vec(), 0));
+        assert!(register_fallback_font(CJK_TTC.to_vec(), 1));
+        let f = AbFont::default_font();
+        assert_ne!(f.face_for(han).glyph_id(han).0, 0, "TTC face 1 supplies 世");
+        // An out-of-range collection index and garbage bytes are rejected, not panics (RR21-FR3).
+        assert!(!register_fallback_font(CJK_TTC.to_vec(), 99));
+        assert!(!register_fallback_font(vec![0u8; 64], 0));
+        assert!(!register_fallback_font(Vec::new(), 0));
     }
 
     #[test]
