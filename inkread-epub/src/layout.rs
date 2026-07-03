@@ -614,6 +614,19 @@ fn break_lines(
                         break;
                     }
                     if let Some((head, head_chars)) =
+                        unspaced_break_fit(rest, room, m, size, bold, italic)
+                    {
+                        // Unspaced-script (CJK) break at a UAX #14 opportunity — no hyphen; the
+                        // rest of the paragraph is one "word", so this is the only way it wraps.
+                        push(&mut cur, head.to_string(), start);
+                        lines.push(std::mem::take(&mut cur));
+                        rest = &rest[head.len()..];
+                        off += head_chars;
+                        first = false;
+                        x = 0.0;
+                        continue;
+                    }
+                    if let Some((head, head_chars)) =
                         hyphenate_fit(rest, room, hyph, m, size, bold, italic)
                     {
                         push(&mut cur, format!("{head}-"), start);
@@ -644,6 +657,80 @@ fn break_lines(
         lines.push(cur);
     }
     lines
+}
+
+/// Whether `ch` belongs to a script written without inter-word spaces (Han, kana, Hangul, and the
+/// CJK punctuation/fullwidth blocks). These are the characters around which a mid-token line break
+/// is typographically normal — the gate that keeps [`unspaced_break_fit`] away from Latin tokens,
+/// whose wrapping (hyphenation-only) must not change.
+fn is_unspaced_script(ch: char) -> bool {
+    matches!(u32::from(ch),
+        0x1100..=0x11FF      // Hangul Jamo
+        | 0x2E80..=0x303F    // CJK Radicals … CJK Symbols and Punctuation (。、「」)
+        | 0x3040..=0x30FF    // Hiragana, Katakana
+        | 0x3130..=0x318F    // Hangul Compatibility Jamo
+        | 0x31F0..=0x31FF    // Katakana Phonetic Extensions
+        | 0x3400..=0x4DBF    // CJK Extension A
+        | 0x4E00..=0x9FFF    // CJK Unified Ideographs
+        | 0xA960..=0xA97F    // Hangul Jamo Extended-A
+        | 0xAC00..=0xD7FF    // Hangul Syllables (+ Jamo Extended-B)
+        | 0xF900..=0xFAFF    // CJK Compatibility Ideographs
+        | 0xFE30..=0xFE4F    // CJK Compatibility Forms
+        | 0xFF00..=0xFFEF    // Halfwidth and Fullwidth Forms（，！？）
+        | 0x20000..=0x2FA1F  // CJK Extensions B–F, Compatibility Supplement
+    )
+}
+
+/// The longest prefix of `word` ending at a **UAX #14** line-break opportunity adjacent to an
+/// unspaced-script character, whose text fits `room` px as-is (no hyphen inserted); returns
+/// `(head, head_char_count)`, or `None` if the token has no such break point that fits.
+///
+/// This is how CJK wraps: a Chinese paragraph has no spaces, so it reaches [`break_lines`] as one
+/// token and — before this — overflowed the line as an unbreakable "word". UAX #14 supplies the
+/// between-character opportunities *and* the prohibition (kinsoku) rules: it never allows a break
+/// before a closing form like 。、」or after an opening 「, so those hang onto the right line for
+/// free. Opportunities not adjacent to an unspaced-script character are ignored so Latin tokens
+/// (e.g. `self-evident`) keep their existing hyphenation-only wrapping bit-for-bit.
+///
+/// Width accumulates segment-by-segment between opportunities (one O(len) pass, so a whole-chapter
+/// token stays linear). Cross-segment kerning is dropped by the summation; kerning only tightens,
+/// so a prefix that fits by the sum also fits when rendered — and CJK faces don't kern.
+fn unspaced_break_fit<'w>(
+    word: &'w str,
+    room: f32,
+    m: &dyn Metrics,
+    size: f32,
+    bold: bool,
+    italic: bool,
+) -> Option<(&'w str, usize)> {
+    if room <= 0.0 || !word.chars().any(is_unspaced_script) {
+        return None;
+    }
+    let mut best: Option<(&str, usize)> = None;
+    let mut width = 0.0f32;
+    let mut measured = 0usize; // byte offset up to which `width`/`chars` account
+    let mut chars = 0usize;
+    for (b, _) in unicode_linebreak::linebreaks(word) {
+        if b >= word.len() {
+            break; // the mandatory end-of-text "opportunity" is not a split point
+        }
+        let seg = &word[measured..b];
+        width += m.advance(seg, size, bold, italic);
+        chars += seg.chars().count();
+        measured = b;
+        if width > room {
+            break; // widths only grow — no later prefix can fit
+        }
+        let adjacent_unspaced = word[..b]
+            .chars()
+            .next_back()
+            .is_some_and(is_unspaced_script)
+            || word[b..].chars().next().is_some_and(is_unspaced_script);
+        if adjacent_unspaced {
+            best = Some((&word[..b], chars));
+        }
+    }
+    best
 }
 
 /// The longest prefix of `word` ending at a hyphenation opportunity whose text plus a trailing
@@ -729,6 +816,77 @@ mod tests {
                 assert!(w <= 100.0 + 0.01, "run overflows: {w}");
             }
         }
+    }
+
+    /// The narrow test viewport for the unspaced-script (CJK) wrapping tests: 10px font → 5px/char
+    /// (Mono); content 50px, paragraph indent 12px (1.2em) → 38px of body ⇒ 7 chars fit a line.
+    fn cjk_opts() -> LayoutOpts {
+        LayoutOpts {
+            page_w: 50.0,
+            page_h: 10_000.0,
+            margin: 0.0,
+            font_px: 10.0,
+            line_spacing: 1.0,
+            para_gap: 0.0,
+            align: Align::Left,
+        }
+    }
+
+    /// Each line's runs joined (the CJK tests place one run per line).
+    fn line_texts(pages: &[Page]) -> Vec<String> {
+        pages
+            .iter()
+            .flat_map(|p| &p.lines)
+            .map(|l| l.runs.iter().map(|r| r.text.as_str()).collect())
+            .collect()
+    }
+
+    #[test]
+    fn cjk_paragraph_wraps_between_characters() {
+        // No spaces, so the whole paragraph is one token — before UAX #14 it overflowed as a single
+        // unbreakable "word". 22 Han chars at 7/line wrap greedily to 7+7+7+1, nothing lost.
+        let text = "书山有路勤为径学海无涯苦作舟读万卷书行万里路";
+        let pages = paginate(&[para(text)], &cjk_opts(), &Mono);
+        let lines = line_texts(&pages);
+        assert_eq!(lines.len(), 4, "22 chars at 7/line: {lines:?}");
+        assert!(lines.iter().all(|l| l.chars().count() <= 7));
+        assert_eq!(lines.concat(), text, "no characters dropped or reordered");
+        // No line overflows the body column (indent 12 + 7×5 = 47 ≤ 50).
+        for line in pages.iter().flat_map(|p| &p.lines) {
+            for r in &line.runs {
+                assert!(r.x + r.text.chars().count() as f32 * 5.0 <= 50.0 + 0.01);
+            }
+        }
+    }
+
+    #[test]
+    fn cjk_break_honors_kinsoku_and_anchors_stay_font_invariant() {
+        // Naive 7-chars-per-line breaking would start line 2 with 。— UAX #14 forbids a break
+        // before a closing form, so the break retreats to after 六 and 。hangs onto 七's line.
+        let pages = paginate(&[para("一二三四五六七。八九十")], &cjk_opts(), &Mono);
+        let lines = line_texts(&pages);
+        assert_eq!(lines, ["一二三四五六", "七。八九十"]);
+        assert!(lines.iter().all(|l| !l.starts_with('。')));
+        // The continuation run keeps a chapter-relative anchor = chars consumed before it
+        // (ADR-INKREAD-0012 — a highlight re-resolves across reflow).
+        let runs: Vec<&PlacedRun> = pages
+            .iter()
+            .flat_map(|p| &p.lines)
+            .flat_map(|l| &l.runs)
+            .collect();
+        assert_eq!(runs[0].anchor.char_offset, 0);
+        assert_eq!(runs[1].anchor.char_offset, 6);
+    }
+
+    #[test]
+    fn mixed_latin_cjk_breaks_at_the_script_boundary_opportunities() {
+        // "Hello你好世界" is one token (no spaces). Latin-internal positions are not eligible —
+        // only UAX #14 opportunities adjacent to an unspaced-script char — so the line fills to
+        // "Hello你好" (7 chars, 35px ≤ 38px) and wraps cleanly, no overflow, no hyphen.
+        let pages = paginate(&[para("Hello你好世界")], &cjk_opts(), &Mono);
+        let lines = line_texts(&pages);
+        assert_eq!(lines, ["Hello你好", "世界"]);
+        assert!(!lines[0].ends_with('-'), "no hyphen for an unspaced break");
     }
 
     #[test]
