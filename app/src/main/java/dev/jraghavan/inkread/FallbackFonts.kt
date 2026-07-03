@@ -52,7 +52,10 @@ object FallbackFonts {
                 if (!file.exists() || !file.canRead()) continue
                 val ok = try {
                     NativeBridge.nativeRegisterFallbackFont(file.readBytes(), c.ttcIndex)
-                } catch (e: RuntimeException) {
+                } catch (e: Exception) {
+                    // Exception, not RuntimeException: readBytes throws IOException on a mid-read
+                    // failure (TOCTOU after the canRead check), and one bad candidate must never
+                    // abort the loop — or propagate out and kill the book open.
                     Log.e(TAG, "register ${c.path}#${c.ttcIndex} failed: ${e.message}")
                     false
                 }

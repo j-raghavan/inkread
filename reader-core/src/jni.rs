@@ -836,10 +836,14 @@ pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeRegisterFal
     ttc_index: jint,
 ) -> jni::sys::jboolean {
     env.with_env(|env| -> jni::errors::Result<jni::sys::jboolean> {
-        let bytes = env.convert_byte_array(&font_bytes)?;
-        let ok = match u32::try_from(ttc_index) {
-            Ok(index) => inkread_epub::register_fallback_font(bytes, index),
-            Err(_) => false, // a negative collection index is invalid input, not an error
+        // A failed array conversion (null array etc.) also maps to `false` rather than `?`-ing
+        // into a thrown RuntimeException — keeps the "never throws" contract airtight.
+        let ok = match (
+            env.convert_byte_array(&font_bytes),
+            u32::try_from(ttc_index),
+        ) {
+            (Ok(bytes), Ok(index)) => inkread_epub::register_fallback_font(bytes, index),
+            _ => false, // unreadable bytes / negative index are invalid input, not an error
         };
         Ok(if ok {
             jni::sys::JNI_TRUE

@@ -447,6 +447,11 @@ mod tests {
     /// Test-only Noto Sans SC subsets (SIL OFL 1.1; see LICENSES-3RDPARTY.md) — a plain TTF with a
     /// handful of Han glyphs, and a 2-face TTC whose face 0 is Latin-only and face 1 carries the
     /// same Han glyphs (so collection-index selection is observable).
+    ///
+    /// The registry these tests feed is process-global with no reset, and tests run in parallel:
+    /// only assert *positively* (a registered glyph resolves). A test asserting a codepoint does
+    /// NOT resolve through the chain would be order-dependent and flaky — probe the parsed face
+    /// directly instead (see `ttc_collection_index_selects_the_face`).
     const CJK_SUBSET: &[u8] = include_bytes!("../fonts/test/NotoSansSC-subset.ttf");
     const CJK_TTC: &[u8] = include_bytes!("../fonts/test/NotoSansSC-test.ttc");
 
@@ -478,9 +483,16 @@ mod tests {
     #[test]
     fn ttc_collection_index_selects_the_face() {
         let han = '\u{4E16}'; // 世
-                              // Face 0 is Latin-only: registration succeeds but supplies no Han glyph...
+                              // The index picks a distinct face — probe the parsed faces directly (registry-independent,
+                              // so this stays order-safe against the other registering tests): face 0 is Latin-only,
+                              // face 1 carries the Han glyphs.
+        let face0 = FontVec::try_from_vec_and_index(CJK_TTC.to_vec(), 0).unwrap();
+        let face1 = FontVec::try_from_vec_and_index(CJK_TTC.to_vec(), 1).unwrap();
+        assert_eq!(face0.glyph_id(han).0, 0, "TTC face 0 has no 世");
+        assert_ne!(face1.glyph_id(han).0, 0, "TTC face 1 supplies 世");
+        // And the registry honors the index end-to-end: register Latin-only face 0 first, then
+        // face 1 — resolution through the chain can therefore only come from the index-1 face.
         assert!(register_fallback_font(CJK_TTC.to_vec(), 0));
-        // ...face 1 is the CJK subset: after this, Han resolves.
         assert!(register_fallback_font(CJK_TTC.to_vec(), 1));
         let f = AbFont::default_font();
         assert_ne!(f.face_for(han).glyph_id(han).0, 0, "TTC face 1 supplies 世");

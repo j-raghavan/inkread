@@ -613,25 +613,19 @@ fn break_lines(
                         x = start + rest_w;
                         break;
                     }
-                    if let Some((head, head_chars)) =
-                        unspaced_break_fit(rest, room, m, size, bold, italic)
-                    {
-                        // Unspaced-script (CJK) break at a UAX #14 opportunity — no hyphen; the
-                        // rest of the paragraph is one "word", so this is the only way it wraps.
-                        push(&mut cur, head.to_string(), start);
+                    // Two ways to split the token mid-word: an unspaced-script (CJK) break at a
+                    // UAX #14 opportunity (no hyphen — for a spaceless paragraph this is the only
+                    // way it wraps), else a soft-hyphenated Latin break. Same head-and-wrap tail.
+                    let split = unspaced_break_fit(rest, room, m, size, bold, italic)
+                        .map(|(head, chars)| (head.to_string(), head.len(), chars))
+                        .or_else(|| {
+                            hyphenate_fit(rest, room, hyph, m, size, bold, italic)
+                                .map(|(head, chars)| (format!("{head}-"), head.len(), chars))
+                        });
+                    if let Some((fragment, head_len, head_chars)) = split {
+                        push(&mut cur, fragment, start);
                         lines.push(std::mem::take(&mut cur));
-                        rest = &rest[head.len()..];
-                        off += head_chars;
-                        first = false;
-                        x = 0.0;
-                        continue;
-                    }
-                    if let Some((head, head_chars)) =
-                        hyphenate_fit(rest, room, hyph, m, size, bold, italic)
-                    {
-                        push(&mut cur, format!("{head}-"), start);
-                        lines.push(std::mem::take(&mut cur));
-                        rest = &rest[head.len()..];
+                        rest = &rest[head_len..];
                         off += head_chars;
                         first = false;
                         x = 0.0;
