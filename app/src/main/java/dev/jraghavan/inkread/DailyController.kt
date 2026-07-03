@@ -133,6 +133,11 @@ class DailyController(private val context: Context) {
         val articles = JSONArray()
         var feedsReached = 0
         var itemsFound = 0
+        // Collected per source first, then interleaved below (#107): appending source-by-source put
+        // late-list sources' articles at the tail, and the front page stores only the first
+        // HEADLINES_SHOWN headlines — so a newly added feed could compile into the issue yet never
+        // appear on the front page. Round-robin gives every source front-of-issue presence.
+        val perSource = mutableListOf<List<JSONObject>>()
         try {
             for (src in active) {
                 val reached = booleanArrayOf(false)
@@ -155,13 +160,18 @@ class DailyController(private val context: Context) {
                             .put("html", html)
                     }
                 }
-                pool.invokeAll(tasks).forEach { f ->
-                    runCatching { f.get() }.getOrNull()?.let { articles.put(it) }
-                }
+                perSource.add(pool.invokeAll(tasks).mapNotNull { f -> runCatching { f.get() }.getOrNull() })
             }
         } finally {
             pool.shutdown()
             pool.awaitTermination(2, TimeUnit.SECONDS)
+        }
+        // Interleave: every source's 1st article, then every source's 2nd, … Source order still
+        // decides ties, so the issue keeps a stable, predictable reading order.
+        for (rank in 0 until PER_SOURCE) {
+            for (list in perSource) {
+                list.getOrNull(rank)?.let { articles.put(it) }
+            }
         }
         Log.i(TAG, "compile: feedsReached=$feedsReached itemsFound=$itemsFound articles=${articles.length()}")
         // Specific failure messages so the cause is obvious without a logcat.
