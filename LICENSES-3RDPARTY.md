@@ -194,6 +194,7 @@ the dependency set changes.
 | Droid Sans Mono | github.com/koreader/koreader-fonts | Apache License 2.0 |
 | FreeSerif | github.com/koreader/koreader-fonts (GNU FreeFont) | GPL-3.0 with font exception |
 | FreeSans | github.com/koreader/koreader-fonts (GNU FreeFont) | GPL-3.0 with font exception |
+| Noto Sans SC (test subset) | github.com/google/fonts (notofonts) | SIL Open Font License 1.1 |
 
 Pinyon Script is bundled at `app/src/main/assets/fonts/pinyon_script.ttf` for the home-screen
 "Library" heading (Spencerian-inspired). © The Pinyon Script Project Authors; SIL OFL 1.1
@@ -209,3 +210,8 @@ The selectable reading faces (font picker) + the glyph fallback are also bundled
 **FreeSerif / FreeSans** (© the GNU FreeFont contributors, GPL-3.0 with the font embedding
 exception — one-way compatible with this project's AGPL-3.0). All are the open-source faces KOReader
 ships; each redistributed with attribution per its license.
+
+`inkread-epub/fonts/test/` holds tiny **test-only** subsets of Noto Sans SC (© The Noto Project
+Authors, SIL OFL 1.1) used by host unit tests for the runtime fallback-font chain (CJK glyph
+selection + TrueType-collection index handling). They are compiled into test binaries only — never
+into the shipped library or APK.
