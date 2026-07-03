@@ -2,6 +2,7 @@ package dev.jraghavan.inkread
 
 import android.app.Activity
 import android.app.AlertDialog
+import android.app.Dialog
 import android.content.Intent
 import android.graphics.Color
 import android.graphics.Typeface
@@ -48,6 +49,12 @@ class DailyActivity : Activity() {
 
     private val daily by lazy { DailyController(this) }
 
+    /** The "Compiling…" busy notice — a compile takes seconds (network fetch + native assembly), so
+     *  without it the screen looks frozen after the tap. Guarded so a re-tap can't start a second
+     *  concurrent compile ([DailyController.compile] spawns a fresh worker per call). */
+    private var compileDialog: Dialog? = null
+    private var compileInProgress = false
+
     private var scale = 1f
     private fun dim(u: Number) = dp((u.toFloat() * scale).toInt()).coerceAtLeast(1)
     private fun fs(u: Number) = u.toFloat() * scale
@@ -61,6 +68,19 @@ class DailyActivity : Activity() {
     override fun onResume() {
         super.onResume()
         setContentView(buildView()) // refresh after returning (a freshly compiled issue, etc.)
+        // Returning while a compile is still running (onPause dropped the dialog window): re-show
+        // the notice, otherwise the screen looks idle while the guard silently swallows re-taps.
+        if (compileInProgress && compileDialog == null) {
+            compileDialog = Ink.progressDialog(this, "Compiling today's issue…")
+        }
+    }
+
+    override fun onPause() {
+        super.onPause()
+        // Drop the dialog window before the activity goes away (leak guard); the compile itself
+        // keeps running and its completion callback still refreshes the view / toasts the result.
+        compileDialog?.let { runCatching { it.dismiss() } }
+        compileDialog = null
     }
 
     private fun buildView(): View {
@@ -414,13 +434,18 @@ class DailyActivity : Activity() {
     )
 
     private fun compileFlow() {
+        if (compileInProgress) return // one compile at a time; the dialog is already up
         if (daily.sources().isEmpty()) {
             suggestedSourcesDialog()
             return
         }
-        Toast.makeText(this, "Compiling today's issue…", Toast.LENGTH_SHORT).show()
+        compileInProgress = true
+        compileDialog = Ink.progressDialog(this, "Compiling today's issue…")
         daily.compile { ok, msg ->
             runOnUiThread {
+                compileDialog?.let { runCatching { it.dismiss() } }
+                compileDialog = null
+                compileInProgress = false
                 Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
                 if (ok) setContentView(buildView())
             }
