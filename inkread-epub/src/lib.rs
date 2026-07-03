@@ -25,7 +25,8 @@ pub use layout::{
     PlacedRun,
 };
 pub use render::{
-    page_glyphs, reading_font_names, render_page, AbFont, EnHyphenator, GrayCanvas, PlacedGlyph,
+    page_glyphs, reading_font_names, register_fallback_font, render_page, AbFont, EnHyphenator,
+    GrayCanvas, PlacedGlyph,
 };
 
 /// The error surface for EPUB parsing — mirrors `inkread-dict`'s shape so the `reader-core` adapter

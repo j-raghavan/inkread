@@ -190,6 +190,13 @@ object NativeBridge {
     /** The bundled reading-face display names, newline-joined, in id order (index = the font id). */
     external fun nativeFontNames(): String
 
+    /** Register a runtime fallback face (raw TTF/OTF/TTC bytes) consulted for glyphs the reading
+     *  faces lack — e.g. the device's CJK font, so Chinese/Japanese/Korean stop rendering as □
+     *  boxes. [ttcIndex] selects the face inside a TrueType collection (0 for a plain TTF/OTF).
+     *  Process-wide, for documents opened after the call: register once at startup, before opening
+     *  a document. Returns false for bytes that don't parse as a font. */
+    external fun nativeRegisterFallbackFont(fontBytes: ByteArray, ttcIndex: Int): Boolean
+
     /** Set the display-enhancement contrast [step] (0 = off; RR4). Applied as a post-render pixel
      *  remap (works on PDF + EPUB); re-render after calling. */
     external fun nativeSetContrast(handle: Long, step: Int)
