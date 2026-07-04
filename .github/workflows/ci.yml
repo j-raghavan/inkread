@@ -2,8 +2,10 @@ name: CI
 
 # Host-first CI (RR29-FR3): the Rust core builds + tests on the host with NO Android SDK
 # (RR1-AC3), then the JNI bridge is cross-checked for the device target, and the license
-# manifest is verified (RR18-AC2). The full APK build is intentionally out of this gate for
-# M0 (it needs the NDK + a device to be meaningful); CI proves the core + the seams.
+# manifest is verified (RR18-AC2). The apk-assemble job builds a debug APK (debug-keystore
+# signed; no release secrets) through the canonical ./buildApk.sh pipeline so Gradle ↔ JNI ↔
+# pdfium packaging regressions fail here instead of at release time — release signing and
+# on-device behavior stay release/manual concerns.
 #
 # The pdfium render tests (open/render/DRM/corrupt) SKIP unless PDFIUM_DYNAMIC_LIB_PATH is
 # set, so the `host` job fetches the BSD bblanchon libpdfium and re-runs them with the env
@@ -127,6 +129,51 @@ jobs:
       # (ADR Decision 2); a new dep with an unvetted license fails the build (RR18-AC2).
       - name: Verify dependency licenses against the allowlist
         run: ./scripts/check-licenses.sh
+
+  apk-assemble:
+    name: assemble debug APK (packaging check)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Set up JDK 21
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: gradle
+      - name: Install Rust toolchain (from rust-toolchain.toml)
+        run: rustup show
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk --locked
+      # Same NDK resolution as release.yml — buildApk.sh drives cargo-ndk off ANDROID_NDK_HOME.
+      - name: Configure Android NDK
+        run: |
+          set -euo pipefail
+          ndk="${ANDROID_NDK_LATEST_HOME:-${ANDROID_NDK_HOME:-${ANDROID_NDK_ROOT:-}}}"
+          test -n "$ndk" || { echo "::error::No Android NDK found on the runner"; exit 1; }
+          echo "ANDROID_NDK_HOME=$ndk" >> "$GITHUB_ENV"
+          echo "Using NDK: $ndk"
+      # The canonical pipeline (cargo-ndk → pinned libpdfium staging → Gradle), debug variant:
+      # debug-keystore signed, no release secrets, same packaging path the release build takes.
+      - name: Build debug APK (./buildApk.sh --debug)
+        run: |
+          chmod +x ./buildApk.sh
+          ./buildApk.sh --debug
+      # The point of the job: the APK must actually CONTAIN the native libs Gradle is meant
+      # to package — a silent jniLibs/sourceSets/packaging regression otherwise ships a
+      # reader that dies on loadLibrary at first launch.
+      - name: Assert native libs packaged in the APK
+        run: |
+          set -euo pipefail
+          apk="$(find app/build/outputs/apk/debug -type f -name '*.apk' -print -quit)"
+          test -n "$apk" || { echo "::error::No APK produced under app/build/outputs/apk/debug"; exit 1; }
+          listing="$(unzip -l "$apk")"
+          for lib in lib/arm64-v8a/libreader.so lib/arm64-v8a/libpdfium.so; do
+            echo "$listing" | grep -q "$lib" || { echo "::error::$lib missing from $apk"; exit 1; }
+          done
+          echo "APK OK: $apk contains libreader.so + libpdfium.so (arm64-v8a)"
 
   android-unit-tests:
     name: android unit tests (host JVM)

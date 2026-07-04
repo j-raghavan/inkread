@@ -1,7 +1,9 @@
 name: Release
 
 # Build the signed APK and publish a GitHub Release with auto-generated notes when a
-# v* tag is pushed (or via manual dispatch). Mirrors the local `./buildApk.sh` pipeline:
+# v* tag is pushed (or via manual dispatch). Before tagging, run the on-device pass in
+# docs/RELEASE-SMOKE-CHECKLIST.md — CI proves the host + packaging, never the EPD/pen behavior.
+# Mirrors the local `./buildApk.sh` pipeline:
 # cargo-ndk builds libreader.so → the pinned BSD libpdfium is fetched + sha256-verified →
 # the dictionary corpus is staged → Gradle assembles the APK. The APK is attached to the
 # Release so anyone can sideload it without a toolchain.

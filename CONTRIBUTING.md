@@ -44,7 +44,7 @@ You don't have to write Rust to help:
 | Contribution                | Examples                                                              |
 | --------------------------- | --------------------------------------------------------------------- |
 | 🐛 **Bug reports**          | Crashes, wrong layout, ink that doesn't render, a refresh that ghosts |
-| 💡 **Feature ideas**        | See [`spec/NEOREADER-FEATURE-BACKLOG.md`] for the roadmap             |
+| 💡 **Feature ideas**        | See the open [milestones and issues] for the roadmap                  |
 | 📝 **Docs**                 | Clarify a confusing README/spec, fix a typo, improve this guide       |
 | 🧪 **Tests / fixtures**     | A PDF/EPUB that breaks reflow is a *gift* — add it as a golden test   |
 | 🦀 **Rust core**            | Parsing, reflow, ink, refresh policy, dictionary, Lua plugin API      |
@@ -84,8 +84,10 @@ Two rules fall out of this split and they shape almost every review comment:
 
 > The canonical design lives in `spec/` (gitignored, not in this repo): `SPEC-INKREAD.md` plus the
 > `ADR-INKREAD-*` set and the `RR` requirement ledger. PRs reference requirements by number
-> (e.g. *RR5-FR1*, *ADR-0010*). If you're an external contributor and need a requirement clarified,
-> ask in the issue/PR — a maintainer will quote the relevant contract.
+> (e.g. *RR5-FR1*, *ADR-0010*). **[`docs/SPEC-INDEX.md`](./docs/SPEC-INDEX.md) is the public,
+> redacted index of every citable ID** — start there to resolve any `RR…`/`ADR-…`/`IR-…` citation.
+> If a summary there is too thin, ask in the issue/PR — a maintainer will quote the relevant
+> contract.
 
 ---
 
@@ -255,4 +257,4 @@ security issues in the public tracker.
 
 Welcome aboard — we're glad you're here. 🚀
 
-[`spec/NEOREADER-FEATURE-BACKLOG.md`]: ./spec/NEOREADER-FEATURE-BACKLOG.md
+[milestones and issues]: https://github.com/j-raghavan/inkread/milestones

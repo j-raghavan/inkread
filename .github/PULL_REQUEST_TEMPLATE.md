@@ -23,6 +23,7 @@ Closes #
 - [ ] `cargo test --workspace` is green
 - [ ] Added/updated a test that fails without this change (for bugs/new behaviour)
 - [ ] Verified on a device (Supernote) — _or_ host-only change, N/A
+      (release PRs: run [`docs/RELEASE-SMOKE-CHECKLIST.md`](../docs/RELEASE-SMOKE-CHECKLIST.md))
 
 ## Pre-merge checklist
 

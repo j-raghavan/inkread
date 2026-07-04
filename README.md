@@ -115,7 +115,7 @@ https://github.com/user-attachments/assets/4381ee07-3683-45ef-9fa4-9ed7cdd11295
 | Annotation portability | **Written into the PDF** + portable sidecar | Sidecar metadata | Proprietary, locked-in |
 | Document reading (PDF reflow, dictionary) | Yes | **Mature** | Limited |
 | Daily reading companion (RSS → on-device issue) | **Built-in** (InkRead Daily) | Plugin (NewsDownloader) | No |
-| E-ink refresh control | Vendor-neutral policy in core | **Excellent** | Native / vendor-optimal |
+| E-ink refresh control | Vendor-neutral policy in core ([platform-capped](./docs/EINK-LIMITS.md)) | **Excellent** (on devices that allow it) | Native / vendor-optimal |
 | Extensibility | Native Lua API + selected KOReader-shim | **Huge Lua ecosystem** | None (closed) |
 | Architecture | Rust core, host-testable | C + Lua | Closed-source |
 | Open source | **AGPL-3.0** | **AGPL-3.0** | Proprietary |
@@ -123,7 +123,9 @@ https://github.com/user-attachments/assets/4381ee07-3683-45ef-9fa4-9ed7cdd11295
 
 > Honest take: KOReader is the more mature *reader* and runs on far more hardware; the Supernote
 > reader is the more polished *native* experience. inkread is the **only one of the three that's both
-> open and built handwriting-first**, and it's **early** — see status below.
+> open and built handwriting-first**, and it's **early** — see status below. Pen latency rides the
+> firmware's own sub-frame ink path; refresh tuning is capped by what the platform exposes to
+> sideloaded apps — [docs/EINK-LIMITS.md](./docs/EINK-LIMITS.md) states those limits plainly.
 
 inkread is **not** a KOReader clone. KOReader is prior art and compatibility inspiration; inkread
 reuses its plugin *style* (a selected `.koplugin` shim) but ships its own Rust-native engine.
