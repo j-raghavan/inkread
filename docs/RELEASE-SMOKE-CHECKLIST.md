@@ -51,7 +51,7 @@ Tick a step only when the expected result is observed. Any failure blocks the ta
 | 4.3 | Copy, then paste | Duplicate lands slightly offset beside the source | primary |
 | 4.4 | Delete the selection | Selected strokes gone; undo restores them | primary |
 | 4.5 | Lasso over printed text (Smart mode) | Text selection result with Copy/Define/Digest actions | primary |
-| 4.6 | Exit the Lasso tool | EMR ink re-enabled: the pen writes again immediately (binder writable restored) | both |
+| 4.6 | Exit the Lasso tool | The pen writes again immediately | both |
 
 ## 5. Reading tools
 

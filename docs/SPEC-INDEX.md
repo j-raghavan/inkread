@@ -38,7 +38,7 @@ authority and moves with the code.
 | RR10 | Annotation storage & sidecars | `.inkread/` sidecar, binary ink codec, document identity, atomic writes. | Conformant |
 | RR11 | Export system | MD/JSON/PDF/SVG/PNG export of annotations and notes. | Planned (PDF export shipped) |
 | RR12 | Rust-native built-in workflows | Reading progress, dictionary, vocabulary, export as core services. | Partial |
-| RR13 | Lua plugin runtime | Embedded Lua for user plugins (L1 shipped: logging API). | Partial |
+| RR13 | Lua plugin runtime | Embedded Lua for user plugins. | Planned (Lua L1 shipped) |
 | RR14 | KOReader compatibility shim | Loader for selected `.koplugin` plugins. | Planned |
 | RR15 | Plugin security & permissions | Capability manifest + per-plugin storage sandbox. | Planned |
 | RR16 | Reader, annotation, notebook & plugin UI | Reader view, tool palette (ADR-0010), notebook/plugin surfaces. | Partial |
