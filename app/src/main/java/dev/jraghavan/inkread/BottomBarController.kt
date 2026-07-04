@@ -18,14 +18,13 @@ import android.widget.ScrollView
 import android.widget.SeekBar
 import android.widget.TextView
 import android.widget.Toast
-import java.io.File
 
 /**
  * The reader's bottom control bar + the navigation panels it opens (RR16/RR25), extracted from
  * `ReaderActivity` (SRP): the KOReader-style bar (page slider, chapter jumps, control row), the
  * go-to-page entry, bookmarks (toggle + list), Contents (TOC), the handwritten-annotations list,
- * the library picker, and go-home. Sub-surfaces owned by other controllers (Search / Export /
- * Dicts / Adjust) open through [Host] callbacks.
+ * and go-home. Sub-surfaces owned by other controllers (Search / Export / Dicts / Adjust) open
+ * through [Host] callbacks.
  *
  * Threading mirrors the original inline code: panels are built on the UI thread; document state
  * (TOC, bookmarks, ink pages) is fetched on the engine thread via [Host.engineExecute].
@@ -64,9 +63,6 @@ class BottomBarController(private val host: Host) {
         fun repaintPanel()
 
         fun openPicker()
-
-        /** Open a Library book in place (engine thread inside). */
-        fun openFromLibrary(file: File)
 
         /** Wrap dialog content so a resting palm can't tap through it. */
         fun palmGuard(content: View): View
@@ -487,20 +483,6 @@ class BottomBarController(private val host: Host) {
             setBackgroundDrawable(Ink.cardBg())
         }
         dialog.show()
-    }
-
-    /** The on-device library (RR17): pick a stored book to open it in place. */
-    private fun showLibraryDialog() {
-        val books = Books.list(activity)
-        if (books.isEmpty()) {
-            Toast.makeText(activity, "No books yet — open a PDF first", Toast.LENGTH_SHORT).show()
-            return
-        }
-        val labels = books.map { Books.title(it) }.toTypedArray()
-        AlertDialog.Builder(activity, R.style.InkDialog)
-            .setTitle("Library")
-            .setItems(labels) { _, which -> host.openFromLibrary(books[which]) }
-            .show()
     }
 
     /** Return to the home screen (RR16), leaving the reader. */

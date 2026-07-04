@@ -340,6 +340,20 @@ class AdjustSheetController(private val host: Host) {
         return container
     }
 
+    /** A white rounded stepper pill (shared by the Zoom and Font tabs). */
+    private fun pill(t: String, on: () -> Unit): TextView {
+        val d = activity.resources.displayMetrics.density
+        fun dp(v: Int) = (v * d).toInt()
+        return TextView(activity).apply {
+            text = t; textSize = 16f; gravity = Gravity.CENTER; setTextColor(Color.BLACK)
+            setPadding(dp(18), dp(10), dp(18), dp(10)); isClickable = true
+            background = GradientDrawable().apply {
+                setColor(Color.WHITE); cornerRadius = dp(20).toFloat(); setStroke(maxOf(1, dp(1)), Color.parseColor("#9E9E9E"))
+            }
+            setOnClickListener { on() }
+        }
+    }
+
     /** The "Zoom" tab: the Fit segmented row + a live zoom −/+ stepper (zoom moved off the bar). */
     private fun zoomPanel(): View {
         val d = activity.resources.displayMetrics.density
@@ -349,14 +363,6 @@ class AdjustSheetController(private val host: Host) {
         }
         fun refresh() { zlabel.text = "${host.zoomPercent}%" }
         refresh()
-        fun pill(t: String, on: () -> Unit) = TextView(activity).apply {
-            text = t; textSize = 16f; gravity = Gravity.CENTER; setTextColor(Color.BLACK)
-            setPadding(dp(18), dp(10), dp(18), dp(10)); isClickable = true
-            background = GradientDrawable().apply {
-                setColor(Color.WHITE); cornerRadius = dp(20).toFloat(); setStroke(maxOf(1, dp(1)), Color.parseColor("#9E9E9E"))
-            }
-            setOnClickListener { on() }
-        }
         val zoomControl = LinearLayout(activity).apply {
             orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
             addView(pill("−") { host.zoomOut(); refresh() })
@@ -451,14 +457,6 @@ class AdjustSheetController(private val host: Host) {
         fun refresh() { value.text = "${(DisplayPrefs.TEXT_SCALES[idx] * 100).toInt()}%" }
         refresh()
         fun apply() { refresh(); applyReflowScale(idx, warnIfFixed = true) }
-        fun pill(t: String, on: () -> Unit) = TextView(activity).apply {
-            text = t; textSize = 16f; gravity = Gravity.CENTER; setTextColor(Color.BLACK)
-            setPadding(dp(18), dp(10), dp(18), dp(10)); isClickable = true
-            background = GradientDrawable().apply {
-                setColor(Color.WHITE); cornerRadius = dp(20).toFloat(); setStroke(maxOf(1, dp(1)), Color.parseColor("#9E9E9E"))
-            }
-            setOnClickListener { on() }
-        }
         val control = LinearLayout(activity).apply {
             orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
             addView(pill("A−") { if (idx > 0) { idx--; apply() } })

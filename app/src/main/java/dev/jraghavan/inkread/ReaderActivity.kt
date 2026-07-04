@@ -236,7 +236,6 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         override fun postJump(page: Int) = this@ReaderActivity.postJump(page)
         override fun repaintPanel() = this@ReaderActivity.repaintPanel()
         override fun openPicker() = this@ReaderActivity.openPicker()
-        override fun openFromLibrary(file: File) = this@ReaderActivity.openFromLibrary(file)
         override fun palmGuard(content: View) = this@ReaderActivity.palmGuard(content)
         override fun zoomIn() = zoomBy(ZOOM_STEP)
         override fun zoomOut() = zoomBy(1f / ZOOM_STEP)
@@ -902,11 +901,6 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         drawLoading()
         openBook(path, id)
         repaintPanel() // the new book's first page has no command stream → refresh
-    }
-
-    /** Open a Library book in place (invoked from the reader popup; engine thread). */
-    private fun openFromLibrary(file: File) {
-        engine.execute { openSwap(file.absolutePath, file.name) }
     }
 
     /**
