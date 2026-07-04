@@ -170,8 +170,11 @@ jobs:
           apk="$(find app/build/outputs/apk/debug -type f -name '*.apk' -print -quit)"
           test -n "$apk" || { echo "::error::No APK produced under app/build/outputs/apk/debug"; exit 1; }
           listing="$(unzip -l "$apk")"
+          # Pure-bash substring check — NOT `echo | grep -q`: grep -q exits on first match,
+          # which can EPIPE the echo mid-write, and pipefail then flunks a SUCCESSFUL match
+          # (bit us on the first master run: a green build reported libpdfium.so "missing").
           for lib in lib/arm64-v8a/libreader.so lib/arm64-v8a/libpdfium.so; do
-            echo "$listing" | grep -q "$lib" || { echo "::error::$lib missing from $apk"; exit 1; }
+            [[ "$listing" == *"$lib"* ]] || { echo "::error::$lib missing from $apk"; exit 1; }
           done
           echo "APK OK: $apk contains libreader.so + libpdfium.so (arm64-v8a)"
 
