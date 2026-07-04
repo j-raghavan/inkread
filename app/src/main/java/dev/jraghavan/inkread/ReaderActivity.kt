@@ -3,7 +3,6 @@ package dev.jraghavan.inkread
 import android.app.Activity
 import android.app.AlertDialog
 import android.content.Intent
-import android.content.pm.ActivityInfo
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
@@ -206,6 +205,28 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         override fun openPicker() = this@ReaderActivity.openPicker()
     })
 
+    /** Persisted display + typography settings (RR4); shared by openBook and the Adjust sheet. */
+    private val displayPrefs = DisplayPrefs(this)
+
+    /** Document-settings sheet (RR4) — owns the tabbed panels + widgets + presets (SRP). The
+     *  shell keeps the page geometry: reflow toggle + zoom mutate through the Host. */
+    private val adjust = AdjustSheetController(object : AdjustSheetController.Host {
+        override val activity get() = this@ReaderActivity
+        override val docHandle get() = this@ReaderActivity.docHandle
+        override val prefs get() = displayPrefs
+        override val reflowOn get() = this@ReaderActivity.reflowOn
+        override val zoomPercent get() = (zoom * 100).toInt()
+        override fun engineExecute(block: () -> Unit) { engine.execute(block) }
+        override fun repaintPanel() = this@ReaderActivity.repaintPanel()
+        override fun refreshPageCount() { pageCount = NativeBridge.nativePageCount(docHandle) }
+        override fun setReflowMode(on: Boolean) = this@ReaderActivity.setReflowMode(on)
+        override fun zoomIn() = zoomBy(ZOOM_STEP)
+        override fun zoomOut() = zoomBy(1f / ZOOM_STEP)
+        override fun openPicker() = this@ReaderActivity.openPicker()
+        override fun palmGuard(content: View) = this@ReaderActivity.palmGuard(content)
+        override fun diag(msg: () -> String) = this@ReaderActivity.diag(msg)
+    })
+
     /** The in-progress stroke as interleaved view-px x,y; UI-thread only. */
     private val strokeBuf = ArrayList<Float>()
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -377,7 +398,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         super.onCreate(savedInstanceState)
         // Re-apply the saved page rotation (RR4) before the surface is created so the first render
         // is at the right orientation. configChanges=orientation keeps us from recreating.
-        requestedOrientation = orientationPref()
+        requestedOrientation = displayPrefs.orientation
         // Prove the JNI boundary up front (RR1-AC2). Cheap; fine on the UI thread.
         Log.i(TAG, "core: ${NativeBridge.nativeHello()}")
 
@@ -768,31 +789,31 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             // A fixed-layout PDF magnifies; EPUB (always reflowed) does not (#61, RR25-FR3).
             magnifiable = try { NativeBridge.nativeIsMagnifiable(docHandle) } catch (e: RuntimeException) { false }
             // Re-apply the saved reflow text scale (EPUB); a no-op (-1) on fixed-layout PDF.
-            val savedScale = textScalePref()
+            val savedScale = displayPrefs.textScale
             if (savedScale != 1.0f) {
                 val np = try { NativeBridge.nativeSetTextScale(docHandle, savedScale) } catch (e: RuntimeException) { -1 }
                 if (np >= 0) Log.i(TAG, "applied text scale $savedScale → page $np")
             }
             // Re-apply the saved reflow typeface (EPUB); default face 0 (a no-op on fixed-layout PDF).
-            if (fontPref() != 0) {
-                try { NativeBridge.nativeSetFont(docHandle, fontPref()) } catch (e: RuntimeException) {}
+            if (displayPrefs.font != 0) {
+                try { NativeBridge.nativeSetFont(docHandle, displayPrefs.font) } catch (e: RuntimeException) {}
             }
             // Re-apply the saved display contrast (RR4); 0 = off (a no-op in the core).
-            try { NativeBridge.nativeSetContrast(docHandle, contrastPref()) } catch (e: RuntimeException) {}
+            try { NativeBridge.nativeSetContrast(docHandle, displayPrefs.contrast) } catch (e: RuntimeException) {}
             // Re-apply night mode (invert); default off (RR4 / style presets).
-            try { NativeBridge.nativeSetNight(docHandle, nightPref()) } catch (e: RuntimeException) {}
+            try { NativeBridge.nativeSetNight(docHandle, displayPrefs.night) } catch (e: RuntimeException) {}
             // Re-apply the saved page fit mode (RR4); default Page/contain.
-            try { NativeBridge.nativeSetFit(docHandle, fitPref()) } catch (e: RuntimeException) {}
+            try { NativeBridge.nativeSetFit(docHandle, displayPrefs.fit) } catch (e: RuntimeException) {}
             // Re-apply the saved auto-crop + margin (RR4); default off.
-            try { NativeBridge.nativeSetCrop(docHandle, if (cropAutoPref()) 1 else 0, cropMarginPref()) } catch (e: RuntimeException) {}
+            try { NativeBridge.nativeSetCrop(docHandle, if (displayPrefs.cropAuto) 1 else 0, displayPrefs.cropMargin) } catch (e: RuntimeException) {}
             // Re-apply the saved render quality (RR4); default 1.
-            try { NativeBridge.nativeSetRenderQuality(docHandle, renderQualityPref()) } catch (e: RuntimeException) {}
+            try { NativeBridge.nativeSetRenderQuality(docHandle, displayPrefs.renderQuality) } catch (e: RuntimeException) {}
             // Re-apply saved reflow line-spacing + alignment (RR4; EPUB only — PDF returns -1).
-            if (kotlin.math.abs(lineSpacingMult() - DEFAULT_LINE_SPACING) > 0.001f) {
-                try { NativeBridge.nativeSetLineSpacing(docHandle, lineSpacingMult()) } catch (e: RuntimeException) {}
+            if (kotlin.math.abs(displayPrefs.lineSpacingMult - DisplayPrefs.DEFAULT_LINE_SPACING) > 0.001f) {
+                try { NativeBridge.nativeSetLineSpacing(docHandle, displayPrefs.lineSpacingMult) } catch (e: RuntimeException) {}
             }
-            if (alignmentPref() != 0) {
-                try { NativeBridge.nativeSetAlignment(docHandle, alignmentPref()) } catch (e: RuntimeException) {}
+            if (displayPrefs.alignment != 0) {
+                try { NativeBridge.nativeSetAlignment(docHandle, displayPrefs.alignment) } catch (e: RuntimeException) {}
             }
             pageCount = NativeBridge.nativePageCount(docHandle)
             Books.pushRecent(this, bookId, path)
@@ -1779,7 +1800,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         control(R.drawable.ic_menu_export, "Export") { export.showExportDialog() }
         control(R.drawable.ic_menu_dict, "Dicts") { dict.showDictionariesDialog() }
         // Document controls consolidated into one KOReader-style tabbed sheet (Rotate/Fit/Font/Display).
-        control(R.drawable.ic_menu_adjust, "Adjust") { showAdjustSheet() }
+        control(R.drawable.ic_menu_adjust, "Adjust") { adjust.show() }
         control(R.drawable.ic_menu_open, "Open") { openPicker() }
         container.addView(controls)
 
@@ -2223,11 +2244,11 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
                 if (pinchFont) {
                     // Map the pinch ratio onto the font scale: pinch out 1.3x ≈ font 1.3x, snapped to
                     // the nearest preset. A small/accidental pinch leaves the size unchanged.
-                    val cur = nearestScaleIndex(textScalePref())
-                    val target = nearestScaleIndex(
-                        (textScalePref() * liveScale).coerceIn(TEXT_SCALES.first(), TEXT_SCALES.last())
+                    val cur = DisplayPrefs.nearestScaleIndex(displayPrefs.textScale)
+                    val target = DisplayPrefs.nearestScaleIndex(
+                        (displayPrefs.textScale * liveScale).coerceIn(DisplayPrefs.TEXT_SCALES.first(), DisplayPrefs.TEXT_SCALES.last())
                     )
-                    if (target != cur) applyReflowScale(target, announce = true)
+                    if (target != cur) adjust.applyReflowScale(target, announce = true)
                     return
                 }
                 val newZoom = (gestureStartZoom * liveScale).coerceIn(1f, MAX_ZOOM_UI)
@@ -2776,284 +2797,6 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         }
     }
 
-    private fun contrastPref(): Int =
-        getSharedPreferences("display", MODE_PRIVATE).getInt("contrast", 0).coerceIn(0, CONTRAST_MAX)
-
-    private fun setContrastPref(step: Int) =
-        getSharedPreferences("display", MODE_PRIVATE).edit().putInt("contrast", step).apply()
-
-    // ---- Document settings sheet (RR4 — KOReader-style tabbed controls) ----
-
-    /**
-     * A KOReader-style tabbed settings sheet that consolidates the document controls
-     * (Rotate / Fit / Font / Display) behind one bottom-bar entry — matching KOReader's bottom
-     * sheet structure. Each tab swaps an inline control panel; changes apply live + persist.
-     */
-    private fun showAdjustSheet() {
-        if (docHandle == 0L) { openPicker(); return }
-        val d = resources.displayMetrics.density
-        fun dp(v: Int) = (v * d).toInt()
-        val dialog = Dialog(this).apply { requestWindowFeature(Window.FEATURE_NO_TITLE) }
-        val content = android.widget.FrameLayout(this)
-
-        val panels: List<Triple<String, Int, () -> View>> = listOf(
-            Triple("Style", R.drawable.ic_menu_adjust) { stylePanel() },
-            Triple("Rotate", R.drawable.ic_menu_rotate) { rotationPanel() },
-            Triple("Crop", R.drawable.ic_menu_crop) { cropPanel() },
-            Triple("Zoom", R.drawable.ic_menu_fit) { zoomPanel() },
-            Triple("Page", R.drawable.ic_menu_page) { pagePanel() },
-            Triple("Font", R.drawable.ic_menu_font) { fontPanel() },
-            Triple("Display", R.drawable.ic_menu_display) { displayPanel() },
-        )
-        val cells = ArrayList<LinearLayout>()
-        fun select(i: Int) {
-            content.removeAllViews()
-            content.addView(panels[i].third())
-            cells.forEachIndexed { j, c ->
-                // Active tab: white, boxed (connected to the panel) + bold label. Inactive: flat gray.
-                if (j == i) {
-                    c.background = GradientDrawable().apply {
-                        setColor(Ink.paper); setStroke(Ink.keyline(), Ink.ink)
-                    }
-                } else {
-                    c.background = null
-                    c.setBackgroundColor(Ink.fill)
-                }
-                val tab = c.getChildAt(1) as? TextView
-                tab?.setTypeface(Ink.mono, if (j == i) android.graphics.Typeface.BOLD else android.graphics.Typeface.NORMAL)
-                tab?.setTextColor(if (j == i) Ink.ink else Ink.inkSoft)
-            }
-        }
-        val tabRow = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            setBackgroundColor(Ink.fill)
-        }
-        panels.forEachIndexed { i, (label, icon, _) ->
-            val cell = LinearLayout(this).apply {
-                orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER
-                setPadding(dp(4), dp(10), dp(4), dp(10)); isClickable = true
-                setOnClickListener { select(i) }
-                addView(
-                    ImageView(this@ReaderActivity).apply { setImageResource(icon); setColorFilter(Ink.ink) },
-                    LinearLayout.LayoutParams(dp(24), dp(24)),
-                )
-                addView(TextView(this@ReaderActivity).apply {
-                    text = label; textSize = 10f; setTextColor(Ink.inkSoft); typeface = Ink.mono
-                    gravity = Gravity.CENTER; setPadding(0, dp(3), 0, 0)
-                })
-            }
-            cells.add(cell)
-            tabRow.addView(cell, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-        }
-        val container = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setBackgroundColor(Ink.paper)
-            // Black keyline up top so the sheet reads as a docked surface (bottom-bar template).
-            addView(
-                View(this@ReaderActivity).apply { setBackgroundColor(Ink.ink) },
-                LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, Ink.hair()),
-            )
-            // Active tab's panel — WRAP_CONTENT so the sheet GROWS UP per tab (KOReader-style),
-            // bottom-anchored, instead of a fixed box with dead space.
-            addView(
-                content,
-                LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT),
-            )
-            addView(
-                View(this@ReaderActivity).apply { setBackgroundColor(Ink.hairline) },
-                LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, Ink.hair()),
-            )
-            addView(tabRow)
-        }
-        select(0)
-        dialog.setContentView(palmGuard(container)) // same palm guard as the bottom bar
-        dialog.window?.apply {
-            setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
-            setGravity(Gravity.BOTTOM)
-            setBackgroundDrawable(android.graphics.drawable.ColorDrawable(Ink.paper))
-        }
-        dialog.show()
-    }
-
-    /** A KOReader-style **segmented control**: a rounded pill of [options] with the [selected]
-     *  segment filled dark. Updates its own highlight on tap, then calls [onSelect]. */
-    private fun segmented(options: List<String>, selected: Int, onSelect: (Int) -> Unit): View {
-        val d = resources.displayMetrics.density
-        fun dp(v: Int) = (v * d).toInt()
-        val radius = dp(20).toFloat()
-        var sel = selected
-        val segs = ArrayList<TextView>()
-        fun style(tv: TextView, on: Boolean) {
-            if (on) {
-                tv.setTextColor(Ink.paper)
-                tv.setTypeface(null, android.graphics.Typeface.BOLD)
-                tv.background = GradientDrawable().apply { setColor(Ink.ink); cornerRadius = radius }
-            } else {
-                tv.setTextColor(Ink.ink)
-                tv.setTypeface(null, android.graphics.Typeface.NORMAL)
-                tv.background = null
-            }
-        }
-        return LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            background = GradientDrawable().apply {
-                setColor(Ink.paper); cornerRadius = radius
-                setStroke(Ink.hair(), Ink.ringSoft)
-            }
-            val p = dp(3); setPadding(p, p, p, p)
-            options.forEachIndexed { i, opt ->
-                val tv = TextView(this@ReaderActivity).apply {
-                    text = opt; textSize = 15f; gravity = Gravity.CENTER
-                    setPadding(dp(6), dp(10), dp(6), dp(10)); isClickable = true
-                    setOnClickListener { sel = i; segs.forEachIndexed { j, t -> style(t, j == sel) }; onSelect(i) }
-                }
-                style(tv, i == sel)
-                segs.add(tv)
-                addView(tv, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-            }
-        }
-    }
-
-    /** A KOReader-style **cell bar**: [count] boxes filled up to the current level; tapping box i
-     *  sets level i+1 (tapping the current top cell turns it off → 0). Repaints on tap. */
-    private fun cellBar(count: Int, initial: Int, onSet: (Int) -> Unit): View {
-        val d = resources.displayMetrics.density
-        fun dp(v: Int) = (v * d).toInt()
-        var filled = initial
-        val draws = ArrayList<GradientDrawable>()
-        fun repaint() = draws.forEachIndexed { i, g ->
-            g.setColor(if (i < filled) Ink.ink else Ink.paper)
-        }
-        return LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
-            for (i in 0 until count) {
-                val g = GradientDrawable().apply { setStroke(Ink.hair(), Ink.ringSoft) }
-                draws.add(g)
-                addView(View(this@ReaderActivity).apply {
-                    background = g; isClickable = true
-                    setOnClickListener {
-                        filled = if (i + 1 == filled) 0 else i + 1
-                        repaint(); invalidate()
-                        onSet(filled)
-                    }
-                }, LinearLayout.LayoutParams(0, dp(30), 1f).apply { val m = dp(2); setMargins(m, 0, m, 0) })
-            }
-            repaint()
-        }
-    }
-
-    /** A KOReader-style settings row: a right-aligned [label] on the left, the [control] on the right. */
-    private fun settingRow(label: String, control: View): View {
-        val d = resources.displayMetrics.density
-        fun dp(v: Int) = (v * d).toInt()
-        return LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(16), dp(14), dp(16), dp(14))
-            addView(TextView(this@ReaderActivity).apply {
-                text = label; textSize = 16f; setTextColor(Color.BLACK); gravity = Gravity.END
-            }, LinearLayout.LayoutParams(dp(96), ViewGroup.LayoutParams.WRAP_CONTENT))
-            addView(control, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
-                marginStart = dp(14)
-            })
-        }
-    }
-
-    private fun rotationPanel(): View {
-        val orients = intArrayOf(
-            ActivityInfo.SCREEN_ORIENTATION_PORTRAIT,
-            ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE,
-            ActivityInfo.SCREEN_ORIENTATION_REVERSE_PORTRAIT,
-            ActivityInfo.SCREEN_ORIENTATION_REVERSE_LANDSCAPE,
-        )
-        val sel = orients.indexOf(orientationPref()).coerceAtLeast(0)
-        return settingRow("Rotation", segmented(listOf("0°", "90°", "180°", "270°"), sel) { which ->
-            diag { "DIAG rotation -> $which" }
-            applyOrientation(orients[which])
-        })
-    }
-
-    private fun fitPanel(): View {
-        val sel = fitPref().coerceIn(0, 2) // index = core FitMode code
-        return settingRow("Fit", segmented(listOf("Full", "Width", "Height"), sel) { which ->
-            setFitPref(which)
-            diag { "DIAG fit -> mode=$which" }
-            engine.execute {
-                try { NativeBridge.nativeSetFit(docHandle, which) } catch (e: RuntimeException) {}
-                repaintPanel()
-            }
-        })
-    }
-
-    /** The "Crop" tab: Page Crop (None/Auto) + a Margin cell bar (margin kept around the content). */
-    private fun cropPanel(): View {
-        val container = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        container.addView(settingRow("Page Crop", segmented(listOf("None", "Auto"), if (cropAutoPref()) 1 else 0) { which ->
-            setCropAutoPref(which == 1)
-            diag { "DIAG crop auto=${which == 1}" }
-            engine.execute {
-                try { NativeBridge.nativeSetCrop(docHandle, which, cropMarginPref()) } catch (e: RuntimeException) {}
-                repaintPanel()
-            }
-        }))
-        container.addView(settingRow("Margin", cellBar(8, cropMarginPref()) { level ->
-            setCropMarginPref(level)
-            diag { "DIAG crop margin=$level" }
-            engine.execute {
-                try { NativeBridge.nativeSetCrop(docHandle, if (cropAutoPref()) 1 else 0, level) } catch (e: RuntimeException) {}
-                repaintPanel()
-            }
-        }))
-        return container
-    }
-
-    private fun cropAutoPref(): Boolean =
-        getSharedPreferences("display", MODE_PRIVATE).getBoolean("crop_auto", false)
-
-    private fun setCropAutoPref(v: Boolean) =
-        getSharedPreferences("display", MODE_PRIVATE).edit().putBoolean("crop_auto", v).apply()
-
-    private fun cropMarginPref(): Int =
-        getSharedPreferences("display", MODE_PRIVATE).getInt("crop_margin", 1).coerceIn(0, 8)
-
-    private fun setCropMarginPref(v: Int) =
-        getSharedPreferences("display", MODE_PRIVATE).edit().putInt("crop_margin", v).apply()
-
-    /** The "Page" tab: reflow Line Spacing + Alignment (EPUB; a toast on fixed-layout PDF). */
-    private fun pagePanel(): View {
-        fun applyReflow(call: () -> Int) {
-            engine.execute {
-                val np = try { call() } catch (e: RuntimeException) { -1 }
-                if (np >= 0) {
-                    pageCount = NativeBridge.nativePageCount(docHandle)
-                    repaintPanel()
-                } else {
-                    runOnUiThread { Toast.makeText(this, "Page layout adjusts reflowable books (EPUB)", Toast.LENGTH_SHORT).show() }
-                }
-            }
-        }
-        val container = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        // Reflow toggle — only for a text-layer PDF (EPUB is always reflowable; a scanned PDF can't).
-        // It gates whether the Line Spacing / Alignment / Font Size controls take effect on a PDF.
-        val supportsReflow = try { NativeBridge.nativeSupportsReflow(docHandle) } catch (e: RuntimeException) { false }
-        if (supportsReflow) {
-            container.addView(settingRow("Reflow", segmented(listOf("Off", "On"), if (reflowOn) 1 else 0) { which ->
-                diag { "DIAG reflow=${which == 1}" }
-                setReflowMode(which == 1)
-            }))
-        }
-        container.addView(settingRow("Line Spacing", segmented(LINE_SPACING_LABELS, lineSpacingIndex()) { which ->
-            setLineSpacingMult(LINE_SPACINGS[which])
-            diag { "DIAG line spacing=${LINE_SPACINGS[which]}" }
-            applyReflow { NativeBridge.nativeSetLineSpacing(docHandle, LINE_SPACINGS[which]) }
-        }))
-        container.addView(settingRow("Alignment", segmented(listOf("Left", "Justify", "Center", "Right"), alignmentPref()) { which ->
-            setAlignmentPref(which)
-            diag { "DIAG alignment=$which" }
-            applyReflow { NativeBridge.nativeSetAlignment(docHandle, which) }
-        }))
-        return container
-    }
-
     /** Toggle PDF reflow (ADR-INKREAD-0011). On enable, re-apply the saved typography so the
      *  reflowed PDF respects the user's font size / spacing / alignment; the page count and position
      *  change across the toggle, so refresh both. A `-1` means no text layer (scanned PDF). */
@@ -3074,14 +2817,14 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
                 magnifiable = try { NativeBridge.nativeIsMagnifiable(docHandle) } catch (e: RuntimeException) { !on }
                 if (!magnifiable && zoom != 1f) { zoom = 1f; panX = 0f; panY = 0f }
                 if (on) {
-                    if (textScalePref() != 1.0f) {
-                        try { NativeBridge.nativeSetTextScale(docHandle, textScalePref()) } catch (e: RuntimeException) {}
+                    if (displayPrefs.textScale != 1.0f) {
+                        try { NativeBridge.nativeSetTextScale(docHandle, displayPrefs.textScale) } catch (e: RuntimeException) {}
                     }
-                    if (kotlin.math.abs(lineSpacingMult() - DEFAULT_LINE_SPACING) > 0.001f) {
-                        try { NativeBridge.nativeSetLineSpacing(docHandle, lineSpacingMult()) } catch (e: RuntimeException) {}
+                    if (kotlin.math.abs(displayPrefs.lineSpacingMult - DisplayPrefs.DEFAULT_LINE_SPACING) > 0.001f) {
+                        try { NativeBridge.nativeSetLineSpacing(docHandle, displayPrefs.lineSpacingMult) } catch (e: RuntimeException) {}
                     }
-                    if (alignmentPref() != 0) {
-                        try { NativeBridge.nativeSetAlignment(docHandle, alignmentPref()) } catch (e: RuntimeException) {}
+                    if (displayPrefs.alignment != 0) {
+                        try { NativeBridge.nativeSetAlignment(docHandle, displayPrefs.alignment) } catch (e: RuntimeException) {}
                     }
                 }
                 pageCount = NativeBridge.nativePageCount(docHandle)
@@ -3099,261 +2842,6 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         reflowProgressDialog?.let { runCatching { it.dismiss() } }
         reflowProgressDialog = null
         reflowInProgress = false
-    }
-
-    /** The saved line-spacing multiplier (value-based; new key, so a changed option set never
-     *  mis-maps an old index). Defaults to the core default 1.4. */
-    private fun lineSpacingMult(): Float =
-        getSharedPreferences("typography", MODE_PRIVATE)
-            .getInt("line_spacing_x100", (DEFAULT_LINE_SPACING * 100).toInt()) / 100f
-
-    private fun setLineSpacingMult(m: Float) =
-        getSharedPreferences("typography", MODE_PRIVATE)
-            .edit().putInt("line_spacing_x100", Math.round(m * 100)).apply()
-
-    /** The segmented index for the saved multiplier (nearest [LINE_SPACINGS] entry; default Medium). */
-    private fun lineSpacingIndex(): Int {
-        val m = lineSpacingMult()
-        val i = LINE_SPACINGS.indexOfFirst { kotlin.math.abs(it - m) < 0.001f }
-        return if (i >= 0) i else {
-            LINE_SPACINGS.indexOfFirst { kotlin.math.abs(it - DEFAULT_LINE_SPACING) < 0.001f }.coerceAtLeast(0)
-        }
-    }
-
-    private fun alignmentPref(): Int =
-        getSharedPreferences("typography", MODE_PRIVATE).getInt("alignment", 0).coerceIn(0, 3)
-
-    private fun setAlignmentPref(i: Int) =
-        getSharedPreferences("typography", MODE_PRIVATE).edit().putInt("alignment", i).apply()
-
-    /** The "Zoom" tab: the Fit segmented row + a live zoom −/+ stepper (zoom moved off the bar). */
-    private fun zoomPanel(): View {
-        val d = resources.displayMetrics.density
-        fun dp(v: Int) = (v * d).toInt()
-        val zlabel = TextView(this).apply {
-            textSize = 16f; setTextColor(Color.BLACK); gravity = Gravity.CENTER; minWidth = dp(64)
-        }
-        fun refresh() { zlabel.text = "${(zoom * 100).toInt()}%" }
-        refresh()
-        fun pill(t: String, on: () -> Unit) = TextView(this).apply {
-            text = t; textSize = 16f; gravity = Gravity.CENTER; setTextColor(Color.BLACK)
-            setPadding(dp(18), dp(10), dp(18), dp(10)); isClickable = true
-            background = GradientDrawable().apply {
-                setColor(Color.WHITE); cornerRadius = dp(20).toFloat(); setStroke(maxOf(1, dp(1)), Color.parseColor("#9E9E9E"))
-            }
-            setOnClickListener { on() }
-        }
-        val zoomControl = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
-            addView(pill("−") { zoomBy(1f / ZOOM_STEP); refresh() })
-            addView(zlabel, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
-                val m = dp(10); setMargins(m, 0, m, 0)
-            })
-            addView(pill("+") { zoomBy(ZOOM_STEP); refresh() })
-        }
-        return LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            addView(fitPanel())
-            addView(settingRow("Zoom", zoomControl))
-        }
-    }
-
-    private fun displayPanel(): View {
-        val container = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        container.addView(settingRow("Contrast", cellBar(CONTRAST_MAX, contrastPref()) { level ->
-            setContrastPref(level)
-            diag { "DIAG contrast step=$level" }
-            engine.execute {
-                try { NativeBridge.nativeSetContrast(docHandle, level) } catch (e: RuntimeException) {}
-                repaintPanel()
-            }
-        }))
-        container.addView(settingRow("Quality", segmented(listOf("Low", "Default", "High"), renderQualityPref()) { which ->
-            setRenderQualityPref(which)
-            diag { "DIAG render quality=$which" }
-            engine.execute {
-                try { NativeBridge.nativeSetRenderQuality(docHandle, which) } catch (e: RuntimeException) {}
-                repaintPanel()
-            }
-        }))
-        return container
-    }
-
-    /** A reading style preset (1.10): a bundle of (text scale, line-spacing index, contrast step,
-     *  night). Font/spacing are no-ops on fixed-layout PDFs; contrast/night apply to both. */
-    private data class StyleSpec(val scale: Float, val spacing: Float, val contrast: Int, val night: Boolean)
-
-    private fun styleSpec(name: String): StyleSpec = when (name) {
-        "Bold" -> StyleSpec(1.0f, DEFAULT_LINE_SPACING, 4, false) // darker text (heavier ink)
-        "Night" -> StyleSpec(1.0f, DEFAULT_LINE_SPACING, 0, true) // inverted (light on dark)
-        "Outdoor" -> StyleSpec(1.0f, DEFAULT_LINE_SPACING, CONTRAST_MAX, false) // maximum contrast
-        "Relaxed" -> StyleSpec(1.15f, 1.7f, 0, false) // larger + airier
-        else -> StyleSpec(1.0f, DEFAULT_LINE_SPACING, 0, false) // Original — defaults
-    }
-
-    /** The "Style" tab: one-tap presets that bundle font size, spacing, contrast, and night. */
-    private fun stylePanel(): View {
-        val container = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        container.addView(
-            settingRow(
-                "Preset",
-                segmented(STYLE_PRESETS, STYLE_PRESETS.indexOf(stylePresetPref()).coerceAtLeast(0)) { which ->
-                    applyStylePreset(STYLE_PRESETS[which])
-                },
-            ),
-        )
-        return container
-    }
-
-    /** Apply + persist a style preset: set every knob, then repaginate/re-render. */
-    private fun applyStylePreset(name: String) {
-        val s = styleSpec(name)
-        setStylePresetPref(name)
-        setTextScalePref(s.scale)
-        setLineSpacingMult(s.spacing)
-        setContrastPref(s.contrast)
-        setNightPref(s.night)
-        engine.execute {
-            try {
-                NativeBridge.nativeSetTextScale(docHandle, s.scale)
-                NativeBridge.nativeSetLineSpacing(docHandle, s.spacing)
-                NativeBridge.nativeSetContrast(docHandle, s.contrast)
-                NativeBridge.nativeSetNight(docHandle, s.night)
-                pageCount = NativeBridge.nativePageCount(docHandle)
-            } catch (e: RuntimeException) {
-                Log.e(TAG, "style preset apply failed: ${e.message}")
-            }
-            repaintPanel()
-        }
-    }
-
-    private fun nightPref(): Boolean =
-        getSharedPreferences("display", MODE_PRIVATE).getBoolean("night", false)
-
-    private fun setNightPref(on: Boolean) =
-        getSharedPreferences("display", MODE_PRIVATE).edit().putBoolean("night", on).apply()
-
-    private fun stylePresetPref(): String =
-        getSharedPreferences("display", MODE_PRIVATE).getString("style_preset", "Original") ?: "Original"
-
-    private fun setStylePresetPref(name: String) =
-        getSharedPreferences("display", MODE_PRIVATE).edit().putString("style_preset", name).apply()
-
-    private fun renderQualityPref(): Int =
-        getSharedPreferences("display", MODE_PRIVATE).getInt("render_quality", 1).coerceIn(0, 2)
-
-    private fun setRenderQualityPref(q: Int) =
-        getSharedPreferences("display", MODE_PRIVATE).edit().putInt("render_quality", q).apply()
-
-    private fun fontPanel(): View {
-        val d = resources.displayMetrics.density
-        fun dp(v: Int) = (v * d).toInt()
-        var idx = nearestScaleIndex(textScalePref())
-        val value = TextView(this).apply {
-            textSize = 16f; setTextColor(Color.BLACK); gravity = Gravity.CENTER; minWidth = dp(64)
-        }
-        fun refresh() { value.text = "${(TEXT_SCALES[idx] * 100).toInt()}%" }
-        refresh()
-        fun apply() { refresh(); applyReflowScale(idx, warnIfFixed = true) }
-        fun pill(t: String, on: () -> Unit) = TextView(this).apply {
-            text = t; textSize = 16f; gravity = Gravity.CENTER; setTextColor(Color.BLACK)
-            setPadding(dp(18), dp(10), dp(18), dp(10)); isClickable = true
-            background = GradientDrawable().apply {
-                setColor(Color.WHITE); cornerRadius = dp(20).toFloat(); setStroke(maxOf(1, dp(1)), Color.parseColor("#9E9E9E"))
-            }
-            setOnClickListener { on() }
-        }
-        val control = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
-            addView(pill("A−") { if (idx > 0) { idx--; apply() } })
-            addView(value, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
-                val m = dp(10); setMargins(m, 0, m, 0)
-            })
-            addView(pill("A+") { if (idx < TEXT_SCALES.size - 1) { idx++; apply() } })
-            // Quick presets next to the steppers: jump straight to default / largest (#55).
-            fun preset(p: View) = addView(p, LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
-            ).apply { leftMargin = dp(8) })
-            preset(pill("100%") { idx = nearestScaleIndex(1.0f); apply() })
-            preset(pill("XL") { idx = TEXT_SCALES.size - 1; apply() })
-        }
-        val container = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        // Typeface picker — the bundled reading faces (EPUB/reflow; a toast on fixed-layout PDF).
-        val faces = try {
-            NativeBridge.nativeFontNames().split("\n").filter { it.isNotBlank() }
-        } catch (e: RuntimeException) { emptyList() }
-        if (faces.isNotEmpty()) {
-            container.addView(settingRow("Typeface", segmented(faces, fontPref().coerceIn(0, faces.size - 1)) { which ->
-                setFontPref(which)
-                engine.execute {
-                    val np = try { NativeBridge.nativeSetFont(docHandle, which) } catch (e: RuntimeException) { -1 }
-                    if (np >= 0) { pageCount = NativeBridge.nativePageCount(docHandle); repaintPanel() }
-                    else runOnUiThread { Toast.makeText(this, "Typeface adjusts reflowable books (EPUB)", Toast.LENGTH_SHORT).show() }
-                }
-            }))
-        }
-        container.addView(settingRow("Font Size", control))
-        return container
-    }
-
-    private fun fontPref(): Int =
-        getSharedPreferences("typography", MODE_PRIVATE).getInt("font_id", 0)
-
-    private fun setFontPref(id: Int) =
-        getSharedPreferences("typography", MODE_PRIVATE).edit().putInt("font_id", id).apply()
-
-    /** Set + persist the screen orientation; the resize re-renders the page (engine via surfaceChanged). */
-    private fun applyOrientation(orientation: Int) {
-        setOrientationPref(orientation)
-        requestedOrientation = orientation
-    }
-
-    private fun fitPref(): Int =
-        getSharedPreferences("display", MODE_PRIVATE).getInt("fit", 0)
-
-    private fun setFitPref(mode: Int) =
-        getSharedPreferences("display", MODE_PRIVATE).edit().putInt("fit", mode).apply()
-
-    private fun orientationPref(): Int =
-        getSharedPreferences("display", MODE_PRIVATE)
-            .getInt("orientation", ActivityInfo.SCREEN_ORIENTATION_PORTRAIT)
-
-    private fun setOrientationPref(orientation: Int) =
-        getSharedPreferences("display", MODE_PRIVATE).edit().putInt("orientation", orientation).apply()
-
-    /** Apply reflow font-size preset [rawIdx] (clamped): persist, repaginate off-thread, repaint.
-     *  Pinch-zoom on a reflowable view and the Font panel's A-/A+ both route here (DRY).
-     *  [announce] toasts the new size (pinch feedback); [warnIfFixed] toasts when the doc is
-     *  fixed-layout so the size can't change (Font panel feedback). */
-    private fun applyReflowScale(rawIdx: Int, announce: Boolean = false, warnIfFixed: Boolean = false) {
-        val idx = rawIdx.coerceIn(0, TEXT_SCALES.size - 1)
-        setTextScalePref(TEXT_SCALES[idx])
-        if (announce) runOnUiThread {
-            Toast.makeText(this, "Font ${(TEXT_SCALES[idx] * 100).toInt()}%", Toast.LENGTH_SHORT).show()
-        }
-        engine.execute {
-            val np = try { NativeBridge.nativeSetTextScale(docHandle, TEXT_SCALES[idx]) } catch (e: RuntimeException) { -1 }
-            if (np >= 0) { pageCount = NativeBridge.nativePageCount(docHandle); repaintPanel() }
-            else if (warnIfFixed) runOnUiThread {
-                Toast.makeText(this, "Font size adjusts reflowable books (EPUB)", Toast.LENGTH_SHORT).show()
-            }
-        }
-    }
-
-    private fun textScalePref(): Float =
-        getSharedPreferences("typography", MODE_PRIVATE).getFloat("scale", 1.0f)
-
-    private fun setTextScalePref(scale: Float) =
-        getSharedPreferences("typography", MODE_PRIVATE).edit().putFloat("scale", scale).apply()
-
-    private fun nearestScaleIndex(scale: Float): Int {
-        var best = 0
-        var bestDist = Float.MAX_VALUE
-        TEXT_SCALES.forEachIndexed { i, v ->
-            val dist = kotlin.math.abs(v - scale)
-            if (dist < bestDist) { bestDist = dist; best = i }
-        }
-        return best
     }
 
     /** Persist the current reading position (RR12-FR3 / RR27); store-less / closed = no-op. */
@@ -3414,13 +2902,6 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         const val SELECTION_HANDLE_PX = 8f // half-size of the square corner handles on the selection box.
         const val MULTILINE_DRAG_FRAC = 0.045f // drag vertical span (frac of height) above which it's a multi-line → line-span select.
         const val OPEN_DRAG_FRAC = 0.08f // lasso: start-to-lift distance (normalized) above which the gesture is an open drag (vs a closed loop).
-        const val CONTRAST_MAX = 8 // mirrors reader-core render::contrast::MAX_CONTRAST_STEP (RR4).
-        // Line-spacing multipliers (RR4), tight → loose. Stored as the value (not the index) so this
-        // set can grow without corrupting saved prefs. 1.4 = the core default.
-        val LINE_SPACINGS = floatArrayOf(1.0f, 1.1f, 1.2f, 1.4f, 1.7f)
-        val LINE_SPACING_LABELS = listOf("Tightest", "Tighter", "Small", "Medium", "Large")
-        const val DEFAULT_LINE_SPACING = 1.4f
-        val STYLE_PRESETS = listOf("Original", "Bold", "Night", "Outdoor", "Relaxed") // 1.10
         const val HIGHLIGHT_WIDTH_PX = 30f // wide marker band (vs INK_STROKE_WIDTH for the pen).
         const val STROKE_PAUSE_MS = 600L // commit a stroke after this pen-pause (swallowed-UP net).
         const val INK_FLUSH_MS = 1500L // trailing-edge delay before the deferred ink autosave fsyncs.
@@ -3430,8 +2911,6 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         const val ERASE_RADIUS_PX = 22f // eraser hit radius (px): a stroke within this of the path goes.
 
         // Core ink seam constants (ADR-INKREAD-0010). Tool codes mirror `inkread_ink::Tool::code`.
-        /** Reflow font-size steps (multiples of the core's base body size); 1.0 = default. */
-        val TEXT_SCALES = floatArrayOf(0.6f, 0.7f, 0.8f, 0.9f, 1.0f, 1.15f, 1.3f, 1.5f, 1.75f, 2.0f, 2.5f, 3.0f)
         const val CORE_TOOL_PEN = 0
         const val CORE_TOOL_HIGHLIGHTER = 1
         const val CORE_TOOL_ERASER = 2
