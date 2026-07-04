@@ -1,7 +1,6 @@
 package dev.jraghavan.inkread
 
 import android.app.Activity
-import android.app.AlertDialog
 import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.Canvas
@@ -34,8 +33,6 @@ import android.widget.TextView
 import dev.jraghavan.inkread.eink.EinkAdapter
 import java.net.HttpURLConnection
 import java.net.URL
-import kotlin.math.max
-import kotlin.math.min
 import org.json.JSONObject
 import dev.jraghavan.inkread.eink.SupernoteEinkAdapter
 import dev.jraghavan.inkread.eink.SupernoteInk
@@ -159,10 +156,6 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
     @Volatile private var tool: Tool = Tool.PEN
     /** The floating tool puck/palette overlay; created in onCreate. */
     private lateinit var toolPalette: ToolPalette
-    /** In-progress selection stroke as interleaved view-px x,y; UI-thread only. */
-    private val selBuf = ArrayList<Float>()
-    /** Net for a swallowed stylus UP during selection (mirrors [strokeFinalize]). */
-    private val selectionFinalize = Runnable { finalizeSelection() }
     /** In-progress eraser path as interleaved view-px x,y; UI-thread only. */
     private val eraseBuf = ArrayList<Float>()
     /** Net for a swallowed stylus UP during erasing (mirrors [strokeFinalize]). */
@@ -174,20 +167,6 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
     private lateinit var colorPalette: ColorPalette
     /** Persistent Lasso discoverability banner (shown while Lasso is active with no selection). */
     private var lassoHint: TextView? = null
-    /** In-progress lasso loop as interleaved view-px x,y; UI-thread only. */
-    private val lassoBuf = ArrayList<Float>()
-    /** Net for a swallowed stylus UP during the lasso loop. */
-    private val lassoFinalize = Runnable { finalizeLasso() }
-    /** 0=Smart, 1=Freehand lasso (NeoReader's two modes). */
-    @Volatile private var lassoMode = 0
-    /** The current selection's stroke ids (empty = no selection); read on both threads. */
-    @Volatile private var selectedIds = IntArray(0)
-    /** The selection's normalized bounds [x0,y0,x1,y1] for the box + toolbar anchor; empty = none. */
-    @Volatile private var selectionBounds = FloatArray(0)
-    /** When dragging the selection to move it: the down point (view px) and whether a move began. */
-    private var moveStartX = 0f
-    private var moveStartY = 0f
-    private var movingSelection = false
     /** In-document search (RR2) — owns its own query/hit state + dialogs (SRP). The shell only
      *  draws the active hit's highlight (see [drawSearchHighlight]) for the current page. */
     private val search = SearchController(object : SearchController.Host {
@@ -243,6 +222,49 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         override fun openExport() = export.showExportDialog()
         override fun openDicts() = dict.showDictionariesDialog()
         override fun openAdjust() = adjust.show()
+    })
+
+    /** Lasso selection + Define-tool text selection (ADR-INKREAD-0010) — owns the selection
+     *  state and the toolbar actions (SRP). The shell keeps the views, geometry, and draw
+     *  primitives behind the Host. */
+    private val lasso = LassoController(object : LassoController.Host {
+        override val activity get() = this@ReaderActivity
+        override val docHandle get() = this@ReaderActivity.docHandle
+        override val currentPage get() = this@ReaderActivity.currentPage
+        override val viewW get() = this@ReaderActivity.viewW
+        override val viewH get() = this@ReaderActivity.viewH
+        override val zoom get() = this@ReaderActivity.zoom
+        override val surfaceW get() = surfaceView.width
+        override val surfaceH get() = surfaceView.height
+        override val activeTool get() = tool
+        override val highlightColor get() = highlightColor()
+        override fun vToNx(vx: Float) = this@ReaderActivity.vToNx(vx)
+        override fun vToNy(vy: Float) = this@ReaderActivity.vToNy(vy)
+        override fun nToVx(nx: Float) = this@ReaderActivity.nToVx(nx)
+        override fun nToVy(ny: Float) = this@ReaderActivity.nToVy(ny)
+        override fun engineExecute(block: () -> Unit) { engine.execute(block) }
+        override fun drawLivePath(buf: ArrayList<Float>, paint: Paint) = this@ReaderActivity.drawLivePath(buf, paint)
+        override fun overlayOnPage(draw: (Canvas) -> Unit) {
+            val bmp = bitmap ?: return
+            blit { c -> c.drawBitmap(bmp, 0f, 0f, null); draw(c) }
+        }
+        override fun renderAndBlit() = this@ReaderActivity.renderAndBlit()
+        override fun repaintPanel() = this@ReaderActivity.repaintPanel()
+        override fun refreshPanel() = this@ReaderActivity.refreshPanel()
+        override fun clearFirmwareInk() = this@ReaderActivity.clearFirmwareInk()
+        override fun scheduleInkFlush() = this@ReaderActivity.scheduleInkFlush()
+        override fun showSelectionToolbar(rect: android.graphics.RectF, canPaste: Boolean) =
+            selectionToolbar.show(rect, canPaste)
+        override fun dismissSelectionToolbar() = selectionToolbar.dismiss()
+        override fun setLassoHintVisible(show: Boolean) {
+            lassoHint?.visibility = if (show) View.VISIBLE else View.GONE
+        }
+        override fun defineWord(page: Int, nx: Float, ny: Float) = dict.defineWord(page, nx, ny)
+        override fun defineSelectionText(text: String) = dict.defineSelectionText(text)
+        override fun addDigest(page: Int, boundsNorm: FloatArray) = digest.addDigest(page, boundsNorm)
+        override fun addDigestText(page: Int, text: String, boundsNorm: FloatArray?) =
+            digest.addDigestText(page, text, boundsNorm)
+        override fun diag(msg: () -> String) = this@ReaderActivity.diag(msg)
     })
 
     /** The in-progress stroke as interleaved view-px x,y; UI-thread only. */
@@ -391,16 +413,6 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         hlLivePaint.strokeWidth = HIGHLIGHT_WIDTH_PX
         return hlLivePaint
     }
-    /** Dashed marching-ants line for the in-progress lasso loop (mirrors the firmware's own
-     *  AreaSelectionView dashPaint — DashPathEffect{6,6} on a normal canvas). */
-    private val lassoPaint = Paint().apply {
-        color = Color.BLACK
-        style = Paint.Style.STROKE
-        strokeWidth = 2f
-        isAntiAlias = true
-        pathEffect = android.graphics.DashPathEffect(floatArrayOf(8f, 6f), 0f)
-    }
-
     private val loadingBg = Paint().apply { color = Color.WHITE }
     private val loadingText = Paint().apply {
         color = Color.DKGRAY
@@ -448,9 +460,9 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
                     diag { "DIAG stylus action=$a tool=$tool type=$toolType hist=${event.historySize}" }
                 }
                 when (tool) {
-                    Tool.DEFINE -> captureSelection(event)
+                    Tool.DEFINE -> lasso.captureSelection(event)
                     Tool.ERASER -> captureErase(event)
-                    Tool.LASSO -> captureLasso(event)
+                    Tool.LASSO -> lasso.captureLasso(event)
                     else -> captureStylus(event) // PEN (Highlighter is still P2)
                 }
             } else if (toolType == MotionEvent.TOOL_TYPE_FINGER) {
@@ -533,10 +545,10 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             // After the pill is moved/collapsed, repaint the page + force a panel refresh so the
             // EPD reflects its new position (the earlier puck "vanished" for lack of this refresh).
             onChrome = { engine.execute { repaintPanel() } },
-            onUndo = { inkUndo() },
-            onRedo = { inkRedo() },
+            onUndo = { lasso.inkUndo() },
+            onRedo = { lasso.inkRedo() },
         )
-        selectionToolbar = SelectionToolbar(this, root) { action -> onSelectionAction(action) }
+        selectionToolbar = SelectionToolbar(this, root) { action -> lasso.onSelectionAction(action) }
         colorPalette = ColorPalette(this, root)
         // Persistent affordance for Lasso (discoverability): a slim top banner shown while the
         // Lasso tool is active and nothing is selected. Tells the user the loop gesture; hidden
@@ -940,7 +952,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         val cv = Canvas(bmp)
         for (s in pageStrokes) drawStroke(cv, s)
         // The active lasso selection's bounding box (ADR-INKREAD-0010).
-        if (selectedIds.isNotEmpty() && selectionBounds.size == 4) drawSelectionBox(cv)
+        if (lasso.hasSelection && lasso.selectionBounds.size == 4) drawSelectionBox(cv)
         // The active in-document search hit's highlight boxes (RR2), if it lives on this page.
         val searchHl = search.highlightForPage(currentPage)
         if (searchHl.isNotEmpty()) drawSearchHighlight(cv, searchHl)
@@ -1259,7 +1271,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
 
     /** Draw the active lasso selection's dashed bounding box + square corner handles (frame 132). */
     private fun drawSelectionBox(canvas: Canvas) {
-        val b = selectionBounds
+        val b = lasso.selectionBounds
         val l = nToVx(b[0]); val t = nToVy(b[1]); val r = nToVx(b[2]); val btm = nToVy(b[3])
         canvas.drawRect(l, t, r, btm, selectionPaint)
         val hs = SELECTION_HANDLE_PX
@@ -1586,7 +1598,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
                     return@execute
                 }
                 ink.clearAll() // wipe the firmware ink overlay so it doesn't bleed onto the new page
-                dropSelectionForPageChange()
+                lasso.dropSelectionForPageChange()
                 renderAndBlit(deferLinks = true)
                 // Flash the panel FIRST so the new page is visible with no persistence/links work
                 // in front of it; then do the off-critical-path bookkeeping (RR27 position + links).
@@ -1597,14 +1609,6 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
                 onDone?.invoke() // release the coalescing latch even on early-out / error
             }
         }
-    }
-
-    /** Drop any lasso selection when the page changes — the ids belong to the old page (engine). */
-    private fun dropSelectionForPageChange() {
-        if (selectedIds.isEmpty()) return
-        selectedIds = IntArray(0)
-        selectionBounds = FloatArray(0)
-        runOnUiThread { selectionToolbar.dismiss() }
     }
 
 
@@ -1635,8 +1639,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         }
         // Re-tapping the active Lasso toggles its sub-mode (NeoReader: Smart ↔ Freehand).
         if (chosen == Tool.LASSO && tool == Tool.LASSO) {
-            lassoMode = if (lassoMode == 0) 1 else 0
-            val name = if (lassoMode == 0) "Smart lasso" else "Freehand lasso"
+            val name = lasso.cycleLassoMode()
             Toast.makeText(this, "$name (tap Lasso again to switch)", Toast.LENGTH_SHORT).show()
             return true
         }
@@ -1663,9 +1666,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         tool = chosen
         applyToolInkState("tool")
         // A tool switch ends any lasso selection (it's page- and tool-specific).
-        selectedIds = IntArray(0)
-        selectionBounds = FloatArray(0)
-        selectionToolbar.dismiss()
+        lasso.dropSelectionForToolChange()
         // Switching to a non-pen tool: wipe the firmware pen overlay so it doesn't sit on top of
         // the page while you lasso/erase/define (the real strokes are baked from the core).
         engine.execute {
@@ -1681,7 +1682,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             else -> chosen.label
         }
         Toast.makeText(this, hint, Toast.LENGTH_SHORT).show()
-        updateLassoHint()
+        lasso.updateLassoHint()
         return true
     }
 
@@ -1858,12 +1859,6 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         })
     }
 
-    /** Show the Lasso hint banner only while Lasso is active and nothing is selected (UI thread). */
-    private fun updateLassoHint() {
-        val show = tool == Tool.LASSO && selectedIds.isEmpty()
-        runOnUiThread { lassoHint?.visibility = if (show) View.VISIBLE else View.GONE }
-    }
-
     private fun applyToolInkState(reason: String) {
         val ok = ink.setup()
         // Only the Pen (and Eraser) want the firmware EMR pen painting the live stroke. Lasso,
@@ -1936,61 +1931,6 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         repaintPanel()
     }
 
-    // ===== Lasso selection (ADR-INKREAD-0010) =====
-
-    /**
-     * Capture the lasso stylus gesture. If the down lands **inside** an active selection, the gesture
-     * MOVES that selection (NeoReader: drag the selection); otherwise it draws a new lasso loop.
-     */
-    private fun captureLasso(e: MotionEvent) {
-        when (e.actionMasked) {
-            MotionEvent.ACTION_DOWN -> {
-                if (selectedIds.isNotEmpty() && pointInSelection(e.x, e.y)) {
-                    movingSelection = true
-                    moveStartX = e.x; moveStartY = e.y
-                } else {
-                    movingSelection = false
-                    lassoBuf.clear()
-                    lassoBuf.add(e.x); lassoBuf.add(e.y)
-                    armLassoTimeout()
-                }
-            }
-            MotionEvent.ACTION_MOVE -> {
-                if (movingSelection) return // the move is applied once, on UP (one e-ink refresh)
-                for (i in 0 until e.historySize) {
-                    lassoBuf.add(e.getHistoricalX(i)); lassoBuf.add(e.getHistoricalY(i))
-                }
-                lassoBuf.add(e.x); lassoBuf.add(e.y)
-                armLassoTimeout()
-                drawLassoLoopLive() // we own the loop pixels now (firmware EMR ink suppressed)
-            }
-            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                if (movingSelection) {
-                    movingSelection = false
-                    applySelectionMove(e.x - moveStartX, e.y - moveStartY)
-                } else {
-                    lassoBuf.add(e.x); lassoBuf.add(e.y)
-                    mainHandler.removeCallbacks(lassoFinalize)
-                    finalizeLasso()
-                }
-            }
-        }
-    }
-
-    private fun armLassoTimeout() {
-        mainHandler.removeCallbacks(lassoFinalize)
-        mainHandler.postDelayed(lassoFinalize, STROKE_PAUSE_MS)
-    }
-
-    /**
-     * Draw the in-progress lasso loop as a dashed line over the cached page (UI thread). The
-     * firmware EMR pen is suppressed in lasso mode ([applyToolInkState]), so WE render the loop —
-     * a dashed marching-ants path, like Ratta's own AreaSelectionView. Reuses the cached page
-     * [bitmap] (no core re-render); the active-stylus touch lets the firmware's auto fast-refresh
-     * show it. lassoBuf holds view-px coords, matching the view-sized bitmap.
-     */
-    private fun drawLassoLoopLive() = drawLivePath(lassoBuf, lassoPaint)
-
     /**
      * Draw an in-progress gesture path (view-px [buf]) over the cached page (UI thread), for the
      * tools whose firmware EMR ink is suppressed: Lasso (dashed loop), Define (dashed select line),
@@ -2007,383 +1947,6 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             var i = 2
             while (i + 1 < buf.size) { path.lineTo(buf[i], buf[i + 1]); i += 2 }
             canvas.drawPath(path, paint)
-        }
-    }
-
-    /** Whether a view-px point falls inside the current selection's bounds. */
-    private fun pointInSelection(x: Float, y: Float): Boolean {
-        val b = selectionBounds
-        if (b.size != 4 || viewW == 0 || viewH == 0) return false
-        val nx = vToNx(x); val ny = vToNy(y)
-        return nx in b[0]..b[2] && ny in b[1]..b[3]
-    }
-
-    /** Close the loop and ask the core which strokes it selects (engine thread). */
-    private fun finalizeLasso() {
-        diag { "DIAG finalizeLasso buf=${lassoBuf.size / 2} pts mode=$lassoMode" }
-        if (lassoBuf.size < 6) { // need ≥3 points for a polygon
-            lassoBuf.clear()
-            engine.execute { clearFirmwareInk(); repaintPanel() }
-            return
-        }
-        val raw = lassoBuf.toFloatArray()
-        lassoBuf.clear()
-        val w = viewW; val h = viewH
-        if (w == 0 || h == 0) return
-        val poly = FloatArray(raw.size)
-        var i = 0
-        while (i + 1 < raw.size) {
-            poly[i] = vToNx(raw[i])
-            poly[i + 1] = vToNy(raw[i + 1])
-            i += 2
-        }
-        engine.execute {
-            if (docHandle == 0L) return@execute
-            val ids = try {
-                NativeBridge.nativeInkSelectInPolygon(docHandle, poly, lassoMode)
-            } catch (e: RuntimeException) {
-                Log.e(TAG, "lasso select failed: ${e.message}"); return@execute
-            }
-            diag { "DIAG lasso selected ${ids.size} strokes from ${poly.size / 2}-pt loop" }
-            // No ink under the loop → fall back to selecting the PRINTED words inside it (the user
-            // circled book text, not handwriting). Lasso thus selects ink OR text — circle anything.
-            if (ids.isEmpty()) selectTextInLoop(poly) else setSelection(ids)
-        }
-    }
-
-    /**
-     * Lasso text fallback (engine thread): the gesture found no ink, so select printed text. An
-     * **open diagonal drag** across lines (start far from lift, spanning >1 line) is a reading-order
-     * line span — start line through the line before the lift taken whole, the lift line clipped to
-     * its word, gaps filled ([NativeBridge.nativeTextLineSpan]). A **closed loop** around a few words
-     * uses the polygon's bounding box ([NativeBridge.nativeTextInRect]). Then offer the actions.
-     */
-    private fun selectTextInLoop(poly: FloatArray) {
-        if (docHandle == 0L || poly.size < 6) {
-            runOnUiThread { Toast.makeText(this, "Nothing under the loop", Toast.LENGTH_SHORT).show() }
-            return
-        }
-        val sx = poly[0]; val sy = poly[1]
-        val ex = poly[poly.size - 2]; val ey = poly[poly.size - 1]
-        var x0 = Float.MAX_VALUE; var y0 = Float.MAX_VALUE; var x1 = -Float.MAX_VALUE; var y1 = -Float.MAX_VALUE
-        var i = 0
-        while (i + 1 < poly.size) {
-            x0 = minOf(x0, poly[i]); x1 = maxOf(x1, poly[i])
-            y0 = minOf(y0, poly[i + 1]); y1 = maxOf(y1, poly[i + 1])
-            i += 2
-        }
-        // A MULTI-LINE text selection always reads in reading order — intermediate lines whole, the
-        // last line clipped — whether the gesture was an open drag or a closed loop (a geometric
-        // bbox across lines would catch only the columns inside the loop, leaving intermediate lines
-        // partial). Use the drag's start→lift when it's a directional open drag; for a closed loop
-        // use its top-left→bottom-right corners so the span still reads top to bottom.
-        val openDrag = kotlin.math.hypot(ex - sx, ey - sy) > OPEN_DRAG_FRAC
-        val multiLine = (y1 - y0) > MULTILINE_DRAG_FRAC
-        if (multiLine) {
-            if (openDrag) presentLineSpanSelection(sx, sy, ex, ey, "No text under the selection")
-            // Closed loop: corner→corner. The last line is clipped to the loop's rightmost extent
-            // (x1), an approximation — for an irregular loop that may run a word or two past where the
-            // user closed it on the bottom line. Acceptable for circling a region; the directional
-            // open-drag path above clips precisely to the actual lift point.
-            else presentLineSpanSelection(x0, y0, x1, y1, "No text under the selection")
-        } else {
-            // Single line → the dragged/circled span on that line (precise, horizontal).
-            presentTextSelection(x0, y0, x1, y1, "Nothing under the loop — circle ink or printed words")
-        }
-    }
-
-    /**
-     * Select the printed text in a normalized rect, shade the caught boxes, and offer
-     * Define / Copy / Highlight (engine thread). Shared by the lasso text fallback and a Define-tool
-     * drag. [emptyMsg] is toasted when the rect holds no text. A drag is a *selection*, never an
-     * auto-lookup — the user picks Define from the action sheet if they want a definition.
-     */
-    private fun presentTextSelection(x0: Float, y0: Float, x1: Float, y1: Float, emptyMsg: String) {
-        if (docHandle == 0L) return
-        val sel = try {
-            WireCodec.decodeSelection(NativeBridge.nativeTextInRect(docHandle, currentPage, x0, y0, x1, y1))
-        } catch (e: RuntimeException) {
-            Log.e(TAG, "text-in-rect failed: ${e.message}"); Selection("", emptyList())
-        }
-        showSelectionResult(sel, emptyMsg)
-    }
-
-    /**
-     * Multi-line drag (engine thread): the reading-order selection the core sweeps from the drag's
-     * start point to its lift point — whole lines through to the line before the lift, the lift line
-     * clipped to the word under it, inter-line gaps filled (see [NativeBridge.nativeTextLineSpan]).
-     */
-    private fun presentLineSpanSelection(sx: Float, sy: Float, ex: Float, ey: Float, emptyMsg: String) {
-        if (docHandle == 0L) return
-        diag { "DIAG lineSpan start=(%.3f,%.3f) lift=(%.3f,%.3f) page=$currentPage".format(sx, sy, ex, ey) }
-        val sel = try {
-            WireCodec.decodeSelection(NativeBridge.nativeTextLineSpan(docHandle, currentPage, sx, sy, ex, ey))
-        } catch (e: RuntimeException) {
-            Log.e(TAG, "text-line-span failed: ${e.message}"); Selection("", emptyList())
-        }
-        showSelectionResult(sel, emptyMsg)
-    }
-
-    /** Render the caught selection's boxes and offer the action sheet — shared by the bbox and
-     *  line-span selection paths (engine thread). A drag is a *selection*, never an auto-lookup. */
-    private fun showSelectionResult(sel: Selection, emptyMsg: String) {
-        diag { "DIAG text selection: '${sel.text.take(60)}' boxes=${sel.boxes.size}" }
-        clearFirmwareInk() // wipe the firmware ink the select gesture left behind
-        renderAndBlit()
-        if (sel.isEmpty) {
-            refreshPanel()
-            runOnUiThread { Toast.makeText(this, emptyMsg, Toast.LENGTH_SHORT).show() }
-            return
-        }
-        drawTextSelectionBoxes(sel.boxes) // show what was caught, then offer actions
-        refreshPanel()
-        runOnUiThread { showTextSelectionActions(sel) }
-    }
-
-    /** Shade the selected printed-text boxes over the cached page (so the user sees the catch). */
-    private fun drawTextSelectionBoxes(boxes: List<SelBox>) {
-        val bmp = bitmap ?: return
-        val fill = Paint().apply { color = Color.argb(60, 0, 0, 0); style = Paint.Style.FILL }
-        blit { canvas ->
-            canvas.drawBitmap(bmp, 0f, 0f, null)
-            for (b in boxes) canvas.drawRect(nToVx(b.x0), nToVy(b.y0), nToVx(b.x1), nToVy(b.y1), fill)
-        }
-    }
-
-    /** Action sheet for circled printed text: Define · Copy · Highlight (UI thread). */
-    private fun showTextSelectionActions(sel: Selection) {
-        val snippet = sel.text.trim().replace(Regex("\\s+"), " ")
-        // Define is a per-word action — it makes no sense for a multi-line selection, so a multi-line
-        // catch (more than one line box) offers only Copy + Highlight.
-        val items = if (sel.boxes.size > 1) arrayOf("Copy", "Highlight", "Add to Digest")
-        else arrayOf("Define", "Copy", "Highlight", "Add to Digest")
-        AlertDialog.Builder(this, R.style.InkDialog)
-            .setTitle(if (snippet.length > 42) snippet.take(42) + "…" else snippet)
-            .setItems(items) { _, which ->
-                when (items[which]) {
-                    "Define" -> dict.defineSelectionText(snippet)
-                    "Copy" -> copyTextToClipboard(snippet)
-                    "Highlight" -> engine.execute { highlightTextBoxes(sel) }
-                    "Add to Digest" -> digest.addDigestText(currentPage, sel.text, sel.boundsNorm())
-                }
-            }
-            // Any dismissal (action chosen or cancelled) clears the box overlay; a Highlight redraws
-            // it with the real annotation, a Define opens the dict card over the cleared page.
-            .setOnDismissListener { engine.execute { repaintPanel() } }
-            .show()
-    }
-
-    /** Copy printed-text selection to the system clipboard. */
-    private fun copyTextToClipboard(text: String) {
-        val cm = getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
-        cm.setPrimaryClip(android.content.ClipData.newPlainText("inkread", text))
-        Toast.makeText(this, "Copied", Toast.LENGTH_SHORT).show()
-    }
-
-    /**
-     * Highlight circled printed text by laying one translucent highlighter stroke across each text
-     * box (engine thread) — reusing the ink highlighter's persistence + PDF export path, so no new
-     * annotation subsystem is needed. The band width matches the line height; colour follows the
-     * highlighter's current swatch.
-     */
-    private fun highlightTextBoxes(sel: Selection) {
-        if (docHandle == 0L || sel.boxes.isEmpty()) return
-        val color = highlightColor()
-        try {
-            for (b in sel.boxes) {
-                val midY = (b.y0 + b.y1) / 2f
-                val widthNorm = (b.y1 - b.y0) * viewH / viewW.coerceAtLeast(1) // line height as a page-space width
-                NativeBridge.nativeInkBeginStroke(docHandle, CORE_TOOL_HIGHLIGHTER, color, widthNorm, System.currentTimeMillis())
-                NativeBridge.nativeInkAddPoint(docHandle, b.x0, midY, 1.0f, Float.NaN, Float.NaN, 0)
-                NativeBridge.nativeInkAddPoint(docHandle, b.x1, midY, 1.0f, Float.NaN, Float.NaN, 0)
-                NativeBridge.nativeInkEndStroke(docHandle)
-            }
-            scheduleInkFlush() // deferred autosave: persist the baked bands on the trailing debounce
-            diag { "DIAG highlighted ${sel.boxes.size} text boxes" }
-        } catch (e: RuntimeException) {
-            Log.e(TAG, "text highlight failed: ${e.message}")
-        }
-        clearFirmwareInk(); repaintPanel()
-    }
-
-    /** Adopt `ids` as the selection, refresh the box, and show/update the selection toolbar (engine). */
-    private fun setSelection(ids: IntArray) {
-        selectedIds = ids
-        selectionBounds = if (ids.isEmpty()) FloatArray(0) else try {
-            NativeBridge.nativeInkSelectionBounds(docHandle, ids)
-        } catch (e: RuntimeException) {
-            FloatArray(0)
-        }
-        clearFirmwareInk() // wipe the firmware ink left by drawing the lasso loop
-        repaintPanel()
-        updateLassoHint() // hide the hint once something is selected; re-show if selection emptied
-        runOnUiThread {
-            if (selectedIds.isEmpty()) {
-                selectionToolbar.dismiss()
-                if (tool == Tool.LASSO) Toast.makeText(this, "Nothing selected — circle around your writing", Toast.LENGTH_SHORT).show()
-            } else {
-                showSelectionToolbar()
-            }
-        }
-    }
-
-    /** Position the selection toolbar over the selection's pixel bounds (UI thread). */
-    private fun showSelectionToolbar() {
-        val b = selectionBounds
-        if (b.size != 4) return
-        val rect = android.graphics.RectF(nToVx(b[0]), nToVy(b[1]), nToVx(b[2]), nToVy(b[3]))
-        val canPaste = try { NativeBridge.nativeInkHasClipboard(docHandle) } catch (e: RuntimeException) { false }
-        selectionToolbar.show(rect, canPaste)
-    }
-
-    /** Apply a drag-move of the selection by a view-px delta (engine thread + autosave). */
-    private fun applySelectionMove(dxPx: Float, dyPx: Float) {
-        val ids = selectedIds
-        if (ids.isEmpty() || viewW == 0 || viewH == 0) return
-        val dx = dxPx / (viewW * zoom); val dy = dyPx / (viewH * zoom)
-        engine.execute {
-            val changed = try {
-                NativeBridge.nativeInkMoveSelection(docHandle, ids, dx, dy)
-            } catch (e: RuntimeException) {
-                Log.e(TAG, "move failed: ${e.message}"); false
-            }
-            if (changed) setSelection(ids) // recompute bounds + re-show toolbar at the new spot
-        }
-    }
-
-    /** Handle a tap on the floating selection toolbar (UI thread → engine). */
-    private fun onSelectionAction(action: SelAction) {
-        val ids = selectedIds
-        when (action) {
-            SelAction.DONE -> clearSelection()
-            SelAction.SELECT_ALL -> engine.execute {
-                val all = try { NativeBridge.nativeInkSelectAll(docHandle) } catch (e: RuntimeException) { IntArray(0) }
-                setSelection(all)
-            }
-            SelAction.DELETE -> if (ids.isNotEmpty()) engine.execute {
-                try { NativeBridge.nativeInkDeleteSelection(docHandle, ids) } catch (e: RuntimeException) {}
-                clearSelectionAndRender()
-            }
-            SelAction.CUT -> if (ids.isNotEmpty()) engine.execute {
-                try { NativeBridge.nativeInkCutSelection(docHandle, ids) } catch (e: RuntimeException) {}
-                clearSelectionAndRender()
-            }
-            SelAction.COPY -> if (ids.isNotEmpty()) engine.execute {
-                try { NativeBridge.nativeInkCopySelection(docHandle, ids) } catch (e: RuntimeException) {}
-                runOnUiThread { showSelectionToolbar() } // refresh Paste-enabled state
-            }
-            SelAction.PASTE -> engine.execute {
-                val newIds = try { NativeBridge.nativeInkPaste(docHandle, PASTE_OFFSET, PASTE_OFFSET) } catch (e: RuntimeException) { IntArray(0) }
-                if (newIds.isNotEmpty()) setSelection(newIds) else runOnUiThread { showSelectionToolbar() }
-            }
-            // Save the PDF text under the selection into the Supernote Digest; keep the selection up.
-            SelAction.DIGEST -> if (ids.isNotEmpty()) digest.addDigest(currentPage, selectionBounds.copyOf())
-        }
-    }
-
-    /** Undo the last ink edit (from the tool pill). Global — refreshes any active selection too. */
-    private fun inkUndo() = engine.execute {
-        try { NativeBridge.nativeInkUndo(docHandle); scheduleInkFlush() } catch (e: RuntimeException) {}
-        refreshSelectionAfterHistory()
-    }
-
-    /** Redo the last undone ink edit (from the tool pill). */
-    private fun inkRedo() = engine.execute {
-        try { NativeBridge.nativeInkRedo(docHandle); scheduleInkFlush() } catch (e: RuntimeException) {}
-        refreshSelectionAfterHistory()
-    }
-
-    /** After undo/redo, the selected strokes may have changed; re-render and re-anchor the toolbar. */
-    private fun refreshSelectionAfterHistory() {
-        if (selectedIds.isEmpty()) { clearSelectionAndRender(); return }
-        setSelection(selectedIds)
-    }
-
-    /** Clear the selection (UI-triggered), then re-render to drop the box (engine). */
-    private fun clearSelection() {
-        engine.execute { clearSelectionAndRender() }
-    }
-
-    /** Drop the selection + toolbar and re-render the page (engine thread). */
-    private fun clearSelectionAndRender() {
-        selectedIds = IntArray(0)
-        selectionBounds = FloatArray(0)
-        repaintPanel()
-        updateLassoHint() // re-show the hint if still on the Lasso tool with nothing selected
-        runOnUiThread { selectionToolbar.dismiss() }
-    }
-
-    // ===== Dictionary (RR12 / ADR-INKREAD-0009 D4) =====
-
-    /** Accumulate the selection stroke; finalize on UP (or a debounced pause if UP is swallowed). */
-    private fun captureSelection(e: MotionEvent) {
-        when (e.actionMasked) {
-            MotionEvent.ACTION_DOWN -> {
-                selBuf.clear()
-                selBuf.add(e.x); selBuf.add(e.y)
-                armSelectionTimeout()
-            }
-            MotionEvent.ACTION_MOVE -> {
-                for (i in 0 until e.historySize) {
-                    selBuf.add(e.getHistoricalX(i)); selBuf.add(e.getHistoricalY(i))
-                }
-                selBuf.add(e.x); selBuf.add(e.y)
-                armSelectionTimeout()
-                drawLivePath(selBuf, lassoPaint) // dashed select line (firmware EMR ink suppressed)
-            }
-            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                selBuf.add(e.x); selBuf.add(e.y)
-                mainHandler.removeCallbacks(selectionFinalize)
-                finalizeSelection()
-            }
-        }
-    }
-
-    private fun armSelectionTimeout() {
-        mainHandler.removeCallbacks(selectionFinalize)
-        mainHandler.postDelayed(selectionFinalize, STROKE_PAUSE_MS)
-    }
-
-    /** Decide tap vs. drag and dispatch the lookup; stays in the (sticky) Define tool (UI thread). */
-    private fun finalizeSelection() {
-        if (selBuf.size < 2) { selBuf.clear(); return }
-        val pts = selBuf.toFloatArray()
-        selBuf.clear()
-        val w = surfaceView.width.toFloat()
-        val h = surfaceView.height.toFloat()
-        // Define is a sticky tool (ADR-INKREAD-0010): stay in select mode + keep firmware ink
-        // released until the user picks another tool from the palette.
-        if (w <= 0f || h <= 0f) return
-
-        var minX = pts[0]; var maxX = pts[0]; var minY = pts[1]; var maxY = pts[1]
-        var i = 0
-        while (i + 1 < pts.size) {
-            minX = min(minX, pts[i]); maxX = max(maxX, pts[i])
-            minY = min(minY, pts[i + 1]); maxY = max(maxY, pts[i + 1])
-            i += 2
-        }
-        val dragged = (maxX - minX) > w * 0.03f || (maxY - minY) > h * 0.02f
-        if (dragged) {
-            // A drag is a text *selection*, not a one-word lookup: show the caught text + the
-            // Copy/Highlight (and Define for one line) sheet, never an auto dict card.
-            val multiLine = (maxY - minY) > h * MULTILINE_DRAG_FRAC
-            if (multiLine) {
-                // The core sweeps from the drag's start point to its lift point: whole lines through
-                // to the line before the lift, the lift line clipped to its word, gaps filled.
-                val sx = vToNx(pts[0]); val sy = vToNy(pts[1])
-                val ex = vToNx(pts[pts.size - 2]); val ey = vToNy(pts[pts.size - 1])
-                engine.execute { presentLineSpanSelection(sx, sy, ex, ey, "No text under the selection") }
-            } else {
-                // Single-line drag: the dragged horizontal span on that one line.
-                val r = floatArrayOf(vToNx(minX), vToNy(minY), vToNx(maxX), vToNy(maxY))
-                engine.execute { presentTextSelection(r[0], r[1], r[2], r[3], "No text under the selection") }
-            }
-        } else {
-            // A single still tap is a word lookup (the dict card).
-            val page = currentPage
-            engine.execute { dict.defineWord(page, vToNx(pts[0]), vToNy(pts[1])) }
-            // Wipe the firmware ink the define gesture left behind (it never becomes an annotation).
-            engine.execute { clearFirmwareInk(); repaintPanel() }
         }
     }
 
@@ -2452,8 +2015,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
 
     private fun closeDocument() {
         bookmarks = null // bookmarks are persisted on toggle; drop the per-book store
-        selectedIds = IntArray(0) // ink is persisted by the core to its sidecar
-        selectionBounds = FloatArray(0)
+        lasso.reset() // ink is persisted by the core to its sidecar
         chapters = emptyList() // recomputed on the next open
 
         val h = docHandle
@@ -2490,8 +2052,6 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         const val DOUBLE_TAP_SLOP_PX = 60f // max distance between the two taps to count as a double-tap.
         const val REFLOW_PROGRESS_DELAY_MS = 250L // show "Reflowing…" only if the build outlasts this (#55).
         const val SELECTION_HANDLE_PX = 8f // half-size of the square corner handles on the selection box.
-        const val MULTILINE_DRAG_FRAC = 0.045f // drag vertical span (frac of height) above which it's a multi-line → line-span select.
-        const val OPEN_DRAG_FRAC = 0.08f // lasso: start-to-lift distance (normalized) above which the gesture is an open drag (vs a closed loop).
         const val HIGHLIGHT_WIDTH_PX = 30f // wide marker band (vs INK_STROKE_WIDTH for the pen).
         const val STROKE_PAUSE_MS = 600L // commit a stroke after this pen-pause (swallowed-UP net).
         const val INK_FLUSH_MS = 1500L // trailing-edge delay before the deferred ink autosave fsyncs.
@@ -2524,7 +2084,6 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         )
         val PEN_COLOR_NAMES = arrayOf("Black", "Blue", "Red", "Green")
         val INK_COLOR_GRAY = 0x808080FF.toInt() // opaque mid-gray (visible on the 16-level panel).
-        const val PASTE_OFFSET = 0.03f // normalized offset so a paste lands just beside the source.
         const val FINGER_LONG_PRESS_MS = 500L // finger held ~still this long on a word → look it up.
         const val FINGER_MOVE_SLOP_PX = 24f // finger travel beyond this = a swipe, not a tap/hold.
         const val SLOW_RENDER_MS = 250L // a render+blit at/over this approaches the e-ink budget — log it.
