@@ -24,17 +24,12 @@ import android.view.SurfaceHolder
 import android.view.SurfaceView
 import android.widget.Toast
 import android.app.Dialog
-import android.text.InputType
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
 import android.view.Window
-import android.widget.EditText
 import android.widget.FrameLayout
-import android.widget.ImageView
 import android.widget.LinearLayout
-import android.widget.ScrollView
-import android.widget.SeekBar
 import android.widget.TextView
 import dev.jraghavan.inkread.eink.EinkAdapter
 import java.net.HttpURLConnection
@@ -227,6 +222,30 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         override fun diag(msg: () -> String) = this@ReaderActivity.diag(msg)
     })
 
+    /** Bottom control bar + the nav panels it opens (RR16/RR25) — page slider, chapter jumps,
+     *  bookmarks, Contents, annotations list, library, go-home (SRP). */
+    private val bottomBar = BottomBarController(object : BottomBarController.Host {
+        override val activity get() = this@ReaderActivity
+        override val docHandle get() = this@ReaderActivity.docHandle
+        override val pageCount get() = this@ReaderActivity.pageCount
+        override val currentPage get() = this@ReaderActivity.currentPage
+        override val chapters get() = this@ReaderActivity.chapters
+        override val bookmarks get() = this@ReaderActivity.bookmarks
+        override val requestedPath get() = this@ReaderActivity.requestedPath
+        override fun engineExecute(block: () -> Unit) { engine.execute(block) }
+        override fun postJump(page: Int) = this@ReaderActivity.postJump(page)
+        override fun repaintPanel() = this@ReaderActivity.repaintPanel()
+        override fun openPicker() = this@ReaderActivity.openPicker()
+        override fun openFromLibrary(file: File) = this@ReaderActivity.openFromLibrary(file)
+        override fun palmGuard(content: View) = this@ReaderActivity.palmGuard(content)
+        override fun zoomIn() = zoomBy(ZOOM_STEP)
+        override fun zoomOut() = zoomBy(1f / ZOOM_STEP)
+        override fun openSearch() = search.showSearchDialog()
+        override fun openExport() = export.showExportDialog()
+        override fun openDicts() = dict.showDictionariesDialog()
+        override fun openAdjust() = adjust.show()
+    })
+
     /** The in-progress stroke as interleaved view-px x,y; UI-thread only. */
     private val strokeBuf = ArrayList<Float>()
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -292,7 +311,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
     private var lastCentreTapY = 0f
     /** A centre single-tap's action (open the bottom bar), deferred [DOUBLE_TAP_MS] so it can be
      *  cancelled if a second tap turns it into a double-tap-zoom. Edge taps stay immediate (#54). */
-    private val pendingCentreMenu = Runnable { showBottomBar() }
+    private val pendingCentreMenu = Runnable { bottomBar.showBottomBar() }
     private val fingerLongPress = Runnable {
         // A genuine 500ms hold (UP cancels this for a tap; a beyond-slop MOVE cancels it for a
         // swipe). Mark it a long-press FIRST so the eventual UP never falls through to a page flip —
@@ -1480,7 +1499,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         }
         // Top-right corner → toggle the bookmark dog-ear (Kindle/KOReader convention).
         if (w > 0f && h > 0f && x > w * 0.86f && y < h * 0.08f) {
-            toggleBookmark()
+            bottomBar.toggleBookmark()
             return
         }
         val third = w / 3f
@@ -1586,46 +1605,6 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         }
     }
 
-    /** Jump to the previous (`dir<0`) / next (`dir>0`) chapter start relative to the current page
-     *  (1.7). No-op with a brief toast at the document ends or when the doc has no chapters. */
-    private fun chapterJump(dir: Int) {
-        val starts = chapters.map { it.first }
-        if (starts.isEmpty()) {
-            Toast.makeText(this, "No chapters in this document", Toast.LENGTH_SHORT).show()
-            return
-        }
-        val cur = currentPage
-        val target = if (dir > 0) starts.firstOrNull { it > cur } else starts.lastOrNull { it < cur }
-        if (target != null) {
-            postJump(target)
-        } else {
-            Toast.makeText(this, if (dir > 0) "Last chapter" else "First chapter", Toast.LENGTH_SHORT).show()
-        }
-    }
-
-    /** "Ch 2/9 · The Crossing" for the chapter the current page sits in, or null if the doc has no
-     *  chapters. The current chapter is the last one whose start page is ≤ the current page. */
-    private fun currentChapterLabel(): String? {
-        val ch = chapters
-        if (ch.isEmpty()) return null
-        val idx = ch.indexOfLast { it.first <= currentPage }.coerceAtLeast(0)
-        return "Ch ${idx + 1}/${ch.size} · ${ch[idx].second}"
-    }
-
-    /** In-chapter position "3/24" — the current page within the current chapter (this chapter's start
-     *  → the next chapter's start; the last chapter runs to the end of the document). Null with no
-     *  chapters, or before the first chapter start (front matter). */
-    private fun inChapterPosition(): String? {
-        val ch = chapters
-        if (ch.isEmpty()) return null
-        val idx = ch.indexOfLast { it.first <= currentPage }
-        if (idx < 0) return null
-        val start = ch[idx].first
-        val end = if (idx + 1 < ch.size) ch[idx + 1].first else pageCount
-        val total = (end - start).coerceAtLeast(1)
-        return "${currentPage - start + 1}/$total"
-    }
-
     /** Drop any lasso selection when the page changes — the ids belong to the old page (engine). */
     private fun dropSelectionForPageChange() {
         if (selectedIds.isEmpty()) return
@@ -1645,389 +1624,6 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             canvas.drawRect(l, t, r, btm, searchFillPaint)
             canvas.drawRect(l, t, r, btm, searchBoxPaint)
         }
-    }
-
-    /**
-     * The reader's bottom control bar (RR16/RR25), KOReader-style: a thin panel **hugging the
-     * bottom edge** — a page slider with a tappable page indicator, above a flat row of controls
-     * (Home · Library · Bookmark · Marks · Contents · Open). Built programmatically, high-contrast
-     * for e-ink; uses the cached page state so showing it needs no engine round-trip.
-     */
-    private fun showBottomBar() {
-        if (docHandle == 0L) {
-            openPicker()
-            return
-        }
-        val total = pageCount.coerceAtLeast(1)
-        val cur = currentPage.coerceIn(0, total - 1)
-        val d = resources.displayMetrics.density
-        fun dp(v: Int) = (v * d).toInt()
-
-        val dialog = Dialog(this).apply { requestWindowFeature(Window.FEATURE_NO_TITLE) }
-        val container = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setBackgroundColor(Ink.paper)
-        }
-        // A crisp black keyline up top so the bar reads as a docked surface, not a floating box.
-        container.addView(
-            View(this).apply { setBackgroundColor(Ink.ink) },
-            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, Ink.hair()),
-        )
-
-        // Page-slider row:  [N / Total]  ────────●────────  (grayscale, tap the chip to type a page)
-        val pageLabel = TextView(this).apply {
-            text = "${cur + 1} / $total"
-            setTextColor(Ink.ink)
-            textSize = 12f
-            typeface = Ink.mono
-            letterSpacing = 0.04f
-            gravity = Gravity.CENTER
-            setPadding(dp(12), dp(6), dp(12), dp(6))
-            background = GradientDrawable().apply {
-                setColor(Ink.fill)
-                cornerRadius = Ink.dpf(40)
-            }
-            setOnClickListener { dialog.dismiss(); showPageEntry(total) }
-        }
-        // A refined, thin grayscale track + small round thumb (the default SeekBar reads clunky).
-        val trackH = dp(3).coerceAtLeast(2)
-        fun bar(c: Int) = GradientDrawable().apply { setColor(c); cornerRadius = trackH.toFloat(); setSize(0, trackH) }
-        val track = android.graphics.drawable.LayerDrawable(
-            arrayOf(
-                bar(Ink.hairline),
-                android.graphics.drawable.ClipDrawable(bar(Ink.ink), Gravity.START, android.graphics.drawable.ClipDrawable.HORIZONTAL),
-            ),
-        ).apply { setId(0, android.R.id.background); setId(1, android.R.id.progress) }
-        val knob = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(Ink.ink); setSize(dp(16), dp(16)) }
-        val seek = SeekBar(this).apply {
-            max = total - 1
-            progress = cur
-            progressDrawable = track
-            thumb = knob
-            splitTrack = false
-            setPadding(dp(10), dp(4), dp(10), dp(4))
-            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-                override fun onProgressChanged(sb: SeekBar, p: Int, fromUser: Boolean) {
-                    if (fromUser) pageLabel.text = "${p + 1} / $total"
-                }
-                override fun onStartTrackingTouch(sb: SeekBar) {}
-                override fun onStopTrackingTouch(sb: SeekBar) { dialog.dismiss(); postJump(sb.progress) }
-            })
-        }
-        // Double-chevron chapter jumps flank the scrubber (distinct from single-page edge taps),
-        // shown only when the document has a table of contents (1.7).
-        fun chapterBtn(glyph: String, dir: Int) = TextView(this).apply {
-            text = glyph; setTextColor(Ink.ink); textSize = 20f; typeface = Ink.serifBold
-            gravity = Gravity.CENTER; setPadding(dp(8), dp(2), dp(8), dp(2)); isClickable = true
-            setOnClickListener { dialog.dismiss(); chapterJump(dir) }
-        }
-        container.addView(
-            LinearLayout(this).apply {
-                orientation = LinearLayout.HORIZONTAL
-                gravity = Gravity.CENTER_VERTICAL
-                setPadding(dp(16), dp(12), dp(16), dp(6))
-                if (chapters.isNotEmpty()) addView(chapterBtn("‹‹", -1))
-                addView(seek, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-                if (chapters.isNotEmpty()) addView(chapterBtn("››", +1))
-                addView(pageLabel, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { marginStart = dp(12) })
-            },
-        )
-        // Current-chapter line under the scrubber: orients the reader and makes the ‹‹/›› obvious.
-        // Left = "Ch i/n · Title" (ellipsized); right = in-chapter "p/q" (stays visible). Tap → the
-        // full Contents sheet. Shown only when the document has chapters.
-        currentChapterLabel()?.let { lbl ->
-            container.addView(LinearLayout(this).apply {
-                orientation = LinearLayout.HORIZONTAL
-                gravity = Gravity.CENTER_VERTICAL
-                setPadding(dp(24), 0, dp(24), dp(8))
-                isClickable = true
-                setOnClickListener { dialog.dismiss(); showContentsLazy() }
-                addView(TextView(this@ReaderActivity).apply {
-                    text = lbl; setTextColor(Ink.inkSoft); textSize = 12f; typeface = Ink.serif
-                    maxLines = 1; ellipsize = android.text.TextUtils.TruncateAt.END
-                }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-                inChapterPosition()?.let { pos ->
-                    addView(TextView(this@ReaderActivity).apply {
-                        text = pos; setTextColor(Ink.muted); textSize = 12f; typeface = Ink.mono
-                        setPadding(dp(10), 0, 0, 0)
-                    })
-                }
-            })
-        }
-
-        // Control row: flat, evenly-weighted icon+label cells.
-        val controls = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            setPadding(dp(2), dp(6), dp(2), dp(12))
-        }
-        // One control = a line icon over a small label (Boox/NeoReader bottom-bar style, frame 069).
-        fun control(iconRes: Int, label: String, onClick: () -> Unit) {
-            val cell = LinearLayout(this).apply {
-                orientation = LinearLayout.VERTICAL
-                gravity = Gravity.CENTER
-                setPadding(dp(2), dp(8), dp(2), dp(8))
-                isClickable = true
-                setOnClickListener { dialog.dismiss(); onClick() }
-            }
-            cell.addView(
-                ImageView(this).apply {
-                    setImageResource(iconRes); setColorFilter(Ink.ink)
-                },
-                LinearLayout.LayoutParams(dp(39), dp(39)),
-            )
-            cell.addView(TextView(this).apply {
-                text = label; setTextColor(Ink.inkSoft); textSize = 11f
-                typeface = Ink.mono; letterSpacing = 0.02f
-                gravity = Gravity.CENTER; setPadding(0, dp(5), 0, 0)
-            })
-            controls.addView(cell, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-        }
-        // Reading a compiled Daily issue → a back-to-the-front-page control (DailyActivity is the
-        // parent in the back stack, so finishing returns to the article list).
-        if (requestedPath?.contains("/daily/") == true) {
-            control(R.drawable.ic_menu_contents, "Daily") { finish() }
-        }
-        // "Home" already opens the library home, so a separate Library item here is redundant.
-        control(R.drawable.ic_menu_home, "Home") { goHome() }
-        // (Bookmark toggle moved to the top-right corner dog-ear; "Marks" lists them.)
-        control(R.drawable.ic_menu_marks, "Marks") { showBookmarks() }
-        control(R.drawable.ic_tool_pen, "Notes") { showAnnotations() }
-        control(R.drawable.ic_menu_contents, "Contents") { showContentsLazy() }
-        control(R.drawable.ic_menu_search, "Search") { search.showSearchDialog() }
-        // Quick zoom (circle −/+ icons — not magnifiers, which are reserved for Search). Also in Adjust → Zoom.
-        control(R.drawable.ic_menu_zoom_out, "Zoom −") { zoomBy(1f / ZOOM_STEP) }
-        control(R.drawable.ic_menu_zoom_in, "Zoom +") { zoomBy(ZOOM_STEP) }
-        control(R.drawable.ic_menu_export, "Export") { export.showExportDialog() }
-        control(R.drawable.ic_menu_dict, "Dicts") { dict.showDictionariesDialog() }
-        // Document controls consolidated into one KOReader-style tabbed sheet (Rotate/Fit/Font/Display).
-        control(R.drawable.ic_menu_adjust, "Adjust") { adjust.show() }
-        control(R.drawable.ic_menu_open, "Open") { openPicker() }
-        container.addView(controls)
-
-        // Palm guard: a hand resting on the bottom-anchored bar must not press a control (esp. Home).
-        dialog.setContentView(palmGuard(container))
-        dialog.window?.apply {
-            setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
-            setGravity(Gravity.BOTTOM)
-            setBackgroundDrawable(android.graphics.drawable.ColorDrawable(Ink.paper))
-        }
-        dialog.show()
-    }
-
-    /** A "go to page" text-entry dialog (RR11-FR1): type a 1-based page number to jump. */
-    private fun showPageEntry(total: Int) {
-        val input = EditText(this).apply {
-            inputType = InputType.TYPE_CLASS_NUMBER
-            hint = "1 – $total"
-        }
-        AlertDialog.Builder(this, R.style.InkDialog)
-            .setTitle("Go to page")
-            .setView(input)
-            .setPositiveButton("Go") { _, _ ->
-                val n = input.text.toString().toIntOrNull()
-                if (n != null && n in 1..total) {
-                    postJump(n - 1)
-                } else {
-                    Toast.makeText(this, "Enter a page from 1 to $total", Toast.LENGTH_SHORT).show()
-                }
-            }
-            .setNegativeButton("Cancel", null)
-            .show()
-    }
-
-    /** Toggle a bookmark on the current page (RR16); redraw so the dog-ear appears/disappears. */
-    private fun toggleBookmark() {
-        engine.execute {
-            val bm = bookmarks ?: return@execute
-            val page = currentPage
-            val now = bm.toggle(page)
-            runOnUiThread {
-                val msg = if (now) "Bookmarked page ${page + 1}" else "Bookmark removed"
-                Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
-            }
-            repaintPanel()
-        }
-    }
-
-    /** List the bookmarked pages (RR16); tap one to jump. */
-    private fun showBookmarks() {
-        engine.execute {
-            val marks = bookmarks?.pages() ?: emptyList()
-            runOnUiThread {
-                if (marks.isEmpty()) {
-                    Toast.makeText(this, "No bookmarks yet — tap Bookmark to add one", Toast.LENGTH_SHORT).show()
-                    return@runOnUiThread
-                }
-                val labels = marks.map { "Page ${it + 1}" }.toTypedArray()
-                AlertDialog.Builder(this, R.style.InkDialog)
-                    .setTitle("Bookmarks")
-                    .setItems(labels) { _, which -> postJump(marks[which]) }
-                    .show()
-            }
-        }
-    }
-
-    /** Fetch the TOC on the engine thread, then show it (RR11-FR2). */
-    private fun showContentsLazy() {
-        engine.execute {
-            if (docHandle == 0L) return@execute
-            val toc = try {
-                WireCodec.decodeToc(NativeBridge.nativeToc(docHandle))
-            } catch (e: RuntimeException) {
-                Log.e(TAG, "toc failed: ${e.message}")
-                emptyList()
-            }
-            runOnUiThread {
-                if (toc.isEmpty()) {
-                    Toast.makeText(this, "No contents in this document", Toast.LENGTH_SHORT).show()
-                } else {
-                    showContents(toc)
-                }
-            }
-        }
-    }
-
-    /** Handwritten-notes annotations list (1.5): fetch inked pages + their stroke counts off-thread,
-     *  then show a tap-to-jump list. */
-    private fun showAnnotations() {
-        engine.execute {
-            if (docHandle == 0L) return@execute
-            val pages = try {
-                NativeBridge.nativeInkPages(docHandle)
-            } catch (e: RuntimeException) {
-                Log.e(TAG, "ink pages failed: ${e.message}"); IntArray(0)
-            }
-            val items = pages.map { p ->
-                val count = try {
-                    WireCodec.decodeStrokes(NativeBridge.nativeInkStrokesForDraw(docHandle, p)).size
-                } catch (e: RuntimeException) { 0 }
-                p to count
-            }
-            runOnUiThread {
-                if (items.isEmpty()) {
-                    Toast.makeText(this, "No handwritten notes yet", Toast.LENGTH_SHORT).show()
-                } else {
-                    showAnnotationsList(items)
-                }
-            }
-        }
-    }
-
-    /** The inked pages as a scrollable "Page N · M notes" list; tap a row to jump there. */
-    private fun showAnnotationsList(items: List<Pair<Int, Int>>) {
-        val d = resources.displayMetrics.density
-        fun dp(v: Int) = (v * d).toInt()
-        val dialog = Dialog(this).apply { requestWindowFeature(Window.FEATURE_NO_TITLE) }
-        val outer = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(24), dp(22), dp(24), dp(14))
-        }
-        outer.addView(Ink.eyebrow(this, "Annotations"))
-        outer.addView(Ink.gap(this, 10))
-        outer.addView(Ink.rule(this))
-        outer.addView(Ink.gap(this, 4))
-        val list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        items.forEachIndexed { i, (page, count) ->
-            if (i > 0) list.addView(View(this).apply { setBackgroundColor(Ink.hairline) },
-                LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, Ink.hair()))
-            list.addView(LinearLayout(this).apply {
-                orientation = LinearLayout.HORIZONTAL
-                gravity = Gravity.CENTER_VERTICAL
-                setPadding(dp(4), dp(14), dp(4), dp(14))
-                isClickable = true
-                setOnClickListener { dialog.dismiss(); postJump(page) }
-                addView(TextView(this@ReaderActivity).apply {
-                    text = "Page ${page + 1}"
-                    setTextColor(Ink.ink); textSize = 17f; typeface = Ink.serifBold
-                }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-                addView(TextView(this@ReaderActivity).apply {
-                    text = if (count == 1) "1 note" else "$count notes"
-                    setTextColor(Ink.muted); textSize = 12f; typeface = Ink.mono
-                })
-            })
-        }
-        outer.addView(ScrollView(this).apply { addView(list) },
-            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, (resources.displayMetrics.heightPixels * 0.7f).toInt()))
-        dialog.setContentView(outer)
-        dialog.window?.apply {
-            setLayout((resources.displayMetrics.widthPixels * 0.82f).toInt(), ViewGroup.LayoutParams.WRAP_CONTENT)
-            setBackgroundDrawable(Ink.cardBg())
-        }
-        dialog.show()
-    }
-
-    /** The document's table of contents (RR11-FR2), shown as a scrollable list from the popup. */
-    private fun showContents(toc: List<TocItem>) {
-        if (toc.isEmpty()) return
-        val d = resources.displayMetrics.density
-        fun dp(v: Int) = (v * d).toInt()
-        val dialog = Dialog(this).apply { requestWindowFeature(Window.FEATURE_NO_TITLE) }
-
-        val outer = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(24), dp(22), dp(24), dp(14))
-        }
-        outer.addView(Ink.eyebrow(this, "Contents"))
-        outer.addView(Ink.gap(this, 10))
-        outer.addView(Ink.rule(this))
-        outer.addView(Ink.gap(this, 4))
-        val list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        toc.forEachIndexed { i, item ->
-            if (i > 0) list.addView(View(this).apply { setBackgroundColor(Ink.hairline) },
-                LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, Ink.hair()))
-            list.addView(LinearLayout(this).apply {
-                orientation = LinearLayout.HORIZONTAL
-                gravity = Gravity.CENTER_VERTICAL
-                setPadding(dp(4) + item.depth * dp(18), dp(14), dp(4), dp(14))
-                isClickable = true
-                setOnClickListener { dialog.dismiss(); item.targetPage?.let { postJump(it) } }
-                addView(TextView(this@ReaderActivity).apply {
-                    text = item.title
-                    setTextColor(if (item.targetPage != null) Ink.ink else Ink.muted)
-                    textSize = if (item.depth == 0) 17f else 15f
-                    typeface = if (item.depth == 0) Ink.serifBold else Ink.serif
-                    maxLines = 2
-                }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-                item.targetPage?.let { p ->
-                    addView(TextView(this@ReaderActivity).apply {
-                        text = "${p + 1}"; setTextColor(Ink.muted); textSize = 12f; typeface = Ink.mono
-                        setPadding(dp(12), 0, 0, 0)
-                    })
-                }
-            })
-        }
-        outer.addView(ScrollView(this).apply { addView(list) },
-            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, (resources.displayMetrics.heightPixels * 0.7f).toInt()))
-
-        dialog.setContentView(outer)
-        dialog.window?.apply {
-            setLayout((resources.displayMetrics.widthPixels * 0.82f).toInt(), ViewGroup.LayoutParams.WRAP_CONTENT)
-            setBackgroundDrawable(Ink.cardBg())
-        }
-        dialog.show()
-    }
-
-    /** The on-device library (RR17): pick a stored book to open it in place. */
-    private fun showLibraryDialog() {
-        val books = Books.list(this)
-        if (books.isEmpty()) {
-            Toast.makeText(this, "No books yet — open a PDF first", Toast.LENGTH_SHORT).show()
-            return
-        }
-        val labels = books.map { Books.title(it) }.toTypedArray()
-        AlertDialog.Builder(this, R.style.InkDialog)
-            .setTitle("Library")
-            .setItems(labels) { _, which -> openFromLibrary(books[which]) }
-            .show()
-    }
-
-    /** Return to the home screen (RR16), leaving the reader. */
-    private fun goHome() {
-        startActivity(
-            Intent(this, HomeActivity::class.java)
-                .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP),
-        )
-        finish()
     }
 
     // ===== Tool model (ADR-INKREAD-0010) =====
