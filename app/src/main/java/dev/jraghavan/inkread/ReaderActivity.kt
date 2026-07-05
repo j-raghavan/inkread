@@ -156,10 +156,6 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
     @Volatile private var tool: Tool = Tool.PEN
     /** The floating tool puck/palette overlay; created in onCreate. */
     private lateinit var toolPalette: ToolPalette
-    /** In-progress eraser path as interleaved view-px x,y; UI-thread only. */
-    private val eraseBuf = ArrayList<Float>()
-    /** Net for a swallowed stylus UP during erasing (mirrors [strokeFinalize]). */
-    private val eraseFinalize = Runnable { finalizeErase() }
 
     // ---- lasso (ADR-INKREAD-0010) ----
     /** The floating selection toolbar; created in onCreate. */
@@ -237,7 +233,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         override val surfaceW get() = surfaceView.width
         override val surfaceH get() = surfaceView.height
         override val activeTool get() = tool
-        override val highlightColor get() = highlightColor()
+        override val highlightColor get() = stylus.highlightColor
         override fun vToNx(vx: Float) = this@ReaderActivity.vToNx(vx)
         override fun vToNy(vy: Float) = this@ReaderActivity.vToNy(vy)
         override fun nToVx(nx: Float) = this@ReaderActivity.nToVx(nx)
@@ -252,7 +248,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         override fun repaintPanel() = this@ReaderActivity.repaintPanel()
         override fun refreshPanel() = this@ReaderActivity.refreshPanel()
         override fun clearFirmwareInk() = this@ReaderActivity.clearFirmwareInk()
-        override fun scheduleInkFlush() = this@ReaderActivity.scheduleInkFlush()
+        override fun scheduleInkFlush() = stylus.scheduleInkFlush()
         override fun showSelectionToolbar(rect: android.graphics.RectF, canPaste: Boolean) =
             selectionToolbar.show(rect, canPaste)
         override fun dismissSelectionToolbar() = selectionToolbar.dismiss()
@@ -267,44 +263,30 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         override fun diag(msg: () -> String) = this@ReaderActivity.diag(msg)
     })
 
-    /** The in-progress stroke as interleaved view-px x,y; UI-thread only. */
-    private val strokeBuf = ArrayList<Float>()
     private val mainHandler = Handler(Looper.getMainLooper())
-    /** Safety net for a swallowed stylus ACTION_UP: commit the stroke after a brief pen pause. */
-    private val strokeFinalize = Runnable { finalizeStroke() }
 
-    /** Trailing-edge flush of deferred ink (RR20): coalesces the per-stroke fsync into one write a
-     *  short while after the pen goes idle. onPause/teardown flush immediately and cancel this. */
-    private val inkFlush = Runnable {
-        val h = docHandle
-        if (h != 0L) engine.execute {
-            try { NativeBridge.nativeInkSave(h) } catch (e: RuntimeException) { Log.e(TAG, "ink flush failed: ${e.message}") }
-        }
-    }
-
-    /** (Re)arm the trailing-edge ink flush after an edit; resets the timer on each new stroke. */
-    private fun scheduleInkFlush() {
-        mainHandler.removeCallbacks(inkFlush)
-        mainHandler.postDelayed(inkFlush, INK_FLUSH_MS)
-    }
-
-    // ---- stylus long-press → instant word lookup (natural "hold a word to define it") ----
-    private var lpDownX = 0f
-    private var lpDownY = 0f
-    private var lpMoved = false
-    /** Fires when the pen has been held ~still on a word: look it up, cancelling the nascent stroke. */
-    private val longPress = Runnable {
-        mainHandler.removeCallbacks(strokeFinalize) // this hold is a lookup, not a stroke
-        strokeBuf.clear()
-        if (viewW == 0 || viewH == 0) return@Runnable
-        val nx = vToNx(lpDownX); val ny = vToNy(lpDownY)
-        val page = currentPage
-        diag { "DIAG long-press lookup @($nx,$ny) page=$page" }
-        engine.execute {
-            clearFirmwareInk(); repaintPanel() // wipe the pen dot the hold left
-            dict.defineWord(page, nx, ny)
-        }
-    }
+    /** Stylus pen/highlighter + eraser capture and the ink commit path (RR19/RR20) — owns the
+     *  stroke buffers, pen colours, deferred autosave, and stroke baking (SRP). The shell keeps
+     *  the firmware-ink object, the transforms, and drawLivePath behind the Host. */
+    private val stylus = StylusInkController(object : StylusInkController.Host {
+        override val docHandle get() = this@ReaderActivity.docHandle
+        override val currentPage get() = this@ReaderActivity.currentPage
+        override val viewW get() = this@ReaderActivity.viewW
+        override val viewH get() = this@ReaderActivity.viewH
+        override val zoom get() = this@ReaderActivity.zoom
+        override val activeTool get() = tool
+        override fun vToNx(vx: Float) = this@ReaderActivity.vToNx(vx)
+        override fun vToNy(vy: Float) = this@ReaderActivity.vToNy(vy)
+        override fun nToVx(nx: Float) = this@ReaderActivity.nToVx(nx)
+        override fun nToVy(ny: Float) = this@ReaderActivity.nToVy(ny)
+        override fun lenToNorm(px: Float) = this@ReaderActivity.lenToNorm(px)
+        override fun engineExecute(block: () -> Unit) { engine.execute(block) }
+        override fun clearFirmwareInk() = this@ReaderActivity.clearFirmwareInk()
+        override fun repaintPanel() = this@ReaderActivity.repaintPanel()
+        override fun drawLivePath(buf: ArrayList<Float>, paint: Paint) = this@ReaderActivity.drawLivePath(buf, paint)
+        override fun defineWord(page: Int, nx: Float, ny: Float) = dict.defineWord(page, nx, ny)
+        override fun diag(msg: () -> String) = this@ReaderActivity.diag(msg)
+    })
 
     // ---- finger gestures: the panel DOES deliver finger UP (action=1) and a continuous stationary
     //      MOVE stream while held, so a tap (quick DOWN→UP) and a long-press (MOVEs past the
@@ -341,7 +323,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         // A pinch-zoom in flight is never a word lookup, even if a finger sat still long enough.
         if (fingerMoved || scaleDetector.isInProgress) return@Runnable
         fingerLookupFired = true // suppresses the tap/page-flip on the upcoming UP
-        if (SystemClock.uptimeMillis() - lastStylusMs <= PALM_REJECT_MS || strokeBuf.isNotEmpty()) return@Runnable
+        if (SystemClock.uptimeMillis() - lastStylusMs <= PALM_REJECT_MS || stylus.strokeInProgress) return@Runnable
         lookupWordAtView(fingerDownX, fingerDownY)
     }
 
@@ -360,15 +342,6 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
     @Volatile private var currentDocPath: String? = null
     @Volatile private var requestedId: String? = null
 
-    private val inkPaint = Paint().apply {
-        color = Color.BLACK
-        style = Paint.Style.STROKE
-        strokeWidth = INK_STROKE_WIDTH // match the firmware needle (baked was thinner than live)
-        strokeCap = Paint.Cap.ROUND
-        strokeJoin = Paint.Join.ROUND
-        isAntiAlias = true
-    }
-    private val inkDotPaint = Paint().apply { color = Color.BLACK; style = Paint.Style.FILL; isAntiAlias = true }
     private val bookmarkPaint = Paint().apply { color = Color.BLACK; style = Paint.Style.FILL; isAntiAlias = true }
     private val bookmarkOutlinePaint = Paint().apply { color = Color.parseColor("#9E9E9E"); style = Paint.Style.STROKE; strokeWidth = 2f; isAntiAlias = true }
     /** White halo drawn under the ribbon so it stays visible over a dark page region (e.g. a black
@@ -398,21 +371,6 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
     private val minimapViewportFill = Paint().apply { color = Color.parseColor("#22000000"); style = Paint.Style.FILL; isAntiAlias = true }
     private val minimapViewportPaint = Paint().apply { color = Color.BLACK; style = Paint.Style.STROKE; strokeWidth = 3f; isAntiAlias = true }
     private val minimapGlyphPaint = Paint().apply { color = Color.BLACK; style = Paint.Style.STROKE; strokeWidth = 3f; strokeCap = Paint.Cap.ROUND; isAntiAlias = true }
-    /** Current pen / highlighter colour (index into the palettes); re-tapping a tool cycles it. */
-    private var penColorIdx = 0
-    private var hlColorIdx = 0
-    private fun penColor() = PEN_COLORS[penColorIdx]
-    private fun highlightColor() = HIGHLIGHT_COLORS[hlColorIdx]
-    private val hlLivePaint = Paint().apply {
-        style = Paint.Style.STROKE; strokeCap = Paint.Cap.ROUND; strokeJoin = Paint.Join.ROUND; isAntiAlias = true
-    }
-    /** Live highlighter band paint, coloured + sized to the current shade. */
-    private fun highlighterLivePaint(): Paint {
-        val c = highlightColor()
-        hlLivePaint.color = Color.argb(c and 0xFF, (c ushr 24) and 0xFF, (c ushr 16) and 0xFF, (c ushr 8) and 0xFF)
-        hlLivePaint.strokeWidth = HIGHLIGHT_WIDTH_PX
-        return hlLivePaint
-    }
     private val loadingBg = Paint().apply { color = Color.WHITE }
     private val loadingText = Paint().apply {
         color = Color.DKGRAY
@@ -461,9 +419,9 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
                 }
                 when (tool) {
                     Tool.DEFINE -> lasso.captureSelection(event)
-                    Tool.ERASER -> captureErase(event)
+                    Tool.ERASER -> stylus.captureErase(event)
                     Tool.LASSO -> lasso.captureLasso(event)
-                    else -> captureStylus(event) // PEN (Highlighter is still P2)
+                    else -> stylus.captureStylus(event) // PEN (Highlighter is still P2)
                 }
             } else if (toolType == MotionEvent.TOOL_TYPE_FINGER) {
                 // A fresh primary DOWN starts a clean gesture: clear both per-gesture latches. This
@@ -628,10 +586,9 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         if (::selectionToolbar.isInitialized) selectionToolbar.dismiss()
         if (::colorPalette.isInitialized) colorPalette.dismiss()
         mainHandler.removeCallbacks(fingerLongPress) // drop any pending finger gesture on leaving
-        mainHandler.removeCallbacks(longPress)
         mainHandler.removeCallbacks(pendingCentreMenu) // don't pop the bar on a paused/finishing activity (#54)
         dismissReflowProgress() // don't leak the "Reflowing…" dialog if backgrounded mid-reflow (#55)
-        mainHandler.removeCallbacks(inkFlush) // the explicit flush below supersedes the debounce
+        stylus.cancelPendingOnPause() // drop the pending pen-lookup + deferred flush (explicit save below)
         ink.teardown() // release the firmware ink claim + clear the overlay
         // Persist the reading position + flush ink when backgrounded (RR27/RR20) — engine thread.
         engine.execute {
@@ -950,7 +907,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         }
         diag { "DIAG baked ${pageStrokes.size} core strokes on page $currentPage" }
         val cv = Canvas(bmp)
-        for (s in pageStrokes) drawStroke(cv, s)
+        for (s in pageStrokes) stylus.drawStroke(cv, s)
         // The active lasso selection's bounding box (ADR-INKREAD-0010).
         if (lasso.hasSelection && lasso.selectionBounds.size == 4) drawSelectionBox(cv)
         // The active in-document search hit's highlight boxes (RR2), if it lives on this page.
@@ -1063,111 +1020,6 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
      * right third = next, center = contents). The page fills the viewport (stretched render), so
      * the hit-test is the normalized tap `(x/w, y/h)` against the link rects.
      */
-    // ---- handwriting capture (RR19) ----
-
-    /** Accumulate the stylus stroke; commit on UP (or a debounced pen-pause if UP is swallowed). */
-    private fun captureStylus(e: MotionEvent) {
-        when (e.actionMasked) {
-            MotionEvent.ACTION_DOWN -> {
-                strokeBuf.clear()
-                strokeBuf.add(e.x); strokeBuf.add(e.y)
-                armStrokeTimeout()
-                // Arm long-press → word lookup in Pen (reading) mode: hold the pen on a word to
-                // define it, no tool switch needed. (Other tools have their own hold semantics.)
-                if (tool == Tool.PEN) {
-                    lpDownX = e.x; lpDownY = e.y; lpMoved = false
-                    mainHandler.postDelayed(longPress, LONG_PRESS_MS)
-                }
-            }
-            MotionEvent.ACTION_MOVE -> {
-                for (i in 0 until e.historySize) {
-                    strokeBuf.add(e.getHistoricalX(i)); strokeBuf.add(e.getHistoricalY(i))
-                }
-                strokeBuf.add(e.x); strokeBuf.add(e.y)
-                armStrokeTimeout()
-                // Any real movement means this is a stroke, not a hold → cancel the pending lookup.
-                if (!lpMoved && kotlin.math.hypot(e.x - lpDownX, e.y - lpDownY) > LONG_PRESS_SLOP_PX) {
-                    lpMoved = true; mainHandler.removeCallbacks(longPress)
-                }
-                // Pen rides the fast firmware overlay; Highlighter's is suppressed, so draw its band.
-                if (tool == Tool.HIGHLIGHTER) drawLivePath(strokeBuf, highlighterLivePaint())
-            }
-            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                mainHandler.removeCallbacks(longPress) // lifted before the hold fired → normal stroke
-                strokeBuf.add(e.x); strokeBuf.add(e.y)
-                mainHandler.removeCallbacks(strokeFinalize)
-                finalizeStroke()
-            }
-        }
-    }
-
-    private fun armStrokeTimeout() {
-        mainHandler.removeCallbacks(strokeFinalize)
-        mainHandler.postDelayed(strokeFinalize, STROKE_PAUSE_MS)
-    }
-
-    /** Hand the captured stroke to the engine thread for persistence (UI thread). */
-    private fun finalizeStroke() {
-        diag { "DIAG finalizeStroke buf=${strokeBuf.size / 2} pts" }
-        if (strokeBuf.size < 2) { strokeBuf.clear(); return }
-        val raw = strokeBuf.toFloatArray()
-        strokeBuf.clear()
-        engine.execute { commitStroke(raw) }
-    }
-
-    /** Map packed view-space `[x,y,…]` to packed page-normalized `[x,y,…]` for [NativeBridge.nativeInkAddPoints]. */
-    private fun toNormPoints(view: FloatArray): FloatArray {
-        val out = FloatArray(view.size)
-        var i = 0
-        while (i + 1 < view.size) {
-            out[i] = vToNx(view[i]); out[i + 1] = vToNy(view[i + 1]); i += 2
-        }
-        return out
-    }
-
-    /** Feed the captured pen stroke to the core (begin→points→end → autosave). Engine thread. */
-    private fun commitStroke(raw: FloatArray) {
-        val w = viewW; val h = viewH
-        if (docHandle == 0L || w == 0 || h == 0) return
-        // Highlighter = a wide, translucent band (its own core tool + colour); Pen = thin black.
-        val isHl = tool == Tool.HIGHLIGHTER
-        val coreTool = if (isHl) CORE_TOOL_HIGHLIGHTER else CORE_TOOL_PEN
-        val widthNorm = lenToNorm(if (isHl) HIGHLIGHT_WIDTH_PX else INK_STROKE_WIDTH)
-        val color = if (isHl) highlightColor() else penColor()
-        try {
-            NativeBridge.nativeInkBeginStroke(docHandle, coreTool, color, widthNorm, System.currentTimeMillis())
-            NativeBridge.nativeInkAddPoints(docHandle, toNormPoints(raw))
-            NativeBridge.nativeInkEndStroke(docHandle)
-            scheduleInkFlush() // deferred autosave: persist on a trailing debounce, not this fsync
-            diag { "DIAG commitStroke OK ${raw.size / 2} pts tool=$tool → core page $currentPage" }
-        } catch (e: RuntimeException) {
-            Log.e(TAG, "ink commit failed: ${e.message}")
-        }
-        // Highlighter's firmware EMR ink is suppressed (we drew the live band ourselves), so bake it
-        // from the core now. Pen rides the firmware overlay and bakes on the next full render.
-        if (isHl) { clearFirmwareInk(); repaintPanel(); return }
-        // The firmware overlay already shows this stroke live; it bakes from the core on the next
-        // full render (page turn / revisit), so no immediate re-blit is needed here.
-    }
-
-    /** Draw one core stroke (normalized points + tool/color/width) onto [canvas]. */
-    private fun drawStroke(canvas: Canvas, s: InkStrokeDraw) {
-        val norm = s.points
-        if (norm.isEmpty()) return
-        inkPaint.color = Color.argb(s.a, s.r, s.g, s.b)
-        inkPaint.strokeWidth = (s.width * viewW * zoom).coerceAtLeast(1f)
-        if (norm.size == 2) {
-            inkDotPaint.color = inkPaint.color
-            canvas.drawCircle(nToVx(norm[0]), nToVy(norm[1]), inkPaint.strokeWidth / 2f, inkDotPaint)
-            return
-        }
-        val path = Path()
-        path.moveTo(nToVx(norm[0]), nToVy(norm[1]))
-        var i = 2
-        while (i + 1 < norm.size) { path.lineTo(nToVx(norm[i]), nToVy(norm[i + 1])); i += 2 }
-        canvas.drawPath(path, inkPaint)
-    }
-
     /** Refresh the cached full-page thumbnail from a fit render [src] (drives the zoom minimap). */
     private fun updateFitThumb(src: Bitmap) {
         val tw = viewW / 5; val th = viewH / 5
@@ -1324,7 +1176,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             isStylusTool = toolType == MotionEvent.TOOL_TYPE_STYLUS || toolType == MotionEvent.TOOL_TYPE_ERASER,
             pointerCount = e.pointerCount,
             penHovering = penHovering,
-            strokeInProgress = strokeBuf.isNotEmpty(),
+            strokeInProgress = stylus.strokeInProgress,
             msSinceStylus = SystemClock.uptimeMillis() - lastStylusMs,
             palmRejectMs = PALM_REJECT_MS,
             touchMajorPx = e.getTouchMajor(0),
@@ -1342,7 +1194,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
      */
     private fun penActiveForPinch(): Boolean = PalmFilter.isPenActive(
         penHovering = penHovering,
-        strokeInProgress = strokeBuf.isNotEmpty(),
+        strokeInProgress = stylus.strokeInProgress,
         msSinceStylus = SystemClock.uptimeMillis() - lastStylusMs,
         palmRejectMs = PALM_REJECT_MS,
     )
@@ -1485,7 +1337,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             }
             return // a swipe (handled above) or rejected palm — not a tap
         }
-        if (SystemClock.uptimeMillis() - lastStylusMs > PALM_REJECT_MS && strokeBuf.isEmpty()) {
+        if (SystemClock.uptimeMillis() - lastStylusMs > PALM_REJECT_MS && !stylus.strokeInProgress) {
             handleTap(fingerDownX, fingerDownY)
         } else {
             diag { "DIAG tap suppressed (stylus active → palm)" }
@@ -1653,12 +1505,12 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         // window that steals focus and drops the overlay — the ringed swatch is the feedback.
         if (chosen == Tool.HIGHLIGHTER && tool == Tool.HIGHLIGHTER) {
             if (colorPalette.isShowing()) collapseColorPalette()
-            else openColorColumn("Highlighter", HIGHLIGHT_COLORS, HIGHLIGHT_COLOR_NAMES, hlColorIdx) { hlColorIdx = it }
+            else openColorColumn("Highlighter", HIGHLIGHT_COLORS, HIGHLIGHT_COLOR_NAMES, stylus.hlColorIndex) { stylus.hlColorIndex = it }
             return true
         }
         if (chosen == Tool.PEN && tool == Tool.PEN) {
             if (colorPalette.isShowing()) collapseColorPalette()
-            else openColorColumn("Pen", PEN_COLORS, PEN_COLOR_NAMES, penColorIdx) { penColorIdx = it }
+            else openColorColumn("Pen", PEN_COLORS, PEN_COLOR_NAMES, stylus.penColorIndex) { stylus.penColorIndex = it }
             return true
         }
         if (chosen == tool) return true
@@ -1878,59 +1730,6 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         ink.clearAll()
     }
 
-    /** Accumulate the eraser path; finalize on UP (or a debounced pause if UP is swallowed). */
-    private fun captureErase(e: MotionEvent) {
-        when (e.actionMasked) {
-            MotionEvent.ACTION_DOWN -> {
-                eraseBuf.clear()
-                eraseBuf.add(e.x); eraseBuf.add(e.y)
-                armEraseTimeout()
-            }
-            MotionEvent.ACTION_MOVE -> {
-                for (i in 0 until e.historySize) {
-                    eraseBuf.add(e.getHistoricalX(i)); eraseBuf.add(e.getHistoricalY(i))
-                }
-                eraseBuf.add(e.x); eraseBuf.add(e.y)
-                armEraseTimeout()
-            }
-            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                eraseBuf.add(e.x); eraseBuf.add(e.y)
-                mainHandler.removeCallbacks(eraseFinalize)
-                finalizeErase()
-            }
-        }
-    }
-
-    private fun armEraseTimeout() {
-        mainHandler.removeCallbacks(eraseFinalize)
-        mainHandler.postDelayed(eraseFinalize, STROKE_PAUSE_MS)
-    }
-
-    /** Hand the eraser path to the engine thread to remove crossed strokes (UI thread). */
-    private fun finalizeErase() {
-        if (eraseBuf.size < 2) { eraseBuf.clear(); return }
-        val pts = eraseBuf.toFloatArray()
-        eraseBuf.clear()
-        engine.execute { commitErase(pts) }
-    }
-
-    /** Feed the eraser path to the core (Eraser stroke removes crossed strokes); re-render (engine). */
-    private fun commitErase(viewPts: FloatArray) {
-        val w = viewW; val h = viewH
-        if (docHandle == 0L || w == 0 || h == 0) return
-        val radiusNorm = lenToNorm(ERASE_RADIUS_PX)
-        try {
-            NativeBridge.nativeInkBeginStroke(docHandle, CORE_TOOL_ERASER, INK_COLOR_BLACK, radiusNorm, System.currentTimeMillis())
-            NativeBridge.nativeInkAddPoints(docHandle, toNormPoints(viewPts))
-            NativeBridge.nativeInkEndStroke(docHandle)
-            scheduleInkFlush() // deferred autosave: persist on a trailing debounce, not this fsync
-        } catch (e: RuntimeException) {
-            Log.e(TAG, "erase failed: ${e.message}"); return
-        }
-        clearFirmwareInk() // wipe the firmware ink left by the eraser drag
-        repaintPanel()
-    }
-
     /**
      * Draw an in-progress gesture path (view-px [buf]) over the cached page (UI thread), for the
      * tools whose firmware EMR ink is suppressed: Lasso (dashed loop), Define (dashed select line),
@@ -2052,13 +1851,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         const val DOUBLE_TAP_SLOP_PX = 60f // max distance between the two taps to count as a double-tap.
         const val REFLOW_PROGRESS_DELAY_MS = 250L // show "Reflowing…" only if the build outlasts this (#55).
         const val SELECTION_HANDLE_PX = 8f // half-size of the square corner handles on the selection box.
-        const val HIGHLIGHT_WIDTH_PX = 30f // wide marker band (vs INK_STROKE_WIDTH for the pen).
-        const val STROKE_PAUSE_MS = 600L // commit a stroke after this pen-pause (swallowed-UP net).
-        const val INK_FLUSH_MS = 1500L // trailing-edge delay before the deferred ink autosave fsyncs.
-        const val LONG_PRESS_MS = 500L // hold the pen this long (≈still) on a word → look it up.
-        const val LONG_PRESS_SLOP_PX = 16f // movement beyond this cancels the long-press (it's a stroke).
-        const val INK_STROKE_WIDTH = 6f // baked-ink line width (px) tuned to match the firmware pen.
-        const val ERASE_RADIUS_PX = 22f // eraser hit radius (px): a stroke within this of the path goes.
+        const val STROKE_PAUSE_MS = 600L // commit a stroke after this pen-pause (swallowed-UP net); shared with the lasso net.
 
         // Core ink seam constants (ADR-INKREAD-0010). Tool codes mirror `inkread_ink::Tool::code`.
         const val CORE_TOOL_PEN = 0
