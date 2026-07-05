@@ -49,8 +49,10 @@ an open [AGPL-3.0](./LICENSE) Rust core you can audit and extend.
 
 ## Demo
 
+<div align="center">
+  <video src="https://github.com/user-attachments/assets/66e5a276-7eb9-4baf-9223-3a110efe39a3"></video>
+</div>
 
-https://github.com/user-attachments/assets/4381ee07-3683-45ef-9fa4-9ed7cdd11295
 
   ## Features
 
