@@ -13,12 +13,12 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/j-raghavan/inkread/releases/latest"><img alt="latest release" src="https://img.shields.io/github/v/release/j-raghavan/inkread?include_prereleases&sort=semver&label=release"></a>
+  <a href="https://github.com/j-raghavan/inkread/releases/latest"><img alt="latest release" src="https://img.shields.io/github/v/release/j-raghavan/inkread?sort=semver&label=release"></a>
   <a href="./.github/workflows/ci.yml"><img alt="CI" src="https://github.com/j-raghavan/inkread/actions/workflows/ci.yml/badge.svg"></a>
   <a href="https://codecov.io/gh/j-raghavan/inkread"><img alt="coverage" src="https://codecov.io/gh/j-raghavan/inkread/branch/master/graph/badge.svg"></a>
   <img alt="core: Rust" src="https://img.shields.io/badge/core-Rust-orange?logo=rust&logoColor=white">
   <a href="./LICENSE"><img alt="License: AGPL-3.0" src="https://img.shields.io/badge/license-AGPL--3.0-blue.svg"></a>
-  <img alt="status: early (M0)" src="https://img.shields.io/badge/status-early%20(beta)-orange.svg">
+  <img alt="status: stable (v1.0)" src="https://img.shields.io/badge/status-stable%20(v1.0)-brightgreen.svg">
 </p>
 
 ---
@@ -28,7 +28,7 @@ inkread is a document reader and writing platform for tablet-class **e-ink** dev
 JNI) that owns parsing, layout, rendering, the refresh policy, and the **ink model** — so the hard
 parts are memory-safe, vendor-neutral, and testable on your laptop with no device.
 
->inkRead is an early open-source e-ink reader for Supernote that combines serious PDF/EPUB reading with
+>inkRead is an open-source e-ink reader for Supernote that combines serious PDF/EPUB reading with
 >handwriting-first annotation. It uses a Kotlin Android shell around a Rust core for parsing, layout, rendering,
 >ink, dictionaries, and refresh policy. The goal is simple: portable reading, portable annotations, and no cloud dependency.
 
@@ -123,20 +123,20 @@ https://github.com/user-attachments/assets/4381ee07-3683-45ef-9fa4-9ed7cdd11295
 
 > Honest take: KOReader is the more mature *reader* and runs on far more hardware; the Supernote
 > reader is the more polished *native* experience. inkread is the **only one of the three that's both
-> open and built handwriting-first**, and it's **early** — see status below. Pen latency rides the
-> firmware's own sub-frame ink path; refresh tuning is capped by what the platform exposes to
-> sideloaded apps — [docs/EINK-LIMITS.md](./docs/EINK-LIMITS.md) states those limits plainly.
+> open and built handwriting-first**, and at **v1.0 it's a daily driver** — see status below. Pen
+> latency rides the firmware's own sub-frame ink path; refresh tuning is capped by what the platform
+> exposes to sideloaded apps — [docs/EINK-LIMITS.md](./docs/EINK-LIMITS.md) states those limits plainly.
 
 inkread is **not** a KOReader clone. KOReader is prior art and compatibility inspiration; inkread
 reuses its plugin *style* (a selected `.koplugin` shim) but ships its own Rust-native engine.
 
 ## Status
 
-Pre-1.0, in **active beta** (v0.5.x). The Rust workspace (parse · reflow · ink · refresh policy ·
-dictionary · Lua runtime) builds and tests green on the host, **and the app runs on the Supernote**
+**v1.0 — stable.** The Rust workspace (parse · reflow · ink · refresh policy · dictionary · Lua
+runtime) builds and tests green on the host, **and the app runs on the Supernote**
 (Manta / Nomad / A5X / A6X): reading, reflow, handwriting, dictionary, export, and **InkRead Daily**
-all work on-device. APIs and formats may still change. Roadmap milestones run toward *Daily Driver v1*
-and beyond.
+all work on-device. The document formats and the on-disk annotation sidecars are stable; further
+work (a broader Lua plugin API, more formats, additional devices) lands additively.
 
 ## Quick start
 

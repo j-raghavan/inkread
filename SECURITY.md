@@ -2,8 +2,8 @@
 
 ## Supported versions
 
-inkread is pre-1.0 and ships from `master`. Security fixes target the **latest release** and
-`master`; older tagged builds are not patched in place — please upgrade.
+inkread follows semantic versioning from **v1.0** and ships from `master`. Security fixes target the
+**latest release** and `master`; older tagged builds are not patched in place — please upgrade.
 
 ## Reporting a vulnerability
 
