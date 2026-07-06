@@ -45,7 +45,7 @@ serde_json = "1"
 rusqlite = { version = "0.32", features = ["bundled"] }
 # mlua with vendored Lua 5.4 (compiled from source via cc, like rusqlite `bundled`) — the embedded
 # plugin runtime (RR13). MIT-licensed (Lua itself is MIT) → AGPL-compatible (check-licenses.sh).
-mlua = { version = "0.11", features = ["lua54", "vendored"] }
+mlua = { version = "0.12", features = ["lua54", "vendored"] }
 # CBZ comic-archive backend (#36): a ZIP of page images. Lean, pure-Rust, AGPL-compatible (all
 # MIT/Apache → auto-pass check-licenses.sh) and cross-compile clean for arm64 (no C/system libs).
 # `zip` only needs DEFLATE (comics are stored/deflated); no bzip2/zstd/aes. `jpeg-decoder` without
