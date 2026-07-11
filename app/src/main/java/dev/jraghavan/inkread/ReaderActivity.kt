@@ -642,7 +642,15 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
     @Deprecated("startActivityForResult is fine for this single-Activity shell (no AndroidX).")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
-        if (requestCode != REQ_OPEN_DOC || resultCode != RESULT_OK) return
+        if (requestCode != REQ_OPEN_DOC) return
+        if (resultCode != RESULT_OK) {
+            // Picker cancelled. With no document open (e.g. launched straight into the picker from
+            // Home's "Open a Document"), there's nothing to show and the only tap action would
+            // re-open the picker — return to Home instead of stranding the reader on a blank page
+            // (#123). With a document already open (the "Open" bottom-bar control), stay on it.
+            if (docHandle == 0L) finish()
+            return
+        }
         val uri = data?.data ?: return
         // Best-effort: keep read access in case we re-import later (the open path copies bytes now).
         try {
