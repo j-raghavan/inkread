@@ -104,10 +104,12 @@ jobs:
           echo "ANDROID_NDK_HOME=$ndk" >> "$GITHUB_ENV"
           echo "Using NDK: $ndk"
 
-      # --- Stamp the crate version from the tag (build-time only, not committed) ---
+      # --- Stamp the crate version from the tag (build-time, for THIS build's artifact) ---
       # reader-core reports CARGO_PKG_VERSION over JNI (jni.rs nativeHello), and env!() bakes
       # it at compile time — so the workspace version must be set BEFORE cargo-ndk runs.
       # All member crates inherit version.workspace, so the single root line drives everything.
+      # This edits the working tree only; the companion "Sync version to the default branch"
+      # step at the end records the same bump on master so the checked-in file tracks releases.
       - name: Stamp crate version from tag
         env:
           VERSION: ${{ steps.ver.outputs.version }}
@@ -204,3 +206,41 @@ jobs:
             > ${{ steps.signing.outputs.signed == 'true' && 'Production-signed with the inkread release key — installs and in-app updates verify against it. Verify the attached `.sha256` before installing.' || 'This build is DEBUG-signed for sideload bring-up; it cannot update an existing install in place. Verify the attached `.sha256` before installing.' }}
 
             ---
+
+      # --- Record the released version on the default branch (best-effort) ---
+      # The build-time stamp above only touched the working tree at the tag; this lands the same
+      # bump on master so the checked-in Cargo.toml/Cargo.lock track the latest release (the tagged
+      # commit itself is immutable and keeps whatever it had). Runs only on a green release and never
+      # fails it: if the push is rejected (branch protection, or master advanced mid-release) the
+      # release still stands — the repo just misses this cosmetic bump. `cargo update --workspace`
+      # rewrites only the workspace members in the lockfile, leaving dependency resolution untouched.
+      # `[skip ci]` keeps the bump commit from re-triggering CI.
+      - name: Sync version to the default branch
+        if: success()
+        continue-on-error: true
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+          BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          git reset --hard HEAD               # drop the build-time working-tree stamp (we're detached at the tag)
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          for attempt in 1 2 3; do
+            git fetch origin "$BRANCH"
+            git checkout -B "$BRANCH" "origin/$BRANCH"
+            n="$(grep -c '^version = ' Cargo.toml)"
+            test "$n" -eq 1 || { echo "::warning::expected 1 workspace version line, found $n — skipping sync"; exit 0; }
+            sed -i "s/^version = \".*\"/version = \"$VERSION\"/" Cargo.toml
+            cargo update --workspace          # sync the 10 workspace entries in Cargo.lock to $VERSION
+            if git diff --quiet -- Cargo.toml Cargo.lock; then
+              echo "$BRANCH already at $VERSION — nothing to sync."; exit 0
+            fi
+            git add Cargo.toml Cargo.lock
+            git commit -m "chore(release): set workspace version to $VERSION [skip ci]"
+            if git push origin "HEAD:$BRANCH"; then
+              echo "Synced version $VERSION to $BRANCH."; exit 0
+            fi
+            echo "::notice::push to $BRANCH rejected (attempt $attempt) — refetching and retrying."
+          done
+          echo "::warning::could not sync the version bump to $BRANCH after retries; the release is unaffected."
