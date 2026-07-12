@@ -333,22 +333,46 @@ fn export_writes_ink_annotation_and_flatten_into_pdf() {
         }],
     }];
 
-    // --- Annotations mode: the reopened PDF has an annotation on page 0. ---
+    // --- Annotations mode (#136): the reopened annotation must be a conformant, *renderable* ink
+    // annotation — a `/InkList` (editable geometry) AND at least one appearance object (the `/AP`
+    // path that Preview/Adobe actually draw). Asserting only that an annotation *exists* is exactly
+    // what let the invisible-ink bug through, so we check both via the raw bindings.
     let out_a = std::env::temp_dir().join("inkread_export_annot.pdf");
     let mut doc = PdfBackend::open(std::fs::read(fixture).unwrap()).unwrap();
     doc.export_pdf(out_a.to_str().unwrap(), &page_ink, ExportMode::Annotations)
         .expect("export annotations");
     drop(doc);
-    let reopened = PdfBackend::open(std::fs::read(&out_a).unwrap()).expect("reopen annotated");
-    let annots = reopened
-        .document
-        .pages()
-        .get(0)
-        .unwrap()
-        .annotations()
-        .len();
-    assert!(annots >= 1, "expected >=1 annotation, got {annots}");
-    drop(reopened);
+    if let Ok(dst) = std::env::var("INKREAD_ANNOT_DUMP") {
+        std::fs::copy(&out_a, dst).ok();
+    }
+    let b = bindings().unwrap();
+    let annotated = std::fs::read(&out_a).unwrap();
+    // SAFETY: raw pdfium read-back; every handle is closed on the single path below.
+    unsafe {
+        let rdoc = b.FPDF_LoadMemDocument(&annotated, None);
+        assert!(!rdoc.is_null(), "reopen annotated");
+        let rpage = b.FPDF_LoadPage(rdoc, 0);
+        let mut ink_seen = false;
+        for i in 0..b.FPDFPage_GetAnnotCount(rpage) {
+            let a = b.FPDFPage_GetAnnot(rpage, i);
+            if b.FPDFAnnot_GetSubtype(a) == 15 {
+                // FPDF_ANNOT_INK
+                ink_seen = true;
+                assert!(
+                    b.FPDFAnnot_GetInkListCount(a) >= 1,
+                    "ink annotation must carry an /InkList"
+                );
+                assert!(
+                    b.FPDFAnnot_GetObjectCount(a) >= 1,
+                    "ink annotation must carry an /AP appearance object"
+                );
+            }
+            b.FPDFPage_CloseAnnot(a);
+        }
+        assert!(ink_seen, "expected an ink annotation on page 0");
+        b.FPDF_ClosePage(rpage);
+        b.FPDF_CloseDocument(rdoc);
+    }
 
     // --- Flatten mode: reopens, renders, and the page now has non-white ink baked in. ---
     let out_f = std::env::temp_dir().join("inkread_export_flat.pdf");

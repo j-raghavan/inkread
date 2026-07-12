@@ -159,6 +159,189 @@ fn chaikin(points: &[(f32, f32)], iterations: u8) -> Vec<(f32, f32)> {
     pts
 }
 
+// --- Ink-annotation export (issue #136) -------------------------------------------------------
+//
+// pdfium's `FPDFAnnot_AddInkStroke` records a conformant, editable `/InkList`, but it does NOT
+// synthesize an appearance stream — so Apple Preview / Adobe, which render ink annotations only from
+// `/AP`, show nothing (the original bug). Appending a stroked path object makes pdfium emit an `/AP`,
+// and setting the annotation `/Rect` gives that appearance a non-degenerate bbox. All three together
+// render in every engine tested (pdfium, MuPDF, Apple PDFKit/Preview). This is raw FFI because
+// pdfium-render 0.9.1 keeps the annotation handle `pub(crate)`, so its high-level API can't reach
+// `FPDFAnnot_AddInkStroke`/`FPDFAnnot_SetRect`.
+
+const FPDF_ANNOT_SUBTYPE_INK: FPDF_ANNOTATION_SUBTYPE = 15; // FPDF_ANNOT_INK
+const FPDFANNOT_COLORTYPE_STROKE: FPDFANNOT_COLORTYPE = 0; // FPDFANNOT_COLORTYPE_Color
+const PATH_FILLMODE_NONE: i32 = 0;
+const PATH_LINE_ROUND: i32 = 1; // round cap and round join, matching the on-screen ink
+
+/// A `FPDF_FILEWRITE` sink that appends pdfium's `FPDF_SaveAsCopy` output to a `Vec<u8>`.
+#[repr(C)]
+struct VecFileWriter {
+    inner: FPDF_FILEWRITE,
+    buf: *mut Vec<u8>,
+}
+
+/// pdfium calls this back with each output block; `pThis` aliases the [`VecFileWriter`] because
+/// `inner` is its first `#[repr(C)]` field.
+unsafe extern "C" fn vec_write_block(
+    this: *mut FPDF_FILEWRITE,
+    data: *const std::os::raw::c_void,
+    size: std::os::raw::c_ulong,
+) -> std::os::raw::c_int {
+    let writer = this as *mut VecFileWriter;
+    let buf = &mut *(*writer).buf;
+    buf.extend_from_slice(std::slice::from_raw_parts(data as *const u8, size as usize));
+    1
+}
+
+/// Write each page's strokes into `base` as PDF **Ink annotations** — a `/InkList` for editability
+/// plus a stroked `/AP` (via an appended path object) so appearance-only viewers show it — and
+/// return the resulting PDF bytes. Never panics across the boundary (RR21-FR3): every pdfium failure
+/// maps to a typed [`CoreError`], and every handle is released on the single linear path.
+fn write_ink_annotations(base: &[u8], page_ink: &[PageInk]) -> CoreResult<Vec<u8>> {
+    let b = bindings()?;
+    let mut out: Vec<u8> = Vec::new();
+    // SAFETY: raw pdfium FFI. `doc`/`page`/`annot` are checked non-null and closed before return on
+    // every path; `pts`/`rect` outlive the calls that borrow them; the writer outlives SaveAsCopy.
+    unsafe {
+        let doc = b.FPDF_LoadMemDocument(base, None);
+        if doc.is_null() {
+            return Err(CoreError::RenderBackend(
+                "export: reloading the serialized document failed".into(),
+            ));
+        }
+        let page_count = b.FPDF_GetPageCount(doc);
+        for pi in page_ink {
+            if pi.strokes.is_empty() || pi.page >= page_count.max(0) as usize {
+                continue;
+            }
+            let page = b.FPDF_LoadPage(doc, pi.page as i32);
+            if page.is_null() {
+                b.FPDF_CloseDocument(doc);
+                return Err(CoreError::RenderBackend(format!(
+                    "export: loading page {} failed",
+                    pi.page
+                )));
+            }
+            let pw = b.FPDF_GetPageWidthF(page);
+            let ph = b.FPDF_GetPageHeightF(page);
+            // Normalized [0,1] top-left → PDF points bottom-left, with the same Chaikin smoothing the
+            // flattened path uses so exported ink matches the on-screen line.
+            let map = |s: &crate::document::ExportStroke| -> Vec<FS_POINTF> {
+                chaikin(&s.points, 2)
+                    .into_iter()
+                    .map(|(nx, ny)| FS_POINTF {
+                        x: nx * pw,
+                        y: (1.0 - ny) * ph,
+                    })
+                    .collect()
+            };
+
+            // Map + smooth every stroke up front so the annotation `/Rect` can be set BEFORE any path
+            // object is appended: pdfium sizes the generated `/AP` bbox from the rect at append time,
+            // so a rect set afterward leaves the appearance clipped to nothing (invisible ink).
+            let mapped: Vec<(&crate::document::ExportStroke, Vec<FS_POINTF>)> = pi
+                .strokes
+                .iter()
+                .filter(|s| s.points.len() >= 2)
+                .map(|s| (s, map(s)))
+                .filter(|(_, pts)| pts.len() >= 2)
+                .collect();
+            if mapped.is_empty() {
+                b.FPDF_ClosePage(page);
+                continue;
+            }
+
+            let annot = b.FPDFPage_CreateAnnot(page, FPDF_ANNOT_SUBTYPE_INK);
+            if annot.is_null() {
+                b.FPDF_ClosePage(page);
+                b.FPDF_CloseDocument(doc);
+                return Err(CoreError::RenderBackend(
+                    "export: creating the ink annotation failed".into(),
+                ));
+            }
+            // The `/InkList` carries a single colour; the appended `/AP` path objects below keep each
+            // stroke's true colour, which is what Preview/Adobe actually render.
+            let c0 = mapped[0].0;
+            b.FPDFAnnot_SetColor(
+                annot,
+                FPDFANNOT_COLORTYPE_STROKE,
+                u32::from(c0.r),
+                u32::from(c0.g),
+                u32::from(c0.b),
+                u32::from(c0.a),
+            );
+
+            // `/Rect` (and hence the `/AP` bbox) must enclose the strokes; pad by the widest stroke so
+            // round caps aren't clipped. Set it before appending any path object (see above).
+            let max_w = mapped
+                .iter()
+                .map(|(s, _)| (s.width * pw).max(0.5))
+                .fold(0.5f32, f32::max);
+            let (mut min_x, mut min_y, mut max_x, mut max_y) =
+                (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+            for (_, pts) in &mapped {
+                for p in pts {
+                    min_x = min_x.min(p.x);
+                    min_y = min_y.min(p.y);
+                    max_x = max_x.max(p.x);
+                    max_y = max_y.max(p.y);
+                }
+            }
+            let rect = FS_RECTF {
+                left: min_x - max_w,
+                top: max_y + max_w,
+                right: max_x + max_w,
+                bottom: min_y - max_w,
+            };
+            b.FPDFAnnot_SetRect(annot, &rect as *const FS_RECTF);
+
+            for (s, pts) in &mapped {
+                let stroke_w = (s.width * pw).max(0.5);
+                // Editable ink geometry.
+                b.FPDFAnnot_AddInkStroke(annot, pts.as_ptr(), pts.len() as _);
+                // Stroked path object → the `/AP` appearance stream, in each stroke's true colour.
+                let path = b.FPDFPageObj_CreateNewPath(pts[0].x, pts[0].y);
+                if !path.is_null() {
+                    for p in &pts[1..] {
+                        b.FPDFPath_LineTo(path, p.x, p.y);
+                    }
+                    b.FPDFPageObj_SetStrokeColor(
+                        path,
+                        u32::from(s.r),
+                        u32::from(s.g),
+                        u32::from(s.b),
+                        u32::from(s.a),
+                    );
+                    b.FPDFPageObj_SetStrokeWidth(path, stroke_w);
+                    b.FPDFPath_SetDrawMode(path, PATH_FILLMODE_NONE, 1);
+                    b.FPDFPageObj_SetLineCap(path, PATH_LINE_ROUND);
+                    b.FPDFPageObj_SetLineJoin(path, PATH_LINE_ROUND);
+                    b.FPDFAnnot_AppendObject(annot, path);
+                }
+            }
+            b.FPDFPage_CloseAnnot(annot);
+            b.FPDF_ClosePage(page);
+        }
+
+        let mut writer = VecFileWriter {
+            inner: FPDF_FILEWRITE {
+                version: 1,
+                WriteBlock: Some(vec_write_block),
+            },
+            buf: &mut out,
+        };
+        let ok = b.FPDF_SaveAsCopy(doc, &mut writer.inner as *mut FPDF_FILEWRITE, 0);
+        b.FPDF_CloseDocument(doc);
+        if ok == 0 || out.is_empty() {
+            return Err(CoreError::RenderBackend(
+                "export: saving ink annotations failed".into(),
+            ));
+        }
+    }
+    Ok(out)
+}
+
 /// A loaded PDF, rendered directly into the shell's buffer (RR5, Amendment 4).
 ///
 /// When **reflow mode** is on (ADR-INKREAD-0011), rendering, page count, selection, search, and the
@@ -431,6 +614,20 @@ impl Document for PdfBackend {
         page_ink: &[PageInk],
         mode: ExportMode,
     ) -> CoreResult<()> {
+        // Annotations: serialize the document, then write conformant ink annotations into it via raw
+        // pdfium (`/InkList` + `/AP`, see [`write_ink_annotations`] and issue #136). pdfium-render's
+        // high-level API can't reach `FPDFAnnot_AddInkStroke`, so we can't do this in-place here.
+        if mode == ExportMode::Annotations {
+            let base = self.document.save_to_bytes().map_err(|e| {
+                CoreError::RenderBackend(format!("export: serialize base document: {e}"))
+            })?;
+            let bytes = write_ink_annotations(&base, page_ink)?;
+            return std::fs::write(out_path, bytes)
+                .map_err(|e| CoreError::RenderBackend(format!("export write {out_path}: {e}")));
+        }
+
+        // Flatten: bake the strokes straight into each page's content (shows in every viewer;
+        // pdfium-render 0.9.1's `flatten` feature is broken, so we add page objects instead).
         let n = self.page_count();
         for pi in page_ink {
             if pi.page >= n || pi.strokes.is_empty() {
@@ -472,29 +669,10 @@ impl Document for PdfBackend {
                 Ok(path)
             };
 
-            match mode {
-                // Editable Ink annotation holding the page's strokes (selectable in PDF viewers).
-                ExportMode::Annotations => {
-                    let mut annot = page
-                        .annotations_mut()
-                        .create_ink_annotation()
-                        .map_err(|e| CoreError::RenderBackend(format!("create ink annot: {e}")))?;
-                    for s in pi.strokes.iter().filter(|s| s.points.len() >= 2) {
-                        annot
-                            .objects_mut()
-                            .add_path_object(build_path(s)?)
-                            .map_err(|e| CoreError::RenderBackend(format!("add path: {e}")))?;
-                    }
-                }
-                // Flatten = bake the strokes straight into the page content (shows in every viewer;
-                // pdfium-render 0.9.1's `flatten` feature is broken, so we add page objects instead).
-                ExportMode::Flatten => {
-                    for s in pi.strokes.iter().filter(|s| s.points.len() >= 2) {
-                        page.objects_mut()
-                            .add_path_object(build_path(s)?)
-                            .map_err(|e| CoreError::RenderBackend(format!("add path: {e}")))?;
-                    }
-                }
+            for s in pi.strokes.iter().filter(|s| s.points.len() >= 2) {
+                page.objects_mut()
+                    .add_path_object(build_path(s)?)
+                    .map_err(|e| CoreError::RenderBackend(format!("add path: {e}")))?;
             }
         }
         self.document
