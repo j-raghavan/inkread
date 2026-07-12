@@ -244,6 +244,97 @@ pub fn word_at(chars: &[CharBox], x: f32, y: f32) -> Option<TextSelection> {
     })
 }
 
+/// A column gutter must be at least this multiple of the median glyph width — an interior vertical
+/// whitespace band wider than any inter-word space. Mirrors `inkread_pdftext`'s `column_gap_mult`,
+/// but applied here only within the selection's own vertical band (see [`confine_to_columns`]).
+const COLUMN_GAP_MULT: f32 = 1.5;
+
+/// Median width of the non-degenerate glyph boxes (0.0 if there are none).
+fn median_glyph_width(glyphs: &[&CharBox]) -> f32 {
+    let mut ws: Vec<f32> = glyphs
+        .iter()
+        .map(|c| c.rect.x1 - c.rect.x0)
+        .filter(|w| *w > 0.0)
+        .collect();
+    if ws.is_empty() {
+        return 0.0;
+    }
+    ws.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    ws[ws.len() / 2]
+}
+
+/// The x-midpoints of the interior **column gutters** among `glyphs` — every x-interval no glyph's
+/// `[x0, x1]` covers that is wider than `min_w`. Sorted left→right. Empty for a single column (glyphs
+/// cover x continuously). The 1-D coverage sweep mirrors `inkread_pdftext::largest_interior_gap`, but
+/// collects *all* gutters (a 3-column page has two) rather than only the widest.
+fn column_gutters(glyphs: &[&CharBox], min_w: f32) -> Vec<f32> {
+    let mut spans: Vec<(f32, f32)> = glyphs.iter().map(|c| (c.rect.x0, c.rect.x1)).collect();
+    spans.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    let mut gutters = Vec::new();
+    let mut cover_end = match spans.first() {
+        Some(s) => s.1,
+        None => return gutters,
+    };
+    for &(lo, hi) in &spans[1..] {
+        let gap = lo - cover_end;
+        if gap > min_w {
+            gutters.push(cover_end + gap * 0.5);
+        }
+        cover_end = cover_end.max(hi);
+    }
+    gutters
+}
+
+/// Confine a lasso/drag selection (its x-range `[x0,x1]`, y-range `[y0,y1]`, either order) to the
+/// text **column(s)** it actually covers, returning the glyphs to run selection over.
+///
+/// Two-column PDFs share baselines across the gutter, so the page-wide predicates
+/// ([`text_in_rect`] / [`text_line_span`]) otherwise sweep the neighbouring column in (a one-column
+/// lasso grabbing both — the reported bug). This finds the vertical gutter(s) among the glyphs on the
+/// selection's **own lines** (y overlapping the selection band, so a title spanning both columns
+/// above/below can't bridge the gutter) and keeps only glyphs whose column the selection's x-range
+/// overlaps. With no interior gutter (a single column) it keeps every glyph — the existing behaviour,
+/// bit-for-bit. Non-degenerate, non-whitespace glyphs define the columns (a stray wide space can't
+/// bridge a gutter, and trailing spaces can't leak one column into the next).
+fn confine_to_columns(chars: &[CharBox], x0: f32, y0: f32, x1: f32, y1: f32) -> Vec<CharBox> {
+    let (ty0, ty1) = (y0.min(y1), y0.max(y1));
+    let band: Vec<&CharBox> = chars
+        .iter()
+        .filter(|c| {
+            c.rect.x1 > c.rect.x0
+                && c.rect.y1 > c.rect.y0
+                && !c.ch.is_whitespace()
+                && c.rect.y1 >= ty0
+                && c.rect.y0 <= ty1
+        })
+        .collect();
+    let glyph_w = median_glyph_width(&band);
+    if glyph_w <= 0.0 {
+        return chars.to_vec();
+    }
+    let gutters = column_gutters(&band, COLUMN_GAP_MULT * glyph_w);
+    if gutters.is_empty() {
+        return chars.to_vec(); // single column — unchanged behaviour
+    }
+    // Column bands are the x-intervals between consecutive gutters, bounded by ±∞ at the page edges.
+    // Keep a glyph when the band its centre falls in overlaps the selection's x-range.
+    let mut bounds = vec![f32::NEG_INFINITY];
+    bounds.extend_from_slice(&gutters);
+    bounds.push(f32::INFINITY);
+    let (sx0, sx1) = (x0.min(x1), x0.max(x1));
+    chars
+        .iter()
+        .filter(|c| {
+            let cx = (c.rect.x0 + c.rect.x1) * 0.5;
+            bounds
+                .windows(2)
+                .find(|w| cx >= w[0] && cx < w[1])
+                .is_some_and(|w| sx0 <= w[1] && w[0] <= sx1)
+        })
+        .cloned()
+        .collect()
+}
+
 /// Whether a drag/lasso `rect` selects `glyph` — true when the glyph's **centre** lies inside `rect`.
 ///
 /// Precision rule (#51): the predicate used to be bounding-box *intersection*, which selected any
@@ -274,6 +365,8 @@ fn glyph_selected(rect: &NormRect, glyph: &NormRect) -> bool {
 /// box per line run.
 #[must_use]
 pub fn text_in_rect(chars: &[CharBox], rect: NormRect) -> TextSelection {
+    let confined = confine_to_columns(chars, rect.x0, rect.y0, rect.x1, rect.y1);
+    let chars: &[CharBox] = &confined;
     let selected: Vec<&CharBox> = chars
         .iter()
         .filter(|c| glyph_selected(&rect, &c.rect))
@@ -317,7 +410,8 @@ pub fn text_in_rect(chars: &[CharBox], rect: NormRect) -> TextSelection {
 /// or its glyphs carry no anchor (a fixed-layout backend), so callers fall back to a page anchor.
 #[must_use]
 pub fn anchored_span(chars: &[CharBox], rect: NormRect) -> Option<(TextAnchor, TextAnchor)> {
-    let mut selected = chars.iter().filter(|c| glyph_selected(&rect, &c.rect));
+    let confined = confine_to_columns(chars, rect.x0, rect.y0, rect.x1, rect.y1);
+    let mut selected = confined.iter().filter(|c| glyph_selected(&rect, &c.rect));
     let start = selected.next()?.anchor?;
     // `end` is the last selected glyph's anchor; a single-glyph selection collapses to `start`.
     let end = selected.next_back().and_then(|c| c.anchor).unwrap_or(start);
@@ -335,6 +429,10 @@ pub fn text_line_span(chars: &[CharBox], start: (f32, f32), end: (f32, f32)) -> 
     if chars.is_empty() {
         return TextSelection::default();
     }
+    // Confine to the column(s) the drag covers so a one-column lasso on a two-column page doesn't
+    // take each shared baseline whole across the gutter (the reported bug). No-op on single columns.
+    let confined = confine_to_columns(chars, start.0, start.1, end.0, end.1);
+    let chars: &[CharBox] = &confined;
     // Group glyphs into reading-order line runs (backends emit glyphs in reading order), skipping
     // DEGENERATE glyphs — zero-width/height boxes the backend emits at the right margin (line-break
     // hyphen artifacts). They are invisible, but if grouped they fragment the lines and, sitting
@@ -948,6 +1046,102 @@ mod tests {
             end, a,
             "the grazed glyph b is not pulled into the anchor span"
         );
+    }
+
+    /// A two-column page: `n` shared baselines, left column in `[0.05,0.45]`, right in `[0.55,0.95]`
+    /// (a ~0.10-wide gutter). Row `i` reads "left row i" / "right row i".
+    fn two_columns(n: usize) -> Vec<CharBox> {
+        let mut chars = Vec::new();
+        for i in 0..n {
+            let y = 0.10 + i as f32 * 0.06;
+            chars.extend(line(&format!("left row {i}"), 0.05, 0.45, y, 0.03));
+            chars.extend(line(&format!("right row {i}"), 0.55, 0.95, y, 0.03));
+        }
+        chars
+    }
+
+    #[test]
+    fn column_gutters_finds_the_interior_gutter_and_none_for_one_column() {
+        let mut chars = line("aaaa", 0.05, 0.40, 0.10, 0.03);
+        chars.extend(line("bbbb", 0.60, 0.95, 0.10, 0.03)); // 0.20-wide gap
+        let band: Vec<&CharBox> = chars.iter().collect();
+        let g = column_gutters(&band, COLUMN_GAP_MULT * median_glyph_width(&band));
+        assert_eq!(g.len(), 1, "one interior gutter");
+        assert!(
+            g[0] > 0.40 && g[0] < 0.60,
+            "gutter midpoint in the gap: {}",
+            g[0]
+        );
+        // A single contiguous column has no interior gutter.
+        let one = line("aaaabbbb", 0.05, 0.95, 0.10, 0.03);
+        let b1: Vec<&CharBox> = one.iter().collect();
+        assert!(column_gutters(&b1, COLUMN_GAP_MULT * median_glyph_width(&b1)).is_empty());
+    }
+
+    #[test]
+    fn text_line_span_confines_a_lasso_to_one_column() {
+        // The reported bug: a closed lasso down the LEFT column of a two-column PDF took every shared
+        // baseline WHOLE, sweeping the right column in. Confinement keeps only the lassoed column.
+        let chars = two_columns(3);
+        // Lasso the left column; lift past the last row so it's taken whole (no end-word clip).
+        let sel = text_line_span(&chars, (0.05, 0.09), (0.45, 0.29));
+        assert!(sel.text.contains("left row 0") && sel.text.contains("left row 2"));
+        assert!(
+            !sel.text.contains("right"),
+            "right column must not be swept in: {:?}",
+            sel.text
+        );
+        assert_eq!(sel.boxes.len(), 3, "three left-column line boxes");
+        assert!(
+            sel.boxes.iter().all(|b| b.x1 <= 0.5),
+            "every box stays left of the gutter"
+        );
+    }
+
+    #[test]
+    fn text_line_span_wide_lasso_still_selects_both_columns() {
+        // A deliberately wide lasso spanning both columns is intended to take both — confinement must
+        // not clip it (both bands overlap the drag's x-range).
+        let chars = two_columns(2);
+        let sel = text_line_span(&chars, (0.05, 0.09), (0.95, 0.23));
+        assert!(sel.text.contains("left row 0"), "{:?}", sel.text);
+        assert!(sel.text.contains("right row 0"), "{:?}", sel.text);
+    }
+
+    #[test]
+    fn text_line_span_ignores_a_spanning_title_when_confining() {
+        // A full-width heading bridges the gutter — but it sits ABOVE the selection, so it is outside
+        // the selection's y-band and can't defeat column detection (why the band is y-restricted).
+        let mut chars = line("A WIDE SPANNING TITLE", 0.05, 0.95, 0.03, 0.03);
+        chars.extend(two_columns(2));
+        // Lasso the left column body, below the title.
+        let sel = text_line_span(&chars, (0.05, 0.09), (0.45, 0.23));
+        assert!(sel.text.contains("left row 0"), "{:?}", sel.text);
+        assert!(!sel.text.contains("TITLE"), "title is outside the y-band");
+        assert!(
+            !sel.text.contains("right"),
+            "gutter still detected despite the spanning title: {:?}",
+            sel.text
+        );
+    }
+
+    #[test]
+    fn text_in_rect_confines_when_the_rect_reaches_across_the_gutter() {
+        // A single-line lasso whose bbox overshoots into the gutter (but whose centre-of-mass is the
+        // left column) previously merged both columns' baseline glyphs into one run. Restricting the
+        // x-range to the left column keeps only its text.
+        let mut chars = line("alpha beta", 0.05, 0.45, 0.10, 0.03);
+        chars.extend(line("gamma delta", 0.55, 0.95, 0.10, 0.03));
+        // Rect over the left column only (right edge short of the right column's glyph centres).
+        let sel = text_in_rect(&chars, rect(0.05, 0.09, 0.47, 0.14));
+        assert!(sel.text.contains("alpha"), "{:?}", sel.text);
+        assert!(
+            !sel.text.contains("gamma"),
+            "right column excluded: {:?}",
+            sel.text
+        );
+        assert_eq!(sel.boxes.len(), 1, "one line box, left column only");
+        assert!(sel.boxes[0].x1 <= 0.5, "box confined to the left column");
     }
 
     #[test]
