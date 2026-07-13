@@ -4,6 +4,6 @@
 // name 'kotlin'"), so the AGP-9 / Gradle-9 Dependabot bump broke the release build. The AGP-9
 // upgrade is a deliberate migration, not an auto-bump (Dependabot is told to ignore those majors).
 plugins {
-    id("com.android.application") version "8.5.2" apply false
-    id("org.jetbrains.kotlin.android") version "2.0.20" apply false
+    id("com.android.application") version "8.13.2" apply false
+    id("org.jetbrains.kotlin.android") version "2.4.0" apply false
 }
