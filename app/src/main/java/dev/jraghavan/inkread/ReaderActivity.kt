@@ -82,6 +82,8 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
     private var docHandle: Long = 0L
     private var bitmap: Bitmap? = null
     private var renderBuffer: ByteBuffer? = null
+    private var thumbnailBitmap: Bitmap? = null
+    private var thumbnailRenderBuffer: ByteBuffer? = null
     private var viewW = 0
     private var viewH = 0
 
@@ -193,8 +195,27 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         override fun zoomIn() = zoomBy(ZOOM_STEP)
         override fun zoomOut() = zoomBy(1f / ZOOM_STEP)
         override fun openPicker() = this@ReaderActivity.openPicker()
-        override fun palmGuard(content: View) = this@ReaderActivity.palmGuard(content)
+        override fun palmGuard(content: View) = this@ReaderActivity.palmGuard(content, fillParent = true)
         override fun diag(msg: () -> String) = this@ReaderActivity.diag(msg)
+    })
+
+    /** Page-thumbnail navigation (#100): renders complete 3×3 batches on [engine], then presents
+     *  each batch in one e-ink-friendly update. */
+    private val thumbnails = ThumbnailGridController(object : ThumbnailGridController.Host {
+        override val activity get() = this@ReaderActivity
+        override val docHandle get() = this@ReaderActivity.docHandle
+        override val pageCount get() = this@ReaderActivity.pageCount
+        override val currentPage get() = this@ReaderActivity.currentPage
+        override fun engineExecute(block: () -> Unit) { engine.execute(block) }
+        override fun renderPageThumbnails(
+            pages: List<Int>,
+            maxWidth: Int,
+            maxHeight: Int,
+            isCancelled: () -> Boolean,
+        ) = this@ReaderActivity.renderPageThumbnails(pages, maxWidth, maxHeight, isCancelled)
+        override fun postJump(page: Int) = this@ReaderActivity.postJump(page)
+        override fun refreshPanel() = this@ReaderActivity.refreshPanel()
+        override fun palmGuardFullScreen(content: View) = this@ReaderActivity.palmGuard(content)
     })
 
     /** Bottom control bar + the nav panels it opens (RR16/RR25) — page slider, chapter jumps,
@@ -218,6 +239,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         override fun openExport() = export.showExportDialog()
         override fun openDicts() = dict.showDictionariesDialog()
         override fun openAdjust() = adjust.show()
+        override fun openPages() = thumbnails.show()
     })
 
     /** Lasso selection + Define-tool text selection (ADR-INKREAD-0010) — owns the selection
@@ -585,6 +607,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         if (::toolPalette.isInitialized) toolPalette.dismiss() // close any open palette popup
         if (::selectionToolbar.isInitialized) selectionToolbar.dismiss()
         if (::colorPalette.isInitialized) colorPalette.dismiss()
+        thumbnails.dismiss()
         mainHandler.removeCallbacks(fingerLongPress) // drop any pending finger gesture on leaving
         mainHandler.removeCallbacks(pendingCentreMenu) // don't pop the bar on a paused/finishing activity (#54)
         dismissReflowProgress() // don't leak the "Reflowing…" dialog if backgrounded mid-reflow (#55)
@@ -678,6 +701,9 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
         // A direct, tightly-packed RGBA buffer the core renders into (Fork 4 / Amendment 5).
         renderBuffer = ByteBuffer.allocateDirect(width * height * 4).order(ByteOrder.LITTLE_ENDIAN)
+        thumbnailBitmap?.recycle()
+        thumbnailBitmap = null
+        thumbnailRenderBuffer = null
 
         drawLoading() // quick feedback while the (slow) open runs
         val wasOpen = docHandle != 0L
@@ -955,6 +981,71 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         if (!deferLinks) refreshCurrentLinks()
     }
 
+    /**
+     * Render a complete thumbnail batch on the engine thread. The native preview seam fit-renders
+     * arbitrary pages without changing navigation, zoom, or refresh-policy state. Shell page state
+     * and the visible surface are untouched until the user chooses a thumbnail.
+     */
+    private fun renderPageThumbnails(
+        pages: List<Int>,
+        maxWidth: Int,
+        maxHeight: Int,
+        isCancelled: () -> Boolean,
+    ): List<ThumbnailGridController.PageThumbnail> {
+        val handle = docHandle
+        if (handle == 0L || viewW <= 0 || viewH <= 0 || pages.isEmpty()) return emptyList()
+        val size = ThumbnailGridModel.fitSize(viewW, viewH, maxWidth, maxHeight)
+        if (size.width <= 0 || size.height <= 0) return emptyList()
+
+        // Fixed-layout backends can rasterize directly at thumbnail resolution. Reflowable
+        // documents retain the reader viewport so previewing cannot repaginate the book.
+        val renderWidth = if (magnifiable) size.width else viewW
+        val renderHeight = if (magnifiable) size.height else viewH
+        val requiredBytes = renderWidth * renderHeight * 4
+        val scratchBuffer =
+            thumbnailRenderBuffer?.takeIf { it.capacity() == requiredBytes }
+                ?: ByteBuffer.allocateDirect(requiredBytes)
+                    .order(ByteOrder.LITTLE_ENDIAN)
+                    .also { thumbnailRenderBuffer = it }
+        val scratchBitmap =
+            thumbnailBitmap?.takeIf {
+                !it.isRecycled && it.width == renderWidth && it.height == renderHeight
+            } ?: Bitmap.createBitmap(renderWidth, renderHeight, Bitmap.Config.ARGB_8888).also {
+                thumbnailBitmap?.recycle()
+                thumbnailBitmap = it
+            }
+        val result = ArrayList<ThumbnailGridController.PageThumbnail>(pages.size)
+
+        for (page in pages) {
+            if (isCancelled()) break
+            try {
+                scratchBuffer.clear()
+                NativeBridge.nativeRenderPagePreview(
+                    handle,
+                    page,
+                    scratchBuffer,
+                    renderWidth,
+                    renderHeight,
+                )
+                scratchBuffer.rewind()
+                scratchBitmap.copyPixelsFromBuffer(scratchBuffer)
+                val thumbnail =
+                    if (renderWidth == size.width && renderHeight == size.height) {
+                        checkNotNull(scratchBitmap.copy(Bitmap.Config.ARGB_8888, false))
+                    } else {
+                        Bitmap.createScaledBitmap(scratchBitmap, size.width, size.height, true)
+                    }
+                result += ThumbnailGridController.PageThumbnail(
+                    page,
+                    thumbnail,
+                )
+            } catch (e: RuntimeException) {
+                Log.e(TAG, "thumbnail render failed for page $page: ${e.message}")
+            }
+        }
+        return result
+    }
+
     /** Cache the current page's links for tap hit-testing (RR11-FR3). Off the page-turn critical path
      *  (postJump calls this after the flash); links are only needed for the next tap. */
     private fun refreshCurrentLinks() {
@@ -1213,7 +1304,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
      * A palm-like DOWN is intercepted (swallowed) before it reaches any child; a real finger/stylus
      * tap passes straight through.
      */
-    private fun palmGuard(content: View): View =
+    private fun palmGuard(content: View, fillParent: Boolean = false): View =
         object : FrameLayout(this) {
             override fun onInterceptTouchEvent(ev: MotionEvent): Boolean {
                 if (ev.actionMasked == MotionEvent.ACTION_DOWN && isPalmTouch(ev)) {
@@ -1223,7 +1314,13 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
                 return super.onInterceptTouchEvent(ev)
             }
         }.apply {
-            addView(content, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+            addView(
+                content,
+                FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    if (fillParent) ViewGroup.LayoutParams.MATCH_PARENT else ViewGroup.LayoutParams.WRAP_CONTENT,
+                ),
+            )
         }
 
     private fun onFingerDown(e: MotionEvent) {

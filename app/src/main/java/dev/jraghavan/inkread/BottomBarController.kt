@@ -80,6 +80,8 @@ class BottomBarController(private val host: Host) {
         fun openDicts()
 
         fun openAdjust()
+
+        fun openPages()
     }
 
     private val activity: Activity get() = host.activity
@@ -231,6 +233,7 @@ class BottomBarController(private val host: Host) {
         control(R.drawable.ic_menu_marks, "Marks") { showBookmarks() }
         control(R.drawable.ic_tool_pen, "Notes") { showAnnotations() }
         control(R.drawable.ic_menu_contents, "Contents") { showContentsLazy() }
+        control(R.drawable.ic_menu_page, "Pages") { host.openPages() }
         control(R.drawable.ic_menu_search, "Search") { host.openSearch() }
         // Quick zoom (circle −/+ icons — not magnifiers, which are reserved for Search). Also in Adjust → Zoom.
         control(R.drawable.ic_menu_zoom_out, "Zoom −") { host.zoomOut() }

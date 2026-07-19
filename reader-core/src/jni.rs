@@ -430,6 +430,69 @@ pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeRenderPage<
 }
 
 // =====================================================================================
+// nativeRenderPagePreview(handle, page, directBuffer, width, height) — fit-render an arbitrary page
+// for thumbnail navigation without changing the session's displayed page/zoom/policy/cache state.
+// =====================================================================================
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeRenderPagePreview<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+    page: jint,
+    buffer: JByteBuffer<'local>,
+    width: jint,
+    height: jint,
+) {
+    env.with_env(|env| -> jni::errors::Result<()> {
+        let session = unsafe { session_mut(handle) }.map_err(|e| throw(env, &e))?;
+        let page = usize::try_from(page).map_err(|_| {
+            throw(
+                env,
+                &CoreError::InvalidArgument(format!("negative preview page {page}")),
+            )
+        })?;
+        let width = u32::try_from(width).map_err(|_| {
+            throw(
+                env,
+                &CoreError::InvalidArgument(format!("invalid preview width {width}")),
+            )
+        })?;
+        let height = u32::try_from(height).map_err(|_| {
+            throw(
+                env,
+                &CoreError::InvalidArgument(format!("invalid preview height {height}")),
+            )
+        })?;
+        if width == 0 || height == 0 {
+            return Err(throw(
+                env,
+                &CoreError::InvalidArgument(format!(
+                    "preview dimensions must be positive, got {width}x{height}"
+                )),
+            ));
+        }
+
+        let addr = env.get_direct_buffer_address(&buffer)?;
+        let cap = env.get_direct_buffer_capacity(&buffer)?;
+        if addr.is_null() {
+            return Err(throw(
+                env,
+                &CoreError::BufferMismatch("preview buffer is not a direct ByteBuffer".into()),
+            ));
+        }
+        // SAFETY: the direct buffer remains valid for this JNI call and is borrowed only until
+        // `render_page_preview()` returns.
+        let slice = unsafe { std::slice::from_raw_parts_mut(addr, cap) };
+        let mut pb = PixelBuffer::from_rgba(slice, width, height).map_err(|e| throw(env, &e))?;
+        session
+            .render_page_preview(page, &mut pb)
+            .map_err(|e| throw(env, &e))?;
+        Ok(())
+    })
+    .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
+}
+
+// =====================================================================================
 // nativePrefetchPage(handle, page) — render `page` into the session's render cache WITHOUT
 // displaying it, so a turn to it is a cache hit (RR24 read-ahead). Best-effort: a prefetch
 // failure is swallowed (it must never disturb reading). Mutates the cache, so engine-thread only.

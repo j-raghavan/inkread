@@ -367,6 +367,19 @@ pub trait Document {
         self.render_page(index, buf)
     }
 
+    /// Fit-render a fixed-layout preview without committing backend viewport bookkeeping.
+    /// Backends without such bookkeeping can use the regular fit path.
+    fn render_preview_fit(
+        &self,
+        index: usize,
+        buf: &mut PixelBuffer<'_>,
+        mode: FitMode,
+        pan_x: f32,
+        pan_y: f32,
+    ) -> CoreResult<()> {
+        self.render_fit(index, buf, mode, pan_x, pan_y)
+    }
+
     /// The page's **content bounding box** in normalized page coords `[0,1]` (RR4 — KOReader's
     /// auto Crop): the tight rectangle around the non-white content, used to trim white margins.
     /// `None` if undetectable or not applicable (blank page / reflowable backend). Never panics.
@@ -410,6 +423,20 @@ pub trait Document {
         pan_y: f32,
     ) -> CoreResult<()> {
         self.render_fit(index, buf, mode, pan_x, pan_y)
+    }
+
+    /// Crop-render a fixed-layout preview without committing backend viewport bookkeeping.
+    /// Backends without such bookkeeping can use the regular cropped path.
+    fn render_preview_cropped(
+        &self,
+        index: usize,
+        buf: &mut PixelBuffer<'_>,
+        crop: NormRect,
+        mode: FitMode,
+        pan_x: f32,
+        pan_y: f32,
+    ) -> CoreResult<()> {
+        self.render_cropped(index, buf, crop, mode, pan_x, pan_y)
     }
 
     /// Adjust the reflow **text scale** (`1.0` = the backend default size) and repaginate (RR2-FR5

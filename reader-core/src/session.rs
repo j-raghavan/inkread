@@ -529,22 +529,60 @@ impl ReaderSession {
         Ok(())
     }
 
+    /// Render `page` as a fit-page preview without changing the reader's page, zoom, pan, ink
+    /// layer, refresh-policy state, or shared render cache.
+    pub fn render_page_preview(
+        &mut self,
+        page: usize,
+        buf: &mut PixelBuffer<'_>,
+    ) -> CoreResult<()> {
+        if page >= self.page_count() {
+            return Err(CoreError::PageOutOfRange {
+                requested: page,
+                available: self.page_count(),
+            });
+        }
+        if (buf.width() != self.viewport.width || buf.height() != self.viewport.height)
+            && !self.document.is_magnifiable()
+        {
+            return Err(CoreError::BufferMismatch(format!(
+                "reflow preview buffer {}x{} != viewport {}x{}",
+                buf.width(),
+                buf.height(),
+                self.viewport.width,
+                self.viewport.height
+            )));
+        }
+
+        let saved_page = self.page;
+        self.page = page;
+        let rendered = self.render_pixels(buf, true);
+        self.page = saved_page;
+        rendered
+    }
+
     /// Rasterize the current page's fit/crop pixels (honoring render-quality supersampling) and apply
     /// contrast, into `buf`. The shared core of [`Self::render_current`]'s non-magnified path and
     /// [`Self::prefetch_page`]; touches neither the cache nor zoom.
     fn render_fit_pixels(&self, buf: &mut PixelBuffer<'_>) -> CoreResult<()> {
+        self.render_pixels(buf, false)
+    }
+
+    /// Render the fit/crop pixel pipeline, optionally through the backend's non-committing preview
+    /// seam. Preview targets may be smaller than the viewport for fixed-layout documents.
+    fn render_pixels(&self, buf: &mut PixelBuffer<'_>, preview: bool) -> CoreResult<()> {
         let q = render_quality_factor(self.render_quality);
         if (q - 1.0).abs() < 1e-3 {
-            self.render_fit_or_crop(buf)?;
+            self.render_fit_or_crop(buf, preview)?;
         } else {
             // Render at q× the panel resolution, then bilinear-resample down/up to the panel —
             // supersampling (high) smooths e-ink text; sub-sampling (low) is faster/softer.
-            let qw = ((self.viewport.width as f32 * q).round() as u32).clamp(1, 8000);
-            let qh = ((self.viewport.height as f32 * q).round() as u32).clamp(1, 8000);
+            let qw = ((buf.width() as f32 * q).round() as u32).clamp(1, 8000);
+            let qh = ((buf.height() as f32 * q).round() as u32).clamp(1, 8000);
             let mut tmp = vec![0u8; (qw as usize) * (qh as usize) * 4];
             {
                 let mut tbuf = PixelBuffer::from_rgba(&mut tmp, qw, qh)?;
-                self.render_fit_or_crop(&mut tbuf)?;
+                self.render_fit_or_crop(&mut tbuf, preview)?;
             }
             crate::render::resample::resample_bilinear(&tmp, qw, qh, buf);
         }
@@ -624,7 +662,7 @@ impl ReaderSession {
     /// Render the current page fit (or auto-cropped) into `buf` (RR4). With auto-crop on, the white
     /// margins are trimmed to the detected content box; otherwise an aspect-preserving fit. PDF
     /// honors both; reflowable backends fall back to a full-buffer render.
-    fn render_fit_or_crop(&self, buf: &mut PixelBuffer<'_>) -> CoreResult<()> {
+    fn render_fit_or_crop(&self, buf: &mut PixelBuffer<'_>, preview: bool) -> CoreResult<()> {
         match self
             .crop_auto
             .then(|| self.cached_crop_bbox(self.page))
@@ -632,14 +670,29 @@ impl ReaderSession {
         {
             Some(b) => {
                 let crop = self.expand_crop(b);
-                self.document.render_cropped(
-                    self.page,
-                    buf,
-                    crop,
-                    self.fit_mode,
-                    self.pan_x,
-                    self.pan_y,
-                )
+                if preview {
+                    self.document.render_preview_cropped(
+                        self.page,
+                        buf,
+                        crop,
+                        self.fit_mode,
+                        0.0,
+                        0.0,
+                    )
+                } else {
+                    self.document.render_cropped(
+                        self.page,
+                        buf,
+                        crop,
+                        self.fit_mode,
+                        self.pan_x,
+                        self.pan_y,
+                    )
+                }
+            }
+            None if preview => {
+                self.document
+                    .render_preview_fit(self.page, buf, self.fit_mode, 0.0, 0.0)
             }
             None => self
                 .document
