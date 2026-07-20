@@ -100,6 +100,17 @@ object NativeBridge {
      */
     external fun nativeRenderPage(handle: Long, directBuffer: ByteBuffer)
 
+    /** Fit-render [page] for a thumbnail without changing the current page, zoom, pan, refresh
+     *  policy, or render-cache state. Fixed-layout documents may use a smaller target; reflowable
+     *  documents must retain the session viewport dimensions. */
+    external fun nativeRenderPagePreview(
+        handle: Long,
+        page: Int,
+        directBuffer: ByteBuffer,
+        width: Int,
+        height: Int,
+    )
+
     /**
      * Apply a navigation gesture (code per [Gesture]); returns the encoded RefreshCommand
      * stream (Fork 2). Decode with [WireCodec.decodeCommands].

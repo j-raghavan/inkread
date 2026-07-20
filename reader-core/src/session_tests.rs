@@ -443,6 +443,64 @@ fn render_current_into_matching_buffer_ok() {
     assert!(s.render_current(&mut pb).is_ok());
 }
 
+#[test]
+fn page_preview_renders_requested_page_without_changing_navigation_state() {
+    struct PageColorDoc;
+    impl Document for PageColorDoc {
+        fn page_count(&self) -> usize {
+            4
+        }
+        fn metadata(&self) -> DocumentMetadata {
+            DocumentMetadata::default()
+        }
+        fn render_page(&self, index: usize, buf: &mut PixelBuffer<'_>) -> CoreResult<()> {
+            buf.fill_white();
+            buf.bytes_mut()[0] = index as u8;
+            Ok(())
+        }
+        fn is_magnifiable(&self) -> bool {
+            true
+        }
+    }
+
+    let mut s = ReaderSession::with_document(
+        Box::new(PageColorDoc),
+        DeviceCapabilities::supernote_full(),
+        Viewport::new(100, 120, 226),
+    );
+    s.jump_to_page(1);
+    s.set_zoom(2.0, 0.4, 0.7);
+    let mut bytes = vec![0u8; 20 * 24 * 4];
+    let mut pb = PixelBuffer::from_rgba(&mut bytes, 20, 24).unwrap();
+    let cached_before = s.caches().render().len();
+
+    s.render_page_preview(3, &mut pb).unwrap();
+
+    assert_eq!(pb.bytes()[0], 3, "preview rendered the requested page");
+    assert_eq!(
+        s.caches().render().len(),
+        cached_before,
+        "preview must not pollute the page-turn cache"
+    );
+    assert_eq!(s.current_page(), 1);
+    assert_eq!(s.zoom(), 2.0);
+    assert_eq!(s.pan_x(), 0.4);
+    assert_eq!(s.pan_y(), 0.7);
+}
+
+#[test]
+fn reflowable_page_preview_rejects_a_different_target_size() {
+    let mut s = session(2, DeviceCapabilities::supernote_full());
+    s.jump_to_page(1);
+    let mut bytes = vec![0u8; 20 * 24 * 4];
+    let mut pb = PixelBuffer::from_rgba(&mut bytes, 20, 24).unwrap();
+
+    let err = s.render_page_preview(0, &mut pb).unwrap_err();
+
+    assert!(matches!(err, CoreError::BufferMismatch(_)));
+    assert_eq!(s.current_page(), 1);
+}
+
 // RR4-FR6 / RR24: a revisited page (same view-settings) is served from the render cache without
 // re-rasterizing; a settings change keys a fresh render; a repagination/viewport change drops it.
 // RR11: a letterboxed page (page coords ≠ viewport coords) must have its text-selection boxes

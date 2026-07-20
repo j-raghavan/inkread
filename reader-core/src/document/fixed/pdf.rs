@@ -740,6 +740,20 @@ impl Document for PdfBackend {
         })
     }
 
+    fn render_preview_fit(
+        &self,
+        index: usize,
+        buf: &mut PixelBuffer<'_>,
+        mode: FitMode,
+        pan_x: f32,
+        pan_y: f32,
+    ) -> CoreResult<()> {
+        let saved_viewport = self.last_viewport.get();
+        let rendered = self.render_fit(index, buf, mode, pan_x, pan_y);
+        self.last_viewport.set(saved_viewport);
+        rendered
+    }
+
     #[allow(clippy::too_many_arguments)] // mirrors the render params + the crop window
     fn page_fit_transform(
         &self,
@@ -885,6 +899,21 @@ impl Document for PdfBackend {
         self.composite_via_scratch(buf, tw, th, pan_x, pan_y, |tbuf| {
             self.render_region(index, tbuf, s, off_x, off_y)
         })
+    }
+
+    fn render_preview_cropped(
+        &self,
+        index: usize,
+        buf: &mut PixelBuffer<'_>,
+        crop: NormRect,
+        mode: FitMode,
+        pan_x: f32,
+        pan_y: f32,
+    ) -> CoreResult<()> {
+        let saved_viewport = self.last_viewport.get();
+        let rendered = self.render_cropped(index, buf, crop, mode, pan_x, pan_y);
+        self.last_viewport.set(saved_viewport);
+        rendered
     }
 
     fn render_zoom(
