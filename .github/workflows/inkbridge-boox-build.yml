@@ -1,0 +1,85 @@
+name: InkBridge BOOX build
+
+on:
+  push:
+    branches: [inkbridge-boox-integration]
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+
+jobs:
+  apk:
+    name: build debug APK with BOOX SDK
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: gradle
+
+      - name: Install Rust toolchain
+        run: rustup show
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk --locked
+
+      - name: Configure Android NDK
+        run: |
+          set -euo pipefail
+          ndk="${ANDROID_NDK_LATEST_HOME:-${ANDROID_NDK_HOME:-${ANDROID_NDK_ROOT:-}}}"
+          test -n "$ndk" || { echo "::error::No Android NDK found on the runner"; exit 1; }
+          echo "ANDROID_NDK_HOME=$ndk" >> "$GITHUB_ENV"
+          echo "Using NDK: $ndk"
+
+      - name: Build debug APK
+        shell: bash
+        run: |
+          chmod +x ./buildApk.sh
+          set +e
+          ./buildApk.sh --debug > inkbridge-build.log 2>&1
+          rc=$?
+          if [ $rc -ne 0 ]; then
+            echo "===== COMPACT BUILD FAILURE ====="
+            grep -E '(^FAILURE:|^\* What went wrong:|^e: |^error:|Could not resolve|Could not find|Unresolved reference|Execution failed for task|Manifest merger failed|Compilation error|BUILD FAILED|Duplicate relative path|duplicate files|A failure occurred while executing)' inkbridge-build.log | tail -n 80 || true
+            echo "===== FINAL 40 LINES ====="
+            tail -n 40 inkbridge-build.log
+            exit $rc
+          fi
+          echo "Build succeeded"
+
+      - name: Upload build diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: inkbridge-boox-build-log
+          path: inkbridge-build.log
+          if-no-files-found: ignore
+          retention-days: 3
+
+      - name: Verify APK and native libraries
+        if: success()
+        run: |
+          set -euo pipefail
+          apk="$(find app/build/outputs/apk/debug -type f -name '*.apk' -print -quit)"
+          test -n "$apk" || { echo "::error::No APK produced"; exit 1; }
+          listing="$(unzip -l "$apk")"
+          for lib in lib/arm64-v8a/libreader.so lib/arm64-v8a/libpdfium.so; do
+            [[ "$listing" == *"$lib"* ]] || { echo "::error::$lib missing from $apk"; exit 1; }
+          done
+          echo "APK OK: $apk"
+
+      - name: Upload debug APK
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: inkbridge-boox-debug-apk
+          path: app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+          retention-days: 7

@@ -12,6 +12,15 @@ dependencyResolutionManagement {
     repositories {
         google()
         mavenCentral()
+        // BOOX/Onyx publishes its Android pen/device SDKs from these repositories.
+        maven {
+            url = uri("http://repo.boox.com/repository/proxy-public/")
+            isAllowInsecureProtocol = true
+        }
+        maven {
+            url = uri("http://repo.boox.com/repository/maven-public/")
+            isAllowInsecureProtocol = true
+        }
     }
 }
 
