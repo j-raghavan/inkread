@@ -246,19 +246,19 @@ class DictController(private val host: Host) {
         // ── header: headword + looked-up chip · WordNet source ───────────────────
         val header = LinearLayout(activity).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
         header.addView(TextView(activity).apply {
-            text = headword; setTextColor(Ink.ink); textSize = 27f; typeface = serifBold
+            text = headword; setTextColor(Ink.ink); textSize = Ink.sp(27f); typeface = serifBold
             includeFontPadding = false
         })
         if (!word.equals(headword, ignoreCase = true) && word.isNotEmpty()) {
             header.addView(TextView(activity).apply {
-                text = "⟨ $word ⟩"; setTextColor(grey); textSize = 14f; typeface = serif
+                text = "⟨ $word ⟩"; setTextColor(grey); textSize = Ink.sp(14f); typeface = serif
                 setPadding(dp(10), dp(8), 0, 0)
             })
         }
         header.addView(View(activity), LinearLayout.LayoutParams(0, 0, 1f)) // spacer
         header.addView(TextView(activity).apply {
             text = if (def.lang.isNotEmpty() && def.lang != "en") "WORDNET · ${def.lang.uppercase()}" else "WORDNET"
-            setTextColor(faint); textSize = 11f; letterSpacing = 0.12f; typeface = Ink.mono
+            setTextColor(faint); textSize = Ink.sp(11f); letterSpacing = 0.12f; typeface = Ink.mono
         })
         root.addView(header)
 
@@ -289,7 +289,7 @@ class DictController(private val host: Host) {
                 body.addView(senseRow(sense.index, sense.definition, dp(2)))
                 for (ex in sense.examples) {
                     body.addView(TextView(activity).apply {
-                        text = "“$ex”"; setTextColor(grey); textSize = 15f
+                        text = "“$ex”"; setTextColor(grey); textSize = Ink.sp(15f)
                         typeface = Ink.serifItalic
                         setPadding(dp(22), dp(4), 0, 0)
                     })
@@ -297,7 +297,7 @@ class DictController(private val host: Host) {
                 if (sense.synonyms.isNotEmpty()) {
                     body.addView(TextView(activity).apply {
                         text = "≈ ${sense.synonyms.joinToString(", ")}"
-                        setTextColor(faint); textSize = 13f; setPadding(dp(22), dp(3), 0, 0)
+                        setTextColor(faint); textSize = Ink.sp(13f); setPadding(dp(22), dp(3), 0, 0)
                     })
                 }
             }
@@ -307,25 +307,25 @@ class DictController(private val host: Host) {
             if (thesaurus.isEmpty()) {
                 body.addView(TextView(activity).apply {
                     text = "No thesaurus entries for this word."
-                    setTextColor(grey); textSize = 15f; setPadding(0, dp(4), 0, 0)
+                    setTextColor(grey); textSize = Ink.sp(15f); setPadding(0, dp(4), 0, 0)
                 })
                 return
             }
             body.addView(posBadge("synonyms"))
             body.addView(TextView(activity).apply {
                 text = thesaurus.joinToString(" · ")
-                setTextColor(Ink.ink); textSize = 16f; typeface = Ink.serif; setLineSpacing(dp(4).toFloat(), 1f)
+                setTextColor(Ink.ink); textSize = Ink.sp(16f); typeface = Ink.serif; setLineSpacing(dp(4).toFloat(), 1f)
                 setPadding(0, dp(6), 0, 0)
             })
         }
         val tabs = LinearLayout(activity).apply { orientation = LinearLayout.HORIZONTAL; setPadding(0, dp(10), 0, 0) }
         tabDef = TextView(activity).apply {
-            text = "DEFINITION"; textSize = 12f; letterSpacing = 0.1f
+            text = "DEFINITION"; textSize = Ink.sp(12f); letterSpacing = 0.1f
             setPadding(0, dp(4), dp(24), dp(4)); isClickable = true
             setOnClickListener { styleTab(tabDef, true); styleTab(tabThe, false); renderDefinition() }
         }
         tabThe = TextView(activity).apply {
-            text = "THESAURUS"; textSize = 12f; letterSpacing = 0.1f
+            text = "THESAURUS"; textSize = Ink.sp(12f); letterSpacing = 0.1f
             setPadding(0, dp(4), 0, dp(4)); isClickable = true
             setOnClickListener { styleTab(tabThe, true); styleTab(tabDef, false); renderThesaurus() }
         }
@@ -361,7 +361,7 @@ class DictController(private val host: Host) {
         val d = activity.resources.displayMetrics.density
         fun dp(v: Int) = (v * d).toInt()
         return TextView(activity).apply {
-            text = label.uppercase(); setTextColor(Ink.inkSoft); textSize = 10f; typeface = Ink.mono
+            text = label.uppercase(); setTextColor(Ink.inkSoft); textSize = Ink.sp(10f); typeface = Ink.mono
             letterSpacing = 0.12f
             setPadding(dp(10), dp(4), dp(10), dp(5))
             background = GradientDrawable().apply {
@@ -383,12 +383,12 @@ class DictController(private val host: Host) {
             orientation = LinearLayout.HORIZONTAL
             setPadding(0, maxOf(topPad, dp(7)), 0, 0)
             addView(TextView(activity).apply {
-                this.text = "$index"; setTextColor(Ink.muted); textSize = 13f
+                this.text = "$index"; setTextColor(Ink.muted); textSize = Ink.sp(13f)
                 typeface = Ink.mono
                 layoutParams = LinearLayout.LayoutParams(dp(22), ViewGroup.LayoutParams.WRAP_CONTENT)
             })
             addView(TextView(activity).apply {
-                this.text = text; setTextColor(Ink.ink); textSize = 16f; typeface = Ink.serif
+                this.text = text; setTextColor(Ink.ink); textSize = Ink.sp(16f); typeface = Ink.serif
                 setLineSpacing(dp(3).toFloat(), 1f)
                 layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
             })
@@ -434,7 +434,7 @@ class DictController(private val host: Host) {
             if (bundles.isEmpty()) {
                 list.addView(TextView(activity).apply {
                     text = "No dictionaries found.\n\nCopy a StarDict folder (its .ifo, .idx and .dict/.dict.dz files) into:\n${home.absolutePath}\n\nthen reopen this screen."
-                    setTextColor(Color.parseColor("#555555")); textSize = 14f; setLineSpacing(dp(3).toFloat(), 1f)
+                    setTextColor(Color.parseColor("#555555")); textSize = Ink.sp(14f); setLineSpacing(dp(3).toFloat(), 1f)
                 })
                 return
             }
@@ -447,16 +447,16 @@ class DictController(private val host: Host) {
                     orientation = LinearLayout.VERTICAL
                     layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
                     addView(TextView(activity).apply {
-                        text = b.name; setTextColor(Color.BLACK); textSize = 16f
+                        text = b.name; setTextColor(Color.BLACK); textSize = Ink.sp(16f)
                     })
                     addView(TextView(activity).apply {
                         text = if (b.installed) "Installed" else "Not installed"
-                        setTextColor(Color.parseColor("#9E9E9E")); textSize = 12f
+                        setTextColor(Color.parseColor("#9E9E9E")); textSize = Ink.sp(12f)
                     })
                 })
                 row.addView(TextView(activity).apply {
                     text = if (b.installed) "Remove" else "Install"
-                    setTextColor(Color.BLACK); textSize = 14f; typeface = Typeface.DEFAULT_BOLD
+                    setTextColor(Color.BLACK); textSize = Ink.sp(14f); typeface = Typeface.DEFAULT_BOLD
                     setPadding(dp(14), dp(6), dp(14), dp(6))
                     background = GradientDrawable().apply {
                         setColor(Color.WHITE); setStroke(maxOf(1, dp(1)), Color.BLACK); cornerRadius = dp(16).toFloat()

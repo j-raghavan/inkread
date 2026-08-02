@@ -83,7 +83,7 @@ object Ink {
         TextView(ctx).apply {
             this.text = text.uppercase()
             setTextColor(muted)
-            textSize = 11f
+            textSize = sp(11f)
             typeface = mono
             letterSpacing = 0.14f
         }
@@ -93,7 +93,7 @@ object Ink {
         TextView(ctx).apply {
             this.text = text
             setTextColor(ink)
-            textSize = size
+            textSize = sp(size)
             typeface = serif
             includeFontPadding = false
         }
@@ -122,7 +122,7 @@ object Ink {
             setContentView(
                 TextView(ctx).apply {
                     text = message
-                    textSize = 16f
+                    textSize = sp(16f)
                     setTextColor(ink)
                     setPadding(dp(28), dp(22), dp(28), dp(22))
                 },
@@ -135,7 +135,7 @@ object Ink {
     fun pillButton(ctx: Context, label: String, primary: Boolean, onTap: () -> Unit): TextView =
         TextView(ctx).apply {
             text = label
-            textSize = 13f
+            textSize = sp(13f)
             typeface = mono
             letterSpacing = 0.08f
             gravity = Gravity.CENTER

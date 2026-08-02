@@ -516,7 +516,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         // once a selection exists or another tool is chosen.
         lassoHint = TextView(this).apply {
             text = "Lasso — draw a loop around your writing to select"
-            textSize = 14f
+            textSize = Ink.sp(14f)
             setTextColor(Color.WHITE)
             setBackgroundColor(Color.BLACK)
             setPadding(dpInt(16), dpInt(8), dpInt(16), dpInt(8))
