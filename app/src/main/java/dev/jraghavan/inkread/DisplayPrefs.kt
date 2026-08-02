@@ -62,6 +62,13 @@ class DisplayPrefs(private val context: Context) {
         get() = display.getFloat("ui_scale", 1.0f).coerceIn(UI_SCALES.first(), UI_SCALES.last())
         set(s) = display.edit().putFloat("ui_scale", s).apply()
 
+    /** Periodic full (flashing) refresh cadence (#99): force a FULL EPD refresh every Nth page-turn
+     *  to clear accumulated e-ink ghosting. 0 = Off (partial refreshes only; the manual "Refresh
+     *  now" still works). Read coerced to a valid [REFRESH_INTERVALS] step. */
+    var fullRefreshEvery: Int
+        get() = display.getInt("full_refresh_every", 0).let { if (it in REFRESH_INTERVALS) it else 0 }
+        set(n) = display.edit().putInt("full_refresh_every", n).apply()
+
     // ---- "typography" store ----
 
     var textScale: Float
@@ -109,6 +116,10 @@ class DisplayPrefs(private val context: Context) {
          *  and coarse so the segmented control stays e-ink-tappable. */
         val UI_SCALES = floatArrayOf(0.9f, 1.0f, 1.15f, 1.3f, 1.5f)
         val UI_SCALE_LABELS = listOf("S", "M", "L", "XL", "2XL")
+
+        /** Page-turn intervals for the periodic full refresh (#99); index 0 = Off, the default. */
+        val REFRESH_INTERVALS = listOf(0, 1, 3, 5, 10)
+        val REFRESH_INTERVAL_LABELS = listOf("Off", "1", "3", "5", "10")
 
         /** Index of the entry in [values] nearest to [target]. */
         private fun nearestIndex(values: FloatArray, target: Float): Int {
