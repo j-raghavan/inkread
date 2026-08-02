@@ -396,7 +396,20 @@ class AdjustSheetController(private val host: Host) {
                 host.repaintPanel()
             }
         }))
+        container.addView(settingRow("Menu Size", segmented(DisplayPrefs.UI_SCALE_LABELS, DisplayPrefs.nearestUiScaleIndex(prefs.uiScale)) { which ->
+            applyUiScale(DisplayPrefs.UI_SCALES[which])
+        }))
         return container
+    }
+
+    /** Persist + apply the menu/chrome scale (#133) for large panels (e.g. the Manta). The reader's
+     *  menus read [Ink.uiScale] as they build, so the new size lands as each menu/sheet is next
+     *  opened; this open sheet keeps its current size, so a toast confirms the change. */
+    private fun applyUiScale(scale: Float) {
+        prefs.uiScale = scale
+        Ink.uiScale = scale
+        val label = DisplayPrefs.UI_SCALE_LABELS[DisplayPrefs.nearestUiScaleIndex(scale)]
+        Toast.makeText(activity, "Menu size $label — reopen a menu to see it", Toast.LENGTH_SHORT).show()
     }
 
     /** A reading style preset (1.10): a bundle of (text scale, line-spacing index, contrast step,
