@@ -53,6 +53,9 @@ class AdjustSheetController(private val host: Host) {
         /** Engine thread only: re-read the page count after a repagination. */
         fun refreshPageCount()
 
+        /** Apply a changed periodic full-refresh interval (#99) to the live page-turn cadence. */
+        fun applyFullRefreshInterval(n: Int)
+
         /** Toggle PDF reflow; owns the zoom/pan/progress-dialog state the toggle disturbs. */
         fun setReflowMode(on: Boolean)
 
@@ -398,6 +401,12 @@ class AdjustSheetController(private val host: Host) {
         }))
         container.addView(settingRow("Menu Size", segmented(DisplayPrefs.UI_SCALE_LABELS, DisplayPrefs.nearestUiScaleIndex(prefs.uiScale)) { which ->
             applyUiScale(DisplayPrefs.UI_SCALES[which])
+        }))
+        container.addView(settingRow("Full Refresh", segmented(DisplayPrefs.REFRESH_INTERVAL_LABELS, DisplayPrefs.REFRESH_INTERVALS.indexOf(prefs.fullRefreshEvery).coerceAtLeast(0)) { which ->
+            val n = DisplayPrefs.REFRESH_INTERVALS[which]
+            prefs.fullRefreshEvery = n
+            host.applyFullRefreshInterval(n)
+            host.diag { "DIAG full-refresh every=$n pages" }
         }))
         return container
     }

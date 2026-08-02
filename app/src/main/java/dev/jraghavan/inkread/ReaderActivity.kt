@@ -62,6 +62,11 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
     private lateinit var surfaceView: SurfaceView
     private val adapter: EinkAdapter = SupernoteEinkAdapter()
 
+    /** Periodic full-refresh cadence (#99): fires a full EPD flash every Nth page-turn to clear
+     *  ghosting. Interval comes from [DisplayPrefs.fullRefreshEvery] (set in onCreate + on change);
+     *  the counter is touched only on the engine thread from [postJump]. */
+    private val refreshCadence = RefreshCadence(0)
+
     /** Firmware stylus-ink client (RR19): the stylus inks via the Supernote pen daemon, the finger
      *  navigates. Claimed on focus, released on pause. */
     private val ink: SupernoteInk by lazy { SupernoteInk(this) }
@@ -189,6 +194,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         override fun engineExecute(block: () -> Unit) { engine.execute(block) }
         override fun repaintPanel() = this@ReaderActivity.repaintPanel()
         override fun refreshPageCount() { pageCount = NativeBridge.nativePageCount(docHandle) }
+        override fun applyFullRefreshInterval(n: Int) { refreshCadence.interval = n } // #99
         override fun setReflowMode(on: Boolean) = this@ReaderActivity.setReflowMode(on)
         override fun zoomIn() = zoomBy(ZOOM_STEP)
         override fun zoomOut() = zoomBy(1f / ZOOM_STEP)
@@ -218,6 +224,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         override fun openExport() = export.showExportDialog()
         override fun openDicts() = dict.showDictionariesDialog()
         override fun openAdjust() = adjust.show()
+        override fun refreshNow() { engine.execute { refreshCadence.reset(); refreshPanel() } } // #99
     })
 
     /** Lasso selection + Define-tool text selection (ADR-INKREAD-0010) — owns the selection
@@ -387,6 +394,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         // Apply the saved menu-size preference before any chrome is built (#133), so the bottom bar
         // and sheets lay out at the user's scale from the first frame.
         Ink.uiScale = displayPrefs.uiScale
+        refreshCadence.interval = displayPrefs.fullRefreshEvery // periodic full-refresh cadence (#99)
         // Re-apply the saved page rotation (RR4) before the surface is created so the first render
         // is at the right orientation. configChanges=orientation keeps us from recreating.
         requestedOrientation = displayPrefs.orientation
@@ -1459,6 +1467,9 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
 
     /** Jump to an absolute page on the engine thread, then render + refresh (RR11-FR1). */
     private fun postJump(page: Int, onDone: (() -> Unit)? = null) {
+        // A real page-turn changes the page; a re-render (postJump(currentPage)) does not and must
+        // not advance the full-refresh cadence (#99).
+        val isTurn = page != currentPage
         engine.execute {
             try {
                 if (docHandle == 0L) return@execute
@@ -1474,6 +1485,8 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
                 // Flash the panel FIRST so the new page is visible with no persistence/links work
                 // in front of it; then do the off-critical-path bookkeeping (RR27 position + links).
                 adapter.executeAll(WireCodec.decodeCommands(commandBytes))
+                // Every Nth page-turn, clear accumulated ghosting with a full flash (#99).
+                if (isTurn && refreshCadence.onPageTurn()) refreshPanel()
                 savePosition() // persist position per jump so an abrupt kill still reopens here (RR27)
                 refreshCurrentLinks()
             } finally {
