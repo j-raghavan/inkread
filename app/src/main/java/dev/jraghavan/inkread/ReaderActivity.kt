@@ -194,7 +194,10 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         override fun engineExecute(block: () -> Unit) { engine.execute(block) }
         override fun repaintPanel() = this@ReaderActivity.repaintPanel()
         override fun refreshPageCount() { pageCount = NativeBridge.nativePageCount(docHandle) }
-        override fun applyFullRefreshInterval(n: Int) { refreshCadence.interval = n } // #99
+        override fun applyFullRefreshInterval(n: Int) {
+            refreshCadence.interval = n // @Volatile — safe from this UI-thread setter
+            engine.execute { refreshCadence.reset() } // restart the count on the engine thread (#99)
+        }
         override fun setReflowMode(on: Boolean) = this@ReaderActivity.setReflowMode(on)
         override fun zoomIn() = zoomBy(ZOOM_STEP)
         override fun zoomOut() = zoomBy(1f / ZOOM_STEP)
@@ -1467,10 +1470,11 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
 
     /** Jump to an absolute page on the engine thread, then render + refresh (RR11-FR1). */
     private fun postJump(page: Int, onDone: (() -> Unit)? = null) {
-        // A real page-turn changes the page; a re-render (postJump(currentPage)) does not and must
-        // not advance the full-refresh cadence (#99).
-        val isTurn = page != currentPage
         engine.execute {
+            // A real page-turn changes the page; a re-render (postJump(currentPage)) does not and
+            // must not advance the full-refresh cadence (#99). Read currentPage here, on the engine
+            // thread that mutates it, so the check sees the actual pre-jump page.
+            val isTurn = page != currentPage
             try {
                 if (docHandle == 0L) return@execute
                 val commandBytes = try {

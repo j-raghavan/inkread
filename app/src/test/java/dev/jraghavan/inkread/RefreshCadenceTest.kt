@@ -2,6 +2,7 @@ package dev.jraghavan.inkread
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
@@ -42,7 +43,7 @@ class RefreshCadenceTest {
         // After reset it takes a full 3 more turns to flash again.
         assertFalse(c.onPageTurn())
         assertFalse(c.onPageTurn())
-        assertEquals(true, c.onPageTurn())
+        assertTrue(c.onPageTurn())
     }
 
     @Test
@@ -53,6 +54,6 @@ class RefreshCadenceTest {
         assertFalse(c.onPageTurn())
         c.interval = 2 // fresh count: two turns to flash
         assertFalse(c.onPageTurn())
-        assertEquals(true, c.onPageTurn())
+        assertTrue(c.onPageTurn())
     }
 }
