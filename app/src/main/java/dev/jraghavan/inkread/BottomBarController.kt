@@ -80,6 +80,9 @@ class BottomBarController(private val host: Host) {
         fun openDicts()
 
         fun openAdjust()
+
+        /** Manual full (flashing) EPD refresh to clear ghosting now (#99); also resets the cadence. */
+        fun refreshNow()
     }
 
     private val activity: Activity get() = host.activity
@@ -241,6 +244,7 @@ class BottomBarController(private val host: Host) {
         control(R.drawable.ic_menu_dict, "Dicts") { host.openDicts() }
         // Document controls consolidated into one KOReader-style tabbed sheet (Rotate/Fit/Font/Display).
         control(R.drawable.ic_menu_adjust, "Adjust") { host.openAdjust() }
+        control(R.drawable.ic_menu_refresh, "Refresh") { host.refreshNow() } // manual full flash (#99)
         control(R.drawable.ic_menu_open, "Open") { host.openPicker() }
         container.addView(controls)
 
