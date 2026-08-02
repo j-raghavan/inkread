@@ -61,6 +61,9 @@ class DailyActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // Keep shared Ink chrome (e.g. the compile progress dialog) in step with the menu-size
+        // preference (#133); Daily's own body text uses its independent width scaler.
+        Ink.uiScale = DisplayPrefs(this).uiScale
         daily.ensureSeeded() // curated feeds ready on first run — no manual set-up
         setContentView(buildView())
     }

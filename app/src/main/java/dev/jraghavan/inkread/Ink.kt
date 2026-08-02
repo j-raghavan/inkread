@@ -53,6 +53,11 @@ object Ink {
     /** A chrome text size, in sp, scaled by the user's [uiScale]. */
     fun sp(designSp: Float): Float = designSp * uiScale
 
+    /** A chrome dimension, in px, scaled by the user's [uiScale] — for the fixed-size boxes (icon
+     *  cells, etc.) around [sp] text, so a raised menu size grows the whole control, not just the
+     *  glyph. `uiScale == 1f` returns exactly [dp] (no change at the default). */
+    fun sdp(v: Int): Int = (dp(v) * uiScale).toInt()
+
     fun dp(v: Int): Int = (v * density).toInt()
 
     fun dpf(v: Int): Float = v * density

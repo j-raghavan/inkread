@@ -211,12 +211,14 @@ class BottomBarController(private val host: Host) {
                 ImageView(activity).apply {
                     setImageResource(iconRes); setColorFilter(Ink.ink)
                 },
-                LinearLayout.LayoutParams(dp(39), dp(39)),
+                // Scale the icon box with the label (#133) so a raised menu size grows the whole
+                // control coherently, not just its text. The cell is WRAP_CONTENT, so this can't clip.
+                LinearLayout.LayoutParams(Ink.sdp(39), Ink.sdp(39)),
             )
             cell.addView(TextView(activity).apply {
                 text = label; setTextColor(Ink.inkSoft); textSize = Ink.sp(11f)
                 typeface = Ink.mono; letterSpacing = 0.02f
-                gravity = Gravity.CENTER; setPadding(0, dp(5), 0, 0)
+                gravity = Gravity.CENTER; setPadding(0, Ink.sdp(5), 0, 0)
             })
             controls.addView(cell, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         }
