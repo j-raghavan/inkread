@@ -55,6 +55,13 @@ class DisplayPrefs(private val context: Context) {
         get() = display.getInt("render_quality", 1).coerceIn(0, 2)
         set(q) = display.edit().putInt("render_quality", q).apply()
 
+    /** UI-chrome scale for menus/sheets (#133). Larger panels (e.g. the Manta) want bigger menus;
+     *  this scales the reader's chrome text/controls independently of [textScale] (the reading body
+     *  text). 1.0 = the current sizing. Read clamped to the [UI_SCALES] range. */
+    var uiScale: Float
+        get() = display.getFloat("ui_scale", 1.0f).coerceIn(UI_SCALES.first(), UI_SCALES.last())
+        set(s) = display.edit().putFloat("ui_scale", s).apply()
+
     // ---- "typography" store ----
 
     var textScale: Float
@@ -98,15 +105,26 @@ class DisplayPrefs(private val context: Context) {
         /** Reflow font-size steps (multiples of the core's base body size); 1.0 = default. */
         val TEXT_SCALES = floatArrayOf(0.6f, 0.7f, 0.8f, 0.9f, 1.0f, 1.15f, 1.3f, 1.5f, 1.75f, 2.0f, 2.5f, 3.0f)
 
-        /** Index of the [TEXT_SCALES] entry nearest to [scale]. */
-        fun nearestScaleIndex(scale: Float): Int {
+        /** Menu/chrome scale steps (#133); 1.0 = current sizing, the default (index 1). Kept small
+         *  and coarse so the segmented control stays e-ink-tappable. */
+        val UI_SCALES = floatArrayOf(0.9f, 1.0f, 1.15f, 1.3f, 1.5f)
+        val UI_SCALE_LABELS = listOf("S", "M", "L", "XL", "2XL")
+
+        /** Index of the entry in [values] nearest to [target]. */
+        private fun nearestIndex(values: FloatArray, target: Float): Int {
             var best = 0
             var bestDist = Float.MAX_VALUE
-            TEXT_SCALES.forEachIndexed { i, v ->
-                val dist = kotlin.math.abs(v - scale)
+            values.forEachIndexed { i, v ->
+                val dist = kotlin.math.abs(v - target)
                 if (dist < bestDist) { bestDist = dist; best = i }
             }
             return best
         }
+
+        /** Index of the [TEXT_SCALES] entry nearest to [scale]. */
+        fun nearestScaleIndex(scale: Float): Int = nearestIndex(TEXT_SCALES, scale)
+
+        /** Index of the [UI_SCALES] entry nearest to [scale]. */
+        fun nearestUiScaleIndex(scale: Float): Int = nearestIndex(UI_SCALES, scale)
     }
 }

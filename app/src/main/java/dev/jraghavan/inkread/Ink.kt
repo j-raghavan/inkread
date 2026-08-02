@@ -42,6 +42,17 @@ object Ink {
     // ── Metrics (system density → no Context needed) ──
     private val density = android.content.res.Resources.getSystem().displayMetrics.density
 
+    /**
+     * UI-chrome scale (#133) — the user's menu-size preference ([DisplayPrefs.uiScale]), set once at
+     * Activity start. Chrome text sizes are declared at their design value and passed through [sp],
+     * so a larger panel (e.g. the Manta) gets proportionally bigger menus. 1.0 = the design sizing.
+     */
+    @JvmField
+    var uiScale: Float = 1f
+
+    /** A chrome text size, in sp, scaled by the user's [uiScale]. */
+    fun sp(designSp: Float): Float = designSp * uiScale
+
     fun dp(v: Int): Int = (v * density).toInt()
 
     fun dpf(v: Int): Float = v * density
