@@ -384,6 +384,9 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // Apply the saved menu-size preference before any chrome is built (#133), so the bottom bar
+        // and sheets lay out at the user's scale from the first frame.
+        Ink.uiScale = displayPrefs.uiScale
         // Re-apply the saved page rotation (RR4) before the surface is created so the first render
         // is at the right orientation. configChanges=orientation keeps us from recreating.
         requestedOrientation = displayPrefs.orientation
@@ -513,7 +516,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         // once a selection exists or another tool is chosen.
         lassoHint = TextView(this).apply {
             text = "Lasso — draw a loop around your writing to select"
-            textSize = 14f
+            textSize = Ink.sp(14f)
             setTextColor(Color.WHITE)
             setBackgroundColor(Color.BLACK)
             setPadding(dpInt(16), dpInt(8), dpInt(16), dpInt(8))

@@ -128,7 +128,7 @@ class AdjustSheetController(private val host: Host) {
                     LinearLayout.LayoutParams(dp(24), dp(24)),
                 )
                 addView(TextView(activity).apply {
-                    text = label; textSize = 10f; setTextColor(Ink.inkSoft); typeface = Ink.mono
+                    text = label; textSize = Ink.sp(10f); setTextColor(Ink.inkSoft); typeface = Ink.mono
                     gravity = Gravity.CENTER; setPadding(0, dp(3), 0, 0)
                 })
             }
@@ -193,7 +193,7 @@ class AdjustSheetController(private val host: Host) {
             val p = dp(3); setPadding(p, p, p, p)
             options.forEachIndexed { i, opt ->
                 val tv = TextView(activity).apply {
-                    text = opt; textSize = 15f; gravity = Gravity.CENTER
+                    text = opt; textSize = Ink.sp(15f); gravity = Gravity.CENTER
                     setPadding(dp(6), dp(10), dp(6), dp(10)); isClickable = true
                     setOnClickListener { sel = i; segs.forEachIndexed { j, t -> style(t, j == sel) }; onSelect(i) }
                 }
@@ -240,7 +240,7 @@ class AdjustSheetController(private val host: Host) {
             orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
             setPadding(dp(16), dp(14), dp(16), dp(14))
             addView(TextView(activity).apply {
-                text = label; textSize = 16f; setTextColor(Color.BLACK); gravity = Gravity.END
+                text = label; textSize = Ink.sp(16f); setTextColor(Color.BLACK); gravity = Gravity.END
             }, LinearLayout.LayoutParams(dp(96), ViewGroup.LayoutParams.WRAP_CONTENT))
             addView(control, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
                 marginStart = dp(14)
@@ -345,7 +345,7 @@ class AdjustSheetController(private val host: Host) {
         val d = activity.resources.displayMetrics.density
         fun dp(v: Int) = (v * d).toInt()
         return TextView(activity).apply {
-            text = t; textSize = 16f; gravity = Gravity.CENTER; setTextColor(Color.BLACK)
+            text = t; textSize = Ink.sp(16f); gravity = Gravity.CENTER; setTextColor(Color.BLACK)
             setPadding(dp(18), dp(10), dp(18), dp(10)); isClickable = true
             background = GradientDrawable().apply {
                 setColor(Color.WHITE); cornerRadius = dp(20).toFloat(); setStroke(maxOf(1, dp(1)), Color.parseColor("#9E9E9E"))
@@ -359,7 +359,7 @@ class AdjustSheetController(private val host: Host) {
         val d = activity.resources.displayMetrics.density
         fun dp(v: Int) = (v * d).toInt()
         val zlabel = TextView(activity).apply {
-            textSize = 16f; setTextColor(Color.BLACK); gravity = Gravity.CENTER; minWidth = dp(64)
+            textSize = Ink.sp(16f); setTextColor(Color.BLACK); gravity = Gravity.CENTER; minWidth = dp(64)
         }
         fun refresh() { zlabel.text = "${host.zoomPercent}%" }
         refresh()
@@ -396,7 +396,20 @@ class AdjustSheetController(private val host: Host) {
                 host.repaintPanel()
             }
         }))
+        container.addView(settingRow("Menu Size", segmented(DisplayPrefs.UI_SCALE_LABELS, DisplayPrefs.nearestUiScaleIndex(prefs.uiScale)) { which ->
+            applyUiScale(DisplayPrefs.UI_SCALES[which])
+        }))
         return container
+    }
+
+    /** Persist + apply the menu/chrome scale (#133) for large panels (e.g. the Manta). The reader's
+     *  menus read [Ink.uiScale] as they build, so the new size lands as each menu/sheet is next
+     *  opened; this open sheet keeps its current size, so a toast confirms the change. */
+    private fun applyUiScale(scale: Float) {
+        prefs.uiScale = scale
+        Ink.uiScale = scale
+        val label = DisplayPrefs.UI_SCALE_LABELS[DisplayPrefs.nearestUiScaleIndex(scale)]
+        Toast.makeText(activity, "Menu size $label — reopen a menu to see it", Toast.LENGTH_SHORT).show()
     }
 
     /** A reading style preset (1.10): a bundle of (text scale, line-spacing index, contrast step,
@@ -452,7 +465,7 @@ class AdjustSheetController(private val host: Host) {
         fun dp(v: Int) = (v * d).toInt()
         var idx = DisplayPrefs.nearestScaleIndex(prefs.textScale)
         val value = TextView(activity).apply {
-            textSize = 16f; setTextColor(Color.BLACK); gravity = Gravity.CENTER; minWidth = dp(64)
+            textSize = Ink.sp(16f); setTextColor(Color.BLACK); gravity = Gravity.CENTER; minWidth = dp(64)
         }
         fun refresh() { value.text = "${(DisplayPrefs.TEXT_SCALES[idx] * 100).toInt()}%" }
         refresh()

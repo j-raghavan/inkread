@@ -116,7 +116,7 @@ class BottomBarController(private val host: Host) {
         val pageLabel = TextView(activity).apply {
             text = "${cur + 1} / $total"
             setTextColor(Ink.ink)
-            textSize = 12f
+            textSize = Ink.sp(12f)
             typeface = Ink.mono
             letterSpacing = 0.04f
             gravity = Gravity.CENTER
@@ -155,7 +155,7 @@ class BottomBarController(private val host: Host) {
         // Double-chevron chapter jumps flank the scrubber (distinct from single-page edge taps),
         // shown only when the document has a table of contents (1.7).
         fun chapterBtn(glyph: String, dir: Int) = TextView(activity).apply {
-            text = glyph; setTextColor(Ink.ink); textSize = 20f; typeface = Ink.serifBold
+            text = glyph; setTextColor(Ink.ink); textSize = Ink.sp(20f); typeface = Ink.serifBold
             gravity = Gravity.CENTER; setPadding(dp(8), dp(2), dp(8), dp(2)); isClickable = true
             setOnClickListener { dialog.dismiss(); chapterJump(dir) }
         }
@@ -181,12 +181,12 @@ class BottomBarController(private val host: Host) {
                 isClickable = true
                 setOnClickListener { dialog.dismiss(); showContentsLazy() }
                 addView(TextView(activity).apply {
-                    text = lbl; setTextColor(Ink.inkSoft); textSize = 12f; typeface = Ink.serif
+                    text = lbl; setTextColor(Ink.inkSoft); textSize = Ink.sp(12f); typeface = Ink.serif
                     maxLines = 1; ellipsize = android.text.TextUtils.TruncateAt.END
                 }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
                 inChapterPosition()?.let { pos ->
                     addView(TextView(activity).apply {
-                        text = pos; setTextColor(Ink.muted); textSize = 12f; typeface = Ink.mono
+                        text = pos; setTextColor(Ink.muted); textSize = Ink.sp(12f); typeface = Ink.mono
                         setPadding(dp(10), 0, 0, 0)
                     })
                 }
@@ -211,12 +211,14 @@ class BottomBarController(private val host: Host) {
                 ImageView(activity).apply {
                     setImageResource(iconRes); setColorFilter(Ink.ink)
                 },
-                LinearLayout.LayoutParams(dp(39), dp(39)),
+                // Scale the icon box with the label (#133) so a raised menu size grows the whole
+                // control coherently, not just its text. The cell is WRAP_CONTENT, so this can't clip.
+                LinearLayout.LayoutParams(Ink.sdp(39), Ink.sdp(39)),
             )
             cell.addView(TextView(activity).apply {
-                text = label; setTextColor(Ink.inkSoft); textSize = 11f
+                text = label; setTextColor(Ink.inkSoft); textSize = Ink.sp(11f)
                 typeface = Ink.mono; letterSpacing = 0.02f
-                gravity = Gravity.CENTER; setPadding(0, dp(5), 0, 0)
+                gravity = Gravity.CENTER; setPadding(0, Ink.sdp(5), 0, 0)
             })
             controls.addView(cell, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         }
@@ -416,11 +418,11 @@ class BottomBarController(private val host: Host) {
                 setOnClickListener { dialog.dismiss(); host.postJump(page) }
                 addView(TextView(activity).apply {
                     text = "Page ${page + 1}"
-                    setTextColor(Ink.ink); textSize = 17f; typeface = Ink.serifBold
+                    setTextColor(Ink.ink); textSize = Ink.sp(17f); typeface = Ink.serifBold
                 }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
                 addView(TextView(activity).apply {
                     text = if (count == 1) "1 note" else "$count notes"
-                    setTextColor(Ink.muted); textSize = 12f; typeface = Ink.mono
+                    setTextColor(Ink.muted); textSize = Ink.sp(12f); typeface = Ink.mono
                 })
             })
         }
@@ -462,13 +464,13 @@ class BottomBarController(private val host: Host) {
                 addView(TextView(activity).apply {
                     text = item.title
                     setTextColor(if (item.targetPage != null) Ink.ink else Ink.muted)
-                    textSize = if (item.depth == 0) 17f else 15f
+                    textSize = Ink.sp(if (item.depth == 0) 17f else 15f)
                     typeface = if (item.depth == 0) Ink.serifBold else Ink.serif
                     maxLines = 2
                 }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
                 item.targetPage?.let { p ->
                     addView(TextView(activity).apply {
-                        text = "${p + 1}"; setTextColor(Ink.muted); textSize = 12f; typeface = Ink.mono
+                        text = "${p + 1}"; setTextColor(Ink.muted); textSize = Ink.sp(12f); typeface = Ink.mono
                         setPadding(dp(12), 0, 0, 0)
                     })
                 }

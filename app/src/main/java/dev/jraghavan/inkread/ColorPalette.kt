@@ -123,7 +123,7 @@ class ColorPalette(
         }
         val label = TextView(activity).apply {
             text = name
-            textSize = 11f
+            textSize = Ink.sp(11f)
             typeface = Ink.mono
             letterSpacing = 0.04f
             gravity = Gravity.CENTER

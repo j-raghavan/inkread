@@ -73,6 +73,9 @@ class HomeActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // Keep the shared chrome scale (#133) in sync with the user's menu-size preference so any
+        // Ink-built popup on the home screen matches the reader.
+        Ink.uiScale = DisplayPrefs(this).uiScale
         setContentView(buildView())
         shelfSig = shelfSignature()
         DailyAutoCompileWorker.schedule(this) // a fresh Daily issue compiles each morning (#66)

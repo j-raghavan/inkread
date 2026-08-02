@@ -193,11 +193,11 @@ class SearchController(private val host: Host) {
                 isClickable = true
                 setOnClickListener { dialog.dismiss(); gotoHit(i) }
                 addView(TextView(activity).apply {
-                    text = "P. ${hit.page + 1}"; setTextColor(Ink.muted); textSize = 10f
+                    text = "P. ${hit.page + 1}"; setTextColor(Ink.muted); textSize = Ink.sp(10f)
                     typeface = Ink.mono; letterSpacing = 0.08f
                 })
                 addView(TextView(activity).apply {
-                    text = hit.match.snippet; setTextColor(Ink.ink); textSize = 15f
+                    text = hit.match.snippet; setTextColor(Ink.ink); textSize = Ink.sp(15f)
                     typeface = Ink.serif; setPadding(0, dp(3), 0, 0)
                 })
             })
@@ -206,7 +206,7 @@ class SearchController(private val host: Host) {
         }
         // Header: a count label flanked by Prev/Next steppers (step renders behind the sheet).
         fun stepper(label: String, delta: Int) = TextView(activity).apply {
-            text = label; setTextColor(Ink.ink); textSize = 18f; gravity = Gravity.CENTER
+            text = label; setTextColor(Ink.ink); textSize = Ink.sp(18f); gravity = Gravity.CENTER
             setPadding(dp(16), dp(8), dp(16), dp(8)); isClickable = true
             setOnClickListener { step(delta) }
         }
@@ -216,7 +216,7 @@ class SearchController(private val host: Host) {
             addView(stepper("◀", -1))
             addView(TextView(activity).apply {
                 text = "${h.size} results · “$query”"
-                setTextColor(Ink.muted); textSize = 12f; typeface = Ink.mono; gravity = Gravity.CENTER
+                setTextColor(Ink.muted); textSize = Ink.sp(12f); typeface = Ink.mono; gravity = Gravity.CENTER
                 setPadding(dp(8), dp(14), dp(8), dp(10))
             }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
             addView(stepper("▶", +1))

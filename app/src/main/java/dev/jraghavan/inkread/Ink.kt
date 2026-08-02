@@ -42,6 +42,22 @@ object Ink {
     // ── Metrics (system density → no Context needed) ──
     private val density = android.content.res.Resources.getSystem().displayMetrics.density
 
+    /**
+     * UI-chrome scale (#133) — the user's menu-size preference ([DisplayPrefs.uiScale]), set once at
+     * Activity start. Chrome text sizes are declared at their design value and passed through [sp],
+     * so a larger panel (e.g. the Manta) gets proportionally bigger menus. 1.0 = the design sizing.
+     */
+    @JvmField
+    var uiScale: Float = 1f
+
+    /** A chrome text size, in sp, scaled by the user's [uiScale]. */
+    fun sp(designSp: Float): Float = designSp * uiScale
+
+    /** A chrome dimension, in px, scaled by the user's [uiScale] — for the fixed-size boxes (icon
+     *  cells, etc.) around [sp] text, so a raised menu size grows the whole control, not just the
+     *  glyph. `uiScale == 1f` returns exactly [dp] (no change at the default). */
+    fun sdp(v: Int): Int = (dp(v) * uiScale).toInt()
+
     fun dp(v: Int): Int = (v * density).toInt()
 
     fun dpf(v: Int): Float = v * density
@@ -72,7 +88,7 @@ object Ink {
         TextView(ctx).apply {
             this.text = text.uppercase()
             setTextColor(muted)
-            textSize = 11f
+            textSize = sp(11f)
             typeface = mono
             letterSpacing = 0.14f
         }
@@ -82,7 +98,7 @@ object Ink {
         TextView(ctx).apply {
             this.text = text
             setTextColor(ink)
-            textSize = size
+            textSize = sp(size)
             typeface = serif
             includeFontPadding = false
         }
@@ -111,7 +127,7 @@ object Ink {
             setContentView(
                 TextView(ctx).apply {
                     text = message
-                    textSize = 16f
+                    textSize = sp(16f)
                     setTextColor(ink)
                     setPadding(dp(28), dp(22), dp(28), dp(22))
                 },
@@ -124,7 +140,7 @@ object Ink {
     fun pillButton(ctx: Context, label: String, primary: Boolean, onTap: () -> Unit): TextView =
         TextView(ctx).apply {
             text = label
-            textSize = 13f
+            textSize = sp(13f)
             typeface = mono
             letterSpacing = 0.08f
             gravity = Gravity.CENTER
