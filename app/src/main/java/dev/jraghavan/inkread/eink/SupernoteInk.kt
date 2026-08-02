@@ -114,6 +114,12 @@ class SupernoteInk(private val context: Context) {
     fun teardown() {
         if (!active) return
         clearAll()
+        // Disable the EMR writable area via the service_myservice binder — the lever that actually
+        // works for a sideloaded app (#157). Without this the firmware keeps painting our ink after
+        // we background, so the stylus leaves invisible inkread marks in whatever app is now
+        // foreground (e.g. KOReader). enableFullUiAuto(false) below is SELinux-blocked for us and
+        // was releasing nothing. Must run while still `active` (setWritable early-returns otherwise).
+        setWritable(false)
         enableFullUiAuto(false)
         active = false
         Log.i(TAG, "firmware ink released")
