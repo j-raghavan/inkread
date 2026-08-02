@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "hooks": {
+    "beforeShellExecution": [
+      { "command": "node .cursor/ruflo-hook-adapter.cjs beforeShellExecution" }
+    ],
+    "afterFileEdit": [
+      { "command": "node .cursor/ruflo-hook-adapter.cjs afterFileEdit" }
+    ],
+    "beforeSubmitPrompt": [
+      { "command": "node .cursor/ruflo-hook-adapter.cjs beforeSubmitPrompt" }
+    ],
+    "stop": [
+      { "command": "node .cursor/ruflo-hook-adapter.cjs stop" }
+    ]
+  }
+}
