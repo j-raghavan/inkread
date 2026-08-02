@@ -12,7 +12,7 @@ import java.io.InputStream
 import java.io.OutputStream
 
 /**
- * A minimal on-device book library (RR17) for the shell: imported PDFs live under
+ * A minimal on-device book library (RR17) for the shell: imported documents live under
  * `filesDir/books/` (kept, not overwritten) so [HomeActivity] and the reader's Library popup can
  * list and reopen them. The Rust core owns reading state per book id; here a book's **file name**
  * is its stable id.
@@ -21,10 +21,25 @@ object Books {
     /** The books directory (created on demand). */
     fun dir(context: Context): File = File(context.filesDir, "books").apply { mkdirs() }
 
-    /** Supported document extensions (the core dispatches a backend by extension). */
-    private val SUPPORTED = setOf("pdf", "epub")
+    /** Supported document extensions — every format the core can open (PDF, EPUB, CBZ, plain text).
+     *  The core dispatches a backend by content first, then extension, so this is the shelf/import
+     *  allow-list, kept in sync with `DocFormat` in `reader-core/src/document/format.rs`. */
+    private val SUPPORTED = setOf("pdf", "epub", "cbz", "txt", "text")
 
-    /** Every imported document (PDF or EPUB), sorted by name (case-insensitive). */
+    /**
+     * The extension to store a picked document under: preserve the source extension when the core
+     * supports it (so CBZ and plain text open with the right backend — plain text has no magic
+     * bytes, so its extension is the *only* signal), else default to `pdf`. The core still
+     * content-sniffs on open, so a mislabeled or unknown file (e.g. a disguised PDF/ZIP) still
+     * resolves by its bytes; only a signature-less plain-text file whose display name carries no
+     * extension is unrecoverable — it stores as `pdf` and won't open as text. Pure + host-testable.
+     */
+    internal fun importExtension(displayName: String): String {
+        val ext = displayName.substringAfterLast('.', "").lowercase()
+        return if (ext in SUPPORTED) ext else "pdf"
+    }
+
+    /** Every imported document (PDF, EPUB, CBZ, or plain text), sorted by name (case-insensitive). */
     fun list(context: Context): List<File> =
         dir(context)
             .listFiles { f -> f.isFile && f.extension.lowercase() in SUPPORTED }
@@ -33,13 +48,13 @@ object Books {
 
     /**
      * Copy a SAF-picked document into the books dir under a sanitized name derived from its display
-     * name, **preserving the extension** (`.epub` → reflowable, else `.pdf`) so the core opens the
+     * name, **preserving a core-supported extension** (see [importExtension]) so the core opens the
      * right backend. Returns the stored file (or null on failure). A re-import of the same display
      * name overwrites — the name is the book's identity. Runs IO; call off the UI thread.
      */
     fun importFrom(context: Context, uri: Uri): File? {
         val raw = queryName(context, uri) ?: "document"
-        val ext = if (raw.substringAfterLast('.', "").equals("epub", ignoreCase = true)) "epub" else "pdf"
+        val ext = importExtension(raw)
         val dest = File(dir(context), "${sanitize(raw)}.$ext")
         return try {
             val ok = context.contentResolver.openInputStream(uri)?.use { input ->
