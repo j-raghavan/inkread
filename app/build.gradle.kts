@@ -4,6 +4,7 @@
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
+    id("org.jetbrains.kotlinx.kover")
 }
 
 android {
@@ -89,4 +90,21 @@ dependencies {
     // Host JVM unit tests for pure logic (e.g. PalmFilter) — run via :app:testDebugUnitTest, no
     // emulator/device needed (an emulator can't simulate the Supernote EMR pen anyway).
     testImplementation("junit:junit:4.13.2")
+}
+
+// Kotlin host-test coverage (Kover). This module is a single-Activity `Context`/UI shell that is
+// overwhelmingly not host-unit-testable, so the *whole-module* line coverage is near zero by
+// nature — a global threshold here would be theatre. The real signal is **patch coverage** (is the
+// host-testable logic in a change actually tested?), surfaced in CI via Codecov's `kotlin` flag
+// (patch status, currently informational — see codecov.yml). This block just produces the reports;
+// generated classes are excluded so the number reflects our code.
+kover {
+    reports {
+        filters {
+            excludes {
+                // Android generated classes (Kover does not exclude these by default).
+                classes("*.BuildConfig", "*.R", "*.R\$*")
+            }
+        }
+    }
 }

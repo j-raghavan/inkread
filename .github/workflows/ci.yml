@@ -87,6 +87,7 @@ jobs:
         uses: codecov/codecov-action@v7
         with:
           files: lcov.info
+          flags: rust # keep the Rust and Kotlin coverage numbers as separate Codecov flags
           fail_ci_if_error: false # don't fail the build on a flaky upload
         env:
           # Optional for public repos (tokenless works but is rate-limited); add a
@@ -196,3 +197,30 @@ jobs:
           cache: gradle
       - name: Run app JVM unit tests (:app:testDebugUnitTest)
         run: ./gradlew :app:testDebugUnitTest --console=plain
+
+  kotlin-coverage:
+    name: kotlin coverage (Kover → Codecov)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Set up JDK 21
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: gradle
+      # Kover measures host-test coverage of the Kotlin shell. This is a UI-heavy Activity module,
+      # so whole-module coverage is low by nature (RR17's real gate is the Rust core); the tracked
+      # signal here is PATCH coverage via Codecov's `kotlin` flag — see codecov.yml. No emulator/NDK.
+      - name: Generate Kover XML (:app:koverXmlReport)
+        run: ./gradlew :app:koverXmlReport --console=plain
+      - name: Upload to Codecov (kotlin flag)
+        uses: codecov/codecov-action@v7
+        with:
+          files: app/build/reports/kover/report.xml
+          flags: kotlin
+          fail_ci_if_error: false # don't fail the build on a flaky upload
+        env:
+          # Same optional secret as the Rust upload: tokenless works for public repos but is
+          # rate-limited; set a CODECOV_TOKEN repo secret to make the kotlin-flag upload reliable.
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}

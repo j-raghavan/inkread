@@ -1,0 +1,46 @@
+# Coverage config for inkread's two languages, tracked as separate Codecov flags:
+#   - rust:   the whole Rust workspace (cargo-llvm-cov --workspace -> lcov.info) — the RR17 gate.
+#   - kotlin: the :app Android shell host tests (Kover -> report.xml).
+#
+# The Kotlin shell is a single-Activity, Context/UI-heavy module whose whole-module coverage is
+# near zero by nature, so its project status is informational (reported, never blocks). Rust keeps
+# its existing anti-regression behaviour on the `rust` flag. The Kotlin patch status shows how much
+# of the host-testable logic in a change is covered; it is informational for now (flip
+# `informational: false` to make new Kotlin logic coverage a hard gate).
+coverage:
+  status:
+    project:
+      default:
+        informational: true # combined number — reported, never blocks
+      rust:
+        flags:
+          - rust
+        target: auto # preserve the RR17 anti-regression behaviour on the Rust core
+      kotlin:
+        flags:
+          - kotlin
+        informational: true
+    patch:
+      default:
+        informational: true
+      rust:
+        flags:
+          - rust
+        target: auto
+      kotlin:
+        flags:
+          - kotlin
+        target: 80%
+        informational: true # visible patch signal; not yet a hard gate (UI churn is untestable)
+
+flag_management:
+  # No per-flag `paths`: the two uploads are disjoint by construction (rust = the whole-workspace
+  # lcov, kotlin = the :app Kover xml), and each is tagged with its flag at upload time in ci.yml.
+  # A `paths` filter here would wrongly drop coverage for files outside it — e.g. scoping `rust` to
+  # reader-core/ would shrink the RR17 gate from 10 crates to one.
+  default_rules:
+    carryforward: true
+
+comment:
+  layout: "reach, flags, files"
+  require_changes: false
