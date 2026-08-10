@@ -4,8 +4,8 @@
 // name 'kotlin'"), so the AGP-9 / Gradle-9 Dependabot bump broke the release build. The AGP-9
 // upgrade is a deliberate migration, not an auto-bump (Dependabot is told to ignore those majors).
 plugins {
-    id("com.android.application") version "8.5.2" apply false
-    id("org.jetbrains.kotlin.android") version "2.0.20" apply false
+    id("com.android.application") version "8.13.2" apply false
+    id("org.jetbrains.kotlin.android") version "2.4.10" apply false
     // Kotlin unit-test coverage (JVM host tests). RR17's coverage gate is Rust-only
     // (cargo-llvm-cov); this adds the equivalent measurement + Codecov patch tracking for the
     // Kotlin shell's host-testable logic. Applied only in :app.
