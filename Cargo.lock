@@ -683,6 +683,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "inkread-opds"
+version = "1.2.0"
+dependencies = [
+ "feed-rs",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "inkread-pdftext"
 version = "1.2.0"
 dependencies = [
