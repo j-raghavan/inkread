@@ -51,7 +51,14 @@ class OpdsActivity : Activity() {
     private val trail = ArrayDeque<String>()
 
     private var current: OpdsController.Catalog? = null
+
+    /** The feed currently shown — the thing pushed onto [trail] when we walk one level deeper. */
+    private var currentUrl: String? = null
     private var busy: Dialog? = null
+
+    /** Network results arrive after the screen may already have closed; nothing may touch the UI
+     *  then (a dialog on a dead window throws). Every posted handler checks this first. */
+    private val gone: Boolean get() = isFinishing || isDestroyed
 
     private lateinit var column: LinearLayout
 
@@ -75,6 +82,9 @@ class OpdsActivity : Activity() {
     override fun onDestroy() {
         super.onDestroy()
         io.shutdownNow()
+        // A fetch in flight when the screen closes would otherwise leave its busy dialog attached to
+        // a dead window (and the posted result would try to show another on top of it).
+        dismissBusy()
     }
 
     /**
@@ -98,6 +108,7 @@ class OpdsActivity : Activity() {
         io.execute {
             val catalog = opds.fetchCatalog(url)
             main.post {
+                if (gone) return@post
                 dismissBusy()
                 if (catalog == null) {
                     render(
@@ -114,8 +125,6 @@ class OpdsActivity : Activity() {
             }
         }
     }
-
-    private var currentUrl: String? = null
 
     // ── rendering ────────────────────────────────────────────────────────────────────────────────
 
@@ -207,6 +216,7 @@ class OpdsActivity : Activity() {
         io.execute {
             val file = opds.download(entry, format)
             main.post {
+                if (gone) return@post
                 dismissBusy()
                 if (file == null) {
                     Toast.makeText(this, "Download failed", Toast.LENGTH_SHORT).show()
@@ -267,6 +277,7 @@ class OpdsActivity : Activity() {
 
     private fun showBusy(message: String) {
         dismissBusy()
+        if (isFinishing || isDestroyed) return
         busy = Ink.progressDialog(this, message)
     }
 

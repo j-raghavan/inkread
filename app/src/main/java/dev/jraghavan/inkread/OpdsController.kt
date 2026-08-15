@@ -76,13 +76,19 @@ class OpdsController(private val context: Context) {
      * Download [format] of [entry] into the shelf, returning the stored file (or null on failure).
      * The catalog's own title names the file, because an acquisition URL generally carries no
      * usable name of its own; the format's extension is what the core dispatches a backend on.
+     *
+     * Downloads land in a temp file and are renamed into place only once complete. Writing straight
+     * to the destination would truncate it on open, so a re-download that then failed — a dropped
+     * Wi-Fi mid-transfer is the ordinary case here — would destroy the perfectly good copy already
+     * on the shelf, with annotations attached to it. A failed download must cost nothing.
      */
     fun download(entry: Entry, format: Format): File? {
         if (!format.openable || !isHttpUrl(format.href)) return null
         val dest = Books.destinationFor(context, entry.title.ifBlank { "document" }, format.ext)
-        val ok = HttpFetch.download(format.href, dest, USER_AGENT, TIMEOUT_MS, MAX_BOOK_BYTES, auth())
-        if (!ok) {
-            dest.delete() // never leave a partial book on the shelf pretending to be readable
+        val partial = File(dest.parentFile, "${dest.name}.part")
+        val ok = HttpFetch.download(format.href, partial, USER_AGENT, TIMEOUT_MS, MAX_BOOK_BYTES, auth())
+        if (!ok || !partial.renameTo(dest)) {
+            partial.delete() // never leave a partial book on the shelf pretending to be readable
             return null
         }
         return dest
