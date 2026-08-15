@@ -13,6 +13,7 @@
 use std::cell::{Cell, Ref, RefCell};
 
 use inkread_epub::layout::{paginate_with, Align, Hyphenator, LayoutOpts, Page};
+use inkread_epub::measure::{CachedHyphenator, CachedMetrics};
 use inkread_epub::render::{render_page as raster_page, AbFont, EnHyphenator, GrayCanvas};
 use inkread_epub::{parse_blocks, Block, EpubPackage, NavPoint};
 
@@ -428,11 +429,15 @@ fn layout_all(
 ) -> Laid {
     #[cfg(test)]
     LAYOUT_PASSES.with(|c| c.set(c.get() + 1));
+    // Memoize measurement across the *whole book*, not per chapter: prose repeats itself, and the
+    // widths a later chapter needs have almost all been computed by an earlier one (#161/#162).
+    let font = CachedMetrics::new(font);
+    let hyph = CachedHyphenator::new(hyph);
     let mut pages = Vec::new();
     let mut chapter_start = Vec::with_capacity(chapters.len());
     for blocks in chapters {
         chapter_start.push(pages.len());
-        let mut cps = paginate_with(blocks, &opts, font, hyph);
+        let mut cps = paginate_with(blocks, &opts, &font, &hyph);
         if cps.is_empty() {
             cps.push(Page::default()); // keep a 1:1 chapter→start mapping even for an empty chapter
         }
