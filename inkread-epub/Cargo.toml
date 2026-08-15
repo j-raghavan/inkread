@@ -10,6 +10,11 @@ description = "EPUB container parsing + (forthcoming) pure-Rust reflow for inkre
 
 [dependencies]
 rbook = "0.7.9"
+# Legacy-encoding repair before rbook sees the book (#159): rbook refuses any non-UTF-8 resource
+# outright, which makes a windows-1251 Russian EPUB unopenable. `zip` reads and rewrites the
+# container (already a workspace dep for CBZ); `encoding_rs` does the decoding.
+zip = { workspace = true }
+encoding_rs = { workspace = true }
 # scraper (html5ever-based, ISC) parses chapter XHTML into a tree we lower to our own owned content
 # model; the parse tree is transient (never escapes parse_blocks). ego-tree (scraper's own tree, MIT)
 # is named directly so the recursive walker can take a `NodeRef`.
