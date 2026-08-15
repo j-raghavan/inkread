@@ -103,6 +103,15 @@ object NativeBridge {
      *  sha256Url}` (ADR-INKREAD-0014). Junk in -> `{"updateAvailable":false}`. */
     external fun nativeUpdateDecide(installedVersion: String, releaseJson: String): String
 
+    /** Classify a fetched OPDS catalog document into the browse model (ADR-INKREAD-0016, #175).
+     *  Standalone — the shell fetches the catalog and resolves the relative hrefs against the server
+     *  URL; the core only says what is in it. Returns
+     *  `{title,entries:[{kind,title,author,summary,published,href,cover,formats:[{mime,href,bytes,
+     *  ext}]}],next,prev,start,searchTemplate}`, where `kind` is `navigation` or `acquisition`,
+     *  `formats` is ordered best-openable-first, and an empty `ext` means inkread cannot open that
+     *  format. Absent fields are omitted. Junk in -> `{"title":"","entries":[]}`. */
+    external fun nativeOpdsParseCatalog(xml: String): String
+
     /**
      * Render the current page into [directBuffer] — a DIRECT [ByteBuffer] of exactly
      * `width*height*4` bytes (RGBA). The core borrows it for the call only (Amendment 5).

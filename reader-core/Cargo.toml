@@ -29,6 +29,9 @@ inkread-daily = { workspace = true }
 # inkread-update (ADR-INKREAD-0014): the self-updater's pure decision, reached over the JNI bridge —
 # the shell fetches the GitHub release JSON, the core decides if it is newer. Pure Rust.
 inkread-update = { workspace = true }
+# inkread-opds (ADR-INKREAD-0016): OPDS catalog classification, reached over the JNI bridge — the
+# shell fetches the catalog document, the core says what is in it. Pure Rust.
+inkread-opds = { workspace = true }
 # EPUB backend: parsing + reflow layout + glyph rasterization (RR2-FR5). Pure Rust; the EpubBackend
 # adapter (document/reflow) maps it to the Document trait.
 inkread-epub = { workspace = true }

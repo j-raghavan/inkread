@@ -1219,6 +1219,7 @@ dependencies = [
  "inkread-dict",
  "inkread-epub",
  "inkread-ink",
+ "inkread-opds",
  "inkread-pdftext",
  "inkread-update",
  "jni",
