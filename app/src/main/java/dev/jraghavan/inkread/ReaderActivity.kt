@@ -805,16 +805,19 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             reflowOn = false // a fresh document opens in fixed-layout view (ADR-INKREAD-0011)
             // A fixed-layout PDF magnifies; EPUB (always reflowed) does not (#61, RR25-FR3).
             magnifiable = try { NativeBridge.nativeIsMagnifiable(docHandle) } catch (e: RuntimeException) { false }
-            // Re-apply the saved reflow text scale (EPUB); a no-op (-1) on fixed-layout PDF.
-            val savedScale = displayPrefs.textScale
-            if (savedScale != 1.0f) {
-                val np = try { NativeBridge.nativeSetTextScale(docHandle, savedScale) } catch (e: RuntimeException) { -1 }
-                if (np >= 0) Log.i(TAG, "applied text scale $savedScale → page $np")
-            }
-            // Re-apply the saved reflow typeface (EPUB); default face 0 (a no-op on fixed-layout PDF).
-            if (displayPrefs.font != 0) {
-                try { NativeBridge.nativeSetFont(docHandle, displayPrefs.font) } catch (e: RuntimeException) {}
-            }
+            // Re-apply the saved reflow typography (EPUB; a no-op (-1) on fixed-layout PDF). One
+            // call, not four: each individual setter repaginates the whole book, so restoring them
+            // separately made a large EPUB take minutes to open (#161/#162).
+            val np = try {
+                NativeBridge.nativeSetTypography(
+                    docHandle,
+                    displayPrefs.textScale,
+                    displayPrefs.font,
+                    displayPrefs.lineSpacingMult,
+                    displayPrefs.alignment,
+                )
+            } catch (e: RuntimeException) { -1 }
+            if (np >= 0) Log.i(TAG, "applied saved typography → page $np")
             // Re-apply the saved display contrast (RR4); 0 = off (a no-op in the core).
             try { NativeBridge.nativeSetContrast(docHandle, displayPrefs.contrast) } catch (e: RuntimeException) {}
             // Re-apply night mode (invert); default off (RR4 / style presets).
@@ -825,13 +828,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             try { NativeBridge.nativeSetCrop(docHandle, if (displayPrefs.cropAuto) 1 else 0, displayPrefs.cropMargin) } catch (e: RuntimeException) {}
             // Re-apply the saved render quality (RR4); default 1.
             try { NativeBridge.nativeSetRenderQuality(docHandle, displayPrefs.renderQuality) } catch (e: RuntimeException) {}
-            // Re-apply saved reflow line-spacing + alignment (RR4; EPUB only — PDF returns -1).
-            if (kotlin.math.abs(displayPrefs.lineSpacingMult - DisplayPrefs.DEFAULT_LINE_SPACING) > 0.001f) {
-                try { NativeBridge.nativeSetLineSpacing(docHandle, displayPrefs.lineSpacingMult) } catch (e: RuntimeException) {}
-            }
-            if (displayPrefs.alignment != 0) {
-                try { NativeBridge.nativeSetAlignment(docHandle, displayPrefs.alignment) } catch (e: RuntimeException) {}
-            }
+            // (line spacing + alignment were restored above, in the same nativeSetTypography call)
             pageCount = NativeBridge.nativePageCount(docHandle)
             Books.pushRecent(this, bookId, path)
             // Capture the real document metadata so the library shows the actual title/author + page
@@ -1805,15 +1802,17 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
                 magnifiable = try { NativeBridge.nativeIsMagnifiable(docHandle) } catch (e: RuntimeException) { !on }
                 if (!magnifiable && zoom != 1f) { zoom = 1f; panX = 0f; panY = 0f }
                 if (on) {
-                    if (displayPrefs.textScale != 1.0f) {
-                        try { NativeBridge.nativeSetTextScale(docHandle, displayPrefs.textScale) } catch (e: RuntimeException) {}
-                    }
-                    if (kotlin.math.abs(displayPrefs.lineSpacingMult - DisplayPrefs.DEFAULT_LINE_SPACING) > 0.001f) {
-                        try { NativeBridge.nativeSetLineSpacing(docHandle, displayPrefs.lineSpacingMult) } catch (e: RuntimeException) {}
-                    }
-                    if (displayPrefs.alignment != 0) {
-                        try { NativeBridge.nativeSetAlignment(docHandle, displayPrefs.alignment) } catch (e: RuntimeException) {}
-                    }
+                    // Same one-call restore as the open path — a reflowed PDF gets the reader's
+                    // saved typeface too, which the per-setting restore here used to skip.
+                    try {
+                        NativeBridge.nativeSetTypography(
+                            docHandle,
+                            displayPrefs.textScale,
+                            displayPrefs.font,
+                            displayPrefs.lineSpacingMult,
+                            displayPrefs.alignment,
+                        )
+                    } catch (e: RuntimeException) {}
                 }
                 pageCount = NativeBridge.nativePageCount(docHandle)
                 repaintPanel()

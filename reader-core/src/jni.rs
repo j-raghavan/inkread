@@ -894,6 +894,32 @@ pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeSetAlignmen
     .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
 }
 
+// nativeSetTypography(handle, scale, fontId, lineSpacing, alignCode) : int — apply all four reflow
+// typography settings and repaginate ONCE (RR4). The open path restores persisted settings with
+// this instead of four separate calls: one repagination instead of four, which on a large book is
+// the difference between opening in seconds and opening in minutes (#161/#162). Returns the new
+// page index, or -1 for a fixed-layout PDF. Re-render after.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeSetTypography<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+    scale: jfloat,
+    font_id: jint,
+    line_spacing: jfloat,
+    align_code: jint,
+) -> jint {
+    env.with_env(|env| -> jni::errors::Result<jint> {
+        let session = unsafe { session_mut(handle) }.map_err(|e| throw(env, &e))?;
+        if session.set_typography(scale, font_id, line_spacing, align_code) {
+            Ok(session.current_page() as jint)
+        } else {
+            Ok(-1)
+        }
+    })
+    .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
+}
+
 // nativeSupportsReflow(handle) : boolean — whether the open document can be reflowed (a text-layer
 // PDF). The shell uses this to enable/disable the Reflow control (ADR-INKREAD-0011).
 #[unsafe(no_mangle)]

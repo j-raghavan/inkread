@@ -228,6 +228,18 @@ object NativeBridge {
      *  new page, or -1 for a fixed-layout PDF. Re-render after. */
     external fun nativeSetAlignment(handle: Long, code: Int): Int
 
+    /** Apply ALL reflow typography at once, repaginating ONCE (RR4). Use this on the open path to
+     *  restore persisted settings — the individual setters each repaginate, so applying four of
+     *  them in a row costs four full passes over the book (#161/#162). Returns the new page, or -1
+     *  for a fixed-layout PDF. Re-render after. */
+    external fun nativeSetTypography(
+        handle: Long,
+        scale: Float,
+        fontId: Int,
+        lineSpacing: Float,
+        alignCode: Int,
+    ): Int
+
     /** Whether the open document can be reflowed — a text-layer PDF (ADR-INKREAD-0011). Use to
      *  enable/disable the Reflow control (false for scanned PDFs and for EPUB, already reflowable). */
     external fun nativeSupportsReflow(handle: Long): Boolean
