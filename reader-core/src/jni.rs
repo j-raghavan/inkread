@@ -38,7 +38,7 @@ use crate::budget::TrimLevel;
 use crate::dict::{encode_definition_wire, Dict};
 use crate::document::{
     encode_links_wire, encode_search_wire, encode_selection_wire, encode_toc_wire, DocFormat,
-    NormRect,
+    NormRect, Typography,
 };
 use crate::error::{CoreError, CoreResult};
 use crate::persistence::ink_store::{FsInkStore, InkStore};
@@ -207,6 +207,10 @@ pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeOpenDocumen
     dpi: jint,
     db_path: JString<'local>,
     book_id: JString<'local>,
+    scale: jfloat,
+    font_id: jint,
+    line_spacing: jfloat,
+    align_code: jint,
 ) -> jlong {
     env.with_env(|env| -> jni::errors::Result<jlong> {
         let path: String = path.try_to_string(env)?;
@@ -214,6 +218,14 @@ pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeOpenDocumen
         let book_id: String = book_id.try_to_string(env)?;
         let caps = read_caps(env, &caps_bytes)?;
         let viewport = read_viewport(env, width, height, dpi)?;
+        // The reader's saved typography, applied as the document opens. Values are clamped by the
+        // backend, so out-of-range input is settings, not an error (RR21-FR3).
+        let typography = Typography {
+            scale,
+            font_id,
+            line_spacing,
+            align_code,
+        };
 
         let bytes = read_document_file(&path).map_err(|e| throw(env, &e))?;
 
@@ -223,16 +235,16 @@ pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeOpenDocumen
 
         let opened = match DocFormat::resolve(&path, &bytes) {
             DocFormat::Epub => {
-                ReaderSession::open_epub_with_store(bytes, caps, viewport, store, book)
+                ReaderSession::open_epub_with_store(bytes, caps, viewport, store, book, typography)
             }
             DocFormat::Cbz => {
-                ReaderSession::open_cbz_with_store(bytes, caps, viewport, store, book)
+                ReaderSession::open_cbz_with_store(bytes, caps, viewport, store, book, typography)
             }
             DocFormat::Text => {
-                ReaderSession::open_txt_with_store(bytes, caps, viewport, store, book)
+                ReaderSession::open_txt_with_store(bytes, caps, viewport, store, book, typography)
             }
             DocFormat::Pdf => {
-                ReaderSession::open_pdf_with_store(bytes, caps, viewport, store, book)
+                ReaderSession::open_pdf_with_store(bytes, caps, viewport, store, book, typography)
             }
         };
         match opened {

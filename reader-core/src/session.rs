@@ -17,7 +17,7 @@ use crate::budget::{Caches, ResourceBudget, TrimLevel};
 use crate::document::fixed::{CbzBackend, PdfBackend};
 use crate::document::{
     Document, DocumentMetadata, ExportMode, ExportStroke, FitMode, NormRect, PageInk, PageLink,
-    TextSelection, TocEntry,
+    TextSelection, TocEntry, Typography,
 };
 use crate::error::{CoreError, CoreResult};
 use crate::persistence::identity::DocIdentity;
@@ -217,9 +217,10 @@ impl ReaderSession {
         viewport: Viewport,
         store: Arc<dyn ReaderStore>,
         book: BookId,
+        typography: Typography,
     ) -> CoreResult<Self> {
         let mut session = Self::open_epub(bytes, caps, viewport)?;
-        session.attach_store(store, book)?;
+        session.attach_store(store, book, typography)?;
         Ok(session)
     }
 
@@ -250,9 +251,10 @@ impl ReaderSession {
         viewport: Viewport,
         store: Arc<dyn ReaderStore>,
         book: BookId,
+        typography: Typography,
     ) -> CoreResult<Self> {
         let mut session = Self::open_txt(bytes, caps, viewport)?;
-        session.attach_store(store, book)?;
+        session.attach_store(store, book, typography)?;
         Ok(session)
     }
 
@@ -305,9 +307,10 @@ impl ReaderSession {
         viewport: Viewport,
         store: Arc<dyn ReaderStore>,
         book: BookId,
+        typography: Typography,
     ) -> CoreResult<Self> {
         let mut session = Self::open_pdf(bytes, caps, viewport)?;
-        session.attach_store(store, book)?;
+        session.attach_store(store, book, typography)?;
         Ok(session)
     }
 
@@ -318,17 +321,30 @@ impl ReaderSession {
         viewport: Viewport,
         store: Arc<dyn ReaderStore>,
         book: BookId,
+        typography: Typography,
     ) -> CoreResult<Self> {
         let mut session = Self::open_cbz(bytes, caps, viewport)?;
-        session.attach_store(store, book)?;
+        session.attach_store(store, book, typography)?;
         Ok(session)
     }
 
     /// Resume the saved position for `book` (if any), apply persisted e-ink settings to the
     /// policy (RR23 ↔ RR3), and remember the store for saving.
-    fn attach_store(&mut self, store: Arc<dyn ReaderStore>, book: BookId) -> CoreResult<()> {
+    fn attach_store(
+        &mut self,
+        store: Arc<dyn ReaderStore>,
+        book: BookId,
+        typography: Typography,
+    ) -> CoreResult<()> {
         let settings = store.load_settings()?;
         self.apply_settings(&settings, Some(&book));
+        // Before anything reads a page count. A reflowable document paginates lazily, so applying
+        // the typography here means the one pagination that the resume below triggers is built at
+        // the settings the book will actually be read at — rather than one at the defaults, then
+        // another when the shell applies the real ones (#161/#162).
+        if let Some(page) = self.document.apply_typography(typography, self.page) {
+            self.page = page;
+        }
         if let Some(pos) = store.load_position(&book)? {
             let last = self.page_count().saturating_sub(1);
             // Prefer the reflow-stable pin (RR12-FR4 / #46): a saved EPUB position re-anchors to the
@@ -420,7 +436,7 @@ impl ReaderSession {
         book: BookId,
     ) -> CoreResult<Self> {
         let mut session = Self::with_document(document, caps, viewport);
-        session.attach_store(store, book)?;
+        session.attach_store(store, book, Typography::default())?;
         Ok(session)
     }
 

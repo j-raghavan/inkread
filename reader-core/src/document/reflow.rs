@@ -531,12 +531,12 @@ thread_local! {
 
 /// Pagination passes performed on this thread since [`reset_layout_passes`].
 #[cfg(test)]
-fn layout_passes() -> usize {
+pub(crate) fn layout_passes() -> usize {
     LAYOUT_PASSES.with(Cell::get)
 }
 
 #[cfg(test)]
-fn reset_layout_passes() {
+pub(crate) fn reset_layout_passes() {
     LAYOUT_PASSES.with(|c| c.set(0));
 }
 

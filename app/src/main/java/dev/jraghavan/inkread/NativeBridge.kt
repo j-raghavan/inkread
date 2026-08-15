@@ -38,6 +38,11 @@ object NativeBridge {
      * Open a PDF AND attach a SQLite store at [dbPath], resuming the saved reading position
      * and persisted e-ink settings for [bookId] (RR12 / RR27). [dbPath] lives under app
      * storage; [bookId] is the stable per-book identity (≤512 chars). Returns the handle.
+     *
+     * The reader's saved typography is passed in rather than applied afterwards: a reflowable
+     * document has to be paginated to resolve a saved reading position, so applying the typography
+     * later would mean paginating the book a second time (#161/#162). Values are clamped by the
+     * core, and are ignored by fixed-layout formats.
      */
     external fun nativeOpenDocumentWithStore(
         path: String,
@@ -47,6 +52,10 @@ object NativeBridge {
         dpi: Int,
         dbPath: String,
         bookId: String,
+        scale: Float,
+        fontId: Int,
+        lineSpacing: Float,
+        alignCode: Int,
     ): Long
 
     /** Persist the current reading position (RR12-FR3); store-less session = no-op. */

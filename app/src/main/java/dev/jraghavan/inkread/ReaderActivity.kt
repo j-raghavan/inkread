@@ -779,7 +779,11 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         NativeBridge.nativeInit(capsBytes)
         val dbPath = File(filesDir, "reader.db").absolutePath
         docHandle = try {
-            NativeBridge.nativeOpenDocumentWithStore(path, capsBytes, viewW, viewH, DPI, dbPath, bookId)
+            NativeBridge.nativeOpenDocumentWithStore(
+                path, capsBytes, viewW, viewH, DPI, dbPath, bookId,
+                displayPrefs.textScale, displayPrefs.font,
+                displayPrefs.lineSpacingMult, displayPrefs.alignment,
+            )
         } catch (e: RuntimeException) {
             Log.e(TAG, "open failed: ${e.message}")
             0L
@@ -805,19 +809,9 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             reflowOn = false // a fresh document opens in fixed-layout view (ADR-INKREAD-0011)
             // A fixed-layout PDF magnifies; EPUB (always reflowed) does not (#61, RR25-FR3).
             magnifiable = try { NativeBridge.nativeIsMagnifiable(docHandle) } catch (e: RuntimeException) { false }
-            // Re-apply the saved reflow typography (EPUB; a no-op (-1) on fixed-layout PDF). One
-            // call, not four: each individual setter repaginates the whole book, so restoring them
-            // separately made a large EPUB take minutes to open (#161/#162).
-            val np = try {
-                NativeBridge.nativeSetTypography(
-                    docHandle,
-                    displayPrefs.textScale,
-                    displayPrefs.font,
-                    displayPrefs.lineSpacingMult,
-                    displayPrefs.alignment,
-                )
-            } catch (e: RuntimeException) { -1 }
-            if (np >= 0) Log.i(TAG, "applied saved typography → page $np")
+            // Reflow typography (text scale, face, line spacing, alignment) was applied by
+            // nativeOpenDocumentWithStore above, so the book is paginated once, at the settings it
+            // will actually be read at (#161/#162).
             // Re-apply the saved display contrast (RR4); 0 = off (a no-op in the core).
             try { NativeBridge.nativeSetContrast(docHandle, displayPrefs.contrast) } catch (e: RuntimeException) {}
             // Re-apply night mode (invert); default off (RR4 / style presets).

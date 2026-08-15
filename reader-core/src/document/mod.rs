@@ -85,6 +85,38 @@ impl FitMode {
     }
 }
 
+/// The reflow typography a document is laid out with (RR4): text scale, reading face, line
+/// spacing, alignment.
+///
+/// Carried into the open path rather than applied afterwards. A reflowable document cannot resolve
+/// a saved reading position without a pagination, and it cannot build the right pagination without
+/// knowing the typography — so restoring a position and then changing the typography means
+/// paginating the book twice, which on a large book is exactly the wait #161/#162 report.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Typography {
+    /// Body text scale; `1.0` is the format's base size.
+    pub scale: f32,
+    /// Index of a bundled reading face.
+    pub font_id: i32,
+    /// Line height as a multiple of the font size.
+    pub line_spacing: f32,
+    /// `0=Left, 1=Justify, 2=Center, 3=Right`.
+    pub align_code: i32,
+}
+
+impl Default for Typography {
+    /// The reader's out-of-the-box typography. Must agree with the shell's `DisplayPrefs`
+    /// defaults, or a book renders in settings the Adjust sheet never claimed.
+    fn default() -> Self {
+        Self {
+            scale: 1.0,
+            font_id: 0,
+            line_spacing: 1.4,
+            align_code: 0,
+        }
+    }
+}
+
 /// Document metadata (title/author) — the M0 subset (RR5-FR2).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DocumentMetadata {
@@ -441,6 +473,17 @@ pub trait Document {
     /// format (PDF). Default: unsupported.
     fn set_font(&self, _font_id: i32, _current_page: usize) -> Option<usize> {
         None
+    }
+
+    /// Apply a whole [`Typography`] at once, preserving the chapter (RR4).
+    fn apply_typography(&self, t: Typography, current_page: usize) -> Option<usize> {
+        self.set_typography(
+            t.scale,
+            t.font_id,
+            t.line_spacing,
+            t.align_code,
+            current_page,
+        )
     }
 
     /// Apply **all** reflow typography at once and repaginate once, preserving the chapter (RR4).

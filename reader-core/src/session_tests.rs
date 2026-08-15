@@ -1402,3 +1402,57 @@ fn prefetch_warms_the_next_page_without_changing_the_displayed_one() {
     s.prefetch_page(999).unwrap();
     assert_eq!(s.current_page(), 0);
 }
+
+/// The real open sequence for a book that was read before (#162): open with a store, which resumes
+/// the saved position, then apply the reader's saved typography. Counts paginations rather than
+/// timing them, because the cost is what the bug reports are about.
+#[test]
+fn resuming_a_previously_read_epub_costs_one_pagination() {
+    const SAMPLE: &[u8] = include_bytes!("../tests/fixtures/sample.epub");
+    let store: Arc<dyn ReaderStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+    let book = BookId::new("resumed").unwrap();
+    let caps = DeviceCapabilities::supernote_full();
+    let viewport = Viewport {
+        width: 400,
+        height: 600,
+        dpi: 226,
+    };
+
+    // First read: open, apply typography, turn a couple of pages, save.
+    let typography = Typography {
+        scale: 1.25,
+        font_id: 0,
+        line_spacing: 1.7,
+        align_code: 1,
+    };
+    let mut first = ReaderSession::open_epub_with_store(
+        SAMPLE.to_vec(),
+        caps,
+        viewport,
+        store.clone(),
+        book.clone(),
+        typography,
+    )
+    .unwrap();
+    first.on_gesture(Gesture::NextPage);
+    first.save_position().unwrap();
+
+    // Re-open it, exactly as the shell does.
+    crate::document::reflow::reset_layout_passes();
+    let again = ReaderSession::open_epub_with_store(
+        SAMPLE.to_vec(),
+        caps,
+        viewport,
+        store,
+        book,
+        typography,
+    )
+    .unwrap();
+    let _ = again.page_count();
+
+    assert_eq!(
+        crate::document::reflow::layout_passes(),
+        1,
+        "re-opening a book paginates it once, at the typography actually in use"
+    );
+}
