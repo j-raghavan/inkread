@@ -15,6 +15,7 @@ pub use format::DocFormat;
 pub use text_select::{CharBox, NormRect, SearchMatch, TextSelection};
 
 use crate::error::CoreResult;
+use crate::persistence::{PaginationCache, PaginationProgress};
 use crate::render::PixelBuffer;
 
 /// One ink stroke to write into the PDF on export (ADR-INKREAD-0005). Points are normalized page
@@ -81,6 +82,38 @@ impl FitMode {
             FitMode::Page => 0,
             FitMode::Width => 1,
             FitMode::Height => 2,
+        }
+    }
+}
+
+/// The reflow typography a document is laid out with (RR4): text scale, reading face, line
+/// spacing, alignment.
+///
+/// Carried into the open path rather than applied afterwards. A reflowable document cannot resolve
+/// a saved reading position without a pagination, and it cannot build the right pagination without
+/// knowing the typography — so restoring a position and then changing the typography means
+/// paginating the book twice, which on a large book is exactly the wait #161/#162 report.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Typography {
+    /// Body text scale; `1.0` is the format's base size.
+    pub scale: f32,
+    /// Index of a bundled reading face.
+    pub font_id: i32,
+    /// Line height as a multiple of the font size.
+    pub line_spacing: f32,
+    /// `0=Left, 1=Justify, 2=Center, 3=Right`.
+    pub align_code: i32,
+}
+
+impl Default for Typography {
+    /// The reader's out-of-the-box typography. Must agree with the shell's `DisplayPrefs`
+    /// defaults, or a book renders in settings the Adjust sheet never claimed.
+    fn default() -> Self {
+        Self {
+            scale: 1.0,
+            font_id: 0,
+            line_spacing: 1.4,
+            align_code: 0,
         }
     }
 }
@@ -441,6 +474,66 @@ pub trait Document {
     /// format (PDF). Default: unsupported.
     fn set_font(&self, _font_id: i32, _current_page: usize) -> Option<usize> {
         None
+    }
+
+    /// Offer somewhere to keep computed paginations across launches (#162).
+    ///
+    /// Only reflowable formats have a pagination worth persisting, and only they need to be told
+    /// where to put it — fixed-layout formats ignore this. Must be called before anything reads a
+    /// page count, or the first pagination is built before there is anywhere to look it up.
+    fn set_pagination_cache(&self, _cache: Box<dyn PaginationCache>) {}
+
+    /// Offer somewhere to report pagination progress, and something to ask about cancelling (#161).
+    /// Ignored by formats that have nothing slow to report.
+    fn set_pagination_progress(&self, _progress: Box<dyn PaginationProgress>) {}
+
+    /// Apply a whole [`Typography`] at once, preserving the chapter (RR4).
+    fn apply_typography(&self, t: Typography, current_page: usize) -> Option<usize> {
+        self.set_typography(
+            t.scale,
+            t.font_id,
+            t.line_spacing,
+            t.align_code,
+            current_page,
+        )
+    }
+
+    /// Apply **all** reflow typography at once and repaginate once, preserving the chapter (RR4).
+    ///
+    /// The open path restores four persisted settings back-to-back; applying them one at a time
+    /// costs one full repagination each, which on a large book is the difference between opening
+    /// in seconds and opening in minutes (#161/#162). Returns the new page, or `None` for a format
+    /// with no reflow at all. The default composes the individual setters — correct for any backend,
+    /// and a backend that can fold them into a single pass overrides this.
+    fn set_typography(
+        &self,
+        scale: f32,
+        font_id: i32,
+        line_spacing: f32,
+        align_code: i32,
+        current_page: usize,
+    ) -> Option<usize> {
+        // Threaded, not batched: each step repaginates, so the next must resolve its chapter
+        // against the pagination the previous one produced. Stays `None` — leaving the shell's
+        // page untouched — for a backend with no reflow at all.
+        let mut page: Option<usize> = None;
+        let mut at = current_page;
+        if let Some(p) = self.set_font(font_id, at) {
+            page = Some(p);
+            at = p;
+        }
+        if let Some(p) = self.set_text_scale(scale, at) {
+            page = Some(p);
+            at = p;
+        }
+        if let Some(p) = self.set_line_spacing(line_spacing, at) {
+            page = Some(p);
+            at = p;
+        }
+        if let Some(p) = self.set_alignment(align_code, at) {
+            page = Some(p);
+        }
+        page
     }
 
     /// Whether this document can be **reflowed** — true for a fixed-layout PDF that carries a text

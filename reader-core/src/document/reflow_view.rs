@@ -14,6 +14,7 @@
 use std::cell::{Cell, RefCell};
 
 use inkread_epub::layout::{paginate, Align, LayoutOpts, Page};
+use inkread_epub::measure::CachedMetrics;
 use inkread_epub::render::{page_glyphs, render_page as raster_page, AbFont, GrayCanvas};
 use inkread_epub::Block;
 
@@ -259,11 +260,13 @@ fn layout_all(
     let mut opts = LayoutOpts::new(w as f32, h as f32, font_px);
     opts.line_spacing = line_spacing;
     opts.align = align;
+    // Memoize measurement across every unit in one pass, as the EPUB backend does (#161/#162).
+    let font = CachedMetrics::new(font);
     let mut pages = Vec::new();
     let mut unit_start = Vec::with_capacity(units.len());
     for blocks in units {
         unit_start.push(pages.len());
-        let mut ps = paginate(blocks, &opts, font);
+        let mut ps = paginate(blocks, &opts, &font);
         if ps.is_empty() {
             ps.push(Page::default()); // keep a 1:1 unit→start mapping even for an empty page
         }

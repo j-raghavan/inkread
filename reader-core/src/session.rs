@@ -17,13 +17,15 @@ use crate::budget::{Caches, ResourceBudget, TrimLevel};
 use crate::document::fixed::{CbzBackend, PdfBackend};
 use crate::document::{
     Document, DocumentMetadata, ExportMode, ExportStroke, FitMode, NormRect, PageInk, PageLink,
-    TextSelection, TocEntry,
+    TextSelection, TocEntry, Typography,
 };
 use crate::error::{CoreError, CoreResult};
 use crate::persistence::identity::DocIdentity;
 use crate::persistence::ink_store::InkStore;
 use crate::persistence::sidecar::SidecarMetadata;
-use crate::persistence::{BookId, ReaderStore, ReadingPosition};
+use crate::persistence::{
+    BookId, PaginationProgress, ReaderStore, ReadingPosition, StorePaginationCache,
+};
 use crate::policy::EinkRefreshPolicy;
 use crate::render::{PixelBuffer, Viewport};
 use crate::settings::SettingsSnapshot;
@@ -217,9 +219,10 @@ impl ReaderSession {
         viewport: Viewport,
         store: Arc<dyn ReaderStore>,
         book: BookId,
+        typography: Typography,
     ) -> CoreResult<Self> {
         let mut session = Self::open_epub(bytes, caps, viewport)?;
-        session.attach_store(store, book)?;
+        session.attach_store(store, book, typography)?;
         Ok(session)
     }
 
@@ -250,9 +253,10 @@ impl ReaderSession {
         viewport: Viewport,
         store: Arc<dyn ReaderStore>,
         book: BookId,
+        typography: Typography,
     ) -> CoreResult<Self> {
         let mut session = Self::open_txt(bytes, caps, viewport)?;
-        session.attach_store(store, book)?;
+        session.attach_store(store, book, typography)?;
         Ok(session)
     }
 
@@ -305,9 +309,10 @@ impl ReaderSession {
         viewport: Viewport,
         store: Arc<dyn ReaderStore>,
         book: BookId,
+        typography: Typography,
     ) -> CoreResult<Self> {
         let mut session = Self::open_pdf(bytes, caps, viewport)?;
-        session.attach_store(store, book)?;
+        session.attach_store(store, book, typography)?;
         Ok(session)
     }
 
@@ -318,17 +323,41 @@ impl ReaderSession {
         viewport: Viewport,
         store: Arc<dyn ReaderStore>,
         book: BookId,
+        typography: Typography,
     ) -> CoreResult<Self> {
         let mut session = Self::open_cbz(bytes, caps, viewport)?;
-        session.attach_store(store, book)?;
+        session.attach_store(store, book, typography)?;
         Ok(session)
     }
 
     /// Resume the saved position for `book` (if any), apply persisted e-ink settings to the
     /// policy (RR23 ↔ RR3), and remember the store for saving.
-    fn attach_store(&mut self, store: Arc<dyn ReaderStore>, book: BookId) -> CoreResult<()> {
+    fn attach_store(
+        &mut self,
+        store: Arc<dyn ReaderStore>,
+        book: BookId,
+        typography: Typography,
+    ) -> CoreResult<()> {
         let settings = store.load_settings()?;
         self.apply_settings(&settings, Some(&book));
+        // Before the first pagination, so it can be served from the cache rather than computed
+        // (#162). Keyed by content fingerprint as well as book id, so replacing the file behind a
+        // book cannot serve a pagination computed for what used to be there.
+        if let Some(identity) = &self.identity {
+            self.document
+                .set_pagination_cache(Box::new(StorePaginationCache::new(
+                    store.clone(),
+                    book.clone(),
+                    identity.fingerprint.to_string(),
+                )));
+        }
+        // Before anything reads a page count. A reflowable document paginates lazily, so applying
+        // the typography here means the one pagination that the resume below triggers is built at
+        // the settings the book will actually be read at — rather than one at the defaults, then
+        // another when the shell applies the real ones (#161/#162).
+        if let Some(page) = self.document.apply_typography(typography, self.page) {
+            self.page = page;
+        }
         if let Some(pos) = store.load_position(&book)? {
             let last = self.page_count().saturating_sub(1);
             // Prefer the reflow-stable pin (RR12-FR4 / #46): a saved EPUB position re-anchors to the
@@ -420,7 +449,7 @@ impl ReaderSession {
         book: BookId,
     ) -> CoreResult<Self> {
         let mut session = Self::with_document(document, caps, viewport);
-        session.attach_store(store, book)?;
+        session.attach_store(store, book, Typography::default())?;
         Ok(session)
     }
 
@@ -815,6 +844,37 @@ impl ReaderSession {
     /// preserving the chapter. `false` for a fixed-layout PDF. Re-render after.
     pub fn set_alignment(&mut self, align_code: i32) -> bool {
         match self.document.set_alignment(align_code, self.page) {
+            Some(new_page) => {
+                self.page = new_page.min(self.page_count().saturating_sub(1));
+                self.invalidate_render_cache(); // repagination changes what each page index renders
+                self.load_ink_for_current_page();
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Report pagination progress to `progress`, and let it cancel a re-pagination (#161). Only
+    /// reflowable documents have anything slow to report; the rest ignore it.
+    pub fn set_pagination_progress(&self, progress: Box<dyn PaginationProgress>) {
+        self.document.set_pagination_progress(progress);
+    }
+
+    /// Apply the whole persisted typography set (text scale, face, line spacing, alignment) in one
+    /// operation, repaginating once (RR4). The open path uses this instead of four separate setters
+    /// so restoring a reader's saved settings costs a single layout pass (#161/#162). `false` for a
+    /// fixed-layout document. Re-render after.
+    pub fn set_typography(
+        &mut self,
+        scale: f32,
+        font_id: i32,
+        line_spacing: f32,
+        align_code: i32,
+    ) -> bool {
+        match self
+            .document
+            .set_typography(scale, font_id, line_spacing, align_code, self.page)
+        {
             Some(new_page) => {
                 self.page = new_page.min(self.page_count().saturating_sub(1));
                 self.invalidate_render_cache(); // repagination changes what each page index renders

@@ -30,6 +30,7 @@ use jni::{Env, EnvUnowned};
 use device_eink::{decode_capabilities, encode_commands, DeviceCapabilities};
 
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use inkread_ink::{InkColor, Tool};
@@ -38,13 +39,13 @@ use crate::budget::TrimLevel;
 use crate::dict::{encode_definition_wire, Dict};
 use crate::document::{
     encode_links_wire, encode_search_wire, encode_selection_wire, encode_toc_wire, DocFormat,
-    NormRect,
+    NormRect, Typography,
 };
 use crate::error::{CoreError, CoreResult};
 use crate::persistence::ink_store::{FsInkStore, InkStore};
 use crate::persistence::sidecar::SidecarPaths;
 use crate::persistence::sqlite::SqliteStore;
-use crate::persistence::{BookId, ReaderStore};
+use crate::persistence::{BookId, PaginationProgress, ReaderStore};
 use crate::render::{PixelBuffer, Viewport};
 use crate::session::{Gesture, ReaderSession};
 use inkread_dict::import::import_stardict;
@@ -207,6 +208,10 @@ pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeOpenDocumen
     dpi: jint,
     db_path: JString<'local>,
     book_id: JString<'local>,
+    scale: jfloat,
+    font_id: jint,
+    line_spacing: jfloat,
+    align_code: jint,
 ) -> jlong {
     env.with_env(|env| -> jni::errors::Result<jlong> {
         let path: String = path.try_to_string(env)?;
@@ -214,29 +219,47 @@ pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeOpenDocumen
         let book_id: String = book_id.try_to_string(env)?;
         let caps = read_caps(env, &caps_bytes)?;
         let viewport = read_viewport(env, width, height, dpi)?;
+        // The reader's saved typography, applied as the document opens. Values are clamped by the
+        // backend, so out-of-range input is settings, not an error (RR21-FR3).
+        let typography = Typography {
+            scale,
+            font_id,
+            line_spacing,
+            align_code,
+        };
 
         let bytes = read_document_file(&path).map_err(|e| throw(env, &e))?;
 
         let book = BookId::new(book_id).map_err(|e| throw(env, &e))?;
+        // A fresh document: no pagination of the previous one is in flight, and no stale cancel
+        // may be left standing or the first re-layout would abandon itself.
+        PAGINATION_CANCEL.store(false, Ordering::Relaxed);
+        PAGINATION_DONE.store(0, Ordering::Relaxed);
+        PAGINATION_TOTAL.store(0, Ordering::Relaxed);
         let store = SqliteStore::open(Path::new(&db_path)).map_err(|e| throw(env, &e))?;
         let store: Arc<dyn ReaderStore> = Arc::new(store);
 
         let opened = match DocFormat::resolve(&path, &bytes) {
             DocFormat::Epub => {
-                ReaderSession::open_epub_with_store(bytes, caps, viewport, store, book)
+                ReaderSession::open_epub_with_store(bytes, caps, viewport, store, book, typography)
             }
             DocFormat::Cbz => {
-                ReaderSession::open_cbz_with_store(bytes, caps, viewport, store, book)
+                ReaderSession::open_cbz_with_store(bytes, caps, viewport, store, book, typography)
             }
             DocFormat::Text => {
-                ReaderSession::open_txt_with_store(bytes, caps, viewport, store, book)
+                ReaderSession::open_txt_with_store(bytes, caps, viewport, store, book, typography)
             }
             DocFormat::Pdf => {
-                ReaderSession::open_pdf_with_store(bytes, caps, viewport, store, book)
+                ReaderSession::open_pdf_with_store(bytes, caps, viewport, store, book, typography)
             }
         };
         match opened {
-            Ok(session) => Ok(Box::into_raw(Box::new(session)) as jlong),
+            Ok(session) => {
+                // Report pagination progress (and accept cancellation) for whatever this document
+                // lays out from here on (#161).
+                session.set_pagination_progress(Box::new(AtomicPaginationProgress));
+                Ok(Box::into_raw(Box::new(session)) as jlong)
+            }
             Err(e) => Err(throw(env, &e)),
         }
     })
@@ -886,6 +909,97 @@ pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeSetAlignmen
     env.with_env(|env| -> jni::errors::Result<jint> {
         let session = unsafe { session_mut(handle) }.map_err(|e| throw(env, &e))?;
         if session.set_alignment(code) {
+            Ok(session.current_page() as jint)
+        } else {
+            Ok(-1)
+        }
+    })
+    .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
+}
+
+// =====================================================================================
+// Pagination progress + cancel (#161).
+//
+// Laying out a large book runs on the shell's engine thread, so the UI thread cannot ask the
+// session about it — that would alias the `&mut` the engine thread is holding. These are plain
+// process-wide atomics instead: no handle, nothing borrowed, safe to poll from any thread while a
+// pagination is in flight. One document is paginated at a time, so one set of counters suffices.
+// =====================================================================================
+static PAGINATION_DONE: AtomicUsize = AtomicUsize::new(0);
+static PAGINATION_TOTAL: AtomicUsize = AtomicUsize::new(0);
+static PAGINATION_CANCEL: AtomicBool = AtomicBool::new(false);
+
+/// The [`PaginationProgress`] the shell sees, backed by the atomics above.
+struct AtomicPaginationProgress;
+
+impl PaginationProgress for AtomicPaginationProgress {
+    fn chapter_done(&self, done: usize, total: usize) {
+        PAGINATION_TOTAL.store(total, Ordering::Relaxed);
+        PAGINATION_DONE.store(done, Ordering::Relaxed);
+    }
+
+    fn cancelled(&self) -> bool {
+        PAGINATION_CANCEL.load(Ordering::Relaxed)
+    }
+}
+
+// nativePaginationProgress() : long — chapters laid out so far, packed as `(done << 32) | total`.
+// `total == 0` means nothing is in flight. Static and lock-free: the shell polls this from the UI
+// thread while the engine thread is inside a repagination.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativePaginationProgress<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+) -> jlong {
+    env.with_env(|_env| -> jni::errors::Result<jlong> {
+        let done = PAGINATION_DONE.load(Ordering::Relaxed) as u64;
+        let total = PAGINATION_TOTAL.load(Ordering::Relaxed) as u64;
+        Ok((((done & 0xFFFF_FFFF) << 32) | (total & 0xFFFF_FFFF)) as jlong)
+    })
+    .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
+}
+
+// nativeCancelPagination(cancel) : void — ask the pagination in flight to stop (true), or clear the
+// flag before starting one (false). A cancelled re-layout leaves the reader on the pagination they
+// already had; the first pagination of a book ignores this, since there is nothing to fall back to.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeCancelPagination<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    cancel: jni::sys::jboolean,
+) {
+    env.with_env(|_env| -> jni::errors::Result<()> {
+        let on = cancel == jni::sys::JNI_TRUE;
+        PAGINATION_CANCEL.store(on, Ordering::Relaxed);
+        if !on {
+            // Starting a fresh pagination: clear the previous one's counters so a stale
+            // "58/60" is never shown against the new run.
+            PAGINATION_DONE.store(0, Ordering::Relaxed);
+            PAGINATION_TOTAL.store(0, Ordering::Relaxed);
+        }
+        Ok(())
+    })
+    .resolve::<jni::errors::ThrowRuntimeExAndDefault>();
+}
+
+// nativeSetTypography(handle, scale, fontId, lineSpacing, alignCode) : int — apply all four reflow
+// typography settings and repaginate ONCE (RR4). The open path restores persisted settings with
+// this instead of four separate calls: one repagination instead of four, which on a large book is
+// the difference between opening in seconds and opening in minutes (#161/#162). Returns the new
+// page index, or -1 for a fixed-layout PDF. Re-render after.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeSetTypography<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+    scale: jfloat,
+    font_id: jint,
+    line_spacing: jfloat,
+    align_code: jint,
+) -> jint {
+    env.with_env(|env| -> jni::errors::Result<jint> {
+        let session = unsafe { session_mut(handle) }.map_err(|e| throw(env, &e))?;
+        if session.set_typography(scale, font_id, line_spacing, align_code) {
             Ok(session.current_page() as jint)
         } else {
             Ok(-1)

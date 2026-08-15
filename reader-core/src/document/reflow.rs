@@ -10,15 +10,17 @@
 //! repaginates, preserving the chapter). `word_at`/`text_in_rect` (dictionary + selection on reflow
 //! text) remain follow-ups.
 
-use std::cell::{Cell, RefCell};
+use std::cell::{Cell, Ref, RefCell};
 
 use inkread_epub::layout::{paginate_with, Align, Hyphenator, LayoutOpts, Page};
+use inkread_epub::measure::{CachedHyphenator, CachedMetrics};
 use inkread_epub::render::{render_page as raster_page, AbFont, EnHyphenator, GrayCanvas};
 use inkread_epub::{parse_blocks, Block, EpubPackage, NavPoint};
 
 use crate::document::text_select::{self, CharBox, NormRect, TextAnchor, TextSelection};
 use crate::document::{Document, DocumentMetadata, SearchMatch, TocEntry};
 use crate::error::{CoreError, CoreResult};
+use crate::persistence::{PaginationCache, PaginationProgress};
 use crate::position::PinPosition;
 use crate::render::PixelBuffer;
 
@@ -30,13 +32,85 @@ const BASE_FONT_PX: f32 = 56.0;
 const MIN_SCALE: f32 = 0.6;
 const MAX_SCALE: f32 = 3.0;
 
-/// A pagination of the whole book for one (viewport, font-size) — recomputed on a metrics change.
+/// Default line-spacing multiple (RR4). Mirrors the shell's `DisplayPrefs.DEFAULT_LINE_SPACING`.
+const DEFAULT_LINE_SPACING: f32 = 1.4;
+
+/// How many materialized chapters to keep. Reading walks forward through one chapter at a time, so
+/// a couple of entries covers a page turn across a chapter boundary and a jump back, while keeping
+/// the retained page structures bounded regardless of how long the book is.
+const CHAPTER_CACHE: usize = 3;
+
+/// The settings a pagination was built for, exactly as the reader set them.
+///
+/// Staleness is decided by comparing this — not the [`LayoutOpts`] derived from it — and a
+/// cancelled re-layout restores it verbatim. Comparing derived values instead would mean
+/// reconstructing the settings on the revert path (recovering `scale` by dividing `font_px` back
+/// out, and so on); any float that failed to round-trip would leave the surviving pagination
+/// looking permanently stale, so every later read would re-run the work the reader just cancelled.
+/// Keeping the compared value and the restored value the same thing removes that class of bug
+/// rather than relying on the arithmetic to be exact.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct LayoutRequest {
+    /// Page size in device pixels.
+    viewport: (u32, u32),
+    /// User text scale; `1.0` = [`BASE_FONT_PX`]. Always finite (see [`clamp_scale`]), so the
+    /// derived `PartialEq` can never be defeated by a NaN.
+    scale: f32,
+    line_spacing: f32,
+    align: Align,
+    /// The bundled reading face. Not part of [`LayoutOpts`], but a different face means different
+    /// metrics, so it belongs in the staleness key.
+    font_id: usize,
+}
+
+/// A pagination of the whole book for one set of layout parameters — rebuilt only when those
+/// parameters actually change (see [`EpubBackend::laid`]).
+///
+/// This is the **index only**: where each chapter starts and how long the book is. The pages
+/// themselves are materialized per chapter on demand ([`EpubBackend::with_page`]), because holding
+/// every page of a long book costs tens of megabytes of positioned runs for content that is not on
+/// screen — and because the index is the part worth persisting across launches (#162).
 struct Laid {
+    /// What was asked for.
+    request: LayoutRequest,
+    /// What that resolved to for the layout engine.
     opts: LayoutOpts,
-    /// All pages across all chapters, concatenated (a single global page index).
-    pages: Vec<Page>,
     /// `chapter_start[i]` = the global page index where chapter `i` begins (TOC resolution).
     chapter_start: Vec<usize>,
+    /// Total pages across every chapter.
+    total_pages: usize,
+}
+
+impl Laid {
+    /// Build the index from per-chapter page counts. Every chapter occupies at least one page, so
+    /// the chapter→page mapping stays 1:1 even for an empty chapter.
+    fn from_chapter_pages(
+        request: LayoutRequest,
+        opts: LayoutOpts,
+        chapter_pages: &[usize],
+    ) -> Self {
+        let mut chapter_start = Vec::with_capacity(chapter_pages.len());
+        let mut total_pages = 0;
+        for &pages in chapter_pages {
+            chapter_start.push(total_pages);
+            total_pages += pages.max(1);
+        }
+        Self {
+            request,
+            opts,
+            chapter_start,
+            // A book with no chapters at all still presents one (blank) page.
+            total_pages: total_pages.max(1),
+        }
+    }
+
+    /// The chapter index that global `page` falls in (the last chapter whose start ≤ page).
+    fn chapter_of(&self, page: usize) -> usize {
+        self.chapter_start
+            .iter()
+            .rposition(|&start| start <= page)
+            .unwrap_or(0)
+    }
 }
 
 /// The EPUB backend: parsed per-chapter content + the embedded reading face, with a cached layout.
@@ -53,14 +127,28 @@ pub struct EpubBackend {
     font: RefCell<AbFont>,
     /// Soft-hyphenation for justified/narrow lines (book typography, like KOReader).
     hyph: EnHyphenator,
+    /// The bundled-face index behind [`Self::font`], kept alongside it as the layout cache key.
+    font_id: Cell<usize>,
     /// User text scale (font size); `1.0` = [`BASE_FONT_PX`]. Drives repagination.
     scale: Cell<f32>,
-    /// Line-spacing multiple (RR4 — default 1.4). Drives repagination.
+    /// Line-spacing multiple (RR4 — default [`DEFAULT_LINE_SPACING`]). Drives repagination.
     line_spacing: Cell<f32>,
-    /// Text alignment (RR4 — default Left). Drives repagination.
+    /// Text alignment (RR4 — default Left, matching every other reflow default). Drives repagination.
     align: Cell<Align>,
-    /// The current pagination; recomputed when the viewport or scale changes.
-    laid: RefCell<Laid>,
+    /// The page size to lay out for; updated by the render path when the buffer changes.
+    viewport: Cell<(u32, u32)>,
+    /// The current pagination index, or `None` before the first one is needed. Laying out lazily
+    /// lets the open path apply the reader's saved typography *before* any pagination is built, so
+    /// a cold open costs a single layout pass instead of one per setting (#161/#162).
+    laid: RefCell<Option<Laid>>,
+    /// Recently materialized chapters as `(chapter index, its pages)`, most recent last. Bounded by
+    /// [`CHAPTER_CACHE`] and cleared whenever [`Self::laid`] is rebuilt, since a re-layout
+    /// invalidates every page in it.
+    chapter_pages: RefCell<Vec<(usize, Vec<Page>)>>,
+    /// Where paginations survive between launches, once a store is attached (#162).
+    pagination_cache: RefCell<Option<Box<dyn PaginationCache>>>,
+    /// Where a pagination in flight is reported, and where cancellation is asked about (#161).
+    progress: RefCell<Option<Box<dyn PaginationProgress>>>,
 }
 
 impl EpubBackend {
@@ -75,95 +163,234 @@ impl EpubBackend {
             title: pkg.title.clone(),
             author: pkg.author.clone(),
         };
-        let font = AbFont::default_font();
-        let hyph = EnHyphenator::new();
-        let laid = layout_all(
-            &chapters,
-            &font,
-            &hyph,
-            viewport.width,
-            viewport.height,
-            BASE_FONT_PX,
-            1.4,
-            Align::Justify,
-        );
         Ok(Self {
             chapters,
             chapter_keys,
             nav: pkg.toc,
             meta,
-            font: RefCell::new(font),
-            hyph,
+            font: RefCell::new(AbFont::default_font()),
+            hyph: EnHyphenator::new(),
+            font_id: Cell::new(0),
             scale: Cell::new(1.0),
-            line_spacing: Cell::new(1.4),
-            align: Cell::new(Align::Justify),
-            laid: RefCell::new(laid),
+            line_spacing: Cell::new(DEFAULT_LINE_SPACING),
+            align: Cell::new(Align::default()),
+            viewport: Cell::new((viewport.width, viewport.height)),
+            // Deferred: the first read paginates, so the saved typography applied right after open
+            // is folded into that single pass rather than triggering one pass per setting.
+            laid: RefCell::new(None),
+            chapter_pages: RefCell::new(Vec::new()),
+            pagination_cache: RefCell::new(None),
+            progress: RefCell::new(None),
         })
     }
 
-    /// The effective body font size for the current user scale.
-    fn font_px(&self) -> f32 {
-        BASE_FONT_PX * self.scale.get()
+    /// A backend over `chapters` of pre-parsed blocks, bypassing the container. Lets a test build a
+    /// book with enough chapters to exercise the chapter cache's eviction, which the small bundled
+    /// fixture cannot. Everything downstream — indexing, materialization, caching — is the real path.
+    #[cfg(test)]
+    fn from_chapters(chapters: Vec<Vec<Block>>, viewport: crate::render::Viewport) -> Self {
+        let chapter_keys = (0..chapters.len())
+            .map(|i| format!("ch{i}.xhtml"))
+            .collect();
+        Self {
+            chapters,
+            chapter_keys,
+            nav: Vec::new(),
+            meta: DocumentMetadata {
+                title: Some("Synthetic".into()),
+                author: None,
+            },
+            font: RefCell::new(AbFont::default_font()),
+            hyph: EnHyphenator::new(),
+            font_id: Cell::new(0),
+            scale: Cell::new(1.0),
+            line_spacing: Cell::new(DEFAULT_LINE_SPACING),
+            align: Cell::new(Align::default()),
+            viewport: Cell::new((viewport.width, viewport.height)),
+            laid: RefCell::new(None),
+            chapter_pages: RefCell::new(Vec::new()),
+            pagination_cache: RefCell::new(None),
+            progress: RefCell::new(None),
+        }
     }
 
-    /// Repaginate if the requested buffer dimensions or the effective font size differ from the
-    /// cached layout.
-    fn ensure_laid(&self, w: u32, h: u32) {
-        let font_px = self.font_px();
-        let needs = {
-            let laid = self.laid.borrow();
-            laid.opts.page_w as u32 != w
-                || laid.opts.page_h as u32 != h
-                || (laid.opts.font_px - font_px).abs() > 0.01
+    /// Lay out chapter `index` on its own. Pagination is per chapter by construction — a chapter
+    /// always starts a fresh page and nothing carries across the boundary — so a chapter laid out
+    /// alone is identical to its slice of a whole-book pass. That is what makes materializing one
+    /// chapter at a time sound rather than merely convenient.
+    fn lay_out_chapter(&self, index: usize, opts: &LayoutOpts) -> Vec<Page> {
+        let Some(blocks) = self.chapters.get(index) else {
+            return vec![Page::default()];
         };
-        if needs {
-            let fresh = layout_all(
-                &self.chapters,
-                &self.font.borrow(),
-                &self.hyph,
-                w,
-                h,
-                font_px,
-                self.line_spacing.get(),
-                self.align.get(),
-            );
-            *self.laid.borrow_mut() = fresh;
+        let face = self.font.borrow();
+        let font = CachedMetrics::new(&*face);
+        let hyph = CachedHyphenator::new(&self.hyph);
+        let mut pages = paginate_with(blocks, opts, &font, &hyph);
+        if pages.is_empty() {
+            pages.push(Page::default()); // an empty chapter still occupies its one page
         }
+        pages
+    }
+
+    /// Run `f` against global `page` and the layout parameters it was laid out with, materializing
+    /// its chapter if it is not already cached. `None` for a page past the end of the book.
+    fn with_page<R>(&self, page: usize, f: impl FnOnce(&Page, &LayoutOpts) -> R) -> Option<R> {
+        let (chapter, offset, opts) = {
+            let laid = self.laid();
+            if page >= laid.total_pages {
+                return None;
+            }
+            let chapter = laid.chapter_of(page);
+            let start = laid.chapter_start.get(chapter).copied().unwrap_or(0);
+            (chapter, page - start, laid.opts)
+        };
+
+        if let Some(hit) = self
+            .chapter_pages
+            .borrow()
+            .iter()
+            .find(|(c, _)| *c == chapter)
+        {
+            return hit.1.get(offset).map(|p| f(p, &opts));
+        }
+
+        let pages = self.lay_out_chapter(chapter, &opts);
+        let result = pages.get(offset).map(|p| f(p, &opts));
+        let mut cache = self.chapter_pages.borrow_mut();
+        if cache.len() >= CHAPTER_CACHE {
+            cache.remove(0); // oldest out; the tail is what reading is walking through
+        }
+        cache.push((chapter, pages));
+        result
+    }
+
+    /// The settings currently asked for. Comparing this against [`Laid::request`] is what makes a
+    /// redundant repagination free.
+    fn current_request(&self) -> LayoutRequest {
+        LayoutRequest {
+            viewport: self.viewport.get(),
+            scale: self.scale.get(),
+            line_spacing: self.line_spacing.get(),
+            align: self.align.get(),
+            font_id: self.font_id.get(),
+        }
+    }
+
+    /// Resolve a request into the layout engine's parameters.
+    fn opts_for(request: &LayoutRequest) -> LayoutOpts {
+        let (w, h) = request.viewport;
+        let mut opts = LayoutOpts::new(w as f32, h as f32, BASE_FONT_PX * request.scale);
+        opts.line_spacing = request.line_spacing;
+        opts.align = request.align;
+        opts
+    }
+
+    /// The current pagination, built on first use and rebuilt **only** when the requested layout
+    /// parameters or the reading face actually differ from the cached ones.
+    fn laid(&self) -> Ref<'_, Laid> {
+        let request = self.current_request();
+        let stale = match self.laid.borrow().as_ref() {
+            None => true,
+            Some(laid) => laid.request != request,
+        };
+        if stale {
+            let opts = Self::opts_for(&request);
+            let key = layout_key(&opts, request.font_id, self.chapters.len());
+            let cache = self.pagination_cache.borrow();
+
+            // A stored pagination is only usable if it describes this book's chapters — a count
+            // mismatch means the key collided or the content moved under it, and trusting it would
+            // put the reader on the wrong page rather than merely make the book slow to open.
+            let cached = cache
+                .as_ref()
+                .and_then(|c| c.load(&key))
+                .filter(|pages| pages.len() == self.chapters.len());
+
+            let chapter_pages = match cached {
+                Some(hit) => Some(hit),
+                None => {
+                    let progress = self.progress.borrow();
+                    // A book being laid out for the first time has nothing to fall back to, so
+                    // that pass reports progress but cannot be cancelled — only a re-layout can.
+                    let cancellable = self.laid.borrow().is_some();
+                    let counted = index_chapters(
+                        &self.chapters,
+                        &self.font.borrow(),
+                        &self.hyph,
+                        &opts,
+                        progress.as_deref(),
+                        cancellable,
+                    );
+                    if let (Some(counted), Some(c)) = (counted.as_ref(), cache.as_ref()) {
+                        c.save(&key, counted);
+                    }
+                    counted
+                }
+            };
+            drop(cache);
+
+            match chapter_pages {
+                Some(pages) => {
+                    // Every cached page belongs to the layout being replaced.
+                    self.chapter_pages.borrow_mut().clear();
+                    *self.laid.borrow_mut() = Some(Laid::from_chapter_pages(request, opts, &pages));
+                }
+                // Abandoned: put the requested parameters back to the ones the surviving
+                // pagination was built with. Leaving them changed would make it look permanently
+                // stale, and every later read would restart the work the reader just cancelled.
+                None => self.revert_request_to_laid(),
+            }
+        }
+        // Materialized directly above and never taken back out, so the borrow is always `Some`.
+        Ref::map(self.laid.borrow(), |slot| {
+            slot.as_ref().expect("pagination materialized above")
+        })
+    }
+
+    /// Roll the requested settings back to those of the pagination still in force, after a
+    /// re-layout was cancelled (#161). Restores the very value the staleness check compares, so the
+    /// surviving pagination reads as current again and the abandoned work is not retried.
+    fn revert_request_to_laid(&self) {
+        let Some(request) = self.laid.borrow().as_ref().map(|laid| laid.request) else {
+            return;
+        };
+        self.viewport.set(request.viewport);
+        self.scale.set(request.scale);
+        self.line_spacing.set(request.line_spacing);
+        self.align.set(request.align);
+        self.apply_font(request.font_id as i32);
     }
 
     /// Repaginate at the current viewport/scale, anchoring the reading position to the chapter
     /// `current_page` is in, and return that chapter's new start page (RR4 line-spacing/alignment).
     fn repaginate_keeping_chapter(&self, current_page: usize) -> Option<usize> {
-        let chapter = self.chapter_of(current_page);
-        let (w, h) = {
-            let laid = self.laid.borrow();
-            (laid.opts.page_w as u32, laid.opts.page_h as u32)
+        // Resolve the chapter against the pagination *as it stands* — the caller has already
+        // applied the new setting, so going through `laid()` here would rebuild first and then
+        // map `current_page` through the new pagination, landing in the wrong chapter.
+        let chapter = match self.laid.borrow().as_ref() {
+            // Nothing paginated yet (the open path applying saved typography): there is no reading
+            // position to preserve, and returning without laying out keeps a cold open to one pass.
+            None => return Some(0),
+            Some(laid) => laid
+                .chapter_start
+                .iter()
+                .rposition(|&start| start <= current_page)
+                .unwrap_or(0),
         };
-        let fresh = layout_all(
-            &self.chapters,
-            &self.font.borrow(),
-            &self.hyph,
-            w,
-            h,
-            self.font_px(),
-            self.line_spacing.get(),
-            self.align.get(),
-        );
-        let target = fresh.chapter_start.get(chapter).copied().unwrap_or(0);
-        *self.laid.borrow_mut() = fresh;
-        Some(target)
+        // Rebuilds only if something really changed — re-picking the value already in effect in
+        // the Adjust sheet costs nothing.
+        Some(self.laid().chapter_start.get(chapter).copied().unwrap_or(0))
     }
 
     /// The page's glyphs as normalized [`CharBox`]es — the input to the pure selection + search
     /// logic (RR11 / RR2). Mirrors the PDF backend's `page_chars`: the layout's positioned glyphs
     /// (pixel space) normalized to `[0,1]`. An out-of-range page contributes nothing (RR21-FR3).
     fn page_chars(&self, index: usize) -> Vec<CharBox> {
-        let laid = self.laid.borrow();
-        let Some(page) = laid.pages.get(index) else {
-            return Vec::new();
-        };
         // Shared with the PDF-reflow backend so the glyph→CharBox + anchor mapping lives once.
-        crate::document::reflow_view::page_charboxes(page, &laid.opts, &self.font.borrow())
+        self.with_page(index, |page, opts| {
+            crate::document::reflow_view::page_charboxes(page, opts, &self.font.borrow())
+        })
+        .unwrap_or_default()
     }
 
     /// Frame a chapter-relative [`TextAnchor`] into a full [`PinPosition`] (RR6) for `chapter`. The
@@ -197,7 +424,7 @@ impl EpubBackend {
     /// re-anchoring that makes a highlight/Digest survive a font-size change (RR12-FR4). Picks, within
     /// the pin's chapter, the last page whose first anchored glyph is at or before the pin's offset.
     pub(crate) fn pin_to_page(&self, pin: &PinPosition) -> usize {
-        let laid = self.laid.borrow();
+        let laid = self.laid();
         // Clamp a foreign/corrupt chapter index into range rather than scanning the whole book.
         let chapter =
             (pin.chapter_index.max(0) as usize).min(laid.chapter_start.len().saturating_sub(1));
@@ -206,7 +433,7 @@ impl EpubBackend {
             .chapter_start
             .get(chapter + 1)
             .copied()
-            .unwrap_or(laid.pages.len());
+            .unwrap_or(laid.total_pages);
         drop(laid);
         let target = pin.text_offset.max(0);
         let mut best = start;
@@ -234,19 +461,29 @@ impl EpubBackend {
         Some((self.pin_at(chapter, start), self.pin_at(chapter, end)))
     }
 
+    /// Swap the reading face to the bundled `font_id`, recording the **normalized** index as the
+    /// layout cache key. `AbFont::for_face` maps an out-of-range id onto the default face, so
+    /// normalizing here keeps "id 99" and "id 0" from looking like a face change (RR21-FR3).
+    fn apply_font(&self, font_id: i32) {
+        let id = match usize::try_from(font_id) {
+            Ok(id) if id < inkread_epub::reading_font_names().len() => id,
+            _ => 0,
+        };
+        if id != self.font_id.get() {
+            *self.font.borrow_mut() = AbFont::for_face(id);
+            self.font_id.set(id);
+        }
+    }
+
     /// The chapter index that global `page` falls in (the last chapter whose start ≤ page).
     fn chapter_of(&self, page: usize) -> usize {
-        let laid = self.laid.borrow();
-        laid.chapter_start
-            .iter()
-            .rposition(|&start| start <= page)
-            .unwrap_or(0)
+        self.laid().chapter_of(page)
     }
 }
 
 impl Document for EpubBackend {
     fn page_count(&self) -> usize {
-        self.laid.borrow().pages.len()
+        self.laid().total_pages
     }
 
     fn metadata(&self) -> DocumentMetadata {
@@ -254,15 +491,19 @@ impl Document for EpubBackend {
     }
 
     fn render_page(&self, index: usize, buf: &mut PixelBuffer<'_>) -> CoreResult<()> {
-        self.ensure_laid(buf.width(), buf.height());
-        let laid = self.laid.borrow();
-        let page = laid.pages.get(index).ok_or(CoreError::PageOutOfRange {
-            requested: index,
-            available: laid.pages.len(),
-        })?;
+        self.viewport.set((buf.width(), buf.height()));
+        let (w, h) = (buf.width(), buf.height());
+        let canvas = self
+            .with_page(index, |page, opts| {
+                let mut canvas = GrayCanvas::new(w, h);
+                raster_page(page, opts, &self.font.borrow(), &mut canvas);
+                canvas
+            })
+            .ok_or(CoreError::PageOutOfRange {
+                requested: index,
+                available: self.laid().total_pages,
+            })?;
         buf.fill_white();
-        let mut canvas = GrayCanvas::new(buf.width(), buf.height());
-        raster_page(page, &laid.opts, &self.font.borrow(), &mut canvas);
         // Expand 8-bit grayscale → opaque RGBA (CHANNEL_ORDER r,g,b,a). One byte → three equal.
         let dst = buf.bytes_mut();
         for (i, &g) in canvas.pixels.iter().enumerate() {
@@ -276,7 +517,7 @@ impl Document for EpubBackend {
     }
 
     fn toc(&self) -> Vec<TocEntry> {
-        let laid = self.laid.borrow();
+        let laid = self.laid();
         self.nav
             .iter()
             .map(|n| resolve_nav(n, &self.chapter_keys, &laid.chapter_start))
@@ -302,24 +543,14 @@ impl Document for EpubBackend {
     }
 
     fn set_text_scale(&self, scale: f32, current_page: usize) -> Option<usize> {
-        let scale = if scale.is_finite() {
-            scale.clamp(MIN_SCALE, MAX_SCALE)
-        } else {
-            1.0
-        };
         // Anchor the reading position to the current chapter, repaginate at the new size, then
         // return that chapter's new start page so the reader stays put across the reflow.
-        self.scale.set(scale);
+        self.scale.set(clamp_scale(scale));
         self.repaginate_keeping_chapter(current_page)
     }
 
     fn set_line_spacing(&self, mult: f32, current_page: usize) -> Option<usize> {
-        let mult = if mult.is_finite() {
-            mult.clamp(1.0, 2.5)
-        } else {
-            1.4
-        };
-        self.line_spacing.set(mult);
+        self.line_spacing.set(clamp_line_spacing(mult));
         self.repaginate_keeping_chapter(current_page)
     }
 
@@ -330,7 +561,30 @@ impl Document for EpubBackend {
 
     fn set_font(&self, font_id: i32, current_page: usize) -> Option<usize> {
         // Swap the reading face, then repaginate (new metrics → new line breaks), keeping the chapter.
-        *self.font.borrow_mut() = AbFont::for_face(font_id.max(0) as usize);
+        self.apply_font(font_id);
+        self.repaginate_keeping_chapter(current_page)
+    }
+
+    fn set_pagination_cache(&self, cache: Box<dyn PaginationCache>) {
+        *self.pagination_cache.borrow_mut() = Some(cache);
+    }
+
+    fn set_pagination_progress(&self, progress: Box<dyn PaginationProgress>) {
+        *self.progress.borrow_mut() = Some(progress);
+    }
+
+    fn set_typography(
+        &self,
+        scale: f32,
+        font_id: i32,
+        line_spacing: f32,
+        align_code: i32,
+        current_page: usize,
+    ) -> Option<usize> {
+        self.scale.set(clamp_scale(scale));
+        self.apply_font(font_id);
+        self.line_spacing.set(clamp_line_spacing(line_spacing));
+        self.align.set(Align::from_code(align_code));
         self.repaginate_keeping_chapter(current_page)
     }
 
@@ -350,39 +604,91 @@ impl Document for EpubBackend {
     }
 }
 
-/// Paginate every chapter for `(w, h, font_px, line_spacing, align)`; each chapter starts a page.
-#[allow(clippy::too_many_arguments)]
-fn layout_all(
+/// Clamp a user text scale into the supported range; a non-finite value falls back to `1.0`
+/// (RR21-FR3 — the value crosses JNI, so it is validated here rather than trusted).
+fn clamp_scale(scale: f32) -> f32 {
+    if scale.is_finite() {
+        scale.clamp(MIN_SCALE, MAX_SCALE)
+    } else {
+        1.0
+    }
+}
+
+/// Clamp a line-spacing multiple; a non-finite value falls back to [`DEFAULT_LINE_SPACING`].
+fn clamp_line_spacing(mult: f32) -> f32 {
+    if mult.is_finite() {
+        mult.clamp(1.0, 2.5)
+    } else {
+        DEFAULT_LINE_SPACING
+    }
+}
+
+// Counts pagination passes on the current thread. Cost here is invisible to correctness tests —
+// a redundant pass produces an identical layout — so the guard against one has to be asserted
+// directly (#161/#162). Thread-local so parallel tests don't see each other's passes.
+#[cfg(test)]
+thread_local! {
+    static LAYOUT_PASSES: Cell<usize> = const { Cell::new(0) };
+}
+
+/// Pagination passes performed on this thread since [`reset_layout_passes`].
+#[cfg(test)]
+pub(crate) fn layout_passes() -> usize {
+    LAYOUT_PASSES.with(Cell::get)
+}
+
+#[cfg(test)]
+pub(crate) fn reset_layout_passes() {
+    LAYOUT_PASSES.with(|c| c.set(0));
+}
+
+/// The cache key for one exact layout of one book (ADR-INKREAD-0013 D1 / RR9-FR3, #162).
+///
+/// [`LayoutOpts::layout_digest`] is the canonical discriminator — FNV-1a-64 over every
+/// layout-affecting field, pinned by a regression test precisely because it keys persisted data and
+/// must stay stable across toolchains. Two things the digest cannot know are appended here: the
+/// **reading face**, which changes the metrics without appearing in `LayoutOpts`, and the **chapter
+/// count**, so a stored pagination can never be read back against a book of a different shape.
+fn layout_key(opts: &LayoutOpts, font_id: usize, chapters: usize) -> String {
+    format!("v1|{:016x}|{font_id}|{chapters}", opts.layout_digest())
+}
+
+/// Paginate every chapter for `opts` and return how many pages each occupies.
+///
+/// The pages themselves are dropped as they are counted: this pass exists to build the index, and
+/// retaining every page of a long book is exactly the memory cost lazy materialization removes.
+/// Peak memory here is one chapter, not the whole book.
+/// Progress is reported throughout. `cancellable` says whether `progress` is also allowed to stop
+/// the pass — a book being laid out for the first time has nothing to fall back to, so that one
+/// always runs to completion. `None` means the pass was abandoned part-way (#161).
+fn index_chapters(
     chapters: &[Vec<Block>],
     font: &AbFont,
     hyph: &dyn Hyphenator,
-    w: u32,
-    h: u32,
-    font_px: f32,
-    line_spacing: f32,
-    align: Align,
-) -> Laid {
-    let mut opts = LayoutOpts::new(w as f32, h as f32, font_px);
-    opts.line_spacing = line_spacing;
-    opts.align = align;
-    let mut pages = Vec::new();
-    let mut chapter_start = Vec::with_capacity(chapters.len());
+    opts: &LayoutOpts,
+    progress: Option<&dyn PaginationProgress>,
+    cancellable: bool,
+) -> Option<Vec<usize>> {
+    #[cfg(test)]
+    LAYOUT_PASSES.with(|c| c.set(c.get() + 1));
+    // Memoize measurement across the *whole book*, not per chapter: prose repeats itself, and the
+    // widths a later chapter needs have almost all been computed by an earlier one (#161/#162).
+    let font = CachedMetrics::new(font);
+    let hyph = CachedHyphenator::new(hyph);
+    let total = chapters.len();
+    let mut counts = Vec::with_capacity(total);
     for blocks in chapters {
-        chapter_start.push(pages.len());
-        let mut cps = paginate_with(blocks, &opts, font, hyph);
-        if cps.is_empty() {
-            cps.push(Page::default()); // keep a 1:1 chapter→start mapping even for an empty chapter
+        // Asked before each chapter rather than after, so a cancel taken during the last chapter
+        // still avoids the work rather than only the bookkeeping.
+        if cancellable && progress.is_some_and(PaginationProgress::cancelled) {
+            return None;
         }
-        pages.append(&mut cps);
+        counts.push(paginate_with(blocks, opts, &font, &hyph).len().max(1));
+        if let Some(p) = progress {
+            p.chapter_done(counts.len(), total);
+        }
     }
-    if pages.is_empty() {
-        pages.push(Page::default());
-    }
-    Laid {
-        opts,
-        pages,
-        chapter_start,
-    }
+    Some(counts)
 }
 
 /// Resolve a [`NavPoint`] into a [`TocEntry`] with a page target (matched by resource basename).
@@ -418,289 +724,5 @@ fn basename(href: &str) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::render::Viewport;
-
-    const SAMPLE: &[u8] = include_bytes!("../../tests/fixtures/sample.epub");
-
-    fn vp(w: u32, h: u32) -> Viewport {
-        Viewport {
-            width: w,
-            height: h,
-            dpi: 226,
-        }
-    }
-
-    fn render(backend: &EpubBackend, index: usize, w: u32, h: u32) -> Vec<u8> {
-        let mut bytes = vec![0u8; (w * h * 4) as usize];
-        let mut buf = PixelBuffer::from_rgba(&mut bytes, w, h).unwrap();
-        backend.render_page(index, &mut buf).unwrap();
-        bytes
-    }
-
-    /// Host preview (#66): render a compiled Daily issue EPUB to PNGs so the reading experience can
-    /// be eyeballed on a host (the e-ink screencap is black). Run:
-    ///   `INKREAD_ISSUE_EPUB=/path/issue.epub cargo test -p reader-core daily_render_dump -- --ignored --nocapture`
-    /// → writes `target/daily-preview/page-NN.png`. Driven by `scripts/daily-preview.sh`.
-    #[test]
-    #[ignore = "host preview: needs INKREAD_ISSUE_EPUB=<path>; run with --ignored --nocapture"]
-    fn daily_render_dump() {
-        let Ok(path) = std::env::var("INKREAD_ISSUE_EPUB") else {
-            eprintln!("SKIP daily_render_dump: set INKREAD_ISSUE_EPUB to a compiled issue .epub");
-            return;
-        };
-        let bytes = std::fs::read(&path).expect("issue epub readable");
-        let env_u32 = |k: &str, d: u32| {
-            std::env::var(k)
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(d)
-        };
-        let (w, h) = (env_u32("INKREAD_W", 790), env_u32("INKREAD_H", 1024)); // device panel for real preview
-        let b = EpubBackend::open(bytes, vp(w, h)).expect("open issue epub");
-        let out = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../target/daily-preview");
-        std::fs::create_dir_all(&out).unwrap();
-        let pages = b.page_count().min(10);
-        for i in 0..pages {
-            let px = render(&b, i, w, h);
-            let f = std::io::BufWriter::new(
-                std::fs::File::create(out.join(format!("page-{i:02}.png"))).unwrap(),
-            );
-            let mut enc = png::Encoder::new(f, w, h);
-            enc.set_color(png::ColorType::Rgba);
-            enc.set_depth(png::BitDepth::Eight);
-            enc.write_header().unwrap().write_image_data(&px).unwrap();
-        }
-        eprintln!("wrote {pages} page PNGs to {}", out.display());
-    }
-
-    #[test]
-    fn opens_paginates_and_exposes_metadata() {
-        let b = EpubBackend::open(SAMPLE.to_vec(), vp(400, 600)).unwrap();
-        assert_eq!(b.metadata().title.as_deref(), Some("Reflow Sample"));
-        // Two chapters, each ≥ 1 page.
-        assert!(b.page_count() >= 2, "pages = {}", b.page_count());
-    }
-
-    #[test]
-    fn renders_ink_and_respects_page_range() {
-        let b = EpubBackend::open(SAMPLE.to_vec(), vp(400, 600)).unwrap();
-        let px = render(&b, 0, 400, 600);
-        let inked = px.chunks_exact(4).filter(|p| p[0] < 250).count();
-        assert!(inked > 50, "first page has rendered text: {inked}");
-
-        let mut bytes = vec![0u8; 400 * 600 * 4];
-        let mut buf = PixelBuffer::from_rgba(&mut bytes, 400, 600).unwrap();
-        assert!(matches!(
-            b.render_page(9999, &mut buf),
-            Err(CoreError::PageOutOfRange { .. })
-        ));
-    }
-
-    #[test]
-    fn toc_resolves_to_page_targets() {
-        let b = EpubBackend::open(SAMPLE.to_vec(), vp(400, 600)).unwrap();
-        let toc = b.toc();
-        assert_eq!(toc.len(), 2, "two nav points");
-        assert_eq!(toc[0].title, "Chapter One");
-        assert_eq!(toc[0].target_page, Some(0), "ch1 starts at page 0");
-        assert!(
-            toc[1].target_page.unwrap() >= 1,
-            "ch2 starts on a later page: {:?}",
-            toc[1].target_page
-        );
-    }
-
-    #[test]
-    fn larger_text_scale_repaginates_and_keeps_the_chapter() {
-        let b = EpubBackend::open(SAMPLE.to_vec(), vp(400, 600)).unwrap();
-        let _ = render(&b, 0, 400, 600); // settle the layout at this viewport
-        let base_pages = b.page_count();
-        // Reader is in chapter 2; bumping the size should land us back at chapter 2's new start.
-        let ch2_start = b.toc()[1].target_page.unwrap();
-        let new_page = b.set_text_scale(1.8, ch2_start).unwrap();
-        assert!(
-            b.page_count() >= base_pages,
-            "bigger text ⇒ at least as many pages"
-        );
-        // The returned page is chapter 2's start under the new pagination.
-        assert_eq!(new_page, b.toc()[1].target_page.unwrap());
-        // PDF-style fixed layout would return None; EPUB returns Some.
-        assert!(b.set_text_scale(1.0, 0).is_some());
-    }
-
-    #[test]
-    fn set_font_repaginates_and_lists_faces() {
-        let b = EpubBackend::open(SAMPLE.to_vec(), vp(400, 600)).unwrap();
-        let _ = render(&b, 0, 400, 600);
-        let ch2_start = b.toc()[1].target_page.unwrap();
-        // Switching the reading face repaginates (EPUB → Some), landing back at chapter 2's start.
-        let new_page = b.set_font(2, ch2_start).unwrap();
-        assert_eq!(new_page, b.toc()[1].target_page.unwrap());
-        // An out-of-range id falls back to the default face, still repaginating.
-        assert!(b.set_font(999, 0).is_some());
-        // The bundled set is exposed for the picker (Spectral + the KOReader OSS faces).
-        let names = inkread_epub::reading_font_names();
-        assert!(
-            names.len() >= 4 && names[0] == "Spectral",
-            "faces: {names:?}"
-        );
-    }
-
-    /// The source character a pin currently resolves to: the glyph on `pin_to_page(pin)` whose anchor
-    /// matches the pin's block + offset.
-    fn char_at(b: &EpubBackend, pin: &PinPosition) -> Option<char> {
-        let page = b.pin_to_page(pin);
-        b.page_chars(page).into_iter().find_map(|c| {
-            c.anchor.and_then(|a| {
-                (a.block as i32 == pin.xpath[0] && a.char_offset as i32 == pin.text_offset)
-                    .then_some(c.ch)
-            })
-        })
-    }
-
-    #[test]
-    fn page_pin_anchors_to_the_first_glyph_and_first_page_is_chapter_start() {
-        let b = EpubBackend::open(SAMPLE.to_vec(), vp(400, 600)).unwrap();
-        let _ = render(&b, 0, 400, 600);
-        let pin = b.page_pin(0).expect("page 0 has text");
-        assert_eq!(pin.chapter_index, 0, "page 0 is chapter 0");
-        // The pin resolves to the first character actually painted on page 0.
-        let first_ch = b.page_chars(0).into_iter().find(|c| c.anchor.is_some());
-        assert_eq!(char_at(&b, &pin), first_ch.map(|c| c.ch));
-    }
-
-    #[test]
-    fn pin_re_anchors_to_the_same_character_across_a_font_size_change() {
-        // The headline guarantee (golden SPEC-INKREAD.md RR8-AC1 / RR12-FR4): a pin minted at one
-        // size re-resolves to the *same source character* after the page reflows at a new size.
-        let b = EpubBackend::open(SAMPLE.to_vec(), vp(400, 600)).unwrap();
-        let _ = render(&b, 0, 400, 600);
-        // Mint a pin partway through chapter 2 so re-pagination genuinely moves it.
-        let ch2 = b.toc()[1].target_page.unwrap();
-        let pin = b.page_pin(ch2).or_else(|| b.page_pin(0)).expect("a pin");
-        let before = char_at(&b, &pin).expect("char before reflow");
-
-        let moved_page = b.set_text_scale(1.9, ch2).unwrap();
-        let after = char_at(&b, &pin).expect("char after reflow");
-
-        assert_eq!(
-            before, after,
-            "pin re-resolves to the same source character after reflow"
-        );
-        // Sanity: the pin still lands inside its own chapter under the new pagination.
-        assert_eq!(
-            b.chapter_of(b.pin_to_page(&pin)),
-            pin.chapter_index.max(0) as usize
-        );
-        let _ = moved_page;
-    }
-
-    #[test]
-    fn selection_pins_span_in_order_and_survive_a_font_size_change() {
-        let b = EpubBackend::open(SAMPLE.to_vec(), vp(400, 600)).unwrap();
-        let _ = render(&b, 0, 400, 600);
-        // A band over the top of page 0 selects the opening lines.
-        let band = NormRect {
-            x0: 0.0,
-            y0: 0.0,
-            x1: 1.0,
-            y1: 0.5,
-        };
-        let (start, end) = b.selection_pins(0, band).expect("a selection on page 0");
-        assert!(start <= end, "start pin precedes end pin");
-        let (sc, ec) = (
-            char_at(&b, &start).expect("start char"),
-            char_at(&b, &end).expect("end char"),
-        );
-
-        // Reflow at a larger size: the same span endpoints re-resolve to the same characters.
-        b.set_text_scale(1.7, 0).unwrap();
-        assert_eq!(char_at(&b, &start), Some(sc), "start re-anchors");
-        assert_eq!(char_at(&b, &end), Some(ec), "end re-anchors");
-    }
-
-    #[test]
-    fn epub_is_never_magnifiable() {
-        // EPUB is always reflowed (font size, not zoom), so the shell must never magnify it (#61,
-        // RR25-FR3) — the trait default for a reflowable backend.
-        let b = EpubBackend::open(SAMPLE.to_vec(), vp(400, 600)).unwrap();
-        assert!(!b.is_magnifiable());
-    }
-
-    #[test]
-    fn text_line_span_selects_reflowed_lines() {
-        // Regression (#46 device finding): EpubBackend didn't override text_line_span, so a multi-line
-        // drag on a reflowed page hit the Document trait's empty default and selected nothing — the
-        // bbox path worked, the line-span path returned ''. The override must select real text.
-        // A realistic reading viewport (the default body size needs a real column; a tiny one would
-        // hyphenate/clip every word).
-        let b = EpubBackend::open(SAMPLE.to_vec(), vp(800, 1200)).unwrap();
-        let _ = render(&b, 0, 800, 1200);
-        let sel = b.text_line_span(0, (0.05, 0.02), (0.60, 0.30)); // a drag down the top of page 0
-        assert!(
-            !sel.boxes.is_empty(),
-            "reflowed line-span produces highlight boxes"
-        );
-        // Correctness, not just wiring: the span must be REAL page text. Pull a word the page
-        // actually has and confirm the top-of-page span contains it (the first line is taken whole,
-        // so the page's opening words are in range) — a wrong-glyph override would not contain it.
-        let page_text: String = b.page_chars(0).iter().map(|c| c.ch).collect();
-        let word = page_text
-            .split_whitespace()
-            .find(|w| w.chars().all(|c| c.is_alphabetic()) && w.len() >= 4)
-            .expect("a real word on page 0");
-        assert!(
-            sel.text.contains(word),
-            "line-span selects actual page text containing {word:?}, got '{}'",
-            sel.text
-        );
-    }
-
-    #[test]
-    fn page_chars_recovers_words_for_selection() {
-        let b = EpubBackend::open(SAMPLE.to_vec(), vp(400, 600)).unwrap();
-        let _ = render(&b, 0, 400, 600); // settle layout at this viewport
-        let chars = b.page_chars(0);
-        assert!(!chars.is_empty(), "first page exposes glyphs");
-        let text: String = chars.iter().map(|c| c.ch).collect();
-        assert!(
-            text.contains(' '),
-            "inter-word spaces are synthesized: {text:?}"
-        );
-        // Every box is on-page and non-degenerate horizontally for non-space glyphs.
-        assert!(chars.iter().all(|c| c.rect.x0 >= 0.0 && c.rect.x1 <= 1.0));
-    }
-
-    #[test]
-    fn search_finds_text_on_the_page_it_lives_on() {
-        let b = EpubBackend::open(SAMPLE.to_vec(), vp(800, 1200)).unwrap();
-        let _ = render(&b, 0, 800, 1200);
-        // Pull a real word off page 0 and search for it.
-        let text: String = b.page_chars(0).iter().map(|c| c.ch).collect();
-        let word = text
-            .split_whitespace()
-            .find(|w| w.chars().all(|c| c.is_alphabetic()) && w.len() >= 4)
-            .expect("a searchable word on page 0")
-            .to_string();
-        let hits = b.search_page(0, &word);
-        assert!(!hits.is_empty(), "found {word:?} on page 0");
-        assert!(hits[0].boxes.iter().all(|bx| bx.x1 >= bx.x0));
-        // The same query in a wildly different case still matches (case-insensitive).
-        assert!(!b.search_page(0, &word.to_uppercase()).is_empty());
-    }
-
-    #[test]
-    fn smaller_viewport_repaginates_to_more_pages() {
-        let b = EpubBackend::open(SAMPLE.to_vec(), vp(400, 600)).unwrap();
-        let wide = b.page_count();
-        // Render into a much shorter buffer → fewer lines/page → more pages (lazy repagination).
-        let _ = render(&b, 0, 400, 200);
-        let tall = b.page_count();
-        assert!(
-            tall > wide,
-            "narrower/shorter viewport paginates longer: {wide} → {tall}"
-        );
-    }
-}
+#[path = "reflow_tests.rs"]
+mod tests;

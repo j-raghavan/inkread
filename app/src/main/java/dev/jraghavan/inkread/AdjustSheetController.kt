@@ -307,19 +307,8 @@ class AdjustSheetController(private val host: Host) {
 
     /** The "Page" tab: reflow Line Spacing + Alignment (EPUB; a toast on fixed-layout PDF). */
     private fun pagePanel(): View {
-        fun applyReflow(call: () -> Int) {
-            host.engineExecute {
-                val np = try { call() } catch (e: RuntimeException) { -1 }
-                if (np >= 0) {
-                    host.refreshPageCount()
-                    host.repaintPanel()
-                } else {
-                    activity.runOnUiThread {
-                        Toast.makeText(activity, "Page layout adjusts reflowable books (EPUB)", Toast.LENGTH_SHORT).show()
-                    }
-                }
-            }
-        }
+        fun applyReflow(call: () -> Int) =
+            runReflow(call, whenFixedLayout = "Page layout adjusts reflowable books (EPUB)")
         val container = LinearLayout(activity).apply { orientation = LinearLayout.VERTICAL }
         // Reflow toggle — only for a text-layer PDF (EPUB is always reflowable; a scanned PDF can't).
         // It gates whether the Line Spacing / Alignment / Font Size controls take effect on a PDF.
@@ -524,11 +513,33 @@ class AdjustSheetController(private val host: Host) {
         if (announce) activity.runOnUiThread {
             Toast.makeText(activity, "Font ${(DisplayPrefs.TEXT_SCALES[idx] * 100).toInt()}%", Toast.LENGTH_SHORT).show()
         }
+        runReflow(
+            { NativeBridge.nativeSetTextScale(host.docHandle, DisplayPrefs.TEXT_SCALES[idx]) },
+            whenFixedLayout = "Font size adjusts reflowable books (EPUB)".takeIf { warnIfFixed },
+        )
+    }
+
+    /**
+     * Run a repagination on the engine thread with progress + cancel in front of it (#161), then
+     * repaint. [call] returns the new page index, or `-1` for a fixed-layout document — in which
+     * case [whenFixedLayout] is toasted, if given.
+     *
+     * Every reflow entry point routes through here, so the reader sees the same thing whether the
+     * relayout came from the Font panel, the Page panel or a pinch.
+     */
+    private fun runReflow(call: () -> Int, whenFixedLayout: String?) {
+        val progress = ReflowProgress(activity)
+        progress.begin()
         host.engineExecute {
-            val np = try { NativeBridge.nativeSetTextScale(host.docHandle, DisplayPrefs.TEXT_SCALES[idx]) } catch (e: RuntimeException) { -1 }
-            if (np >= 0) { host.refreshPageCount(); host.repaintPanel() }
-            else if (warnIfFixed) activity.runOnUiThread {
-                Toast.makeText(activity, "Font size adjusts reflowable books (EPUB)", Toast.LENGTH_SHORT).show()
+            val np = try { call() } catch (e: RuntimeException) { -1 }
+            activity.runOnUiThread { progress.end() }
+            if (np >= 0) {
+                host.refreshPageCount()
+                host.repaintPanel()
+            } else if (whenFixedLayout != null) {
+                activity.runOnUiThread {
+                    Toast.makeText(activity, whenFixedLayout, Toast.LENGTH_SHORT).show()
+                }
             }
         }
     }

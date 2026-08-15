@@ -38,6 +38,11 @@ object NativeBridge {
      * Open a PDF AND attach a SQLite store at [dbPath], resuming the saved reading position
      * and persisted e-ink settings for [bookId] (RR12 / RR27). [dbPath] lives under app
      * storage; [bookId] is the stable per-book identity (≤512 chars). Returns the handle.
+     *
+     * The reader's saved typography is passed in rather than applied afterwards: a reflowable
+     * document has to be paginated to resolve a saved reading position, so applying the typography
+     * later would mean paginating the book a second time (#161/#162). Values are clamped by the
+     * core, and are ignored by fixed-layout formats.
      */
     external fun nativeOpenDocumentWithStore(
         path: String,
@@ -47,6 +52,10 @@ object NativeBridge {
         dpi: Int,
         dbPath: String,
         bookId: String,
+        scale: Float,
+        fontId: Int,
+        lineSpacing: Float,
+        alignCode: Int,
     ): Long
 
     /** Persist the current reading position (RR12-FR3); store-less session = no-op. */
@@ -227,6 +236,35 @@ object NativeBridge {
     /** Reflow alignment (0=Left, 1=Justify, 2=Center, 3=Right; RR4); repaginates EPUB. Returns the
      *  new page, or -1 for a fixed-layout PDF. Re-render after. */
     external fun nativeSetAlignment(handle: Long, code: Int): Int
+
+    /** Apply ALL reflow typography at once, repaginating ONCE (RR4). Use this on the open path to
+     *  restore persisted settings — the individual setters each repaginate, so applying four of
+     *  them in a row costs four full passes over the book (#161/#162). Returns the new page, or -1
+     *  for a fixed-layout PDF. Re-render after. */
+    external fun nativeSetTypography(
+        handle: Long,
+        scale: Float,
+        fontId: Int,
+        lineSpacing: Float,
+        alignCode: Int,
+    ): Int
+
+    /** Chapters laid out so far, packed as `(done shl 32) or total` (#161). `total == 0` means no
+     *  pagination is in flight. Static and lock-free — safe to poll from the UI thread while the
+     *  engine thread is inside a repagination. Decode with [paginationDone]/[paginationTotal]. */
+    external fun nativePaginationProgress(): Long
+
+    /** Ask the pagination in flight to stop (`true`), or clear the flag before starting one
+     *  (`false`, which also resets the counters). A cancelled re-layout leaves the reader on the
+     *  pagination they already had; a book's FIRST pagination ignores this, since there is nothing
+     *  to fall back to. */
+    external fun nativeCancelPagination(cancel: Boolean)
+
+    /** Chapters laid out so far, from [nativePaginationProgress]. */
+    fun paginationDone(packed: Long): Int = (packed ushr 32).toInt()
+
+    /** Chapters in the book being laid out, from [nativePaginationProgress]; 0 = nothing running. */
+    fun paginationTotal(packed: Long): Int = (packed and 0xFFFFFFFFL).toInt()
 
     /** Whether the open document can be reflowed — a text-layer PDF (ADR-INKREAD-0011). Use to
      *  enable/disable the Reflow control (false for scanned PDFs and for EPUB, already reflowable). */

@@ -36,6 +36,16 @@ const MIGRATIONS: &[&str] = &[
      );
      CREATE TABLE settings_meta (id INTEGER PRIMARY KEY CHECK (id = 0), version INTEGER NOT NULL);
      INSERT INTO settings_meta (id, version) VALUES (0, 0);",
+    // v3 — pagination cache (#162): per-chapter page counts for one exact layout of one book, so
+    // re-opening a book it has already been laid out for costs a lookup instead of a full pass.
+    // Pure cache: every row is derivable by laying the book out again, so it is safe to drop.
+    "CREATE TABLE pagination_cache (
+        book_id       TEXT NOT NULL,
+        layout_key    TEXT NOT NULL,
+        chapter_pages TEXT NOT NULL,
+        updated_at    INTEGER NOT NULL,
+        PRIMARY KEY (book_id, layout_key)
+     );",
 ];
 
 /// The SQLite-backed reading store.
@@ -109,6 +119,38 @@ impl ReaderStore for SqliteStore {
         )
         .map_err(db_err)?;
         Ok(())
+    }
+
+    fn load_pagination(&self, book: &BookId, key: &str) -> Option<Vec<usize>> {
+        // Every failure here — locked database, missing row, a blob written by a future version —
+        // is a cache miss. The caller lays the book out instead, which is slower but always right.
+        let conn = self.lock();
+        let stored: String = conn
+            .query_row(
+                "SELECT chapter_pages FROM pagination_cache WHERE book_id = ?1 AND layout_key = ?2",
+                params![book.as_str(), key],
+                |r| r.get(0),
+            )
+            .ok()?;
+        let pages: Vec<usize> = serde_json::from_str(&stored).ok()?;
+        // A pagination with no chapters would put the reader in a book with no pages.
+        (!pages.is_empty()).then_some(pages)
+    }
+
+    fn save_pagination(&self, book: &BookId, key: &str, chapter_pages: &[usize]) {
+        let Ok(encoded) = serde_json::to_string(chapter_pages) else {
+            return;
+        };
+        let conn = self.lock();
+        // A cache write that fails costs the next open a layout pass and nothing else, so it is
+        // dropped rather than propagated.
+        let _ = conn.execute(
+            "INSERT INTO pagination_cache (book_id, layout_key, chapter_pages, updated_at)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(book_id, layout_key) DO UPDATE SET
+                 chapter_pages = ?3, updated_at = ?4",
+            params![book.as_str(), key, encoded, now_secs()],
+        );
     }
 
     fn schema_version(&self) -> CoreResult<u32> {
@@ -344,5 +386,73 @@ mod tests {
         }
         let snap = store.load_settings().unwrap();
         assert_eq!(snap.get_int(SettingKey::FlashInterval, None), 6);
+    }
+
+    // ---- pagination cache (#162) --------------------------------------------------------------
+
+    #[test]
+    fn a_pagination_round_trips_and_is_scoped_to_its_book_and_key() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let a = BookId::new("book-a").unwrap();
+        let b = BookId::new("book-b").unwrap();
+
+        store.save_pagination(&a, "layout-1", &[3, 5, 8]);
+        assert_eq!(store.load_pagination(&a, "layout-1"), Some(vec![3, 5, 8]));
+
+        // Neither a different key nor a different book may see it.
+        assert_eq!(store.load_pagination(&a, "layout-2"), None);
+        assert_eq!(store.load_pagination(&b, "layout-1"), None);
+
+        // Re-saving the same key replaces rather than duplicates.
+        store.save_pagination(&a, "layout-1", &[1, 1]);
+        assert_eq!(store.load_pagination(&a, "layout-1"), Some(vec![1, 1]));
+    }
+
+    #[test]
+    fn an_unreadable_stored_pagination_is_a_miss_rather_than_an_error() {
+        // RR21-FR3 at the persistence boundary: a book must still open if its cache row is
+        // garbage — written by a future version, truncated, or simply not what we expect.
+        let store = SqliteStore::open_in_memory().unwrap();
+        let book = BookId::new("corrupt").unwrap();
+        for (i, garbage) in ["not json", "{}", "\"a string\"", "[1,2,", "[]", "[-1]"]
+            .iter()
+            .enumerate()
+        {
+            let key = format!("k{i}");
+            {
+                let conn = store.lock();
+                conn.execute(
+                    "INSERT INTO pagination_cache (book_id, layout_key, chapter_pages, updated_at)
+                     VALUES (?1, ?2, ?3, 0)",
+                    params![book.as_str(), &key, garbage],
+                )
+                .unwrap();
+            }
+            assert_eq!(
+                store.load_pagination(&book, &key),
+                None,
+                "{garbage:?} is a miss, not a panic and not a bad pagination"
+            );
+        }
+    }
+
+    #[test]
+    fn the_pagination_cache_arrives_by_migration_over_an_existing_database() {
+        // Append-only migrations: a database created before v3 gains the table without losing the
+        // reading position or settings already in it.
+        let store = SqliteStore::open_in_memory().unwrap();
+        let book = BookId::new("upgraded").unwrap();
+        store
+            .save_position(&book, &ReadingPosition::new(4, 10))
+            .unwrap();
+        assert_eq!(store.schema_version().unwrap(), MIGRATIONS.len() as u32);
+
+        store.save_pagination(&book, "k", &[2, 2, 2]);
+        assert_eq!(store.load_pagination(&book, "k"), Some(vec![2, 2, 2]));
+        assert_eq!(
+            store.load_position(&book).unwrap().unwrap().page_index,
+            4,
+            "the position that predates the cache table is untouched"
+        );
     }
 }

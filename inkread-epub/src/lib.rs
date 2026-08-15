@@ -18,12 +18,14 @@ use rbook::Epub;
 
 pub mod content;
 pub mod layout;
+pub mod measure;
 pub mod render;
 pub use content::{parse_blocks, Block, Inline, TextRun};
 pub use layout::{
     paginate, paginate_with, Align, Hyphenator, LayoutLine, LayoutOpts, Metrics, NoHyphen, Page,
     PlacedRun,
 };
+pub use measure::{CachedHyphenator, CachedMetrics};
 pub use render::{
     page_glyphs, reading_font_names, register_fallback_font, render_page, AbFont, EnHyphenator,
     GrayCanvas, PlacedGlyph,

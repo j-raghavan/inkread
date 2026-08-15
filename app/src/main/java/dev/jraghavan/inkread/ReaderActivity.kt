@@ -22,7 +22,6 @@ import android.view.MotionEvent
 import android.view.SurfaceHolder
 import android.view.SurfaceView
 import android.widget.Toast
-import android.app.Dialog
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
@@ -122,15 +121,11 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
      *  reflowable view (EPUB, or a reflowed PDF) can't strand the shell's zoom. Refreshed on open and
      *  on a reflow toggle. */
     @Volatile private var magnifiable = false
-    /** True while a reflow toggle's full-document repagination is running (guards re-toggle + drives
-     *  the "Reflowing…" notice). Large PDFs take seconds (#55). */
+    /** True while a reflow toggle's full-document repagination is running — guards a re-toggle.
+     *  Large PDFs take seconds (#55). */
     @Volatile private var reflowInProgress = false
-    private var reflowProgressDialog: Dialog? = null
-    /** Shows the "Reflowing…" notice — posted with a short delay so a fast reflow never flashes it. */
-    private val showReflowProgress = Runnable {
-        if (isFinishing || docHandle == 0L) return@Runnable
-        reflowProgressDialog = Ink.progressDialog(this, "Reflowing…")
-    }
+    /** The "Reflowing…" notice for the reflow toggle; [ReflowProgress] owns showing and dismissing it. */
+    private var reflowProgress: ReflowProgress? = null
 
     // ---- dictionary (RR12 / D4) — owns the corpus handle + lookup/define/manage UI (SRP) ----
     private val dict = DictController(object : DictController.Host {
@@ -779,7 +774,11 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         NativeBridge.nativeInit(capsBytes)
         val dbPath = File(filesDir, "reader.db").absolutePath
         docHandle = try {
-            NativeBridge.nativeOpenDocumentWithStore(path, capsBytes, viewW, viewH, DPI, dbPath, bookId)
+            NativeBridge.nativeOpenDocumentWithStore(
+                path, capsBytes, viewW, viewH, DPI, dbPath, bookId,
+                displayPrefs.textScale, displayPrefs.font,
+                displayPrefs.lineSpacingMult, displayPrefs.alignment,
+            )
         } catch (e: RuntimeException) {
             Log.e(TAG, "open failed: ${e.message}")
             0L
@@ -805,16 +804,9 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             reflowOn = false // a fresh document opens in fixed-layout view (ADR-INKREAD-0011)
             // A fixed-layout PDF magnifies; EPUB (always reflowed) does not (#61, RR25-FR3).
             magnifiable = try { NativeBridge.nativeIsMagnifiable(docHandle) } catch (e: RuntimeException) { false }
-            // Re-apply the saved reflow text scale (EPUB); a no-op (-1) on fixed-layout PDF.
-            val savedScale = displayPrefs.textScale
-            if (savedScale != 1.0f) {
-                val np = try { NativeBridge.nativeSetTextScale(docHandle, savedScale) } catch (e: RuntimeException) { -1 }
-                if (np >= 0) Log.i(TAG, "applied text scale $savedScale → page $np")
-            }
-            // Re-apply the saved reflow typeface (EPUB); default face 0 (a no-op on fixed-layout PDF).
-            if (displayPrefs.font != 0) {
-                try { NativeBridge.nativeSetFont(docHandle, displayPrefs.font) } catch (e: RuntimeException) {}
-            }
+            // Reflow typography (text scale, face, line spacing, alignment) was applied by
+            // nativeOpenDocumentWithStore above, so the book is paginated once, at the settings it
+            // will actually be read at (#161/#162).
             // Re-apply the saved display contrast (RR4); 0 = off (a no-op in the core).
             try { NativeBridge.nativeSetContrast(docHandle, displayPrefs.contrast) } catch (e: RuntimeException) {}
             // Re-apply night mode (invert); default off (RR4 / style presets).
@@ -825,13 +817,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             try { NativeBridge.nativeSetCrop(docHandle, if (displayPrefs.cropAuto) 1 else 0, displayPrefs.cropMargin) } catch (e: RuntimeException) {}
             // Re-apply the saved render quality (RR4); default 1.
             try { NativeBridge.nativeSetRenderQuality(docHandle, displayPrefs.renderQuality) } catch (e: RuntimeException) {}
-            // Re-apply saved reflow line-spacing + alignment (RR4; EPUB only — PDF returns -1).
-            if (kotlin.math.abs(displayPrefs.lineSpacingMult - DisplayPrefs.DEFAULT_LINE_SPACING) > 0.001f) {
-                try { NativeBridge.nativeSetLineSpacing(docHandle, displayPrefs.lineSpacingMult) } catch (e: RuntimeException) {}
-            }
-            if (displayPrefs.alignment != 0) {
-                try { NativeBridge.nativeSetAlignment(docHandle, displayPrefs.alignment) } catch (e: RuntimeException) {}
-            }
+            // (line spacing + alignment were restored above, in the same nativeSetTypography call)
             pageCount = NativeBridge.nativePageCount(docHandle)
             Books.pushRecent(this, bookId, path)
             // Capture the real document metadata so the library shows the actual title/author + page
@@ -1793,9 +1779,10 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         reflowInProgress = true
         // Enabling reflow on a PDF re-extracts the text layer and repaginates the WHOLE document — on
         // a large book that's several seconds. Show a "Reflowing…" notice if it doesn't finish
-        // quickly so the toggle doesn't look frozen; the delay means a small/fast doc never flashes
-        // the dialog (#55). The work itself is already off the UI thread (engine).
-        mainHandler.postDelayed(showReflowProgress, REFLOW_PROGRESS_DELAY_MS)
+        // quickly so the toggle doesn't look frozen (#55). Not cancellable: this path rebuilds the
+        // reflow view rather than driving the core's pagination, so there is no progress to report
+        // and nothing to fall back to. The work itself is already off the UI thread (engine).
+        reflowProgress = ReflowProgress(this, cancellable = false).also { it.begin() }
         engine.execute {
             val np = try { NativeBridge.nativeSetReflow(docHandle, on) } catch (e: RuntimeException) { -1 }
             if (np >= 0) {
@@ -1805,15 +1792,17 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
                 magnifiable = try { NativeBridge.nativeIsMagnifiable(docHandle) } catch (e: RuntimeException) { !on }
                 if (!magnifiable && zoom != 1f) { zoom = 1f; panX = 0f; panY = 0f }
                 if (on) {
-                    if (displayPrefs.textScale != 1.0f) {
-                        try { NativeBridge.nativeSetTextScale(docHandle, displayPrefs.textScale) } catch (e: RuntimeException) {}
-                    }
-                    if (kotlin.math.abs(displayPrefs.lineSpacingMult - DisplayPrefs.DEFAULT_LINE_SPACING) > 0.001f) {
-                        try { NativeBridge.nativeSetLineSpacing(docHandle, displayPrefs.lineSpacingMult) } catch (e: RuntimeException) {}
-                    }
-                    if (displayPrefs.alignment != 0) {
-                        try { NativeBridge.nativeSetAlignment(docHandle, displayPrefs.alignment) } catch (e: RuntimeException) {}
-                    }
+                    // Same one-call restore as the open path — a reflowed PDF gets the reader's
+                    // saved typeface too, which the per-setting restore here used to skip.
+                    try {
+                        NativeBridge.nativeSetTypography(
+                            docHandle,
+                            displayPrefs.textScale,
+                            displayPrefs.font,
+                            displayPrefs.lineSpacingMult,
+                            displayPrefs.alignment,
+                        )
+                    } catch (e: RuntimeException) {}
                 }
                 pageCount = NativeBridge.nativePageCount(docHandle)
                 repaintPanel()
@@ -1824,11 +1813,10 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         }
     }
 
-    /** Dismiss the reflow "Reflowing…" notice (and cancel a not-yet-shown one); clears the guard. */
+    /** Dismiss the reflow "Reflowing…" notice (and disarm a not-yet-shown one); clears the guard. */
     private fun dismissReflowProgress() {
-        mainHandler.removeCallbacks(showReflowProgress)
-        reflowProgressDialog?.let { runCatching { it.dismiss() } }
-        reflowProgressDialog = null
+        reflowProgress?.end()
+        reflowProgress = null
         reflowInProgress = false
     }
 
@@ -1885,7 +1873,6 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         const val DOUBLE_TAP_ZOOM = 2.0f // zoom level a double-tap jumps to from fit (#54).
         const val DOUBLE_TAP_MS = 280L // max gap between the two taps of a double-tap (#54).
         const val DOUBLE_TAP_SLOP_PX = 60f // max distance between the two taps to count as a double-tap.
-        const val REFLOW_PROGRESS_DELAY_MS = 250L // show "Reflowing…" only if the build outlasts this (#55).
         const val SELECTION_HANDLE_PX = 8f // half-size of the square corner handles on the selection box.
         const val STROKE_PAUSE_MS = 600L // commit a stroke after this pen-pause (swallowed-UP net); shared with the lasso net.
 
