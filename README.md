@@ -93,6 +93,13 @@ an open [AGPL-3.0](./LICENSE) Rust core you can audit and extend.
   - Add your own custom dictionaries (drop a starter dictionary into `MYSTYLES/SnDict/<name>` and install it in-app)
   - Send a multi-line selection to the **Supernote Digest**
 
+  **Your calibre library**
+  - Browse a **calibre content server** or **Calibre-Web** over its catalog and pull books straight
+    onto your shelf — no cable, no vendor cloud
+  - Search the library, walk it by author or tag, and page through large collections
+  - Picks the format that reads best on e-ink (EPUB before PDF), and says so when it can't open one
+  - Books calibre builds from **news recipes** land in the library, so they arrive the same way
+
   **Export & data**
   - Export annotations as a PDF into a synced folder
   - Overwrite the original PDF in place, or save a separate `-annotated` copy
@@ -117,6 +124,7 @@ an open [AGPL-3.0](./LICENSE) Rust core you can audit and extend.
 | Annotation portability | **Written into the PDF** + portable sidecar | Sidecar metadata | Proprietary, locked-in |
 | Document reading (PDF reflow, dictionary) | Yes | **Mature** | Limited |
 | Daily reading companion (RSS → on-device issue) | **Built-in** (InkRead Daily) | Plugin (NewsDownloader) | No |
+| calibre library over the air | **Built-in** (OPDS: calibre + Calibre-Web) | Plugin (OPDS) | No |
 | E-ink refresh control | Vendor-neutral policy in core ([platform-capped](./docs/EINK-LIMITS.md)) | **Excellent** (on devices that allow it) | Native / vendor-optimal |
 | Extensibility | Native Lua API + selected KOReader-shim | **Huge Lua ecosystem** | None (closed) |
 | Architecture | Rust core, host-testable | C + Lua | Closed-source |

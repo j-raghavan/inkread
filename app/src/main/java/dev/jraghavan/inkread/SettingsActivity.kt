@@ -319,6 +319,7 @@ class SettingsActivity : Activity() {
         val HELP = listOf(
             "Pen & Highlighter" to "Write and highlight on the page with the stylus; the floating tool palette switches between them.",
             "Eraser" to "Switch to the eraser in the tool palette to wipe strokes — or, if your pen has an eraser end, just flip it over.",
+            "Your library" to "Connect a calibre content server or Calibre-Web under Library, then browse it from Home and download books onto your shelf.",
             "Lasso select" to "Circle ink or text to move, copy, delete, or look it up.",
             "Define" to "Select a word and tap Define to look it up in the on-device dictionaries.",
             "Search" to "Find text anywhere in the document and jump between matches.",
