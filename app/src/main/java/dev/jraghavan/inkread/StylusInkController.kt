@@ -126,6 +126,15 @@ class StylusInkController(private val host: Host) {
         style = Paint.Style.STROKE; strokeCap = Paint.Cap.ROUND; strokeJoin = Paint.Join.ROUND; isAntiAlias = true
     }
 
+    /** Live eraser band — the swept region, at the real hit width (2× the radius), so you can see
+     *  what is about to go. The firmware EMR ink is suppressed for the Eraser (#158), so this is the
+     *  only feedback during the drag; the page is repainted from the core when the gesture ends. */
+    private val eraseLivePaint = Paint().apply {
+        color = Ink.ringSoft
+        style = Paint.Style.STROKE; strokeCap = Paint.Cap.ROUND; strokeJoin = Paint.Join.ROUND; isAntiAlias = true
+        strokeWidth = ERASE_RADIUS_PX * 2f
+    }
+
     /** Current pen / highlighter colour (index into the palettes); re-tapping a tool cycles it. */
     var penColorIndex = 0
     var hlColorIndex = 0
@@ -281,6 +290,9 @@ class StylusInkController(private val host: Host) {
                 }
                 eraseBuf.add(e.x); eraseBuf.add(e.y)
                 armEraseTimeout()
+                // The Eraser's firmware EMR ink is suppressed (it would deposit a real stroke, #158),
+                // so draw the swept band ourselves — the same live-overlay path the Highlighter uses.
+                host.drawLivePath(eraseBuf, eraseLivePaint)
             }
             MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
                 eraseBuf.add(e.x); eraseBuf.add(e.y)
@@ -306,17 +318,22 @@ class StylusInkController(private val host: Host) {
     /** Feed the eraser path to the core (Eraser stroke removes crossed strokes); re-render (engine). */
     private fun commitErase(viewPts: FloatArray) {
         val w = host.viewW; val h = host.viewH
-        if (host.docHandle == 0L || w == 0 || h == 0) return
-        val radiusNorm = host.lenToNorm(ERASE_RADIUS_PX)
-        try {
-            NativeBridge.nativeInkBeginStroke(host.docHandle, ReaderActivity.CORE_TOOL_ERASER, ReaderActivity.INK_COLOR_BLACK, radiusNorm, System.currentTimeMillis())
-            NativeBridge.nativeInkAddPoints(host.docHandle, toNormPoints(viewPts))
-            NativeBridge.nativeInkEndStroke(host.docHandle)
-            scheduleInkFlush() // deferred autosave: persist on a trailing debounce, not this fsync
-        } catch (e: RuntimeException) {
-            Log.e(TAG, "erase failed: ${e.message}"); return
+        if (host.docHandle != 0L && w != 0 && h != 0) {
+            val radiusNorm = host.lenToNorm(ERASE_RADIUS_PX)
+            try {
+                NativeBridge.nativeInkBeginStroke(host.docHandle, ReaderActivity.CORE_TOOL_ERASER, ReaderActivity.INK_COLOR_BLACK, radiusNorm, System.currentTimeMillis())
+                NativeBridge.nativeInkAddPoints(host.docHandle, toNormPoints(viewPts))
+                NativeBridge.nativeInkEndStroke(host.docHandle)
+                scheduleInkFlush() // deferred autosave: persist on a trailing debounce, not this fsync
+            } catch (e: RuntimeException) {
+                Log.e(TAG, "erase failed: ${e.message}")
+            }
         }
-        host.clearFirmwareInk() // wipe the firmware ink left by the eraser drag
+        // Always restore the page from the core, on every path (#158). The live band we drew is
+        // transient, and an inverted pen sweeps while the palette is PEN — where the firmware ink is
+        // still claimed — so a bailed-out or failed erase must never leave marks the model doesn't
+        // have. The core is the only source of truth for what is on the page.
+        host.clearFirmwareInk()
         host.repaintPanel()
     }
 
