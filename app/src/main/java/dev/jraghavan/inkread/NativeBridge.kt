@@ -249,6 +249,23 @@ object NativeBridge {
         alignCode: Int,
     ): Int
 
+    /** Chapters laid out so far, packed as `(done shl 32) or total` (#161). `total == 0` means no
+     *  pagination is in flight. Static and lock-free — safe to poll from the UI thread while the
+     *  engine thread is inside a repagination. Decode with [paginationDone]/[paginationTotal]. */
+    external fun nativePaginationProgress(): Long
+
+    /** Ask the pagination in flight to stop (`true`), or clear the flag before starting one
+     *  (`false`, which also resets the counters). A cancelled re-layout leaves the reader on the
+     *  pagination they already had; a book's FIRST pagination ignores this, since there is nothing
+     *  to fall back to. */
+    external fun nativeCancelPagination(cancel: Boolean)
+
+    /** Chapters laid out so far, from [nativePaginationProgress]. */
+    fun paginationDone(packed: Long): Int = (packed ushr 32).toInt()
+
+    /** Chapters in the book being laid out, from [nativePaginationProgress]; 0 = nothing running. */
+    fun paginationTotal(packed: Long): Int = (packed and 0xFFFFFFFFL).toInt()
+
     /** Whether the open document can be reflowed — a text-layer PDF (ADR-INKREAD-0011). Use to
      *  enable/disable the Reflow control (false for scanned PDFs and for EPUB, already reflowable). */
     external fun nativeSupportsReflow(handle: Long): Boolean

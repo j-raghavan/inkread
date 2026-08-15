@@ -20,7 +20,7 @@ use inkread_epub::{parse_blocks, Block, EpubPackage, NavPoint};
 use crate::document::text_select::{self, CharBox, NormRect, TextAnchor, TextSelection};
 use crate::document::{Document, DocumentMetadata, SearchMatch, TocEntry};
 use crate::error::{CoreError, CoreResult};
-use crate::persistence::PaginationCache;
+use crate::persistence::{PaginationCache, PaginationProgress};
 use crate::position::PinPosition;
 use crate::render::PixelBuffer;
 
@@ -120,6 +120,8 @@ pub struct EpubBackend {
     chapter_pages: RefCell<Vec<(usize, Vec<Page>)>>,
     /// Where paginations survive between launches, once a store is attached (#162).
     pagination_cache: RefCell<Option<Box<dyn PaginationCache>>>,
+    /// Where a pagination in flight is reported, and where cancellation is asked about (#161).
+    progress: RefCell<Option<Box<dyn PaginationProgress>>>,
 }
 
 impl EpubBackend {
@@ -151,6 +153,7 @@ impl EpubBackend {
             laid: RefCell::new(None),
             chapter_pages: RefCell::new(Vec::new()),
             pagination_cache: RefCell::new(None),
+            progress: RefCell::new(None),
         })
     }
 
@@ -180,6 +183,7 @@ impl EpubBackend {
             laid: RefCell::new(None),
             chapter_pages: RefCell::new(Vec::new()),
             pagination_cache: RefCell::new(None),
+            progress: RefCell::new(None),
         }
     }
 
@@ -269,24 +273,60 @@ impl EpubBackend {
                 .and_then(|c| c.load(&key))
                 .filter(|pages| pages.len() == self.chapters.len());
 
-            let chapter_pages = cached.unwrap_or_else(|| {
-                let counted =
-                    index_chapters(&self.chapters, &self.font.borrow(), &self.hyph, &opts);
-                if let Some(c) = cache.as_ref() {
-                    c.save(&key, &counted);
+            let chapter_pages = match cached {
+                Some(hit) => Some(hit),
+                None => {
+                    let progress = self.progress.borrow();
+                    // A book being laid out for the first time has nothing to fall back to, so
+                    // that pass reports progress but cannot be cancelled — only a re-layout can.
+                    let cancellable = self.laid.borrow().is_some();
+                    let counted = index_chapters(
+                        &self.chapters,
+                        &self.font.borrow(),
+                        &self.hyph,
+                        &opts,
+                        progress.as_deref(),
+                        cancellable,
+                    );
+                    if let (Some(counted), Some(c)) = (counted.as_ref(), cache.as_ref()) {
+                        c.save(&key, counted);
+                    }
+                    counted
                 }
-                counted
-            });
+            };
             drop(cache);
 
-            // Every cached page belongs to the layout being replaced.
-            self.chapter_pages.borrow_mut().clear();
-            *self.laid.borrow_mut() = Some(Laid::from_chapter_pages(opts, font_id, &chapter_pages));
+            match chapter_pages {
+                Some(pages) => {
+                    // Every cached page belongs to the layout being replaced.
+                    self.chapter_pages.borrow_mut().clear();
+                    *self.laid.borrow_mut() = Some(Laid::from_chapter_pages(opts, font_id, &pages));
+                }
+                // Abandoned: put the requested parameters back to the ones the surviving
+                // pagination was built with. Leaving them changed would make it look permanently
+                // stale, and every later read would restart the work the reader just cancelled.
+                None => self.revert_request_to_laid(),
+            }
         }
         // Materialized directly above and never taken back out, so the borrow is always `Some`.
         Ref::map(self.laid.borrow(), |slot| {
             slot.as_ref().expect("pagination materialized above")
         })
+    }
+
+    /// Roll the requested layout parameters back to those of the pagination currently in force,
+    /// after a re-layout was cancelled (#161). Every value the staleness check compares has to be
+    /// restored, or the abandoned work restarts on the next read.
+    fn revert_request_to_laid(&self) {
+        let Some(laid) = self.laid.borrow().as_ref().map(|l| (l.opts, l.font_id)) else {
+            return;
+        };
+        let (opts, font_id) = laid;
+        self.viewport.set((opts.page_w as u32, opts.page_h as u32));
+        self.scale.set(opts.font_px / BASE_FONT_PX);
+        self.line_spacing.set(opts.line_spacing);
+        self.align.set(opts.align);
+        self.apply_font(font_id as i32);
     }
 
     /// Repaginate at the current viewport/scale, anchoring the reading position to the chapter
@@ -497,6 +537,10 @@ impl Document for EpubBackend {
         *self.pagination_cache.borrow_mut() = Some(cache);
     }
 
+    fn set_pagination_progress(&self, progress: Box<dyn PaginationProgress>) {
+        *self.progress.borrow_mut() = Some(progress);
+    }
+
     fn set_typography(
         &self,
         scale: f32,
@@ -592,22 +636,37 @@ fn layout_key(opts: &LayoutOpts, font_id: usize, chapters: usize) -> String {
 /// The pages themselves are dropped as they are counted: this pass exists to build the index, and
 /// retaining every page of a long book is exactly the memory cost lazy materialization removes.
 /// Peak memory here is one chapter, not the whole book.
+/// Progress is reported throughout. `cancellable` says whether `progress` is also allowed to stop
+/// the pass — a book being laid out for the first time has nothing to fall back to, so that one
+/// always runs to completion. `None` means the pass was abandoned part-way (#161).
 fn index_chapters(
     chapters: &[Vec<Block>],
     font: &AbFont,
     hyph: &dyn Hyphenator,
     opts: &LayoutOpts,
-) -> Vec<usize> {
+    progress: Option<&dyn PaginationProgress>,
+    cancellable: bool,
+) -> Option<Vec<usize>> {
     #[cfg(test)]
     LAYOUT_PASSES.with(|c| c.set(c.get() + 1));
     // Memoize measurement across the *whole book*, not per chapter: prose repeats itself, and the
     // widths a later chapter needs have almost all been computed by an earlier one (#161/#162).
     let font = CachedMetrics::new(font);
     let hyph = CachedHyphenator::new(hyph);
-    chapters
-        .iter()
-        .map(|blocks| paginate_with(blocks, opts, &font, &hyph).len().max(1))
-        .collect()
+    let total = chapters.len();
+    let mut counts = Vec::with_capacity(total);
+    for blocks in chapters {
+        // Asked before each chapter rather than after, so a cancel taken during the last chapter
+        // still avoids the work rather than only the bookkeeping.
+        if cancellable && progress.is_some_and(PaginationProgress::cancelled) {
+            return None;
+        }
+        counts.push(paginate_with(blocks, opts, &font, &hyph).len().max(1));
+        if let Some(p) = progress {
+            p.chapter_done(counts.len(), total);
+        }
+    }
+    Some(counts)
 }
 
 /// Resolve a [`NavPoint`] into a [`TocEntry`] with a page target (matched by resource basename).
@@ -1259,6 +1318,133 @@ mod tests {
         }
         // The same layout keys the same, or nothing would ever hit.
         assert_eq!(key, layout_key(&LayoutOpts::new(400.0, 600.0, 56.0), 0, 12));
+    }
+
+    // ---- pagination progress + cancel (#161) --------------------------------------------------
+
+    /// What a [`SharedWatcher`] observed, as `(chapters done, total)` per report.
+    type Seen = std::rc::Rc<RefCell<Vec<(usize, usize)>>>;
+
+    /// Records what it is told and asks to cancel once `cancel_after` chapters have been laid out.
+    /// The record is shared, since the backend takes ownership of the watcher.
+    struct SharedWatcher {
+        seen: Seen,
+        cancel_after: Option<usize>,
+    }
+
+    impl PaginationProgress for SharedWatcher {
+        fn chapter_done(&self, done: usize, total: usize) {
+            self.seen.borrow_mut().push((done, total));
+        }
+        fn cancelled(&self) -> bool {
+            self.cancel_after
+                .is_some_and(|n| self.seen.borrow().len() >= n)
+        }
+    }
+
+    fn watcher(cancel_after: Option<usize>) -> (Box<SharedWatcher>, Seen) {
+        let seen: Seen = std::rc::Rc::new(RefCell::new(Vec::new()));
+        (
+            Box::new(SharedWatcher {
+                seen: seen.clone(),
+                cancel_after,
+            }),
+            seen,
+        )
+    }
+
+    #[test]
+    fn progress_is_reported_once_per_chapter_and_counts_up_to_the_total() {
+        let b = synthetic_book();
+        let (w, seen) = watcher(None);
+        b.set_pagination_progress(w);
+        let _ = b.page_count(); // the first pagination reports, it just cannot be cancelled
+        let chapters = b.chapters.len();
+
+        let seen = seen.borrow();
+        assert_eq!(seen.len(), chapters, "one report per chapter");
+        assert!(
+            seen.iter()
+                .enumerate()
+                .all(|(i, &(done, total))| done == i + 1 && total == chapters),
+            "progress counts 1..=n against a fixed total: {seen:?}"
+        );
+    }
+
+    #[test]
+    fn the_first_pagination_of_a_book_cannot_be_cancelled() {
+        // There is nothing to fall back to, so a cancel here would leave a book that cannot be
+        // read at all. It must run to completion regardless.
+        let b = synthetic_book();
+        let (w, _) = watcher(Some(1)); // asks to cancel as early as possible
+        b.set_pagination_progress(w);
+        assert_eq!(b.page_count(), synthetic_book().page_count());
+    }
+
+    #[test]
+    fn a_cancelled_relayout_leaves_the_reader_on_the_pagination_they_had() {
+        let b = synthetic_book();
+        let before_pages = b.page_count();
+        let before_render = render(&b, 1, 400, 600);
+
+        let (w, _) = watcher(Some(2)); // give up two chapters in
+        b.set_pagination_progress(w);
+        let page = b.set_text_scale(2.5, 1);
+
+        assert_eq!(b.page_count(), before_pages, "the old pagination survives");
+        assert_eq!(
+            render(&b, 1, 400, 600),
+            before_render,
+            "and pages still render as they did"
+        );
+        assert_eq!(
+            page,
+            Some(0),
+            "the reader is left in the chapter they were in"
+        );
+    }
+
+    #[test]
+    fn a_cancelled_relayout_does_not_restart_itself_on_the_next_read() {
+        // The subtle failure: the requested settings were changed before the pass began, so unless
+        // they are rolled back the pagination looks stale forever and every later read re-runs the
+        // work the reader just cancelled.
+        let b = synthetic_book();
+        let _ = b.page_count();
+        let (w, _) = watcher(Some(2));
+        b.set_pagination_progress(w);
+        let _ = b.set_text_scale(2.5, 0);
+
+        reset_layout_passes();
+        let _ = b.page_count();
+        let _ = b.page_count();
+        let _ = render(&b, 0, 400, 600);
+        assert_eq!(
+            layout_passes(),
+            0,
+            "reading after a cancel does not restart the abandoned pagination"
+        );
+    }
+
+    #[test]
+    fn a_setting_can_still_be_changed_after_a_cancel() {
+        // Cancelling must not wedge the document: a later change still takes effect.
+        let b = synthetic_book();
+        let original = b.page_count();
+        let (w, _) = watcher(Some(2));
+        b.set_pagination_progress(w);
+        let _ = b.set_text_scale(2.5, 0);
+        assert_eq!(b.page_count(), original, "cancelled");
+
+        // A fresh watcher that never cancels — the change now goes through.
+        let (w, _) = watcher(None);
+        b.set_pagination_progress(w);
+        let _ = b.set_text_scale(2.5, 0);
+        assert_ne!(
+            b.page_count(),
+            original,
+            "a re-tried change is applied normally"
+        );
     }
 
     #[test]

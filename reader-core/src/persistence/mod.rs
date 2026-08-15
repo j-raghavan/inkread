@@ -150,6 +150,23 @@ pub trait PaginationCache {
     fn save(&self, key: &str, chapter_pages: &[usize]);
 }
 
+/// Watches a pagination in flight, and can ask it to stop (#161).
+///
+/// Laying out a large book takes long enough that the reader needs to see it happening and be able
+/// to change their mind. The core reports progress and asks whether to keep going; it never knows
+/// what is displaying that or how the reader answered (IR-7).
+///
+/// Cancellation applies only to *re*-pagination. There is nothing to fall back to when a book is
+/// being laid out for the first time, so that pass always runs to completion.
+pub trait PaginationProgress {
+    /// `done` of `total` chapters have been laid out.
+    fn chapter_done(&self, done: usize, total: usize);
+
+    /// Whether the pagination in flight should be abandoned. Polled once per chapter, so a book of
+    /// very few, very long chapters responds coarsely.
+    fn cancelled(&self) -> bool;
+}
+
 /// Binds a [`ReaderStore`] and a book to the [`PaginationCache`] a document sees, so the document
 /// never has to know about books, stores or schemas — only about its own layout key.
 pub struct StorePaginationCache {

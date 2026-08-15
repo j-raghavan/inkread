@@ -23,7 +23,9 @@ use crate::error::{CoreError, CoreResult};
 use crate::persistence::identity::DocIdentity;
 use crate::persistence::ink_store::InkStore;
 use crate::persistence::sidecar::SidecarMetadata;
-use crate::persistence::{BookId, ReaderStore, ReadingPosition, StorePaginationCache};
+use crate::persistence::{
+    BookId, PaginationProgress, ReaderStore, ReadingPosition, StorePaginationCache,
+};
 use crate::policy::EinkRefreshPolicy;
 use crate::render::{PixelBuffer, Viewport};
 use crate::settings::SettingsSnapshot;
@@ -850,6 +852,12 @@ impl ReaderSession {
             }
             None => false,
         }
+    }
+
+    /// Report pagination progress to `progress`, and let it cancel a re-pagination (#161). Only
+    /// reflowable documents have anything slow to report; the rest ignore it.
+    pub fn set_pagination_progress(&self, progress: Box<dyn PaginationProgress>) {
+        self.document.set_pagination_progress(progress);
     }
 
     /// Apply the whole persisted typography set (text scale, face, line spacing, alignment) in one

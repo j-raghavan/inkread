@@ -15,7 +15,7 @@ pub use format::DocFormat;
 pub use text_select::{CharBox, NormRect, SearchMatch, TextSelection};
 
 use crate::error::CoreResult;
-use crate::persistence::PaginationCache;
+use crate::persistence::{PaginationCache, PaginationProgress};
 use crate::render::PixelBuffer;
 
 /// One ink stroke to write into the PDF on export (ADR-INKREAD-0005). Points are normalized page
@@ -482,6 +482,10 @@ pub trait Document {
     /// where to put it — fixed-layout formats ignore this. Must be called before anything reads a
     /// page count, or the first pagination is built before there is anywhere to look it up.
     fn set_pagination_cache(&self, _cache: Box<dyn PaginationCache>) {}
+
+    /// Offer somewhere to report pagination progress, and something to ask about cancelling (#161).
+    /// Ignored by formats that have nothing slow to report.
+    fn set_pagination_progress(&self, _progress: Box<dyn PaginationProgress>) {}
 
     /// Apply a whole [`Typography`] at once, preserving the chapter (RR4).
     fn apply_typography(&self, t: Typography, current_page: usize) -> Option<usize> {
