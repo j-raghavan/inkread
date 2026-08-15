@@ -127,6 +127,13 @@ class HomeActivity : Activity() {
         // The InkRead Daily — the day's issue as a strip card (the design's in-flow Daily entry).
         column.addView(spacer(dim(24)))
         column.addView(dailyCard(contentW))
+        // Your calibre / Calibre-Web library, once one is configured (ADR-INKREAD-0016). Hidden
+        // until then: an entry point to a server you have not set up is a dead end, and Settings is
+        // where you would go looking for it anyway.
+        if (AppSettings.opdsConfigured(this)) {
+            column.addView(spacer(dim(14)))
+            column.addView(libraryCard(contentW))
+        }
         if (recents.size >= 2) {
             column.addView(spacer(dim(28)))
             column.addView(eyebrowItalic("Recently on your shelf"))
@@ -287,6 +294,45 @@ class HomeActivity : Activity() {
             }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
 
             // Right action (WRAP height, centred — not full-height, which made it a black bar).
+            addView(TextView(this@HomeActivity).apply {
+                text = "Open →"; setTextColor(Color.WHITE); textSize = fs(14f)
+                typeface = Typeface.create(serif, Typeface.BOLD); gravity = Gravity.CENTER
+                setPadding(dim(18), dim(10), dim(18), dim(10))
+                background = GradientDrawable().apply { setColor(ink); cornerRadius = dim(6).toFloat() }
+            }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                marginEnd = dim(12)
+            })
+        }
+    }
+
+    // ── Your library — the configured OPDS server as a quiet strip (taps → OpdsActivity) ─────────
+
+    private fun libraryCard(contentW: Int): View {
+        val pad = dim(15)
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            background = outlined(dim(12))
+            isClickable = true
+            setOnClickListener { startActivity(Intent(this@HomeActivity, OpdsActivity::class.java)) }
+            layoutParams = LinearLayout.LayoutParams(contentW, ViewGroup.LayoutParams.WRAP_CONTENT)
+
+            addView(LinearLayout(this@HomeActivity).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(dim(16), pad, dim(12), pad)
+                addView(eyebrow("Your library"))
+                addView(TextView(this@HomeActivity).apply {
+                    text = "Browse and download"
+                    setTextColor(ink); textSize = fs(19f); typeface = serif
+                    setPadding(0, dim(4), 0, 0); maxLines = 1
+                })
+                addView(TextView(this@HomeActivity).apply {
+                    text = AppSettings.opdsUrl(this@HomeActivity)
+                    setTextColor(inkSoft); textSize = fs(13f); typeface = mono
+                    setPadding(0, dim(3), 0, 0); maxLines = 1
+                })
+            }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+
             addView(TextView(this@HomeActivity).apply {
                 text = "Open →"; setTextColor(Color.WHITE); textSize = fs(14f)
                 typeface = Typeface.create(serif, Typeface.BOLD); gravity = Gravity.CENTER

@@ -62,6 +62,13 @@
             android:exported="false"
             android:configChanges="orientation|screenSize|keyboardHidden" />
 
+        <!-- OPDS library browser (ADR-INKREAD-0016, #175) — calibre / Calibre-Web, launched from the
+             Home library card once a server is configured (not exported). -->
+        <activity
+            android:name=".OpdsActivity"
+            android:exported="false"
+            android:configChanges="orientation|screenSize|keyboardHidden" />
+
         <!-- Self-update install callback (ADR-INKREAD-0014): receives the PackageInstaller session
              result and launches the OS install-confirmation intent. Internal only. -->
         <receiver

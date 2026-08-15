@@ -15,6 +15,9 @@ object AppSettings {
     private const val KEY_AUTO_INSTALL_UPDATES = "auto_install_updates"
     private const val KEY_UPDATE_SKIP_VERSION = "update_skip_version"
     private const val KEY_UPDATE_LAST_CHECK_MS = "update_last_check_ms"
+    private const val KEY_OPDS_URL = "opds_url"
+    private const val KEY_OPDS_USER = "opds_user"
+    private const val KEY_OPDS_PASSWORD = "opds_password"
 
     private fun prefs(c: Context) = c.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
 
@@ -79,4 +82,38 @@ object AppSettings {
 
     fun setUpdateLastCheckMs(c: Context, ms: Long) =
         prefs(c).edit().putLong(KEY_UPDATE_LAST_CHECK_MS, ms).apply()
+
+    // ---- OPDS library: calibre content server / Calibre-Web (ADR-INKREAD-0016, #175) ----
+
+    /**
+     * The catalog server's address, as the reader typed it ("" = no library configured, which is
+     * what hides the Home entry). [OpdsController.catalogRoot] normalizes it before use, so a bare
+     * host is fine here.
+     */
+    fun opdsUrl(c: Context): String = prefs(c).getString(KEY_OPDS_URL, "").orEmpty()
+
+    fun setOpdsUrl(c: Context, value: String) =
+        prefs(c).edit().putString(KEY_OPDS_URL, value.trim()).apply()
+
+    /** Basic-auth username; "" when the server allows anonymous access (calibre's default). */
+    fun opdsUser(c: Context): String = prefs(c).getString(KEY_OPDS_USER, "").orEmpty()
+
+    fun setOpdsUser(c: Context, value: String) =
+        prefs(c).edit().putString(KEY_OPDS_USER, value.trim()).apply()
+
+    /**
+     * Basic-auth password, stored **in plain text** like every other preference here.
+     *
+     * That is a deliberate, disclosed choice rather than an oversight (ADR-INKREAD-0016 Decision 4):
+     * on a sideloaded app that already holds MANAGE_EXTERNAL_STORAGE on a single-user device, a
+     * keystore wrapper would raise the effort of an attack who is already inside by approximately
+     * nothing. The Settings screen says so plainly instead of implying a protection that is not there.
+     */
+    fun opdsPassword(c: Context): String = prefs(c).getString(KEY_OPDS_PASSWORD, "").orEmpty()
+
+    fun setOpdsPassword(c: Context, value: String) =
+        prefs(c).edit().putString(KEY_OPDS_PASSWORD, value).apply()
+
+    /** Whether a library is configured at all — gates the Home entry point. */
+    fun opdsConfigured(c: Context): Boolean = opdsUrl(c).isNotBlank()
 }

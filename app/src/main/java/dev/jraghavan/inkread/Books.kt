@@ -85,6 +85,16 @@ object Books {
         }
     }
 
+    /**
+     * Where a book downloaded from a catalog is stored (ADR-INKREAD-0016). Unlike [importFrom],
+     * [title] is a *document* title rather than a file name, so it keeps everything before its last
+     * dot — "Vol. 2" must not become "Vol". [ext] falls back to `pdf` on anything the core cannot
+     * open, matching [importExtension]. As with a SAF import, re-downloading the same title
+     * overwrites: the name is the book's identity.
+     */
+    fun destinationFor(context: Context, title: String, ext: String): File =
+        File(dir(context), "${sanitizeStem(title)}.${if (ext in SUPPORTED) ext else "pdf"}")
+
     /** A human title for a stored book file (drop the extension). */
     fun title(file: File): String = file.nameWithoutExtension
 
@@ -215,8 +225,10 @@ object Books {
             .query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)
             ?.use { c -> if (c.moveToFirst()) c.getString(0) else null }
 
-    private fun sanitize(name: String): String {
-        val stem = name.substringBeforeLast('.').ifBlank { "document" }
-        return stem.replace(Regex("[^A-Za-z0-9 ._-]"), "_").trim().take(80).ifBlank { "document" }
-    }
+    private fun sanitize(name: String): String =
+        sanitizeStem(name.substringBeforeLast('.').ifBlank { "document" })
+
+    /** Make [stem] safe as a file name (no extension handling — see [sanitize]). */
+    private fun sanitizeStem(stem: String): String =
+        stem.replace(Regex("[^A-Za-z0-9 ._-]"), "_").trim().take(80).ifBlank { "document" }
 }
