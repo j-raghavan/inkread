@@ -34,17 +34,55 @@ const MAX_SCALE: f32 = 3.0;
 /// Default line-spacing multiple (RR4). Mirrors the shell's `DisplayPrefs.DEFAULT_LINE_SPACING`.
 const DEFAULT_LINE_SPACING: f32 = 1.4;
 
+/// How many materialized chapters to keep. Reading walks forward through one chapter at a time, so
+/// a couple of entries covers a page turn across a chapter boundary and a jump back, while keeping
+/// the retained page structures bounded regardless of how long the book is.
+const CHAPTER_CACHE: usize = 3;
+
 /// A pagination of the whole book for one set of layout parameters — rebuilt only when those
 /// parameters actually change (see [`EpubBackend::laid`]).
+///
+/// This is the **index only**: where each chapter starts and how long the book is. The pages
+/// themselves are materialized per chapter on demand ([`EpubBackend::with_page`]), because holding
+/// every page of a long book costs tens of megabytes of positioned runs for content that is not on
+/// screen — and because the index is the part worth persisting across launches (#162).
 struct Laid {
     opts: LayoutOpts,
     /// The reading face this pagination was measured with. Not part of [`LayoutOpts`], but a
     /// different face means different metrics, so it belongs in the staleness key.
     font_id: usize,
-    /// All pages across all chapters, concatenated (a single global page index).
-    pages: Vec<Page>,
     /// `chapter_start[i]` = the global page index where chapter `i` begins (TOC resolution).
     chapter_start: Vec<usize>,
+    /// Total pages across every chapter.
+    total_pages: usize,
+}
+
+impl Laid {
+    /// Build the index from per-chapter page counts. Every chapter occupies at least one page, so
+    /// the chapter→page mapping stays 1:1 even for an empty chapter.
+    fn from_chapter_pages(opts: LayoutOpts, font_id: usize, chapter_pages: &[usize]) -> Self {
+        let mut chapter_start = Vec::with_capacity(chapter_pages.len());
+        let mut total_pages = 0;
+        for &pages in chapter_pages {
+            chapter_start.push(total_pages);
+            total_pages += pages.max(1);
+        }
+        Self {
+            opts,
+            font_id,
+            chapter_start,
+            // A book with no chapters at all still presents one (blank) page.
+            total_pages: total_pages.max(1),
+        }
+    }
+
+    /// The chapter index that global `page` falls in (the last chapter whose start ≤ page).
+    fn chapter_of(&self, page: usize) -> usize {
+        self.chapter_start
+            .iter()
+            .rposition(|&start| start <= page)
+            .unwrap_or(0)
+    }
 }
 
 /// The EPUB backend: parsed per-chapter content + the embedded reading face, with a cached layout.
@@ -71,10 +109,14 @@ pub struct EpubBackend {
     align: Cell<Align>,
     /// The page size to lay out for; updated by the render path when the buffer changes.
     viewport: Cell<(u32, u32)>,
-    /// The current pagination, or `None` before the first one is needed. Laying out lazily lets the
-    /// open path apply the reader's saved typography *before* any pagination is built, so a cold
-    /// open costs a single layout pass instead of one per setting (#161/#162).
+    /// The current pagination index, or `None` before the first one is needed. Laying out lazily
+    /// lets the open path apply the reader's saved typography *before* any pagination is built, so
+    /// a cold open costs a single layout pass instead of one per setting (#161/#162).
     laid: RefCell<Option<Laid>>,
+    /// Recently materialized chapters as `(chapter index, its pages)`, most recent last. Bounded by
+    /// [`CHAPTER_CACHE`] and cleared whenever [`Self::laid`] is rebuilt, since a re-layout
+    /// invalidates every page in it.
+    chapter_pages: RefCell<Vec<(usize, Vec<Page>)>>,
 }
 
 impl EpubBackend {
@@ -104,7 +146,86 @@ impl EpubBackend {
             // Deferred: the first read paginates, so the saved typography applied right after open
             // is folded into that single pass rather than triggering one pass per setting.
             laid: RefCell::new(None),
+            chapter_pages: RefCell::new(Vec::new()),
         })
+    }
+
+    /// A backend over `chapters` of pre-parsed blocks, bypassing the container. Lets a test build a
+    /// book with enough chapters to exercise the chapter cache's eviction, which the small bundled
+    /// fixture cannot. Everything downstream — indexing, materialization, caching — is the real path.
+    #[cfg(test)]
+    fn from_chapters(chapters: Vec<Vec<Block>>, viewport: crate::render::Viewport) -> Self {
+        let chapter_keys = (0..chapters.len())
+            .map(|i| format!("ch{i}.xhtml"))
+            .collect();
+        Self {
+            chapters,
+            chapter_keys,
+            nav: Vec::new(),
+            meta: DocumentMetadata {
+                title: Some("Synthetic".into()),
+                author: None,
+            },
+            font: RefCell::new(AbFont::default_font()),
+            hyph: EnHyphenator::new(),
+            font_id: Cell::new(0),
+            scale: Cell::new(1.0),
+            line_spacing: Cell::new(DEFAULT_LINE_SPACING),
+            align: Cell::new(Align::default()),
+            viewport: Cell::new((viewport.width, viewport.height)),
+            laid: RefCell::new(None),
+            chapter_pages: RefCell::new(Vec::new()),
+        }
+    }
+
+    /// Lay out chapter `index` on its own. Pagination is per chapter by construction — a chapter
+    /// always starts a fresh page and nothing carries across the boundary — so a chapter laid out
+    /// alone is identical to its slice of a whole-book pass. That is what makes materializing one
+    /// chapter at a time sound rather than merely convenient.
+    fn lay_out_chapter(&self, index: usize, opts: &LayoutOpts) -> Vec<Page> {
+        let Some(blocks) = self.chapters.get(index) else {
+            return vec![Page::default()];
+        };
+        let face = self.font.borrow();
+        let font = CachedMetrics::new(&*face);
+        let hyph = CachedHyphenator::new(&self.hyph);
+        let mut pages = paginate_with(blocks, opts, &font, &hyph);
+        if pages.is_empty() {
+            pages.push(Page::default()); // an empty chapter still occupies its one page
+        }
+        pages
+    }
+
+    /// Run `f` against global `page` and the layout parameters it was laid out with, materializing
+    /// its chapter if it is not already cached. `None` for a page past the end of the book.
+    fn with_page<R>(&self, page: usize, f: impl FnOnce(&Page, &LayoutOpts) -> R) -> Option<R> {
+        let (chapter, offset, opts) = {
+            let laid = self.laid();
+            if page >= laid.total_pages {
+                return None;
+            }
+            let chapter = laid.chapter_of(page);
+            let start = laid.chapter_start.get(chapter).copied().unwrap_or(0);
+            (chapter, page - start, laid.opts)
+        };
+
+        if let Some(hit) = self
+            .chapter_pages
+            .borrow()
+            .iter()
+            .find(|(c, _)| *c == chapter)
+        {
+            return hit.1.get(offset).map(|p| f(p, &opts));
+        }
+
+        let pages = self.lay_out_chapter(chapter, &opts);
+        let result = pages.get(offset).map(|p| f(p, &opts));
+        let mut cache = self.chapter_pages.borrow_mut();
+        if cache.len() >= CHAPTER_CACHE {
+            cache.remove(0); // oldest out; the tail is what reading is walking through
+        }
+        cache.push((chapter, pages));
+        result
     }
 
     /// The effective body font size for the current user scale.
@@ -130,13 +251,14 @@ impl EpubBackend {
             Some(laid) => laid.opts != self.requested_opts() || laid.font_id != self.font_id.get(),
         };
         if stale {
-            let fresh = layout_all(
-                &self.chapters,
-                &self.font.borrow(),
-                &self.hyph,
-                self.requested_opts(),
+            let opts = self.requested_opts();
+            let fresh = Laid::from_chapter_pages(
+                opts,
                 self.font_id.get(),
+                &index_chapters(&self.chapters, &self.font.borrow(), &self.hyph, &opts),
             );
+            // Every cached page belongs to the layout being replaced.
+            self.chapter_pages.borrow_mut().clear();
             *self.laid.borrow_mut() = Some(fresh);
         }
         // Materialized directly above and never taken back out, so the borrow is always `Some`.
@@ -170,12 +292,11 @@ impl EpubBackend {
     /// logic (RR11 / RR2). Mirrors the PDF backend's `page_chars`: the layout's positioned glyphs
     /// (pixel space) normalized to `[0,1]`. An out-of-range page contributes nothing (RR21-FR3).
     fn page_chars(&self, index: usize) -> Vec<CharBox> {
-        let laid = self.laid();
-        let Some(page) = laid.pages.get(index) else {
-            return Vec::new();
-        };
         // Shared with the PDF-reflow backend so the glyph→CharBox + anchor mapping lives once.
-        crate::document::reflow_view::page_charboxes(page, &laid.opts, &self.font.borrow())
+        self.with_page(index, |page, opts| {
+            crate::document::reflow_view::page_charboxes(page, opts, &self.font.borrow())
+        })
+        .unwrap_or_default()
     }
 
     /// Frame a chapter-relative [`TextAnchor`] into a full [`PinPosition`] (RR6) for `chapter`. The
@@ -218,7 +339,7 @@ impl EpubBackend {
             .chapter_start
             .get(chapter + 1)
             .copied()
-            .unwrap_or(laid.pages.len());
+            .unwrap_or(laid.total_pages);
         drop(laid);
         let target = pin.text_offset.max(0);
         let mut best = start;
@@ -262,17 +383,13 @@ impl EpubBackend {
 
     /// The chapter index that global `page` falls in (the last chapter whose start ≤ page).
     fn chapter_of(&self, page: usize) -> usize {
-        let laid = self.laid();
-        laid.chapter_start
-            .iter()
-            .rposition(|&start| start <= page)
-            .unwrap_or(0)
+        self.laid().chapter_of(page)
     }
 }
 
 impl Document for EpubBackend {
     fn page_count(&self) -> usize {
-        self.laid().pages.len()
+        self.laid().total_pages
     }
 
     fn metadata(&self) -> DocumentMetadata {
@@ -281,14 +398,18 @@ impl Document for EpubBackend {
 
     fn render_page(&self, index: usize, buf: &mut PixelBuffer<'_>) -> CoreResult<()> {
         self.viewport.set((buf.width(), buf.height()));
-        let laid = self.laid();
-        let page = laid.pages.get(index).ok_or(CoreError::PageOutOfRange {
-            requested: index,
-            available: laid.pages.len(),
-        })?;
+        let (w, h) = (buf.width(), buf.height());
+        let canvas = self
+            .with_page(index, |page, opts| {
+                let mut canvas = GrayCanvas::new(w, h);
+                raster_page(page, opts, &self.font.borrow(), &mut canvas);
+                canvas
+            })
+            .ok_or(CoreError::PageOutOfRange {
+                requested: index,
+                available: self.laid().total_pages,
+            })?;
         buf.fill_white();
-        let mut canvas = GrayCanvas::new(buf.width(), buf.height());
-        raster_page(page, &laid.opts, &self.font.borrow(), &mut canvas);
         // Expand 8-bit grayscale → opaque RGBA (CHANNEL_ORDER r,g,b,a). One byte → three equal.
         let dst = buf.bytes_mut();
         for (i, &g) in canvas.pixels.iter().enumerate() {
@@ -419,39 +540,27 @@ fn reset_layout_passes() {
     LAYOUT_PASSES.with(|c| c.set(0));
 }
 
-/// Paginate every chapter for `opts` measured with `font`; each chapter starts a page.
-fn layout_all(
+/// Paginate every chapter for `opts` and return how many pages each occupies.
+///
+/// The pages themselves are dropped as they are counted: this pass exists to build the index, and
+/// retaining every page of a long book is exactly the memory cost lazy materialization removes.
+/// Peak memory here is one chapter, not the whole book.
+fn index_chapters(
     chapters: &[Vec<Block>],
     font: &AbFont,
     hyph: &dyn Hyphenator,
-    opts: LayoutOpts,
-    font_id: usize,
-) -> Laid {
+    opts: &LayoutOpts,
+) -> Vec<usize> {
     #[cfg(test)]
     LAYOUT_PASSES.with(|c| c.set(c.get() + 1));
     // Memoize measurement across the *whole book*, not per chapter: prose repeats itself, and the
     // widths a later chapter needs have almost all been computed by an earlier one (#161/#162).
     let font = CachedMetrics::new(font);
     let hyph = CachedHyphenator::new(hyph);
-    let mut pages = Vec::new();
-    let mut chapter_start = Vec::with_capacity(chapters.len());
-    for blocks in chapters {
-        chapter_start.push(pages.len());
-        let mut cps = paginate_with(blocks, &opts, &font, &hyph);
-        if cps.is_empty() {
-            cps.push(Page::default()); // keep a 1:1 chapter→start mapping even for an empty chapter
-        }
-        pages.append(&mut cps);
-    }
-    if pages.is_empty() {
-        pages.push(Page::default());
-    }
-    Laid {
-        opts,
-        font_id,
-        pages,
-        chapter_start,
-    }
+    chapters
+        .iter()
+        .map(|blocks| paginate_with(blocks, opts, &font, &hyph).len().max(1))
+        .collect()
 }
 
 /// Resolve a [`NavPoint`] into a [`TocEntry`] with a page target (matched by resource basename).
@@ -885,5 +994,117 @@ mod tests {
                 .any(|p| render(&justified, p, 400, 600) != render(&untouched, p, 400, 600)),
             "Justify differs from the default, so the comparison above is meaningful"
         );
+    }
+
+    // ---- lazy per-chapter materialization (#161/#162) -----------------------------------------
+
+    /// A book with more chapters than the chapter cache holds, so eviction actually happens.
+    fn synthetic_book() -> EpubBackend {
+        let chapters = (0..CHAPTER_CACHE * 4)
+            .map(|c| {
+                (0..6)
+                    .map(|p| {
+                        parse_blocks(&format!(
+                            "<p>Chapter {c} paragraph {p}. The morning was unremarkable and the \
+                             light through the window was the light of every other morning, and \
+                             he remembered none of it at all, not one moment of any of it.</p>"
+                        ))
+                        .remove(0)
+                    })
+                    .collect()
+            })
+            .collect();
+        EpubBackend::from_chapters(chapters, vp(400, 600))
+    }
+
+    #[test]
+    fn building_the_index_materializes_no_pages() {
+        // The whole point of persisting an index (#162): page count and TOC are answerable without
+        // holding a single laid-out page.
+        let b = synthetic_book();
+        assert!(b.page_count() > 0);
+        let _ = b.toc();
+        assert!(
+            b.chapter_pages.borrow().is_empty(),
+            "counting pages retains none of them"
+        );
+    }
+
+    #[test]
+    fn pages_render_identically_however_the_reader_arrives_at_them() {
+        // Materializing a chapter at a time only works if the cache is transparent. Render every
+        // page forwards, then again in reverse — which evicts and re-materializes constantly — and
+        // demand the bytes match.
+        let b = synthetic_book();
+        let count = b.page_count();
+        assert!(count > 0);
+        let forwards: Vec<Vec<u8>> = (0..count).map(|p| render(&b, p, 400, 600)).collect();
+
+        for page in (0..count).rev() {
+            assert_eq!(
+                render(&b, page, 400, 600),
+                forwards[page],
+                "page {page} renders the same when reached backwards"
+            );
+        }
+        // ...and jumping around (TOC navigation) is no different.
+        for page in [count - 1, 0, count / 2, count - 1, 1] {
+            assert_eq!(render(&b, page, 400, 600), forwards[page], "page {page}");
+        }
+        // The rendered pages are not all the same image, so the comparison means something.
+        assert!(forwards.iter().any(|p| *p != forwards[0]));
+    }
+
+    #[test]
+    fn the_chapter_cache_stays_bounded_however_far_the_reader_reads() {
+        let b = synthetic_book();
+        for page in 0..b.page_count() {
+            let _ = render(&b, page, 400, 600);
+            assert!(
+                b.chapter_pages.borrow().len() <= CHAPTER_CACHE,
+                "chapter cache exceeded its bound at page {page}"
+            );
+        }
+        assert!(
+            b.chapter_pages.borrow().len() > 1,
+            "the reader crossed chapters, so more than one was cached"
+        );
+    }
+
+    #[test]
+    fn a_relayout_drops_pages_cached_under_the_old_settings() {
+        let b = synthetic_book();
+        let before = render(&b, 0, 400, 600);
+        assert!(!b.chapter_pages.borrow().is_empty(), "page 0 was cached");
+
+        let _ = b.set_text_scale(2.0, 0);
+        assert!(
+            b.chapter_pages.borrow().is_empty(),
+            "a repagination invalidates every cached page"
+        );
+        assert_ne!(
+            render(&b, 0, 400, 600),
+            before,
+            "and the page re-renders at the new size rather than serving a stale one"
+        );
+    }
+
+    #[test]
+    fn a_page_past_the_end_is_a_typed_error_not_a_panic() {
+        // RR21-FR3 — the page index arrives from the shell, so it is not trusted.
+        let b = synthetic_book();
+        let count = b.page_count();
+        let mut bytes = vec![0u8; 400 * 600 * 4];
+        let mut buf = PixelBuffer::from_rgba(&mut bytes, 400, 600).unwrap();
+        assert!(matches!(
+            b.render_page(count, &mut buf),
+            Err(CoreError::PageOutOfRange { .. })
+        ));
+        assert!(matches!(
+            b.render_page(usize::MAX, &mut buf),
+            Err(CoreError::PageOutOfRange { .. })
+        ));
+        assert!(b.page_chars(count).is_empty());
+        assert!(b.page_pin(count).is_none());
     }
 }
