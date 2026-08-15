@@ -47,11 +47,34 @@ const CHAPTER_CACHE: usize = 3;
 /// themselves are materialized per chapter on demand ([`EpubBackend::with_page`]), because holding
 /// every page of a long book costs tens of megabytes of positioned runs for content that is not on
 /// screen — and because the index is the part worth persisting across launches (#162).
-struct Laid {
-    opts: LayoutOpts,
-    /// The reading face this pagination was measured with. Not part of [`LayoutOpts`], but a
-    /// different face means different metrics, so it belongs in the staleness key.
+/// The settings a pagination was built for, exactly as the reader set them.
+///
+/// Staleness is decided by comparing this — not the [`LayoutOpts`] derived from it — and a
+/// cancelled re-layout restores it verbatim. Comparing derived values instead would mean
+/// reconstructing the settings on the revert path (recovering `scale` by dividing `font_px` back
+/// out, and so on); any float that failed to round-trip would leave the surviving pagination
+/// looking permanently stale, so every later read would re-run the work the reader just cancelled.
+/// Keeping the compared value and the restored value the same thing removes that class of bug
+/// rather than relying on the arithmetic to be exact.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct LayoutRequest {
+    /// Page size in device pixels.
+    viewport: (u32, u32),
+    /// User text scale; `1.0` = [`BASE_FONT_PX`]. Always finite (see [`clamp_scale`]), so the
+    /// derived `PartialEq` can never be defeated by a NaN.
+    scale: f32,
+    line_spacing: f32,
+    align: Align,
+    /// The bundled reading face. Not part of [`LayoutOpts`], but a different face means different
+    /// metrics, so it belongs in the staleness key.
     font_id: usize,
+}
+
+struct Laid {
+    /// What was asked for.
+    request: LayoutRequest,
+    /// What that resolved to for the layout engine.
+    opts: LayoutOpts,
     /// `chapter_start[i]` = the global page index where chapter `i` begins (TOC resolution).
     chapter_start: Vec<usize>,
     /// Total pages across every chapter.
@@ -61,7 +84,11 @@ struct Laid {
 impl Laid {
     /// Build the index from per-chapter page counts. Every chapter occupies at least one page, so
     /// the chapter→page mapping stays 1:1 even for an empty chapter.
-    fn from_chapter_pages(opts: LayoutOpts, font_id: usize, chapter_pages: &[usize]) -> Self {
+    fn from_chapter_pages(
+        request: LayoutRequest,
+        opts: LayoutOpts,
+        chapter_pages: &[usize],
+    ) -> Self {
         let mut chapter_start = Vec::with_capacity(chapter_pages.len());
         let mut total_pages = 0;
         for &pages in chapter_pages {
@@ -69,8 +96,8 @@ impl Laid {
             total_pages += pages.max(1);
         }
         Self {
+            request,
             opts,
-            font_id,
             chapter_start,
             // A book with no chapters at all still presents one (blank) page.
             total_pages: total_pages.max(1),
@@ -237,32 +264,38 @@ impl EpubBackend {
         result
     }
 
-    /// The effective body font size for the current user scale.
-    fn font_px(&self) -> f32 {
-        BASE_FONT_PX * self.scale.get()
+    /// The settings currently asked for. Comparing this against [`Laid::request`] is what makes a
+    /// redundant repagination free.
+    fn current_request(&self) -> LayoutRequest {
+        LayoutRequest {
+            viewport: self.viewport.get(),
+            scale: self.scale.get(),
+            line_spacing: self.line_spacing.get(),
+            align: self.align.get(),
+            font_id: self.font_id.get(),
+        }
     }
 
-    /// The layout parameters the current settings + viewport ask for. Comparing this against the
-    /// cached [`Laid::opts`] is what makes a redundant repagination free.
-    fn requested_opts(&self) -> LayoutOpts {
-        let (w, h) = self.viewport.get();
-        let mut opts = LayoutOpts::new(w as f32, h as f32, self.font_px());
-        opts.line_spacing = self.line_spacing.get();
-        opts.align = self.align.get();
+    /// Resolve a request into the layout engine's parameters.
+    fn opts_for(request: &LayoutRequest) -> LayoutOpts {
+        let (w, h) = request.viewport;
+        let mut opts = LayoutOpts::new(w as f32, h as f32, BASE_FONT_PX * request.scale);
+        opts.line_spacing = request.line_spacing;
+        opts.align = request.align;
         opts
     }
 
     /// The current pagination, built on first use and rebuilt **only** when the requested layout
     /// parameters or the reading face actually differ from the cached ones.
     fn laid(&self) -> Ref<'_, Laid> {
+        let request = self.current_request();
         let stale = match self.laid.borrow().as_ref() {
             None => true,
-            Some(laid) => laid.opts != self.requested_opts() || laid.font_id != self.font_id.get(),
+            Some(laid) => laid.request != request,
         };
         if stale {
-            let opts = self.requested_opts();
-            let font_id = self.font_id.get();
-            let key = layout_key(&opts, font_id, self.chapters.len());
+            let opts = Self::opts_for(&request);
+            let key = layout_key(&opts, request.font_id, self.chapters.len());
             let cache = self.pagination_cache.borrow();
 
             // A stored pagination is only usable if it describes this book's chapters — a count
@@ -300,7 +333,7 @@ impl EpubBackend {
                 Some(pages) => {
                     // Every cached page belongs to the layout being replaced.
                     self.chapter_pages.borrow_mut().clear();
-                    *self.laid.borrow_mut() = Some(Laid::from_chapter_pages(opts, font_id, &pages));
+                    *self.laid.borrow_mut() = Some(Laid::from_chapter_pages(request, opts, &pages));
                 }
                 // Abandoned: put the requested parameters back to the ones the surviving
                 // pagination was built with. Leaving them changed would make it look permanently
@@ -314,19 +347,18 @@ impl EpubBackend {
         })
     }
 
-    /// Roll the requested layout parameters back to those of the pagination currently in force,
-    /// after a re-layout was cancelled (#161). Every value the staleness check compares has to be
-    /// restored, or the abandoned work restarts on the next read.
+    /// Roll the requested settings back to those of the pagination still in force, after a
+    /// re-layout was cancelled (#161). Restores the very value the staleness check compares, so the
+    /// surviving pagination reads as current again and the abandoned work is not retried.
     fn revert_request_to_laid(&self) {
-        let Some(laid) = self.laid.borrow().as_ref().map(|l| (l.opts, l.font_id)) else {
+        let Some(request) = self.laid.borrow().as_ref().map(|laid| laid.request) else {
             return;
         };
-        let (opts, font_id) = laid;
-        self.viewport.set((opts.page_w as u32, opts.page_h as u32));
-        self.scale.set(opts.font_px / BASE_FONT_PX);
-        self.line_spacing.set(opts.line_spacing);
-        self.align.set(opts.align);
-        self.apply_font(font_id as i32);
+        self.viewport.set(request.viewport);
+        self.scale.set(request.scale);
+        self.line_spacing.set(request.line_spacing);
+        self.align.set(request.align);
+        self.apply_font(request.font_id as i32);
     }
 
     /// Repaginate at the current viewport/scale, anchoring the reading position to the chapter
@@ -1424,6 +1456,41 @@ mod tests {
             0,
             "reading after a cancel does not restart the abandoned pagination"
         );
+    }
+
+    #[test]
+    fn a_cancel_restores_the_request_exactly_across_the_whole_settings_range() {
+        // `revert_request_to_laid` has to leave the surviving pagination reading as *current*.
+        // If the restored request differed from the compared one by even one bit, the pagination
+        // would look stale forever and every read would re-run the cancelled work — so sweep the
+        // full range of every setting rather than trusting one example.
+        // One book: every iteration cancels and must land back on the same settled request, so the
+        // book is in the identical state each time round.
+        let b = synthetic_book();
+        let _ = b.page_count(); // establish a pagination to fall back to
+        let settled = b.current_request();
+
+        let mut scale = MIN_SCALE;
+        while scale <= MAX_SCALE {
+            for &spacing in &[1.0f32, 1.4, 1.9, 2.5] {
+                for align_code in 0..4 {
+                    let (w, _) = watcher(Some(1));
+                    b.set_pagination_progress(w);
+                    let _ = b.set_typography(scale, 1, spacing, align_code, 0);
+
+                    assert_eq!(
+                        b.current_request(),
+                        settled,
+                        "cancelling scale={scale} spacing={spacing} align={align_code} \
+                         must restore the request bit-for-bit"
+                    );
+                    reset_layout_passes();
+                    let _ = b.page_count();
+                    assert_eq!(layout_passes(), 0, "and leave nothing looking stale");
+                }
+            }
+            scale += 0.05;
+        }
     }
 
     #[test]
