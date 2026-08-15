@@ -20,6 +20,7 @@ use inkread_epub::{parse_blocks, Block, EpubPackage, NavPoint};
 use crate::document::text_select::{self, CharBox, NormRect, TextAnchor, TextSelection};
 use crate::document::{Document, DocumentMetadata, SearchMatch, TocEntry};
 use crate::error::{CoreError, CoreResult};
+use crate::persistence::PaginationCache;
 use crate::position::PinPosition;
 use crate::render::PixelBuffer;
 
@@ -117,6 +118,8 @@ pub struct EpubBackend {
     /// [`CHAPTER_CACHE`] and cleared whenever [`Self::laid`] is rebuilt, since a re-layout
     /// invalidates every page in it.
     chapter_pages: RefCell<Vec<(usize, Vec<Page>)>>,
+    /// Where paginations survive between launches, once a store is attached (#162).
+    pagination_cache: RefCell<Option<Box<dyn PaginationCache>>>,
 }
 
 impl EpubBackend {
@@ -147,6 +150,7 @@ impl EpubBackend {
             // is folded into that single pass rather than triggering one pass per setting.
             laid: RefCell::new(None),
             chapter_pages: RefCell::new(Vec::new()),
+            pagination_cache: RefCell::new(None),
         })
     }
 
@@ -175,6 +179,7 @@ impl EpubBackend {
             viewport: Cell::new((viewport.width, viewport.height)),
             laid: RefCell::new(None),
             chapter_pages: RefCell::new(Vec::new()),
+            pagination_cache: RefCell::new(None),
         }
     }
 
@@ -252,14 +257,31 @@ impl EpubBackend {
         };
         if stale {
             let opts = self.requested_opts();
-            let fresh = Laid::from_chapter_pages(
-                opts,
-                self.font_id.get(),
-                &index_chapters(&self.chapters, &self.font.borrow(), &self.hyph, &opts),
-            );
+            let font_id = self.font_id.get();
+            let key = layout_key(&opts, font_id, self.chapters.len());
+            let cache = self.pagination_cache.borrow();
+
+            // A stored pagination is only usable if it describes this book's chapters — a count
+            // mismatch means the key collided or the content moved under it, and trusting it would
+            // put the reader on the wrong page rather than merely make the book slow to open.
+            let cached = cache
+                .as_ref()
+                .and_then(|c| c.load(&key))
+                .filter(|pages| pages.len() == self.chapters.len());
+
+            let chapter_pages = cached.unwrap_or_else(|| {
+                let counted =
+                    index_chapters(&self.chapters, &self.font.borrow(), &self.hyph, &opts);
+                if let Some(c) = cache.as_ref() {
+                    c.save(&key, &counted);
+                }
+                counted
+            });
+            drop(cache);
+
             // Every cached page belongs to the layout being replaced.
             self.chapter_pages.borrow_mut().clear();
-            *self.laid.borrow_mut() = Some(fresh);
+            *self.laid.borrow_mut() = Some(Laid::from_chapter_pages(opts, font_id, &chapter_pages));
         }
         // Materialized directly above and never taken back out, so the borrow is always `Some`.
         Ref::map(self.laid.borrow(), |slot| {
@@ -471,6 +493,10 @@ impl Document for EpubBackend {
         self.repaginate_keeping_chapter(current_page)
     }
 
+    fn set_pagination_cache(&self, cache: Box<dyn PaginationCache>) {
+        *self.pagination_cache.borrow_mut() = Some(cache);
+    }
+
     fn set_typography(
         &self,
         scale: f32,
@@ -538,6 +564,27 @@ pub(crate) fn layout_passes() -> usize {
 #[cfg(test)]
 pub(crate) fn reset_layout_passes() {
     LAYOUT_PASSES.with(|c| c.set(0));
+}
+
+/// The cache key for one exact layout of one book (#162).
+///
+/// A stored pagination is valid only for the parameters that produced it, so every input the line
+/// breaking depends on has to appear here: the page box and margin, the body size, line spacing,
+/// paragraph gap, alignment, and the reading face. Floats go in by bit pattern so the key is exact
+/// rather than rounded — two font sizes that print the same but differ in the last bit really do
+/// paginate differently. The chapter count is included so a key can never be read back against a
+/// book of a different shape.
+fn layout_key(opts: &LayoutOpts, font_id: usize, chapters: usize) -> String {
+    format!(
+        "v1|{}|{}|{}|{}|{}|{}|{}|{font_id}|{chapters}",
+        opts.page_w.to_bits(),
+        opts.page_h.to_bits(),
+        opts.margin.to_bits(),
+        opts.font_px.to_bits(),
+        opts.line_spacing.to_bits(),
+        opts.para_gap.to_bits(),
+        opts.align as i32,
+    )
 }
 
 /// Paginate every chapter for `opts` and return how many pages each occupies.
@@ -1087,6 +1134,131 @@ mod tests {
             before,
             "and the page re-renders at the new size rather than serving a stale one"
         );
+    }
+
+    // ---- persisted pagination (#162) ---------------------------------------------------------
+
+    /// What a [`FakeCache`] was asked to store, as `(layout key, per-chapter page counts)`.
+    type SaveLog = std::rc::Rc<RefCell<Vec<(String, Vec<usize>)>>>;
+
+    /// A cache that hands back whatever it is told to and records what it is given, so the
+    /// backend's own validation can be tested without going near a database. The record is shared
+    /// so a test can still read it after handing the cache to the backend.
+    struct FakeCache {
+        answer: Option<Vec<usize>>,
+        saved: SaveLog,
+    }
+
+    impl PaginationCache for FakeCache {
+        fn load(&self, _key: &str) -> Option<Vec<usize>> {
+            self.answer.clone()
+        }
+        fn save(&self, key: &str, chapter_pages: &[usize]) {
+            self.saved
+                .borrow_mut()
+                .push((key.to_string(), chapter_pages.to_vec()));
+        }
+    }
+
+    /// A cache answering `answer` to every load, plus the log of what it was asked to save.
+    fn fake(answer: Option<Vec<usize>>) -> (Box<FakeCache>, SaveLog) {
+        let saved: SaveLog = std::rc::Rc::new(RefCell::new(Vec::new()));
+        (
+            Box::new(FakeCache {
+                answer,
+                saved: saved.clone(),
+            }),
+            saved,
+        )
+    }
+
+    #[test]
+    fn a_stored_pagination_for_the_wrong_number_of_chapters_is_refused() {
+        // The dangerous failure is not a crash, it is silently believing a pagination that
+        // describes a different book: the reader would resume at a page that means nothing.
+        let truth = synthetic_book().page_count();
+        for wrong in [vec![1usize], vec![2; 500], Vec::new()] {
+            let b = synthetic_book();
+            b.set_pagination_cache(fake(Some(wrong.clone())).0);
+            assert_eq!(
+                b.page_count(),
+                truth,
+                "a {}-chapter pagination was refused and the book laid out instead",
+                wrong.len()
+            );
+        }
+    }
+
+    #[test]
+    fn a_stored_pagination_of_the_right_shape_is_used_verbatim() {
+        // The flip side: a pagination that *does* match is trusted without a layout pass, which is
+        // the entire saving in #162.
+        let b = synthetic_book();
+        let chapters = b.chapters.len();
+        b.set_pagination_cache(fake(Some(vec![7; chapters])).0);
+        reset_layout_passes();
+        assert_eq!(b.page_count(), 7 * chapters);
+        assert_eq!(layout_passes(), 0, "served from the cache, not laid out");
+    }
+
+    #[test]
+    fn each_computed_pagination_is_stored_under_its_own_key() {
+        let b = synthetic_book();
+        let (cache, saved) = fake(None); // always a miss, so every layout is offered for storage
+        b.set_pagination_cache(cache);
+
+        let first = b.page_count();
+        let _ = b.set_text_scale(2.0, 0);
+        let second = b.page_count();
+
+        let saved = saved.borrow();
+        assert_eq!(saved.len(), 2, "both layouts were offered to the cache");
+        assert_ne!(saved[0].0, saved[1].0, "under different keys");
+        assert_eq!(saved[0].1.iter().sum::<usize>(), first);
+        assert_eq!(saved[1].1.iter().sum::<usize>(), second);
+        assert_eq!(
+            saved[0].1.len(),
+            b.chapters.len(),
+            "one entry per chapter — the shape the load side validates"
+        );
+    }
+
+    #[test]
+    fn every_layout_parameter_changes_the_key() {
+        // If two different layouts share a key, one of them gets the other's page boundaries.
+        let base = LayoutOpts::new(400.0, 600.0, 56.0);
+        let key = layout_key(&base, 0, 12);
+
+        let mut wider = base;
+        wider.page_w = 401.0;
+        let mut taller = base;
+        taller.page_h = 601.0;
+        let mut margined = base;
+        margined.margin += 1.0;
+        let mut bigger = base;
+        bigger.font_px = 56.5;
+        let mut looser = base;
+        looser.line_spacing = 1.5;
+        let mut gapped = base;
+        gapped.para_gap += 1.0;
+        let mut justified = base;
+        justified.align = Align::Justify;
+
+        for (label, other) in [
+            ("width", layout_key(&wider, 0, 12)),
+            ("height", layout_key(&taller, 0, 12)),
+            ("margin", layout_key(&margined, 0, 12)),
+            ("font size", layout_key(&bigger, 0, 12)),
+            ("line spacing", layout_key(&looser, 0, 12)),
+            ("paragraph gap", layout_key(&gapped, 0, 12)),
+            ("alignment", layout_key(&justified, 0, 12)),
+            ("face", layout_key(&base, 1, 12)),
+            ("chapter count", layout_key(&base, 0, 13)),
+        ] {
+            assert_ne!(key, other, "{label} must change the layout key");
+        }
+        // The same layout keys the same, or nothing would ever hit.
+        assert_eq!(key, layout_key(&LayoutOpts::new(400.0, 600.0, 56.0), 0, 12));
     }
 
     #[test]

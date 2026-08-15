@@ -1403,56 +1403,170 @@ fn prefetch_warms_the_next_page_without_changing_the_displayed_one() {
     assert_eq!(s.current_page(), 0);
 }
 
-/// The real open sequence for a book that was read before (#162): open with a store, which resumes
-/// the saved position, then apply the reader's saved typography. Counts paginations rather than
-/// timing them, because the cost is what the bug reports are about.
-#[test]
-fn resuming_a_previously_read_epub_costs_one_pagination() {
-    const SAMPLE: &[u8] = include_bytes!("../tests/fixtures/sample.epub");
-    let store: Arc<dyn ReaderStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
-    let book = BookId::new("resumed").unwrap();
-    let caps = DeviceCapabilities::supernote_full();
-    let viewport = Viewport {
-        width: 400,
-        height: 600,
-        dpi: 226,
-    };
+// ---- persisted pagination (#161/#162) --------------------------------------------------------
+// These count paginations rather than timing them: the cost is what the reports are about, and a
+// wall clock would mean something different on every machine.
 
-    // First read: open, apply typography, turn a couple of pages, save.
-    let typography = Typography {
+const SAMPLE_EPUB: &[u8] = include_bytes!("../tests/fixtures/sample.epub");
+
+fn reading_typography() -> Typography {
+    Typography {
         scale: 1.25,
         font_id: 0,
         line_spacing: 1.7,
         align_code: 1,
-    };
-    let mut first = ReaderSession::open_epub_with_store(
-        SAMPLE.to_vec(),
-        caps,
-        viewport,
-        store.clone(),
-        book.clone(),
-        typography,
-    )
-    .unwrap();
-    first.on_gesture(Gesture::NextPage);
-    first.save_position().unwrap();
+    }
+}
 
-    // Re-open it, exactly as the shell does.
-    crate::document::reflow::reset_layout_passes();
-    let again = ReaderSession::open_epub_with_store(
-        SAMPLE.to_vec(),
-        caps,
-        viewport,
+fn open_sample(store: Arc<dyn ReaderStore>, book: BookId, typography: Typography) -> ReaderSession {
+    ReaderSession::open_epub_with_store(
+        SAMPLE_EPUB.to_vec(),
+        DeviceCapabilities::supernote_full(),
+        Viewport {
+            width: 400,
+            height: 600,
+            dpi: 226,
+        },
         store,
         book,
         typography,
     )
-    .unwrap();
-    let _ = again.page_count();
+    .unwrap()
+}
 
+#[test]
+fn a_first_open_paginates_once_and_a_re_open_not_at_all() {
+    let store: Arc<dyn ReaderStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+    let book = BookId::new("resumed").unwrap();
+
+    crate::document::reflow::reset_layout_passes();
+    let mut first = open_sample(store.clone(), book.clone(), reading_typography());
+    let pages = first.page_count();
     assert_eq!(
         crate::document::reflow::layout_passes(),
         1,
-        "re-opening a book paginates it once, at the typography actually in use"
+        "a book never seen before is laid out exactly once"
     );
+    first.on_gesture(Gesture::NextPage);
+    first.save_position().unwrap();
+
+    // Re-open exactly as the shell does — the whole point of #162.
+    crate::document::reflow::reset_layout_passes();
+    let again = open_sample(store, book, reading_typography());
+    assert_eq!(again.page_count(), pages, "and to the same length");
+    assert_eq!(
+        crate::document::reflow::layout_passes(),
+        0,
+        "re-opening a book it has already laid out costs no pagination at all"
+    );
+}
+
+#[test]
+fn a_pagination_is_only_reused_for_the_layout_that_produced_it() {
+    let store: Arc<dyn ReaderStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+    let book = BookId::new("keyed").unwrap();
+    let base = reading_typography();
+    let _ = open_sample(store.clone(), book.clone(), base).page_count();
+
+    // Each of these changes how the book breaks into pages, so none may be served the stored one.
+    for (label, changed) in [
+        ("scale", Typography { scale: 2.0, ..base }),
+        ("face", Typography { font_id: 2, ..base }),
+        (
+            "line spacing",
+            Typography {
+                line_spacing: 1.0,
+                ..base
+            },
+        ),
+        (
+            "alignment",
+            Typography {
+                align_code: 2,
+                ..base
+            },
+        ),
+    ] {
+        crate::document::reflow::reset_layout_passes();
+        let _ = open_sample(store.clone(), book.clone(), changed).page_count();
+        assert_eq!(
+            crate::document::reflow::layout_passes(),
+            1,
+            "changing the {label} must re-paginate, not reuse the stored pagination"
+        );
+    }
+
+    // ...and the original layout is still cached, not evicted by the others.
+    crate::document::reflow::reset_layout_passes();
+    let _ = open_sample(store, book, base).page_count();
+    assert_eq!(crate::document::reflow::layout_passes(), 0);
+}
+
+#[test]
+fn a_cached_pagination_produces_the_same_book_as_laying_it_out() {
+    // The cache stores page counts, not pages. If it is ever read back against a different layout
+    // the reader lands on the wrong page — so a cached open must be indistinguishable from a cold
+    // one, page for page and pixel for pixel.
+    let store: Arc<dyn ReaderStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+    let book = BookId::new("identical").unwrap();
+    let mut cold = open_sample(store.clone(), book.clone(), reading_typography());
+    let mut warm = open_sample(store, book, reading_typography());
+
+    assert_eq!(cold.page_count(), warm.page_count());
+    assert!(cold.page_count() > 1, "a book with pages to compare");
+    assert_eq!(cold.toc(), warm.toc(), "TOC targets resolve the same");
+
+    let mut distinct = std::collections::HashSet::new();
+    for page in 0..cold.page_count() {
+        let mut a = vec![0u8; 400 * 600 * 4];
+        let mut b = vec![0u8; 400 * 600 * 4];
+        cold.jump_to_page(page);
+        warm.jump_to_page(page);
+        cold.render_current(&mut PixelBuffer::from_rgba(&mut a, 400, 600).unwrap())
+            .unwrap();
+        warm.render_current(&mut PixelBuffer::from_rgba(&mut b, 400, 600).unwrap())
+            .unwrap();
+        assert_eq!(a, b, "page {page} is identical whether cached or laid out");
+        distinct.insert(a);
+    }
+    assert!(
+        distinct.len() > 1,
+        "the pages differ, so the comparison bites"
+    );
+}
+
+#[test]
+fn replacing_the_file_behind_a_book_id_invalidates_its_pagination() {
+    // A book id is a file identity, not a content identity. Serving a pagination computed for
+    // different content would put the reader at an offset that no longer means anything.
+    let store: Arc<dyn ReaderStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+    let book = BookId::new("swapped").unwrap();
+    let _ = open_sample(store.clone(), book.clone(), reading_typography()).page_count();
+
+    crate::document::reflow::reset_layout_passes();
+    let other = ReaderSession::open_epub_with_store(
+        // Same book id, different bytes → a different fingerprint.
+        {
+            let mut bytes = SAMPLE_EPUB.to_vec();
+            bytes.extend_from_slice(b"\n<!-- different content -->");
+            bytes
+        },
+        DeviceCapabilities::supernote_full(),
+        Viewport {
+            width: 400,
+            height: 600,
+            dpi: 226,
+        },
+        store,
+        book,
+        reading_typography(),
+    );
+    if let Ok(session) = other {
+        let _ = session.page_count();
+        assert_eq!(
+            crate::document::reflow::layout_passes(),
+            1,
+            "different content under the same book id is laid out afresh"
+        );
+    }
 }

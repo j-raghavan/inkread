@@ -12,6 +12,8 @@ pub mod ink_store;
 pub mod sidecar;
 pub mod sqlite;
 
+use std::sync::Arc;
+
 use crate::error::{CoreError, CoreResult};
 use crate::settings::{Scope, SettingKey, SettingValue, SettingsSnapshot};
 
@@ -121,6 +123,69 @@ pub trait ReaderStore: Send + Sync {
 
     /// Persist one setting value at `scope`, bumping the settings version (RR23-FR1).
     fn put_setting(&self, scope: Scope, key: SettingKey, value: SettingValue) -> CoreResult<()>;
+
+    /// The per-chapter page counts stored for `book` under `key`, or `None` if nothing usable is
+    /// there. See [`PaginationCache`] for why this cannot fail.
+    fn load_pagination(&self, book: &BookId, key: &str) -> Option<Vec<usize>>;
+
+    /// Record a pagination for `book` under `key`, replacing anything already stored for that key.
+    fn save_pagination(&self, book: &BookId, key: &str, chapter_pages: &[usize]);
+}
+
+/// Somewhere to keep a computed pagination so re-opening a book does not have to lay it out again
+/// (#162).
+///
+/// Deliberately **infallible**. To a reader, a cache that errors and a cache that misses are the
+/// same thing — the book just takes longer to open — and no storage fault should ever stop a book
+/// from opening at all. Implementations absorb their own errors and report a miss.
+///
+/// `key` identifies the layout the pagination belongs to. A pagination is only valid for the exact
+/// parameters that produced it, so the key has to cover every one of them; anything it misses shows
+/// up as a book that opens with wrong page boundaries, which is worse than opening slowly.
+pub trait PaginationCache {
+    /// The per-chapter page counts stored under `key`, or `None` for a miss.
+    fn load(&self, key: &str) -> Option<Vec<usize>>;
+
+    /// Record `chapter_pages` under `key`.
+    fn save(&self, key: &str, chapter_pages: &[usize]);
+}
+
+/// Binds a [`ReaderStore`] and a book to the [`PaginationCache`] a document sees, so the document
+/// never has to know about books, stores or schemas — only about its own layout key.
+pub struct StorePaginationCache {
+    store: Arc<dyn ReaderStore>,
+    book: BookId,
+    /// The document's content fingerprint, prefixed onto every key. A book id is a file identity,
+    /// not a content identity: if the file behind it is replaced, a pagination computed for the old
+    /// content must not be served for the new.
+    fingerprint: String,
+}
+
+impl StorePaginationCache {
+    /// Scope `store` to one book's content.
+    #[must_use]
+    pub fn new(store: Arc<dyn ReaderStore>, book: BookId, fingerprint: String) -> Self {
+        Self {
+            store,
+            book,
+            fingerprint,
+        }
+    }
+
+    fn scoped(&self, key: &str) -> String {
+        format!("{}|{key}", self.fingerprint)
+    }
+}
+
+impl PaginationCache for StorePaginationCache {
+    fn load(&self, key: &str) -> Option<Vec<usize>> {
+        self.store.load_pagination(&self.book, &self.scoped(key))
+    }
+
+    fn save(&self, key: &str, chapter_pages: &[usize]) {
+        self.store
+            .save_pagination(&self.book, &self.scoped(key), chapter_pages);
+    }
 }
 
 #[cfg(test)]

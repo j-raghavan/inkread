@@ -23,7 +23,7 @@ use crate::error::{CoreError, CoreResult};
 use crate::persistence::identity::DocIdentity;
 use crate::persistence::ink_store::InkStore;
 use crate::persistence::sidecar::SidecarMetadata;
-use crate::persistence::{BookId, ReaderStore, ReadingPosition};
+use crate::persistence::{BookId, ReaderStore, ReadingPosition, StorePaginationCache};
 use crate::policy::EinkRefreshPolicy;
 use crate::render::{PixelBuffer, Viewport};
 use crate::settings::SettingsSnapshot;
@@ -338,6 +338,17 @@ impl ReaderSession {
     ) -> CoreResult<()> {
         let settings = store.load_settings()?;
         self.apply_settings(&settings, Some(&book));
+        // Before the first pagination, so it can be served from the cache rather than computed
+        // (#162). Keyed by content fingerprint as well as book id, so replacing the file behind a
+        // book cannot serve a pagination computed for what used to be there.
+        if let Some(identity) = &self.identity {
+            self.document
+                .set_pagination_cache(Box::new(StorePaginationCache::new(
+                    store.clone(),
+                    book.clone(),
+                    identity.fingerprint.to_string(),
+                )));
+        }
         // Before anything reads a page count. A reflowable document paginates lazily, so applying
         // the typography here means the one pagination that the resume below triggers is built at
         // the settings the book will actually be read at — rather than one at the defaults, then
