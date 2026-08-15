@@ -23,6 +23,24 @@ enum class Tool(val label: String, val iconRes: Int, val phase2: Boolean) {
     ERASER("Eraser", R.drawable.ic_tool_eraser, false),
     LASSO("Lasso", R.drawable.ic_tool_lasso, false),
     DEFINE("Define", R.drawable.ic_menu_dict, false),
+    ;
+
+    companion object {
+        /**
+         * Which tool a stylus event actually drives (#158). The palette decides — except for an
+         * **inverted pen**, which Android reports as [MotionEvent.TOOL_TYPE_ERASER] and which must
+         * erase whatever the palette says. The hardware end of the pen is a deliberate, unambiguous
+         * statement of intent; no user flips the pen over meaning to write.
+         *
+         * Getting this wrong corrupted the page rather than merely doing the wrong thing: an
+         * inverted pen used to fall through to the ink path, so the firmware's own eraser wiped the
+         * live ink off the panel (the stroke *looked* erased) while the app committed the eraser
+         * sweep to the core as a **Pen** stroke. Nothing was deleted from the model, so the next
+         * full render brought the original stroke back with the sweep inked on top of it.
+         */
+        fun forStylus(palette: Tool, motionToolType: Int): Tool =
+            if (motionToolType == MotionEvent.TOOL_TYPE_ERASER) ERASER else palette
+    }
 }
 
 /**
