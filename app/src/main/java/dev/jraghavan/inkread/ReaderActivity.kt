@@ -426,7 +426,8 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
                 if (a == MotionEvent.ACTION_DOWN || a == MotionEvent.ACTION_UP) {
                     diag { "DIAG stylus action=$a tool=$tool type=$toolType hist=${event.historySize}" }
                 }
-                when (tool) {
+                // An inverted pen erases regardless of the palette (#158) — see [Tool.forStylus].
+                when (Tool.forStylus(tool, toolType)) {
                     Tool.DEFINE -> lasso.captureSelection(event)
                     Tool.ERASER -> stylus.captureErase(event)
                     Tool.LASSO -> lasso.captureLasso(event)
@@ -1550,7 +1551,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         val hint = when (chosen) {
             Tool.PEN -> "Pen — write with the stylus"
             Tool.HIGHLIGHTER -> "Highlighter — drag over text; tap again to change shade"
-            Tool.ERASER -> "Eraser — drag the stylus over ink to remove it"
+            Tool.ERASER -> "Eraser — drag over ink to remove it, or flip the pen from any tool"
             Tool.DEFINE -> "Define — tap a word to look it up; drag over text to select it"
             Tool.LASSO -> "Lasso — circle strokes to select; tap Lasso again for Freehand"
             else -> chosen.label
@@ -1735,13 +1736,16 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
 
     private fun applyToolInkState(reason: String) {
         val ok = ink.setup()
-        // Only the Pen (and Eraser) want the firmware EMR pen painting the live stroke. Lasso,
-        // Define and Highlighter draw their OWN overlay (dashed loop / dashed select line / wide
-        // band), so suppress the firmware ink for them — else it paints a solid black stroke on top.
+        // Only the Pen wants the firmware EMR pen painting the live stroke. Lasso, Define,
+        // Highlighter and Eraser draw their OWN overlay (dashed loop / dashed select line / wide
+        // band / swept band), so suppress the firmware ink for them — else it paints a solid black
+        // stroke on top. The Eraser used to be grouped with the Pen here, which had the firmware
+        // ink a real eraser sweep onto the panel; wiping it afterwards was a race the eraser
+        // sometimes lost, leaving a scribble over the page (#158).
         // setup() re-enables the writable area each call (incl. on focus regain), so re-assert here
         // for every reason. setWritable rides the service_myservice binder (works for a sideloaded
         // app); enableFullUiAuto is SELinux-blocked.
-        val inkWritable = tool == Tool.PEN || tool == Tool.ERASER
+        val inkWritable = tool == Tool.PEN
         ink.setWritable(inkWritable)
         Log.i(TAG, "ink claimed ($reason) for $tool: available=$ok writable=$inkWritable")
     }

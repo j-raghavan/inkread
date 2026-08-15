@@ -38,9 +38,11 @@ Tick a step only when the expected result is observed. Any failure blocks the ta
 | 3.1 | With Pen tool active, write a few words | Ink appears under the nib at firmware latency (no visible lag) | both |
 | 3.2 | Turn the page and come back | Strokes persisted and re-render baked on the page | primary |
 | 3.3 | Undo, then redo from the selection toolbar / palette | Last stroke disappears, then returns | primary |
-| 3.4 | Eraser tool: scrub across a stroke | Stroke vanishes; surrounding strokes untouched | primary |
-| 3.5 | Rest a palm while writing | No stray finger input fires (palm rejection); writing unaffected | both |
-| 3.6 | Kill the app right after a stroke; relaunch | The stroke survived (autosave + crash-safe sidecar, RR20) | primary |
+| 3.4 | Eraser tool: scrub across a stroke | Grey swept band follows the nib (no black firmware ink); stroke vanishes; surrounding strokes untouched | primary |
+| 3.5 | After 3.4, turn the page and come back | Stroke still gone; **no** eraser-shaped scribble anywhere on the page (#158) | primary |
+| 3.6 | With the **Pen** tool active, flip the pen to its eraser end and scrub a stroke | Erases — does not ink. Turn the page and back: stroke stays gone, nothing new drawn (#158) | primary |
+| 3.7 | Rest a palm while writing | No stray finger input fires (palm rejection); writing unaffected | both |
+| 3.8 | Kill the app right after a stroke; relaunch | The stroke survived (autosave + crash-safe sidecar, RR20) | primary |
 
 ## 4. Lasso & selection
 
