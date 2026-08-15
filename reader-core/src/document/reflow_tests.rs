@@ -799,3 +799,131 @@ fn a_page_past_the_end_is_a_typed_error_not_a_panic() {
     assert!(b.page_chars(count).is_empty());
     assert!(b.page_pin(count).is_none());
 }
+
+/// An empty chapter still occupies exactly one page, so the chapter -> page mapping stays 1:1 and
+/// a TOC entry pointing at it lands somewhere real. Front matter and section dividers produce these
+/// in real books, and the index build, the materialization path and the persisted counts each have
+/// their own `max(1)` — they have to agree.
+#[test]
+fn an_empty_chapter_occupies_exactly_one_page() {
+    let text = || parse_blocks("<p>Some ordinary paragraph of prose that occupies a line.</p>");
+    let chapters = vec![
+        text(),
+        Vec::new(), // wholly empty chapter
+        text(),
+        parse_blocks(""), // parses to nothing
+        text(),
+    ];
+    let b = EpubBackend::from_chapters(chapters, vp(400, 600));
+
+    assert_eq!(
+        b.laid().chapter_start.len(),
+        5,
+        "every chapter gets a start page, empty or not"
+    );
+    // Each empty chapter contributes exactly one page, so consecutive starts differ by >= 1 and
+    // the empty ones differ by exactly 1.
+    let starts = b.laid().chapter_start.clone();
+    assert_eq!(starts[2] - starts[1], 1, "the empty chapter is one page");
+    assert_eq!(
+        starts[4] - starts[3],
+        1,
+        "the blank-parse chapter is one page"
+    );
+    assert!(
+        starts.windows(2).all(|w| w[1] > w[0]),
+        "starts increase: {starts:?}"
+    );
+
+    // Every page in the book renders, including the empty ones — no panic, no out-of-range.
+    for page in 0..b.page_count() {
+        let mut bytes = vec![0u8; 400 * 600 * 4];
+        let mut buf = PixelBuffer::from_rgba(&mut bytes, 400, 600).unwrap();
+        b.render_page(page, &mut buf)
+            .unwrap_or_else(|e| panic!("page {page}: {e:?}"));
+    }
+    // ...and each page resolves back to the chapter that owns it.
+    for (chapter, &start) in starts.iter().enumerate() {
+        assert_eq!(
+            b.chapter_of(start),
+            chapter,
+            "page {start} belongs to chapter {chapter}"
+        );
+    }
+}
+
+/// A book of nothing but empty chapters still presents pages rather than an unreadable void.
+#[test]
+fn a_book_of_only_empty_chapters_still_has_a_page_per_chapter() {
+    let b = EpubBackend::from_chapters(vec![Vec::new(), Vec::new(), Vec::new()], vp(400, 600));
+    assert_eq!(b.page_count(), 3);
+    assert_eq!(b.laid().chapter_start.clone(), vec![0, 1, 2]);
+}
+
+/// A book with no chapters at all still presents one page — `page_count()` of 0 would make every
+/// page index out of range and leave the reader staring at nothing.
+#[test]
+fn a_book_with_no_chapters_still_presents_a_page() {
+    let b = EpubBackend::from_chapters(Vec::new(), vp(400, 600));
+    assert_eq!(b.page_count(), 1);
+    let mut bytes = vec![0u8; 400 * 600 * 4];
+    let mut buf = PixelBuffer::from_rgba(&mut bytes, 400, 600).unwrap();
+    assert!(b.render_page(0, &mut buf).is_ok());
+    assert!(b.page_chars(0).is_empty());
+}
+
+/// Reading position must resolve to the right chapter at every chapter boundary — the page index
+/// is now derived from the index rather than from a flat page list, so the boundaries are exactly
+/// where an off-by-one would hide (RR12-FR4).
+#[test]
+fn pins_resolve_to_their_own_chapter_at_every_boundary() {
+    let b = synthetic_book();
+    let starts = b.laid().chapter_start.clone();
+    for (chapter, &start) in starts.iter().enumerate() {
+        let Some(pin) = b.page_pin(start) else {
+            continue;
+        };
+        assert_eq!(
+            pin.chapter_index as usize, chapter,
+            "the pin at page {start} claims chapter {} but that page starts chapter {chapter}",
+            pin.chapter_index,
+        );
+        let resolved = b.pin_to_page(&pin);
+        assert_eq!(
+            b.chapter_of(resolved),
+            chapter,
+            "a pin taken at the start of chapter {chapter} resolved into chapter {}",
+            b.chapter_of(resolved),
+        );
+        // The last page of the preceding chapter must NOT resolve into this one.
+        if start > 0 {
+            assert_eq!(b.chapter_of(start - 1), chapter - 1);
+        }
+    }
+}
+
+/// A corrupt or foreign pin is clamped into range rather than panicking (RR21-FR3) — pins arrive
+/// from persisted state, so they are not trusted.
+#[test]
+fn an_out_of_range_pin_is_clamped_not_panicked() {
+    let b = synthetic_book();
+    let last = b.page_count() - 1;
+    for chapter_index in [i32::MIN, -1, 0, i32::MAX] {
+        for text_offset in [i32::MIN, -1, 0, i32::MAX] {
+            let pin = PinPosition {
+                chapter_index,
+                chapter_id: String::new(),
+                chapter_start: 0,
+                chapter_end: i32::MAX,
+                node_position: 0,
+                text_offset,
+                xpath: Vec::new(),
+            };
+            let page = b.pin_to_page(&pin);
+            assert!(
+                page <= last,
+                "pin {chapter_index}/{text_offset} -> {page} > {last}"
+            );
+        }
+    }
+}
