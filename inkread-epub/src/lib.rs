@@ -20,6 +20,7 @@ pub mod content;
 pub mod layout;
 pub mod measure;
 pub mod render;
+mod transcode;
 pub use content::{parse_blocks, Block, Inline, TextRun};
 pub use layout::{
     paginate, paginate_with, Align, Hyphenator, LayoutLine, LayoutOpts, Metrics, NoHyphen, Page,
@@ -95,6 +96,10 @@ impl EpubPackage {
     /// the PDF path). Reads every spine document's XHTML in reading order. Returns an
     /// [`EpubError::Parse`] on any malformed-container failure — never panics.
     pub fn open(bytes: Vec<u8>) -> EpubResult<Self> {
+        // Repair legacy text encodings first (#159). rbook refuses any non-UTF-8 resource outright,
+        // so without this a windows-1251 Russian EPUB does not open at all. A conforming book comes
+        // back from this untouched.
+        let bytes = transcode::to_utf8(bytes);
         let epub = Epub::read(Cursor::new(bytes)).map_err(|e| EpubError::Parse(e.to_string()))?;
 
         let meta = epub.metadata();
@@ -162,7 +167,7 @@ mod tests {
     /// Build a minimal valid EPUB **zip** in memory: `mimetype` first, the rest stored — enough for
     /// rbook to open the fixture without an on-disk file. Two spine chapters + an EPUB-3 nav doc →
     /// exercises metadata, reading order, and TOC.
-    fn sample_epub() -> Vec<u8> {
+    pub(crate) fn sample_epub() -> Vec<u8> {
         let mut buf = Vec::new();
         write_zip(
             &mut buf,
@@ -321,5 +326,54 @@ mod tests {
     fn malformed_bytes_error_not_panic() {
         let err = EpubPackage::open(b"not a zip at all".to_vec());
         assert!(matches!(err, Err(EpubError::Parse(_))));
+    }
+
+    /// Encode Cyrillic + ASCII as **windows-1251** — the encoding a great many Russian EPUBs still
+    /// declare, especially the FB2-converted ones. А–Я and а–я are contiguous at 0xC0 and 0xE0.
+    pub(crate) fn to_cp1251(s: &str) -> Vec<u8> {
+        s.chars()
+            .map(|c| match c {
+                'А'..='Я' => 0xC0 + (c as u32 - 'А' as u32) as u8,
+                'а'..='я' => 0xE0 + (c as u32 - 'а' as u32) as u8,
+                'Ё' => 0xA8,
+                'ё' => 0xB8,
+                c if c.is_ascii() => c as u8,
+                _ => b'?',
+            })
+            .collect()
+    }
+
+    /// A book whose chapters are windows-1251, declared in the XML prolog as EPUB permits.
+    fn cp1251_epub() -> Vec<u8> {
+        let chapter = "<?xml version=\"1.0\" encoding=\"windows-1251\"?>\n\
+             <html xmlns=\"http://www.w3.org/1999/xhtml\"><body>\
+             <h1>Глава</h1><p>Первая глава книги.</p></body></html>";
+        let mut buf = Vec::new();
+        write_zip(
+            &mut buf,
+            &[
+                ("mimetype", b"application/epub+zip".to_vec()),
+                ("META-INF/container.xml", CONTAINER_XML.as_bytes().to_vec()),
+                ("OEBPS/content.opf", OPF.as_bytes().to_vec()),
+                ("OEBPS/nav.xhtml", NAV.as_bytes().to_vec()),
+                ("OEBPS/ch1.xhtml", to_cp1251(chapter)),
+                ("OEBPS/ch2.xhtml", CH2.as_bytes().to_vec()),
+            ],
+        );
+        buf
+    }
+
+    /// #159: a Russian EPUB opened but rendered nothing. Glyph coverage was ruled out (every
+    /// bundled face has Cyrillic), which leaves decoding: a non-UTF-8 chapter must still reach the
+    /// layout stage as text, not as emptiness. Blank pages are the worst failure mode here because
+    /// the book *opens* — nothing tells the reader the text was dropped rather than absent.
+    #[test]
+    fn a_windows_1251_chapter_still_yields_text() {
+        let pkg = EpubPackage::open(cp1251_epub()).expect("a cp1251 epub still opens");
+        let html = &pkg.chapters[0].html;
+        assert!(
+            html.contains("Первая глава книги."),
+            "cp1251 chapter decoded to {html:?}",
+        );
     }
 }

@@ -663,10 +663,12 @@ version = "1.2.0"
 dependencies = [
  "ab_glyph",
  "ego-tree",
+ "encoding_rs",
  "hyphenation",
  "rbook",
  "scraper",
  "unicode-linebreak",
+ "zip",
 ]
 
 [[package]]

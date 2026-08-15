@@ -55,6 +55,11 @@ jpeg-decoder = { version = "0.3", default-features = false }
 png = "0.17"
 # inkread-daily (#66): RSS/Atom feed parsing. Pure-Rust pull parser, MIT/Apache, cross-compiles clean.
 quick-xml = "0.41"
+# Legacy text encodings (#159): a great many Russian EPUBs are windows-1251 or koi8-r, and rbook
+# refuses any non-UTF-8 resource outright. encoding_rs is the browser-grade decoder (the one Firefox
+# ships), so this also covers Shift-JIS/Big5/EUC-KR books rather than just the reported one.
+# "(Apache-2.0 OR MIT) AND BSD-3-Clause" — every atom is on the check-licenses.sh allowlist.
+encoding_rs = "0.8"
 # inkread-update (ADR-INKREAD-0014): semver comparison of the installed version against the GitHub
 # release tag. Pure Rust, MIT/Apache (AGPL-compatible → auto-passes check-licenses.sh).
 semver = "1"
