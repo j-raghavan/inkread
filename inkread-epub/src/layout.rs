@@ -114,6 +114,41 @@ impl LayoutOpts {
     fn content_h(&self) -> f32 {
         (self.page_h - 2.0 * self.margin).max(1.0)
     }
+
+    /// A stable hash of every layout-affecting field — the pagination-cache discriminator (RR9-FR3,
+    /// `SPEC-RUST-READER.md`). Two `LayoutOpts` that paginate identically share a digest; any change
+    /// that moves page boundaries (viewport, font size, line/para spacing, alignment, margin) flips
+    /// it, while a non-layout change (e.g. a colour theme — none exist in `LayoutOpts`) could not.
+    ///
+    /// Uses **FNV-1a-64**, not `std::hash::DefaultHasher`: this value keys a persisted pagination, so
+    /// it must be **stable forever across builds and toolchains** — `DefaultHasher`'s algorithm is
+    /// explicitly allowed to change between releases. (Mirrors the FNV-1a fingerprint policy in
+    /// `reader-core`'s `persistence::identity`.) f32s are folded in by bit pattern so the digest is
+    /// exact and deterministic (ADR-INKREAD-0013 D1).
+    #[must_use]
+    pub fn layout_digest(&self) -> u64 {
+        const FNV_OFFSET_64: u64 = 0xcbf2_9ce4_8422_2325;
+        const FNV_PRIME_64: u64 = 0x0000_0100_0000_01b3;
+        let mut h = FNV_OFFSET_64;
+        let mut eat = |byte: u8| {
+            h ^= u64::from(byte);
+            h = h.wrapping_mul(FNV_PRIME_64);
+        };
+        for field in [
+            self.page_w,
+            self.page_h,
+            self.margin,
+            self.font_px,
+            self.line_spacing,
+            self.para_gap,
+        ] {
+            for b in field.to_bits().to_le_bytes() {
+                eat(b);
+            }
+        }
+        eat(self.align as u8);
+        h
+    }
 }
 
 /// A reflow-stable source anchor for a placed run/glyph (ADR-INKREAD-0012; feeds RR6 `PinPosition`).
@@ -760,6 +795,100 @@ fn hyphenate_fit<'w>(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn layout_digest_is_stable_and_sensitive_to_layout_fields() {
+        let base = LayoutOpts::new(400.0, 600.0, 16.0);
+        // Deterministic: identical opts → identical digest (same process AND across
+        // processes — the persisted cache key contract).
+        assert_eq!(
+            base.layout_digest(),
+            LayoutOpts::new(400.0, 600.0, 16.0).layout_digest()
+        );
+
+        // Every layout-affecting field flips the digest.
+        let d = base.layout_digest();
+        assert_ne!(
+            d,
+            LayoutOpts {
+                page_w: 401.0,
+                ..base
+            }
+            .layout_digest(),
+            "width"
+        );
+        assert_ne!(
+            d,
+            LayoutOpts {
+                page_h: 601.0,
+                ..base
+            }
+            .layout_digest(),
+            "height"
+        );
+        assert_ne!(
+            d,
+            LayoutOpts {
+                margin: base.margin + 1.0,
+                ..base
+            }
+            .layout_digest(),
+            "margin"
+        );
+        assert_ne!(
+            d,
+            LayoutOpts {
+                font_px: 17.0,
+                ..base
+            }
+            .layout_digest(),
+            "font"
+        );
+        assert_ne!(
+            d,
+            LayoutOpts {
+                line_spacing: 1.5,
+                ..base
+            }
+            .layout_digest(),
+            "line spacing"
+        );
+        assert_ne!(
+            d,
+            LayoutOpts {
+                para_gap: base.para_gap + 1.0,
+                ..base
+            }
+            .layout_digest(),
+            "para gap"
+        );
+        assert_ne!(
+            d,
+            LayoutOpts {
+                align: Align::Justify,
+                ..base
+            }
+            .layout_digest(),
+            "align"
+        );
+    }
+
+    #[test]
+    fn layout_digest_is_pinned_against_algorithm_drift() {
+        // The digest keys persisted paginations (ADR-INKREAD-0013 D1); pin a known value so a future
+        // change to the FNV constants/algorithm — which would silently orphan every cached
+        // pagination — is caught here, exactly as reader-core's identity fingerprint is pinned.
+        let opts = LayoutOpts {
+            page_w: 400.0,
+            page_h: 600.0,
+            margin: 24.0,
+            font_px: 16.0,
+            line_spacing: 1.4,
+            para_gap: 11.2,
+            align: Align::Left,
+        };
+        assert_eq!(opts.layout_digest(), 17_685_407_801_978_826_572);
+    }
+
     use super::*;
     use crate::content::{parse_blocks, TextRun};
 

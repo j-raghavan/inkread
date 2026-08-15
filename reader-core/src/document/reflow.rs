@@ -642,25 +642,15 @@ pub(crate) fn reset_layout_passes() {
     LAYOUT_PASSES.with(|c| c.set(0));
 }
 
-/// The cache key for one exact layout of one book (#162).
+/// The cache key for one exact layout of one book (ADR-INKREAD-0013 D1 / RR9-FR3, #162).
 ///
-/// A stored pagination is valid only for the parameters that produced it, so every input the line
-/// breaking depends on has to appear here: the page box and margin, the body size, line spacing,
-/// paragraph gap, alignment, and the reading face. Floats go in by bit pattern so the key is exact
-/// rather than rounded — two font sizes that print the same but differ in the last bit really do
-/// paginate differently. The chapter count is included so a key can never be read back against a
-/// book of a different shape.
+/// [`LayoutOpts::layout_digest`] is the canonical discriminator — FNV-1a-64 over every
+/// layout-affecting field, pinned by a regression test precisely because it keys persisted data and
+/// must stay stable across toolchains. Two things the digest cannot know are appended here: the
+/// **reading face**, which changes the metrics without appearing in `LayoutOpts`, and the **chapter
+/// count**, so a stored pagination can never be read back against a book of a different shape.
 fn layout_key(opts: &LayoutOpts, font_id: usize, chapters: usize) -> String {
-    format!(
-        "v1|{}|{}|{}|{}|{}|{}|{}|{font_id}|{chapters}",
-        opts.page_w.to_bits(),
-        opts.page_h.to_bits(),
-        opts.margin.to_bits(),
-        opts.font_px.to_bits(),
-        opts.line_spacing.to_bits(),
-        opts.para_gap.to_bits(),
-        opts.align as i32,
-    )
+    format!("v1|{:016x}|{font_id}|{chapters}", opts.layout_digest())
 }
 
 /// Paginate every chapter for `opts` and return how many pages each occupies.
