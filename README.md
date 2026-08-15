@@ -210,7 +210,7 @@ Pick a tool from the floating palette. Tap a tool again to reveal its options (e
 |---|---|
 | **Pen** | Write directly on the page with low-latency e-ink ink. Strokes bake into the page and persist. |
 | **Highlighter** | Lay down a wide translucent band; multiple colours. |
-| **Eraser** | Drag across strokes to remove them. |
+| **Eraser** | Drag across strokes to remove them. If your pen has an eraser end, flipping it over erases from any tool. |
 | **Lasso** | Draw a loop around your writing to select it. A floating toolbar then offers **move, cut, copy, paste, delete, select-all**, and **Add to Digest**. (Loop over printed text instead and it selects the text.) |
 | **Define** | Tap a word to look it up, or drag to select text for **Copy / Define / Highlight / Add to Digest**. |
 
