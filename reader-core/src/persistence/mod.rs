@@ -158,6 +158,12 @@ pub trait PaginationCache {
 ///
 /// Cancellation applies only to *re*-pagination. There is nothing to fall back to when a book is
 /// being laid out for the first time, so that pass always runs to completion.
+///
+/// **Implementations must not call back into the document.** Both methods are invoked from inside
+/// the pagination, which holds the document's interior-mutability borrows for the duration; a
+/// re-entrant call would conflict with them. Record what you are told and return — the shell's
+/// implementation writes to atomics that its UI thread polls separately, which is the intended
+/// shape.
 pub trait PaginationProgress {
     /// `done` of `total` chapters have been laid out.
     fn chapter_done(&self, done: usize, total: usize);
