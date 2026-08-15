@@ -22,7 +22,6 @@ import android.view.MotionEvent
 import android.view.SurfaceHolder
 import android.view.SurfaceView
 import android.widget.Toast
-import android.app.Dialog
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
@@ -122,15 +121,11 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
      *  reflowable view (EPUB, or a reflowed PDF) can't strand the shell's zoom. Refreshed on open and
      *  on a reflow toggle. */
     @Volatile private var magnifiable = false
-    /** True while a reflow toggle's full-document repagination is running (guards re-toggle + drives
-     *  the "Reflowing…" notice). Large PDFs take seconds (#55). */
+    /** True while a reflow toggle's full-document repagination is running — guards a re-toggle.
+     *  Large PDFs take seconds (#55). */
     @Volatile private var reflowInProgress = false
-    private var reflowProgressDialog: Dialog? = null
-    /** Shows the "Reflowing…" notice — posted with a short delay so a fast reflow never flashes it. */
-    private val showReflowProgress = Runnable {
-        if (isFinishing || docHandle == 0L) return@Runnable
-        reflowProgressDialog = Ink.progressDialog(this, "Reflowing…")
-    }
+    /** The "Reflowing…" notice for the reflow toggle; [ReflowProgress] owns showing and dismissing it. */
+    private var reflowProgress: ReflowProgress? = null
 
     // ---- dictionary (RR12 / D4) — owns the corpus handle + lookup/define/manage UI (SRP) ----
     private val dict = DictController(object : DictController.Host {
@@ -1784,9 +1779,10 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         reflowInProgress = true
         // Enabling reflow on a PDF re-extracts the text layer and repaginates the WHOLE document — on
         // a large book that's several seconds. Show a "Reflowing…" notice if it doesn't finish
-        // quickly so the toggle doesn't look frozen; the delay means a small/fast doc never flashes
-        // the dialog (#55). The work itself is already off the UI thread (engine).
-        mainHandler.postDelayed(showReflowProgress, REFLOW_PROGRESS_DELAY_MS)
+        // quickly so the toggle doesn't look frozen (#55). Not cancellable: this path rebuilds the
+        // reflow view rather than driving the core's pagination, so there is no progress to report
+        // and nothing to fall back to. The work itself is already off the UI thread (engine).
+        reflowProgress = ReflowProgress(this, cancellable = false).also { it.begin() }
         engine.execute {
             val np = try { NativeBridge.nativeSetReflow(docHandle, on) } catch (e: RuntimeException) { -1 }
             if (np >= 0) {
@@ -1817,11 +1813,10 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         }
     }
 
-    /** Dismiss the reflow "Reflowing…" notice (and cancel a not-yet-shown one); clears the guard. */
+    /** Dismiss the reflow "Reflowing…" notice (and disarm a not-yet-shown one); clears the guard. */
     private fun dismissReflowProgress() {
-        mainHandler.removeCallbacks(showReflowProgress)
-        reflowProgressDialog?.let { runCatching { it.dismiss() } }
-        reflowProgressDialog = null
+        reflowProgress?.end()
+        reflowProgress = null
         reflowInProgress = false
     }
 
@@ -1878,7 +1873,6 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         const val DOUBLE_TAP_ZOOM = 2.0f // zoom level a double-tap jumps to from fit (#54).
         const val DOUBLE_TAP_MS = 280L // max gap between the two taps of a double-tap (#54).
         const val DOUBLE_TAP_SLOP_PX = 60f // max distance between the two taps to count as a double-tap.
-        const val REFLOW_PROGRESS_DELAY_MS = 250L // show "Reflowing…" only if the build outlasts this (#55).
         const val SELECTION_HANDLE_PX = 8f // half-size of the square corner handles on the selection box.
         const val STROKE_PAUSE_MS = 600L // commit a stroke after this pen-pause (swallowed-UP net); shared with the lasso net.
 
