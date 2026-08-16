@@ -85,6 +85,28 @@ class OpdsUrlTest {
         assertFalse(OpdsController.isHttpUrl("//a/b"))
     }
 
+    @Test
+    fun theSearchTemplateSurvivesResolution() {
+        // The template reaches resolve() before it is ever substituted, and it carries braces, which
+        // are not legal URL characters. If resolution rejected it the template would come back
+        // empty and the search box would silently never appear — so this pins that it survives with
+        // the placeholder intact and absolute.
+        assertEquals(
+            "http://192.168.1.20:8080/opds/search/{searchTerms}",
+            OpdsController.resolve(base, "/opds/search/{searchTerms}"),
+        )
+    }
+
+    @Test
+    fun aResolvedTemplateStillSubstitutes() {
+        // The two steps compose: resolve to absolute, then substitute the reader's query.
+        val template = OpdsController.resolve(base, "/opds/search/{searchTerms}")
+        assertEquals(
+            "http://192.168.1.20:8080/opds/search/le%20guin",
+            OpdsController.searchUrl(template, "le guin"),
+        )
+    }
+
     // ---- searchUrl ----
 
     @Test
@@ -108,6 +130,24 @@ class OpdsUrlTest {
     fun searchWithoutATemplateOrTermsYieldsNothing() {
         assertEquals("", OpdsController.searchUrl("", "x"))
         assertEquals("", OpdsController.searchUrl("/opds/search/{searchTerms}", ""))
+    }
+
+    // ---- failure classification ----
+
+    @Test
+    fun aRefusedLoginIsNotAnUnreachableServer() {
+        // The reporter's server is Calibre-Web, which authenticates OPDS with Basic. Telling him to
+        // check his network when the password is wrong sends him to fix the wrong thing.
+        assertEquals(OpdsController.Fetch.Unauthorized, OpdsController.failureFor(401))
+        assertEquals(OpdsController.Fetch.Unauthorized, OpdsController.failureFor(403))
+    }
+
+    @Test
+    fun otherFailuresCarryTheirStatus() {
+        assertEquals(OpdsController.Fetch.Unreachable(404), OpdsController.failureFor(404))
+        assertEquals(OpdsController.Fetch.Unreachable(500), OpdsController.failureFor(500))
+        // 0 = nothing answered at all, which is a different sentence again.
+        assertEquals(OpdsController.Fetch.Unreachable(0), OpdsController.failureFor(0))
     }
 
     // ---- catalogRoot ----

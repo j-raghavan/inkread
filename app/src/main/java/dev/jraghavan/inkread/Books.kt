@@ -95,6 +95,20 @@ object Books {
     fun destinationFor(context: Context, title: String, ext: String): File =
         File(dir(context), "${sanitizeStem(title)}.${if (ext in SUPPORTED) ext else "pdf"}")
 
+    /**
+     * Bytes as a short human string, for a reader deciding whether something is worth keeping or
+     * worth downloading. MB resolution is the useful grain — nobody manages storage a kilobyte at a
+     * time — but a real file must never round down to "0", which would read as costing nothing.
+     * Pure + host-testable.
+     */
+    fun humanSize(bytes: Long): String = when {
+        bytes >= 1024L * 1024 * 1024 ->
+            String.format(java.util.Locale.US, "%.1f GB", bytes / (1024.0 * 1024 * 1024))
+        bytes >= 1024L * 1024 -> "${bytes / (1024 * 1024)} MB"
+        bytes > 0 -> "${(bytes / 1024).coerceAtLeast(1)} KB"
+        else -> "0 KB"
+    }
+
     /** A human title for a stored book file (drop the extension). */
     fun title(file: File): String = file.nameWithoutExtension
 

@@ -38,21 +38,44 @@ object HttpFetch {
         timeoutMs: Int,
         capBytes: Int,
         authorization: String? = null,
-    ): String? {
-        if (url.isBlank()) return null
+    ): String? = getTextWithStatus(url, userAgent, accept, timeoutMs, capBytes, authorization).body
+
+    /**
+     * The same GET, reporting the HTTP [status] alongside the [body].
+     *
+     * Callers that only degrade to a no-op want [getText]; a caller that has to *explain* the
+     * failure to the reader needs to tell "the server said no" from "there was no server". A 401 is
+     * a wrong password, not an unreachable host, and telling someone to check their network when
+     * their password is wrong sends them to fix the wrong thing.
+     *
+     * [status] is `0` when the request never got a response at all.
+     */
+    fun getTextWithStatus(
+        url: String,
+        userAgent: String,
+        accept: String?,
+        timeoutMs: Int,
+        capBytes: Int,
+        authorization: String? = null,
+    ): Response {
+        if (url.isBlank()) return Response(0, null)
         return try {
             val conn = open(url, userAgent, accept, timeoutMs, authorization)
-            if (conn.responseCode !in 200..299) {
-                Log.w(TAG, "GET $url -> HTTP ${conn.responseCode}")
-                null
+            val code = conn.responseCode
+            if (code !in 200..299) {
+                Log.w(TAG, "GET $url -> HTTP $code")
+                Response(code, null)
             } else {
-                conn.inputStream.use { String(it.readCapped(capBytes), Charsets.UTF_8) }
+                Response(code, conn.inputStream.use { String(it.readCapped(capBytes), Charsets.UTF_8) })
             }
         } catch (e: Exception) {
             Log.w(TAG, "GET $url failed: ${e.message}")
-            null
+            Response(0, null)
         }
     }
+
+    /** An HTTP response: the [status] (`0` = never reached the server) and the body when 2xx. */
+    data class Response(val status: Int, val body: String?)
 
     /** Stream [url] to [dest], aborting past [capBytes]; `false` on non-2xx / IO error / oversize. */
     fun download(

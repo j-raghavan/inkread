@@ -76,7 +76,7 @@ class ShelfActivity : Activity() {
         if (books.isNotEmpty()) {
             val total = books.sumOf { Books.sizeOnDisk(it) }
             addView(TextView(this@ShelfActivity).apply {
-                text = "${humanSize(total)} on this device"
+                text = "${Books.humanSize(total)} on this device"
                 setTextColor(Ink.muted); textSize = Ink.sp(11f); typeface = mono; letterSpacing = 0.08f
                 setPadding(0, 0, 0, dp(4))
             })
@@ -119,7 +119,7 @@ class ShelfActivity : Activity() {
 
     /** Format · size · how far in you are — enough to decide whether it can go. */
     private fun subtitleFor(book: File): String {
-        val bits = mutableListOf(book.extension.uppercase(), humanSize(Books.sizeOnDisk(book)))
+        val bits = mutableListOf(book.extension.uppercase(), Books.humanSize(Books.sizeOnDisk(book)))
         val percent = Books.progress(this, book.name)
         if (percent > 0) bits += "$percent% read"
         if (Books.sidecarDir(book).exists()) bits += "HAS NOTES"
@@ -137,7 +137,7 @@ class ShelfActivity : Activity() {
             "Remove “$title” from this device? Your handwritten notes stay, and come back if you " +
                 "add the book again."
         } else {
-            "Remove “$title” from this device? It frees ${humanSize(Books.sizeOnDisk(book))}."
+            "Remove “$title” from this device? It frees ${Books.humanSize(Books.sizeOnDisk(book))}."
         }
         val dialog = AlertDialog.Builder(this)
             .setTitle("Remove from device")
@@ -161,7 +161,7 @@ class ShelfActivity : Activity() {
     private fun doRemove(book: File, alsoNotes: Boolean) {
         val freed = Books.sizeOnDisk(book)
         if (Books.remove(this, book, alsoNotes)) {
-            Toast.makeText(this, "Removed · ${humanSize(freed)} free", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "Removed · ${Books.humanSize(freed)} free", Toast.LENGTH_SHORT).show()
         } else {
             Toast.makeText(this, "Could not remove that book", Toast.LENGTH_SHORT).show()
         }
@@ -180,15 +180,4 @@ class ShelfActivity : Activity() {
         layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, h)
     }
 
-    companion object {
-        /** Bytes as a short human string. Sizes are for deciding what to delete, so MB resolution
-         *  is the useful grain — nobody clears space one kilobyte at a time. Pure + host-testable. */
-        fun humanSize(bytes: Long): String = when {
-            bytes >= 1024L * 1024 * 1024 ->
-                String.format(java.util.Locale.US, "%.1f GB", bytes / (1024.0 * 1024 * 1024))
-            bytes >= 1024L * 1024 -> "${bytes / (1024 * 1024)} MB"
-            bytes > 0 -> "${(bytes / 1024).coerceAtLeast(1)} KB"
-            else -> "0 KB"
-        }
-    }
 }
