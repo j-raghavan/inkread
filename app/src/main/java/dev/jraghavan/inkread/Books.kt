@@ -137,6 +137,19 @@ object Books {
         return removed
     }
 
+    /**
+     * Delete any stranded `.part` file left by a download that never finished.
+     *
+     * A catalog download writes to `.part` and renames on success (ADR-INKREAD-0016), so a `.part`
+     * that outlives its transfer — the app was killed mid-download — is unusable: nothing resumes
+     * it, and [list] filters it out, so it would sit there consuming storage that the shelf claims
+     * is free. Swept when the shelf is opened, which is where a reader goes to reclaim space.
+     */
+    fun sweepPartialDownloads(context: Context) {
+        dir(context).listFiles { f -> f.isFile && f.name.endsWith(".part") }
+            ?.forEach { runCatching { it.delete() } }
+    }
+
     // ---- real document metadata (title/author/page position), captured by the reader on open ----
 
     private fun meta(context: Context) =

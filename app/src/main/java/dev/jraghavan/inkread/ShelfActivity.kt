@@ -49,6 +49,7 @@ class ShelfActivity : Activity() {
     }
 
     private fun render() {
+        Books.sweepPartialDownloads(this)
         val books = Books.list(this)
         column.removeAllViews()
         column.addView(header(books))
