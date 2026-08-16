@@ -48,7 +48,12 @@ pub fn parse_catalog(xml: &str) -> Catalog {
 }
 
 /// One OPDS feed, flattened into what a browse screen needs.
+///
+/// Serialized **camelCase**: this JSON is read by the Kotlin shell, and a Rust-side `snake_case`
+/// field silently reaches it as a key it never looks up — the value is simply absent, with no error
+/// anywhere. [`tests::the_json_keys_are_exactly_what_the_shell_reads`] pins the whole contract.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Catalog {
     /// Feed title, for the screen's heading.
     pub title: String,
@@ -69,7 +74,7 @@ pub struct Catalog {
 
 impl Catalog {
     /// The serialization of an empty catalog — the defensive fallback in [`parse_catalog_json`].
-    const EMPTY_JSON: &'static str = r#"{"title":"","entries":[]}"#;
+    pub(crate) const EMPTY_JSON: &'static str = r#"{"title":"","entries":[]}"#;
 }
 
 /// What tapping an entry does: load another feed, or download a book.

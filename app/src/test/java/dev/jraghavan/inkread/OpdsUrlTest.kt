@@ -85,6 +85,28 @@ class OpdsUrlTest {
         assertFalse(OpdsController.isHttpUrl("//a/b"))
     }
 
+    @Test
+    fun theSearchTemplateSurvivesResolution() {
+        // The template reaches resolve() before it is ever substituted, and it carries braces, which
+        // are not legal URL characters. If resolution rejected it the template would come back
+        // empty and the search box would silently never appear — so this pins that it survives with
+        // the placeholder intact and absolute.
+        assertEquals(
+            "http://192.168.1.20:8080/opds/search/{searchTerms}",
+            OpdsController.resolve(base, "/opds/search/{searchTerms}"),
+        )
+    }
+
+    @Test
+    fun aResolvedTemplateStillSubstitutes() {
+        // The two steps compose: resolve to absolute, then substitute the reader's query.
+        val template = OpdsController.resolve(base, "/opds/search/{searchTerms}")
+        assertEquals(
+            "http://192.168.1.20:8080/opds/search/le%20guin",
+            OpdsController.searchUrl(template, "le guin"),
+        )
+    }
+
     // ---- searchUrl ----
 
     @Test

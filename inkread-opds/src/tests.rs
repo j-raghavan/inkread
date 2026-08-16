@@ -271,6 +271,57 @@ fn a_calibre_web_feed_classifies_and_stays_downloadable() {
     );
 }
 
+/// Calibre-Web's **root** `/opds` feed (`cps/templates/index.xml`) — the first screen a reader
+/// sees. Its navigation links carry a catalog `type` and **no `rel` at all**, which is the shape
+/// most likely to be mishandled: a classifier that keyed on `rel` would render this as an empty
+/// library, and the reader would conclude the server was unreachable.
+const CALIBRE_WEB_ROOT: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <id>urn:uuid:2853dacf</id>
+  <updated>2026-08-16T10:00:00+00:00</updated>
+  <link rel="self" href="/opds" type="application/atom+xml;profile=opds-catalog;kind=navigation"/>
+  <link rel="start" title="Start" href="/opds" type="application/atom+xml;profile=opds-catalog;kind=navigation"/>
+  <link rel="search" href="/opds/osd" type="application/opensearchdescription+xml"/>
+  <link type="application/atom+xml" rel="search" title="Search" href="/opds/search/{searchTerms}"/>
+  <title>Calibre-Web</title>
+  <entry>
+    <title>Alphabetical Books</title>
+    <link href="/opds/books" type="application/atom+xml;profile=opds-catalog"/>
+    <id>/opds/books</id>
+    <updated>2026-08-16T10:00:00+00:00</updated>
+    <content type="text">Books sorted alphabetically</content>
+  </entry>
+  <entry>
+    <title>Recently added Books</title>
+    <link href="/opds/new" type="application/atom+xml;profile=opds-catalog"/>
+    <id>/opds/new</id>
+    <updated>2026-08-16T10:00:00+00:00</updated>
+    <content type="text">The latest books</content>
+  </entry>
+</feed>"#;
+
+#[test]
+fn the_calibre_web_root_feed_is_navigable() {
+    let catalog = parse_catalog(CALIBRE_WEB_ROOT);
+    assert_eq!(catalog.title, "Calibre-Web");
+    assert_eq!(
+        catalog.entries.len(),
+        2,
+        "the root feed's shelves are listed"
+    );
+
+    let first = &catalog.entries[0];
+    assert_eq!(first.kind, EntryKind::Navigation);
+    assert_eq!(first.title, "Alphabetical Books");
+    // The destination is what makes the row tappable; without it the library is a dead end.
+    assert_eq!(
+        first.href, "/opds/books",
+        "a rel-less catalog link is still followed"
+    );
+    assert_eq!(first.summary, "Books sorted alphabetically");
+    assert_eq!(catalog.entries[1].href, "/opds/new");
+}
+
 #[test]
 fn the_search_link_chosen_is_the_one_that_can_be_searched() {
     // Calibre-Web advertises the OpenSearch *description document* first and the query template
@@ -322,6 +373,43 @@ fn a_query_string_cannot_smuggle_a_format_into_the_href() {
   </entry>
 </feed>"#;
     assert!(parse_catalog(xml).entries[0].formats[0].ext.is_empty());
+}
+
+/// The JSON contract the Kotlin shell reads, key by key.
+///
+/// This is the seam with no compiler and no runtime error behind it: a key the core renames, or
+/// spells in a different convention, reaches the shell as a value that is simply *absent*. Nothing
+/// throws, nothing logs — the feature just quietly does nothing. That is exactly how the search
+/// template was lost (emitted `search_template`, read `searchTemplate`), so every key the shell
+/// looks up is pinned here.
+#[test]
+fn the_json_keys_are_exactly_what_the_shell_reads() {
+    let value: serde_json::Value =
+        serde_json::from_str(&parse_catalog_json(CALIBRE_WEB_FEED)).expect("valid JSON");
+
+    // Feed level — mirrors OpdsController.parseCatalog.
+    for key in ["title", "entries", "next", "searchTemplate"] {
+        assert!(value.get(key).is_some(), "feed key `{key}` is missing");
+    }
+    assert_eq!(value["searchTemplate"], "/opds/search/{searchTerms}");
+
+    // Entry level.
+    let book = &value["entries"][0];
+    for key in ["kind", "title", "author", "published", "cover", "formats"] {
+        assert!(book.get(key).is_some(), "entry key `{key}` is missing");
+    }
+
+    // Format level.
+    let format = &book["formats"][0];
+    for key in ["mime", "href", "bytes", "ext"] {
+        assert!(format.get(key).is_some(), "format key `{key}` is missing");
+    }
+
+    // A navigation entry's destination.
+    assert!(
+        value["entries"][1].get("href").is_some(),
+        "navigation `href` is missing"
+    );
 }
 
 #[test]
