@@ -1,0 +1,19 @@
+[package]
+name = "inkread-opds"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "inkread-opds (ADR-INKREAD-0016): turn an OPDS catalog document into the browse/download model the reader shell renders. Pure, host-testable, IO- and vendor-free (IR-7) — the Android shell does the fetch, the URL resolution, and the download."
+
+[dependencies]
+# OPDS 1.2 *is* Atom with extra link relations, and feed-rs already models a link's rel, media type
+# and length — every field the classification needs. Reused from inkread-daily rather than adding a
+# second XML parser (REUSE-FIRST); malformed input yields an empty catalog, never an error.
+feed-rs = { workspace = true }
+# The catalog crosses the JNI boundary as JSON, the same string contract inkread-daily and
+# inkread-update use.
+serde = { workspace = true }
+serde_json = { workspace = true }

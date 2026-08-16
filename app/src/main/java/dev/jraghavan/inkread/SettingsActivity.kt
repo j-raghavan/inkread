@@ -117,6 +117,22 @@ class SettingsActivity : Activity() {
         column.addView(spacer(dp(18)))
         column.addView(actionRow("Check for updates now") { UpdateGate.checkNow(this) })
 
+        // ── Library (ADR-INKREAD-0016) ─────────────────────────────────────────────
+        column.addView(spacer(dp(34)))
+        column.addView(eyebrow("Library"))
+        column.addView(spacer(dp(12)))
+        column.addView(
+            actionRow(
+                if (AppSettings.opdsConfigured(this)) AppSettings.opdsUrl(this) else "Connect a calibre library",
+            ) { onLibraryTapped() },
+        )
+        column.addView(TextView(this).apply {
+            text = "Browse a calibre content server or Calibre-Web over its catalog and pull books " +
+                "straight onto your shelf. Books calibre builds from news recipes arrive the same way."
+            setTextColor(inkSoft); textSize = 14f; typeface = serif
+            setPadding(0, dp(6), 0, 0); setLineSpacing(0f, 1.2f)
+        })
+
         // ── How it works ───────────────────────────────────────────────────────────
         column.addView(spacer(dp(34)))
         column.addView(eyebrow("How it works"))
@@ -180,6 +196,58 @@ class SettingsActivity : Activity() {
     // ── Pieces ──────────────────────────────────────────────────────────────────────
 
     /** A tappable action with a title on the left and an outlined affordance pill on the right. */
+    /**
+     * Server address + optional login for the OPDS library (ADR-INKREAD-0016). Three plain fields:
+     * a bare host is fine, since [OpdsController.catalogRoot] completes the scheme and the `/opds`
+     * path. The password note is not boilerplate — it is stored in plain text and the reader is
+     * entitled to know that before typing one in (Decision 4).
+     */
+    private fun onLibraryTapped() {
+        val pad = dp(20)
+        val url = android.widget.EditText(this).apply {
+            hint = "192.168.1.20:8080"
+            setText(AppSettings.opdsUrl(this@SettingsActivity)); setSingleLine()
+        }
+        val user = android.widget.EditText(this).apply {
+            hint = "Username (leave blank if none)"
+            setText(AppSettings.opdsUser(this@SettingsActivity)); setSingleLine()
+        }
+        val password = android.widget.EditText(this).apply {
+            hint = "Password"
+            setText(AppSettings.opdsPassword(this@SettingsActivity)); setSingleLine()
+            inputType = android.text.InputType.TYPE_CLASS_TEXT or
+                android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD
+        }
+        val body = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(pad, dp(8), pad, 0)
+            addView(url); addView(user); addView(password)
+            addView(TextView(this@SettingsActivity).apply {
+                text = "The password is stored on this device in plain text. calibre only accepts a " +
+                    "login like this when started with --auth-mode=basic; Calibre-Web works as is."
+                setTextColor(textMuted); textSize = 12f; typeface = mono
+                setPadding(0, dp(12), 0, 0); setLineSpacing(0f, 1.25f)
+            })
+        }
+        AlertDialog.Builder(this)
+            .setTitle("Your library")
+            .setView(body)
+            .setPositiveButton("Save") { _, _ ->
+                AppSettings.setOpdsUrl(this, url.text.toString())
+                AppSettings.setOpdsUser(this, user.text.toString())
+                AppSettings.setOpdsPassword(this, password.text.toString())
+                refresh()
+            }
+            .setNeutralButton("Forget") { _, _ ->
+                AppSettings.setOpdsUrl(this, "")
+                AppSettings.setOpdsUser(this, "")
+                AppSettings.setOpdsPassword(this, "")
+                refresh()
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
     private fun actionRow(title: String, onTap: () -> Unit): View =
         LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -251,6 +319,7 @@ class SettingsActivity : Activity() {
         val HELP = listOf(
             "Pen & Highlighter" to "Write and highlight on the page with the stylus; the floating tool palette switches between them.",
             "Eraser" to "Switch to the eraser in the tool palette to wipe strokes — or, if your pen has an eraser end, just flip it over.",
+            "Your library" to "Connect a calibre content server or Calibre-Web under Library, then browse it from Home and download books onto your shelf.",
             "Lasso select" to "Circle ink or text to move, copy, delete, or look it up.",
             "Define" to "Select a word and tap Define to look it up in the on-device dictionaries.",
             "Search" to "Find text anywhere in the document and jump between matches.",

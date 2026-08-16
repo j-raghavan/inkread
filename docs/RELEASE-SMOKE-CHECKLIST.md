@@ -83,6 +83,19 @@ Tick a step only when the expected result is observed. Any failure blocks the ta
 | 7.2 | Open a Daily article → bottom bar → "Daily" | Returns to the issue's front page | primary |
 | 7.3 | Settings → check for updates (on a production-signed install) | Finds/declines the latest release correctly; a debug-signed build reports the updater inert (signer gate fails closed) | primary |
 
+## 7b. Calibre library (OPDS, needs a calibre content server or Calibre-Web on the LAN)
+
+| # | Action | Expect | Devices |
+|---|--------|--------|---------|
+| 7b.1 | Settings → Library; enter a bare host (e.g. `192.168.1.20:8080`); save | Home grows a "Your library" card showing that address | primary |
+| 7b.2 | Tap the card | The library's top-level feed lists rows; navigation rows read BROWSE →, books read DOWNLOAD EPUB | primary |
+| 7b.3 | Walk into a category, then press Back | Returns to the previous feed, not out of the library | primary |
+| 7b.4 | Search for a title with a space in it | Matches come back (percent-encoded path, not `+`) | primary |
+| 7b.5 | Download a book, then "Read now" | Opens in the reader; it is also on the Home shelf afterwards | primary |
+| 7b.6 | Re-download the same book, then kill Wi-Fi mid-transfer | The already-shelved copy still opens — a failed download costs nothing (#175) | primary |
+| 7b.7 | Point at a server that is off / wrong | Says it could not reach the library and names `--auth-mode=basic`; no crash, no empty-looking library | primary |
+| 7b.8 | On a Calibre-Web instance with a login, set username + password | Catalog loads (Basic auth); wrong credentials fail with the same clear notice | primary |
+
 ## 8. Lifecycle & stability
 
 | # | Action | Expect | Devices |

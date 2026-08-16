@@ -413,6 +413,24 @@ pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeUpdateDecid
     .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
 }
 
+// nativeOpdsParseCatalog(xml) : String — classify a fetched OPDS catalog document into the browse
+// model the shell renders (ADR-INKREAD-0016 / #175): navigation vs acquisition entries, each book's
+// formats ranked best-openable-first, cover art, and the paging/search links. Standalone (no
+// document handle): the shell fetches the catalog and resolves the relative hrefs, the core only
+// says what is in it. Junk in -> an empty catalog, never a throw (RR21-FR3).
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeOpdsParseCatalog<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    xml: JString<'local>,
+) -> JString<'local> {
+    env.with_env(|env| -> jni::errors::Result<JString<'local>> {
+        let xml: String = xml.try_to_string(env)?;
+        env.new_string(inkread_opds::parse_catalog_json(&xml))
+    })
+    .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
+}
+
 // =====================================================================================
 // nativeRenderPage(handle, directBuffer) — render the current page into the direct
 // ByteBuffer the shell locked. The PixelBuffer borrow never outlives this call (Amendment 5).
