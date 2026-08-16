@@ -98,6 +98,45 @@ object Books {
     /** A human title for a stored book file (drop the extension). */
     fun title(file: File): String = file.nameWithoutExtension
 
+    // ---- removing a book from the device (#175 follow-up) ----
+
+    /**
+     * A book's annotation sidecar: `book.epub` → sibling `book.inkread/` (RR10-FR2), the same
+     * mapping the core's `SidecarPaths::for_document` makes.
+     */
+    fun sidecarDir(file: File): File =
+        File(file.parentFile, "${file.nameWithoutExtension}.inkread")
+
+    /** Bytes this book occupies, its annotations included — what removing it actually frees. */
+    fun sizeOnDisk(file: File): Long =
+        file.length() + sidecarDir(file).walkBottomUp().filter { it.isFile }.sumOf { it.length() }
+
+    /**
+     * Remove [file] from the device.
+     *
+     * **Handwritten annotations are kept unless [alsoNotes].** The document is replaceable — one tap
+     * from the catalog, or a re-import — while the ink on it is not, and this app exists to make
+     * that ink worth having. The core re-associates a sidecar by content fingerprint (RR10-FR6), so
+     * re-downloading the same book lands the notes and the reading position straight back on it.
+     *
+     * With [alsoNotes] the sidecar, reading position and cached metadata go too — the "I am done
+     * with this book" case, which must leave nothing behind.
+     */
+    fun remove(context: Context, file: File, alsoNotes: Boolean): Boolean {
+        val id = file.name
+        val removed = runCatching { file.delete() }.getOrDefault(false)
+        // The thumbnail is a cache of the document, so it always goes with it.
+        runCatching { thumbFile(context, id).delete() }
+        if (alsoNotes) {
+            runCatching { sidecarDir(file).deleteRecursively() }
+            meta(context).edit().remove("$id.title").remove("$id.author")
+                .remove("$id.pages").remove("$id.page").apply()
+            context.getSharedPreferences("progress", Context.MODE_PRIVATE).edit().remove(id).apply()
+        }
+        // `recents` already skips entries whose file is gone, so it needs no repair here.
+        return removed
+    }
+
     // ---- real document metadata (title/author/page position), captured by the reader on open ----
 
     private fun meta(context: Context) =
