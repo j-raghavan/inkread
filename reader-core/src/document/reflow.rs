@@ -649,8 +649,17 @@ pub(crate) fn reset_layout_passes() {
 /// must stay stable across toolchains. Two things the digest cannot know are appended here: the
 /// **reading face**, which changes the metrics without appearing in `LayoutOpts`, and the **chapter
 /// count**, so a stored pagination can never be read back against a book of a different shape.
+///
+/// The leading version exists for a third thing neither of those can see: a change to the layout
+/// *engine* itself. The inputs can be identical and the output different, so **bump it whenever a
+/// change alters how content is broken into lines or pages**. Without that, a reader who has already
+/// opened a book keeps being served the page index the old engine built, and the fix appears not to
+/// have worked — worse, positions resolved against a stale index land on the wrong page.
+///
+/// - `v1` → `v2`: the paragraph first-line indent stopped applying to every line (#163), which
+///   changes how much text fits on a line and therefore every page count in the cache.
 fn layout_key(opts: &LayoutOpts, font_id: usize, chapters: usize) -> String {
-    format!("v1|{:016x}|{font_id}|{chapters}", opts.layout_digest())
+    format!("v2|{:016x}|{font_id}|{chapters}", opts.layout_digest())
 }
 
 /// Paginate every chapter for `opts` and return how many pages each occupies.

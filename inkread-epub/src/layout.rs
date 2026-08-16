@@ -239,15 +239,20 @@ pub fn paginate_with(
             Block::Heading { level, content } => {
                 pager.gap_before(opts.font_px * 0.7);
                 let size = opts.font_px * heading_scale(*level);
-                pager.add_paragraph(content, size, 0.0, true, block_index, &mut cursor, m);
+                pager.add_paragraph(content, size, 0.0, 0.0, true, block_index, &mut cursor, m);
                 pager.gap(opts.font_px * 0.5);
             }
             Block::Paragraph { content } => {
-                // First-line indent, no trailing gap — dense, book-like.
+                // First line indented, the rest flush left, no trailing gap — dense and book-like.
+                // The indent is the *only* thing marking where one paragraph ends and the next
+                // begins, since this typography deliberately omits the blank line between them; an
+                // indent applied to every line would leave prose with no paragraph breaks at all
+                // (#163) and would also spend 1.2em of every line's width on nothing.
                 pager.add_paragraph(
                     content,
                     opts.font_px,
                     indent,
+                    0.0,
                     false,
                     block_index,
                     &mut cursor,
@@ -282,7 +287,16 @@ pub fn paginate_with(
                     href: None,
                 })];
                 pager.gap_before(opts.font_px * 0.4);
-                pager.add_paragraph(&run, opts.font_px, 0.0, false, block_index, &mut cursor, m);
+                pager.add_paragraph(
+                    &run,
+                    opts.font_px,
+                    0.0,
+                    0.0,
+                    false,
+                    block_index,
+                    &mut cursor,
+                    m,
+                );
                 pager.gap(opts.font_px * 0.4);
             }
             Block::Rule => pager.add_rule(opts.para_gap),
@@ -363,7 +377,8 @@ impl<'o> Pager<'o> {
         &mut self,
         inlines: &[Inline],
         size: f32,
-        indent: f32,
+        first_indent: f32,
+        rest_indent: f32,
         bold_all: bool,
         block: usize,
         cursor: &mut usize,
@@ -372,7 +387,8 @@ impl<'o> Pager<'o> {
         let lines = break_lines(
             inlines,
             size,
-            indent,
+            first_indent,
+            rest_indent,
             self.opts.content_w(),
             bold_all,
             block,
@@ -412,9 +428,12 @@ impl<'o> Pager<'o> {
             block,
             char_offset: *cursor,
         };
+        // A hanging indent: the body is inset on *every* line and the marker hangs out to the left
+        // of the first, so both indents are the same here — unlike a paragraph's first-line indent.
         let mut lines = break_lines(
             inlines,
             size,
+            indent,
             indent,
             self.opts.content_w(),
             false,
@@ -580,7 +599,8 @@ fn align_line(
 fn break_lines(
     inlines: &[Inline],
     size: f32,
-    indent: f32,
+    first_indent: f32,
+    rest_indent: f32,
     content_w: f32,
     bold_all: bool,
     block: usize,
@@ -588,7 +608,6 @@ fn break_lines(
     m: &dyn Metrics,
     hyph: &dyn Hyphenator,
 ) -> Vec<Vec<PlacedRun>> {
-    let avail = (content_w - indent).max(1.0);
     let space_w = m.advance(" ", size, false, false);
     let mut lines: Vec<Vec<PlacedRun>> = Vec::new();
     let mut cur: Vec<PlacedRun> = Vec::new();
@@ -620,6 +639,15 @@ fn break_lines(
                 let mut off = 0usize;
                 let mut first = true;
                 while !rest.is_empty() {
+                    // `lines` holds the lines already finished, so its length is the index of the
+                    // one being built — which is what decides whether this is the indented first
+                    // line or a subsequent one. Both the offset and the room available move with it.
+                    let indent = if lines.is_empty() {
+                        first_indent
+                    } else {
+                        rest_indent
+                    };
+                    let avail = (content_w - indent).max(1.0);
                     let lead = if first && need_space && !cur.is_empty() {
                         space_w
                     } else {
@@ -942,7 +970,8 @@ mod tests {
     }
 
     /// The narrow test viewport for the unspaced-script (CJK) wrapping tests: 10px font → 5px/char
-    /// (Mono); content 50px, paragraph indent 12px (1.2em) → 38px of body ⇒ 7 chars fit a line.
+    /// (Mono); content 50px. The paragraph's 12px (1.2em) indent applies to the **first line only**,
+    /// so 7 chars fit there and 10 on every line after it.
     fn cjk_opts() -> LayoutOpts {
         LayoutOpts {
             page_w: 50.0,
@@ -964,17 +993,86 @@ mod tests {
             .collect()
     }
 
+    /// #163: the first-line indent must land on the first line and nowhere else.
+    ///
+    /// This typography omits the blank line between paragraphs on purpose, so the indent is the
+    /// *only* thing marking where one paragraph ends and the next begins. Applying it to every line
+    /// — which is what the code did — left prose with no paragraph breaks at all, and spent 1.2em of
+    /// every line's width on nothing.
+    #[test]
+    fn only_a_paragraphs_first_line_is_indented() {
+        let pages = paginate(
+            &[para("alpha bravo charlie delta echo foxtrot")],
+            &cjk_opts(),
+            &Mono,
+        );
+        let lines: Vec<&LayoutLine> = pages.iter().flat_map(|p| &p.lines).collect();
+        assert!(
+            lines.len() > 1,
+            "need a wrapped paragraph to test: {lines:?}"
+        );
+
+        assert_eq!(
+            lines[0].runs[0].x, 12.0,
+            "the first line carries the 1.2em indent"
+        );
+        for (i, line) in lines.iter().enumerate().skip(1) {
+            assert_eq!(line.runs[0].x, 0.0, "line {i} must start flush left");
+        }
+    }
+
+    /// The counterpart: a list item's indent is a *hanging* indent, so it applies to every line and
+    /// the marker hangs to the left of the first. The two must not be conflated.
+    #[test]
+    fn a_list_items_body_stays_indented_on_every_line() {
+        let item = Block::ListItem {
+            ordered: false,
+            index: 1,
+            content: vec![Inline::Run(TextRun {
+                text: "alpha bravo charlie delta echo".into(),
+                bold: false,
+                italic: false,
+                href: None,
+            })],
+        };
+        let pages = paginate(&[item], &cjk_opts(), &Mono);
+        let lines: Vec<&LayoutLine> = pages.iter().flat_map(|p| &p.lines).collect();
+        assert!(lines.len() > 1, "need a wrapped item to test");
+
+        // The marker hangs at the content origin; the body starts indented past it.
+        assert_eq!(lines[0].runs[0].text, "•");
+        assert_eq!(lines[0].runs[0].x, 0.0, "the marker hangs left");
+        let body_x = lines[0].runs[1].x;
+        assert!(body_x > 0.0, "the body is inset past the marker");
+        for (i, line) in lines.iter().enumerate().skip(1) {
+            assert_eq!(
+                line.runs[0].x, body_x,
+                "wrapped line {i} stays under the body, not the marker"
+            );
+        }
+    }
+
     #[test]
     fn cjk_paragraph_wraps_between_characters() {
         // No spaces, so the whole paragraph is one token — before UAX #14 it overflowed as a single
-        // unbreakable "word". 22 Han chars at 7/line wrap greedily to 7+7+7+1, nothing lost.
+        // unbreakable "word". 22 Han chars wrap greedily to 7 (the indented first line) + 10 + 5,
+        // nothing lost.
         let text = "书山有路勤为径学海无涯苦作舟读万卷书行万里路";
         let pages = paginate(&[para(text)], &cjk_opts(), &Mono);
         let lines = line_texts(&pages);
-        assert_eq!(lines.len(), 4, "22 chars at 7/line: {lines:?}");
-        assert!(lines.iter().all(|l| l.chars().count() <= 7));
+        assert_eq!(lines.len(), 3, "22 chars as 7+10+5: {lines:?}");
+        assert_eq!(
+            lines[0].chars().count(),
+            7,
+            "the indented first line is narrower"
+        );
+        assert_eq!(
+            lines[1].chars().count(),
+            10,
+            "later lines get the full column"
+        );
         assert_eq!(lines.concat(), text, "no characters dropped or reordered");
-        // No line overflows the body column (indent 12 + 7×5 = 47 ≤ 50).
+        // No line overflows the content box, indented or not.
         for line in pages.iter().flat_map(|p| &p.lines) {
             for r in &line.runs {
                 assert!(r.x + r.text.chars().count() as f32 * 5.0 <= 50.0 + 0.01);
