@@ -204,6 +204,126 @@ fn json_form_round_trips_and_omits_absent_fields() {
     assert!(value["entries"][0].get("href").is_none());
 }
 
+/// A **Calibre-Web** feed, shaped from `cps/templates/feed.xml` rather than from calibre desktop.
+/// The two servers differ in ways that matter, and this is the one the issue reporter runs:
+/// navigation uses `rel="subsection"`, covers use `image`/`image/thumbnail`, there are *two*
+/// `search` links, and the acquisition media type comes from the host's mime database — so an EPUB
+/// arrives as `application/octet-stream` wherever that database has no entry for it.
+const CALIBRE_WEB_FEED: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom" xmlns:dcterms="http://purl.org/dc/terms/">
+  <id>urn:uuid:2853dacf</id>
+  <updated>2026-08-16T10:00:00+00:00</updated>
+  <link rel="start" href="/opds" type="application/atom+xml;profile=opds-catalog;type=feed;kind=navigation"/>
+  <link rel="next" title="Next" href="/opds/new?offset=60" type="application/atom+xml;profile=opds-catalog;type=feed;kind=navigation"/>
+  <link rel="search" href="/opds/osd" type="application/opensearchdescription+xml"/>
+  <link type="application/atom+xml" rel="search" title="Search" href="/opds/search/{searchTerms}"/>
+  <title>Calibre-Web</title>
+  <entry>
+    <title>A Wizard of Earthsea</title>
+    <id>urn:uuid:9c1f</id>
+    <updated>2026-08-01T09:00:00+00:00</updated>
+    <author><name>Ursula K. Le Guin</name></author>
+    <published>1968-11-01T00:00:00+00:00</published>
+    <content type="xhtml"><div xmlns="http://www.w3.org/1999/xhtml">TAGS: fantasy</div></content>
+    <link type="image/jpeg" href="/opds/cover/7" rel="http://opds-spec.org/image"/>
+    <link type="image/jpeg" href="/opds/cover/7" rel="http://opds-spec.org/image/thumbnail"/>
+    <link rel="http://opds-spec.org/acquisition" href="/opds/download/7/epub/"
+          length="402118" title="EPUB" type="application/octet-stream"/>
+    <link rel="http://opds-spec.org/acquisition" href="/opds/download/7/pdf/"
+          length="9100000" title="PDF" type="application/pdf"/>
+  </entry>
+  <entry>
+    <title>Fantasy</title>
+    <id>/opds/category/3</id>
+    <updated>2026-08-16T10:00:00+00:00</updated>
+    <link rel="subsection" type="application/atom+xml;profile=opds-catalog" href="/opds/category/3"/>
+  </entry>
+</feed>"#;
+
+#[test]
+fn a_calibre_web_feed_classifies_and_stays_downloadable() {
+    let catalog = parse_catalog(CALIBRE_WEB_FEED);
+    assert_eq!(catalog.entries.len(), 2);
+
+    let book = &catalog.entries[0];
+    assert_eq!(book.kind, EntryKind::Acquisition);
+    assert_eq!(book.author, "Ursula K. Le Guin");
+    // The EPUB is served as application/octet-stream because the host mime database has no entry
+    // for it. Refusing it on that basis would make the reader useless against a real Calibre-Web,
+    // so the link's title and href are consulted before giving up.
+    let exts: Vec<&str> = book.formats.iter().map(|f| f.ext.as_str()).collect();
+    assert_eq!(
+        exts,
+        ["epub", "pdf"],
+        "octet-stream EPUB still resolves, and still sorts first"
+    );
+    assert_eq!(book.formats[0].href, "/opds/download/7/epub/");
+    assert_eq!(book.formats[0].bytes, Some(402_118));
+
+    // `rel="subsection"` with an opds-catalog profile is a navigation row.
+    let nav = &catalog.entries[1];
+    assert_eq!(nav.kind, EntryKind::Navigation);
+    assert_eq!(nav.href, "/opds/category/3");
+
+    assert_eq!(
+        book.cover, "/opds/cover/7",
+        "image/thumbnail is offered and preferred"
+    );
+}
+
+#[test]
+fn the_search_link_chosen_is_the_one_that_can_be_searched() {
+    // Calibre-Web advertises the OpenSearch *description document* first and the query template
+    // second. Picking the first would send every search to a metadata document and return nothing.
+    let catalog = parse_catalog(CALIBRE_WEB_FEED);
+    assert_eq!(catalog.search_template, "/opds/search/{searchTerms}");
+}
+
+#[test]
+fn a_description_only_search_link_yields_no_template() {
+    // With nothing searchable advertised, the shell must get "" and hide the search box rather than
+    // offer a control that silently does nothing.
+    let xml = r#"<?xml version="1.0" encoding="utf-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>t</title><id>i</id><updated>2026-08-14T10:00:00+00:00</updated>
+  <link rel="search" href="/opds/osd" type="application/opensearchdescription+xml"/>
+</feed>"#;
+    assert_eq!(parse_catalog(xml).search_template, "");
+}
+
+#[test]
+fn a_format_is_never_guessed_into_something_unopenable() {
+    // A MOBI served as octet-stream must stay unopenable: neither its title nor its href names a
+    // format this reader handles, so the fallbacks must not manufacture one.
+    let xml = r#"<?xml version="1.0" encoding="utf-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>t</title><id>i</id><updated>2026-08-14T10:00:00+00:00</updated>
+  <entry>
+    <title>Only MOBI</title><id>e</id><updated>2026-08-14T10:00:00+00:00</updated>
+    <link rel="http://opds-spec.org/acquisition" href="/opds/download/9/mobi/"
+          title="MOBI" type="application/octet-stream"/>
+  </entry>
+</feed>"#;
+    let entry = &parse_catalog(xml).entries[0];
+    assert!(entry.formats[0].ext.is_empty(), "no format was invented");
+}
+
+#[test]
+fn a_query_string_cannot_smuggle_a_format_into_the_href() {
+    // Only path segments are scanned: a title in the query must not make an unopenable download
+    // look openable.
+    let xml = r#"<?xml version="1.0" encoding="utf-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>t</title><id>i</id><updated>2026-08-14T10:00:00+00:00</updated>
+  <entry>
+    <title>Trap</title><id>e</id><updated>2026-08-14T10:00:00+00:00</updated>
+    <link rel="http://opds-spec.org/acquisition" href="/dl/9?name=epub"
+          type="application/octet-stream"/>
+  </entry>
+</feed>"#;
+    assert!(parse_catalog(xml).entries[0].formats[0].ext.is_empty());
+}
+
 #[test]
 fn empty_catalog_json_constant_matches_a_real_empty_catalog() {
     // The defensive fallback in parse_catalog_json must not drift from the derived serialization.

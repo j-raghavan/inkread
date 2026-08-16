@@ -42,7 +42,7 @@ pub fn parse_catalog(xml: &str) -> Catalog {
         next: feed_href(&feed.links, &["next"]),
         prev: feed_href(&feed.links, &["previous", "prev"]),
         start: feed_href(&feed.links, &["start"]),
-        search_template: feed_href(&feed.links, &["search"]),
+        search_template: search_template(&feed.links),
         entries: feed.entries.into_iter().map(catalog_entry).collect(),
     }
 }
@@ -128,6 +128,10 @@ pub struct Format {
 
 /// Formats the reader opens, in the order it prefers them. EPUB first: it reflows, so it is the
 /// format that actually reads well on a small panel. Kept in step with the shell's supported set.
+const EXT_ORDER: [&str; 4] = ["epub", "pdf", "cbz", "txt"];
+
+/// Media types that identify those formats. Several servers get this wrong (see
+/// [`extension_for`]), so it is the first source consulted, not the only one.
 const PREFERRED: [(&str, &str); 5] = [
     ("application/epub+zip", "epub"),
     ("application/pdf", "pdf"),
@@ -210,33 +214,71 @@ fn acquisition_formats(links: &[Link]) -> Vec<Format> {
         })
         .map(|l| {
             let mime = l.media_type.clone().unwrap_or_default();
+            let href = l.href.trim().to_string();
             Format {
-                ext: extension_for(&mime).unwrap_or_default().to_string(),
+                ext: extension_for(&mime, l.title.as_deref().unwrap_or_default(), &href)
+                    .unwrap_or_default()
+                    .to_string(),
                 mime,
-                href: l.href.trim().to_string(),
+                href,
                 bytes: l.length,
             }
         })
         .collect();
     // Stable sort by preference rank, so equally-ranked formats keep the server's order.
-    formats.sort_by_key(|f| rank(&f.mime));
+    formats.sort_by_key(|f| rank(&f.ext));
     formats
 }
 
-/// Preference rank of a media type: its index in [`PREFERRED`], or past the end when unsupported.
-fn rank(mime: &str) -> usize {
-    PREFERRED
+/// Preference rank of a resolved extension: its index in [`EXT_ORDER`], or past the end when the
+/// reader cannot open it. Ranking on the *resolved* extension rather than the media type matters —
+/// a server that labels its EPUBs `application/octet-stream` must still have them sort first.
+fn rank(ext: &str) -> usize {
+    EXT_ORDER
         .iter()
-        .position(|(m, _)| mime.eq_ignore_ascii_case(m))
-        .unwrap_or(PREFERRED.len())
+        .position(|e| *e == ext)
+        .unwrap_or(EXT_ORDER.len())
 }
 
-/// The file extension this reader would save `mime` as, or `None` when it cannot open it.
-fn extension_for(mime: &str) -> Option<&'static str> {
-    PREFERRED
+/// The file extension this reader would save a download as, or `None` when it cannot open it.
+///
+/// Three sources, in descending order of authority, because **the media type alone is not reliable
+/// in the field**. Servers commonly derive it from the host's mime database, and where that database
+/// has no entry for a format the link goes out as `application/octet-stream` — a correctly-served
+/// EPUB that a mime-only reader would refuse to download.
+///
+/// 1. The declared media type — right when present, and the only standards-blessed source.
+/// 2. The link's `title`, which acquisition links conventionally set to the format name ("EPUB").
+/// 3. A format token in the href, since download URLs usually name the format they serve.
+///
+/// Every source must match a format this reader actually opens, so a wrong guess degrades to
+/// "cannot open" rather than to a download that fails on the way in.
+fn extension_for(mime: &str, title: &str, href: &str) -> Option<&'static str> {
+    if let Some(ext) = PREFERRED
         .iter()
         .find(|(m, _)| mime.eq_ignore_ascii_case(m))
         .map(|(_, ext)| *ext)
+    {
+        return Some(ext);
+    }
+    if let Some(ext) = format_token(title) {
+        return Some(ext);
+    }
+    // Path segments only — a query string may carry anything, including a title.
+    href.split(['?', '#'])
+        .next()
+        .unwrap_or_default()
+        .split('/')
+        .find_map(format_token)
+}
+
+/// `token` as one of the formats this reader opens, ignoring case and any leading dot.
+fn format_token(token: &str) -> Option<&'static str> {
+    let cleaned = token.trim().trim_start_matches('.');
+    EXT_ORDER
+        .iter()
+        .find(|e| cleaned.eq_ignore_ascii_case(e))
+        .copied()
 }
 
 /// Where a navigation entry leads: a link explicitly marked as a catalog feed, else the first link
@@ -266,6 +308,30 @@ fn image_href(links: &[Link]) -> String {
         .map(|l| l.href.trim().to_string())
         .unwrap_or_default()
 }
+
+/// The searchable URL template — a `search` link whose href actually carries `{searchTerms}`.
+///
+/// A feed may advertise **several** `search` links: one pointing at an OpenSearch *description
+/// document* (which describes how to search, and is not itself a query) and one carrying the query
+/// template. Taking whichever came first would send the search to the description document, which
+/// answers with metadata rather than results — a search that quietly returns nothing rather than
+/// failing. Requiring the placeholder picks the usable link regardless of order, and yields nothing
+/// when only a description document is offered, which correctly hides the search box.
+fn search_template(links: &[Link]) -> String {
+    links
+        .iter()
+        .find(|l| {
+            l.rel
+                .as_deref()
+                .is_some_and(|r| r.eq_ignore_ascii_case("search"))
+                && l.href.contains(SEARCH_TERMS)
+        })
+        .map(|l| l.href.trim().to_string())
+        .unwrap_or_default()
+}
+
+/// The OpenSearch placeholder the shell substitutes the reader's query into.
+const SEARCH_TERMS: &str = "{searchTerms}";
 
 /// The feed-level href for the first of `rels` the feed carries (paging / start / search).
 fn feed_href(links: &[Link], rels: &[&str]) -> String {
