@@ -91,9 +91,12 @@ class HomeActivity : Activity() {
         UpdateGate.maybeCheckOnLaunch(this) // throttled GitHub release check (ADR-INKREAD-0014)
     }
 
-    /** A stable digest of what the shelf renders — recents order + per-book read progress. */
+    /** A stable digest of what the shelf renders — recents order + per-book read progress, plus the
+     *  stored-book count so removing a book that was past the recents cut still refreshes the
+     *  "Your shelf · N books" line. */
     private fun shelfSignature(): String =
-        Books.recents(this).joinToString("|") { "${it.id}@${Books.progress(this, it.id)}" }
+        Books.recents(this).joinToString("|") { "${it.id}@${Books.progress(this, it.id)}" } +
+            "#${Books.list(this).size}"
 
     private fun buildView(): View {
         val w = resources.displayMetrics.widthPixels
@@ -142,6 +145,13 @@ class HomeActivity : Activity() {
         }
         column.addView(spacer(dim(28)))
         column.addView(openButton())
+        // Everything on the device, not just the recent handful — and the only route to removing a
+        // book. Shown whenever anything is stored, since a book past the recents cut is otherwise
+        // invisible while still taking up space.
+        allBooksLink()?.let {
+            column.addView(spacer(dim(12)))
+            column.addView(it)
+        }
         statChips()?.let {
             column.addView(spacer(dim(16)))
             column.addView(it)
@@ -513,6 +523,20 @@ class HomeActivity : Activity() {
         }
         isClickable = true; setOnClickListener { openPicker() }
         layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+    }
+
+    /** "Your shelf · N books" → [ShelfActivity]; `null` when the device holds nothing yet. */
+    private fun allBooksLink(): View? {
+        val count = Books.list(this).size
+        if (count == 0) return null
+        return TextView(this).apply {
+            text = "Your shelf · $count ${if (count == 1) "book" else "books"}"
+            setTextColor(inkSoft); textSize = fs(13f); typeface = mono; letterSpacing = 0.08f
+            gravity = Gravity.CENTER
+            setPadding(dim(12), dim(8), dim(12), dim(8))
+            isClickable = true
+            setOnClickListener { startActivity(Intent(this@HomeActivity, ShelfActivity::class.java)) }
+        }
     }
 
     /** A small uppercase, letter-spaced mono eyebrow (the design's Space Mono labels). */

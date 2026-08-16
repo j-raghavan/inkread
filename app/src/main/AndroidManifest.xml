@@ -69,6 +69,13 @@
             android:exported="false"
             android:configChanges="orientation|screenSize|keyboardHidden" />
 
+        <!-- Every book on the device, and the only place to remove one; launched from the Home
+             shelf link (not exported). -->
+        <activity
+            android:name=".ShelfActivity"
+            android:exported="false"
+            android:configChanges="orientation|screenSize|keyboardHidden" />
+
         <!-- Self-update install callback (ADR-INKREAD-0014): receives the PackageInstaller session
              result and launches the OS install-confirmation intent. Internal only. -->
         <receiver
