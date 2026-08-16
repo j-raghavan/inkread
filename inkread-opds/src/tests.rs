@@ -388,7 +388,7 @@ fn the_json_keys_are_exactly_what_the_shell_reads() {
         serde_json::from_str(&parse_catalog_json(CALIBRE_WEB_FEED)).expect("valid JSON");
 
     // Feed level — mirrors OpdsController.parseCatalog.
-    for key in ["title", "entries", "next", "searchTemplate"] {
+    for key in ["isCatalog", "title", "entries", "next", "searchTemplate"] {
         assert!(value.get(key).is_some(), "feed key `{key}` is missing");
     }
     assert_eq!(value["searchTemplate"], "/opds/search/{searchTerms}");
@@ -410,6 +410,33 @@ fn the_json_keys_are_exactly_what_the_shell_reads() {
         value["entries"][1].get("href").is_some(),
         "navigation `href` is missing"
     );
+}
+
+#[test]
+fn an_empty_shelf_and_a_non_catalog_are_told_apart() {
+    // Both produce zero entries, and only one of them is the reader's mistake to fix. Pointing at a
+    // server's HTML UI instead of its catalog must not report "your library is empty".
+    let empty_feed = r#"<?xml version="1.0" encoding="utf-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>Calibre-Web</title><id>i</id><updated>2026-08-16T10:00:00+00:00</updated>
+</feed>"#;
+    let empty = parse_catalog(empty_feed);
+    assert!(
+        empty.is_catalog,
+        "a real feed with no books is still a catalog"
+    );
+    assert!(empty.entries.is_empty());
+
+    for not_a_catalog in [
+        "<html><body><h1>Calibre-Web</h1></body></html>",
+        "404 Not Found",
+        "",
+    ] {
+        assert!(
+            !parse_catalog(not_a_catalog).is_catalog,
+            "{not_a_catalog:?} is not a catalog",
+        );
+    }
 }
 
 #[test]

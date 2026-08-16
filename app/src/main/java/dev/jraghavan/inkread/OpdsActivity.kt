@@ -106,24 +106,46 @@ class OpdsActivity : Activity() {
         val from = currentUrl
         showBusy("Opening the library…")
         io.execute {
-            val catalog = opds.fetchCatalog(url)
+            val result = opds.fetchCatalog(url)
             main.post {
                 if (gone) return@post
                 dismissBusy()
-                if (catalog == null) {
-                    render(
-                        message = "Could not reach the library.\n\nCheck that the server is running " +
-                            "and reachable from this device. If it asks for a login, calibre must be " +
-                            "started with --auth-mode=basic.",
-                    )
+                if (result !is OpdsController.Fetch.Ok) {
+                    render(message = explain(result))
                     return@post
                 }
                 if (pushTrail && from != null) trail.addLast(from)
                 currentUrl = url
-                current = catalog
+                current = result.catalog
                 render()
             }
         }
+    }
+
+    /**
+     * What to tell the reader about a failure — the point being to name the *one* thing worth
+     * checking. A wrong password and an unreachable host are not the same problem, and the advice
+     * for one is a waste of time for the other.
+     */
+    private fun explain(result: OpdsController.Fetch): String = when (result) {
+        is OpdsController.Fetch.Unauthorized ->
+            "The library refused the login.\n\nCheck the username and password in Settings → " +
+                "Library. If this is calibre's own content server rather than Calibre-Web, it also " +
+                "has to be started with --auth-mode=basic — its default login method is one this " +
+                "device cannot answer."
+        is OpdsController.Fetch.NotACatalog ->
+            "That address answered, but not with a library.\n\nIt is probably the server's web page " +
+                "rather than its catalog. Try the address on its own — inkread adds the catalog path " +
+                "itself."
+        is OpdsController.Fetch.Unreachable ->
+            if (result.status > 0) {
+                "The library answered with an error (HTTP ${result.status})." +
+                    "\n\nCheck the address in Settings → Library."
+            } else {
+                "Could not reach the library.\n\nCheck that the server is running and that this " +
+                    "device is on the same network."
+            }
+        is OpdsController.Fetch.Ok -> "" // not a failure; never rendered
     }
 
     // ── rendering ────────────────────────────────────────────────────────────────────────────────
@@ -198,8 +220,11 @@ class OpdsActivity : Activity() {
         if (entry.navigation) return "BROWSE →"
         val best = entry.best
             ?: return "UNSUPPORTED FORMAT" + entry.formats.firstOrNull()?.let { " · ${it.mime}" }.orEmpty()
-        val size = if (best.bytes > 0) " · ${best.bytes / 1024 / 1024} MB" else ""
-        return "DOWNLOAD ${best.ext.uppercase()}$size"
+        // Shared with the shelf so a book reads the same size in both places — and so a 400 KB EPUB
+        // does not show as "0 MB", which integer megabytes would have made of most books.
+        val size = if (best.bytes > 0) " · ${Books.humanSize(best.bytes)}" else ""
+        val already = if (Books.destinationFor(this, entry.title, best.ext).exists()) " · ON SHELF" else ""
+        return "DOWNLOAD ${best.ext.uppercase()}$size$already"
     }
 
     private fun onRowTapped(entry: OpdsController.Entry) {

@@ -132,6 +132,24 @@ class OpdsUrlTest {
         assertEquals("", OpdsController.searchUrl("/opds/search/{searchTerms}", ""))
     }
 
+    // ---- failure classification ----
+
+    @Test
+    fun aRefusedLoginIsNotAnUnreachableServer() {
+        // The reporter's server is Calibre-Web, which authenticates OPDS with Basic. Telling him to
+        // check his network when the password is wrong sends him to fix the wrong thing.
+        assertEquals(OpdsController.Fetch.Unauthorized, OpdsController.failureFor(401))
+        assertEquals(OpdsController.Fetch.Unauthorized, OpdsController.failureFor(403))
+    }
+
+    @Test
+    fun otherFailuresCarryTheirStatus() {
+        assertEquals(OpdsController.Fetch.Unreachable(404), OpdsController.failureFor(404))
+        assertEquals(OpdsController.Fetch.Unreachable(500), OpdsController.failureFor(500))
+        // 0 = nothing answered at all, which is a different sentence again.
+        assertEquals(OpdsController.Fetch.Unreachable(0), OpdsController.failureFor(0))
+    }
+
     // ---- catalogRoot ----
 
     @Test

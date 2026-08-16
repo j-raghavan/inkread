@@ -45,6 +45,8 @@ class OpdsController(private val context: Context) {
 
     /** One fetched feed, with its hrefs already resolved to absolute URLs. */
     data class Catalog(
+        /** The document really was a feed — see [Fetch.NotACatalog]. */
+        val isCatalog: Boolean,
         val title: String,
         val entries: List<Entry>,
         val next: String,
@@ -54,22 +56,41 @@ class OpdsController(private val context: Context) {
     )
 
     /**
-     * Fetch [url] and classify it. Returns null when the server is unreachable, refuses us, or
-     * answers with something that is not a catalog — the caller shows the failure; a null here is
-     * never a crash.
+     * What came back from asking the server for a feed.
+     *
+     * Failure is modelled rather than collapsed to `null` because the reader has to be told which
+     * thing to go and fix. "Could not reach the library" is the wrong sentence for a wrong password,
+     * and "your library is empty" is the wrong sentence for an address that is not a catalog — each
+     * sends someone to correct something that was never broken.
      */
-    fun fetchCatalog(url: String): Catalog? {
-        if (!isHttpUrl(url)) return null
-        val xml = HttpFetch.getText(url, USER_AGENT, ACCEPT, TIMEOUT_MS, MAX_CATALOG_BYTES, auth())
-            ?: return null
+    sealed interface Fetch {
+        data class Ok(val catalog: Catalog) : Fetch
+
+        /** The server answered 401/403: credentials are missing or wrong. */
+        data object Unauthorized : Fetch
+
+        /** Nothing answered, or it answered with an error status. */
+        data class Unreachable(val status: Int) : Fetch
+
+        /** Something answered, but it was not an OPDS feed — usually a web UI, not a catalog. */
+        data object NotACatalog : Fetch
+    }
+
+    /** Fetch [url] and classify it. Never throws; every failure is one of the [Fetch] cases. */
+    fun fetchCatalog(url: String): Fetch {
+        if (!isHttpUrl(url)) return Fetch.Unreachable(0)
+        val response =
+            HttpFetch.getTextWithStatus(url, USER_AGENT, ACCEPT, TIMEOUT_MS, MAX_CATALOG_BYTES, auth())
+        val xml = response.body ?: return failureFor(response.status)
         val json = runCatching { NativeBridge.nativeOpdsParseCatalog(xml) }.getOrElse {
             Log.e(TAG, "catalog parse failed: ${it.message}")
-            return null
+            return Fetch.NotACatalog
         }
-        return runCatching { parseCatalog(json, url) }.getOrElse {
+        val catalog = runCatching { parseCatalog(json, url) }.getOrElse {
             Log.e(TAG, "catalog decode failed: ${it.message}")
-            null
+            return Fetch.NotACatalog
         }
+        return if (catalog.isCatalog) Fetch.Ok(catalog) else Fetch.NotACatalog
     }
 
     /**
@@ -137,6 +158,7 @@ class OpdsController(private val context: Context) {
             }
         }
         return Catalog(
+            isCatalog = root.optBoolean("isCatalog", false),
             title = root.optString("title"),
             entries = entries,
             next = resolve(base, root.optString("next")),
@@ -163,6 +185,18 @@ class OpdsController(private val context: Context) {
 
         /** Matches the shelf's own import cap (the core refuses larger documents at open anyway). */
         private const val MAX_BOOK_BYTES = 2L shl 30
+
+        /**
+         * The failure a non-success HTTP [status] represents.
+         *
+         * 401 and 403 are the reader's credentials, everything else is the address or the network —
+         * a distinction worth getting right, because each sends someone to fix a different thing.
+         * Pure so the rule is tested rather than inferred from a `when` buried in an IO path.
+         */
+        fun failureFor(status: Int): Fetch = when (status) {
+            401, 403 -> Fetch.Unauthorized
+            else -> Fetch.Unreachable(status)
+        }
 
         /**
          * Resolve [href] against [base] into an absolute URL, or "" when it is absent or does not
