@@ -541,7 +541,14 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
 
     // ---- SurfaceHolder lifecycle → core (RR21-FR4) ----
 
-    override fun surfaceCreated(holder: SurfaceHolder) { /* size arrives in surfaceChanged */ }
+    override fun surfaceCreated(holder: SurfaceHolder) {
+        // Paint the surface white the instant it exists, on this thread. The size arrives in
+        // surfaceChanged, whose work is handed to the engine thread — so the "Loading…" frame can be
+        // queued behind whatever that thread is already doing. Until something is pushed, a
+        // SurfaceView shows black, and on this panel that is a full black refresh. One white frame
+        // here closes that window regardless of how busy the engine is.
+        blit { canvas -> canvas.drawColor(Color.WHITE) }
+    }
 
     override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
         // Hand the slow open+render to the engine thread; show feedback immediately.

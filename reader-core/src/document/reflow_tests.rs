@@ -552,7 +552,7 @@ fn a_stored_pagination_of_the_right_shape_is_used_verbatim() {
     // The flip side: a pagination that *does* match is trusted without a layout pass, which is
     // the entire saving in #162.
     let b = synthetic_book();
-    let chapters = b.chapters.len();
+    let chapters = b.chapter_count();
     b.set_pagination_cache(fake(Some(vec![7; chapters])).0);
     reset_layout_passes();
     assert_eq!(b.page_count(), 7 * chapters);
@@ -576,7 +576,7 @@ fn each_computed_pagination_is_stored_under_its_own_key() {
     assert_eq!(saved[1].1.iter().sum::<usize>(), second);
     assert_eq!(
         saved[0].1.len(),
-        b.chapters.len(),
+        b.chapter_count(),
         "one entry per chapter — the shape the load side validates"
     );
 }
@@ -658,7 +658,7 @@ fn progress_is_reported_once_per_chapter_and_counts_up_to_the_total() {
     let (w, seen) = watcher(None);
     b.set_pagination_progress(w);
     let _ = b.page_count(); // the first pagination reports, it just cannot be cancelled
-    let chapters = b.chapters.len();
+    let chapters = b.chapter_count();
 
     let seen = seen.borrow();
     assert_eq!(seen.len(), chapters, "one report per chapter");
@@ -926,4 +926,66 @@ fn an_out_of_range_pin_is_clamped_not_panicked() {
             );
         }
     }
+}
+
+// ---- lazy chapter parsing (#186) ---------------------------------------------------------
+
+/// The cost that no cache used to remove: opening a book parsed **every** chapter to blocks, in
+/// full, on every open — for chapters the reader never looked at. On a device that was measured at
+/// ~3.2s of a ~6s open, paid again on every reopen.
+///
+/// With a cached pagination there is nothing that needs the whole book, so only the chapter being
+/// read should be parsed.
+#[test]
+fn a_cached_pagination_parses_only_the_chapter_being_read() {
+    let b = EpubBackend::open(SAMPLE.to_vec(), vp(400, 600)).unwrap();
+    // A pagination the backend will accept: one entry per chapter, so the shape check passes.
+    let cached = vec![1usize; b.chapter_count()];
+    b.set_pagination_cache(fake(Some(cached)).0);
+
+    reset_chapter_parses();
+    let mut buf = vec![0u8; 400 * 600 * 4];
+    let mut px = PixelBuffer::from_rgba(&mut buf, 400, 600).unwrap();
+    b.render_page(0, &mut px).expect("render first page");
+
+    assert_eq!(
+        chapter_parses(),
+        1,
+        "only the chapter holding page 0 should have been parsed",
+    );
+}
+
+/// The counterpart: building a pagination from scratch genuinely needs every chapter, so that path
+/// must still parse them all. Without this a "fix" that simply never parsed would look correct here
+/// and produce a book with no pages.
+#[test]
+fn building_a_pagination_still_parses_every_chapter() {
+    let b = EpubBackend::open(SAMPLE.to_vec(), vp(400, 600)).unwrap();
+    let chapters = b.chapter_count();
+
+    reset_chapter_parses();
+    let pages = b.page_count();
+
+    assert_eq!(chapter_parses(), chapters, "every chapter parsed");
+    assert!(pages > 0, "and the book has pages");
+}
+
+/// Parsing is memoized: re-reading a chapter must not re-parse it.
+#[test]
+fn a_chapter_is_parsed_at_most_once() {
+    let b = EpubBackend::open(SAMPLE.to_vec(), vp(400, 600)).unwrap();
+    let _ = b.page_count(); // parses everything once
+    reset_chapter_parses();
+
+    let mut buf = vec![0u8; 400 * 600 * 4];
+    let mut px = PixelBuffer::from_rgba(&mut buf, 400, 600).unwrap();
+    for page in 0..b.page_count().min(4) {
+        b.render_page(page, &mut px).expect("render");
+    }
+
+    assert_eq!(
+        chapter_parses(),
+        0,
+        "already-parsed chapters are not re-parsed"
+    );
 }

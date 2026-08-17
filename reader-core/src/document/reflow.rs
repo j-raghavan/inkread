@@ -113,10 +113,33 @@ impl Laid {
     }
 }
 
+/// A chapter's content: its source XHTML until something actually needs it, then the parsed blocks.
+///
+/// Parsing every chapter at open was the one cost no cache removed — paid in full on every open of
+/// every book, for chapters the reader never looks at. On a book whose pagination is already cached
+/// (the common case after the first open) nothing but the chapter being read has to be parsed at
+/// all (#186).
+enum Chapter {
+    /// Not yet needed; holds the XHTML the parse will consume.
+    Source(String),
+    /// Parsed. The source is dropped here, so a fully-read book costs what it always did.
+    Parsed(Vec<Block>),
+}
+
+impl Chapter {
+    /// The parsed blocks, or `&[]` if this chapter has not been through [`EpubBackend::parse_chapter`].
+    fn blocks(&self) -> &[Block] {
+        match self {
+            Chapter::Parsed(blocks) => blocks,
+            Chapter::Source(_) => &[],
+        }
+    }
+}
+
 /// The EPUB backend: parsed per-chapter content + the embedded reading face, with a cached layout.
 pub struct EpubBackend {
-    /// Reading-order chapters as content blocks.
-    chapters: Vec<Vec<Block>>,
+    /// Reading-order chapters, each parsed on first use (see [`Chapter`]).
+    chapters: RefCell<Vec<Chapter>>,
     /// Each chapter's resource basename (for matching TOC hrefs → chapter index).
     chapter_keys: Vec<String>,
     /// The table of contents from the package (resolved to page targets in [`Self::toc`]).
@@ -156,15 +179,20 @@ impl EpubBackend {
     pub fn open(bytes: Vec<u8>, viewport: crate::render::Viewport) -> CoreResult<Self> {
         let pkg = EpubPackage::open(bytes)
             .map_err(|e| CoreError::RenderBackend(format!("epub open: {e}")))?;
-        let chapters: Vec<Vec<Block>> =
-            pkg.chapters.iter().map(|c| parse_blocks(&c.html)).collect();
+        // Deliberately not parsed here: see [`Chapter`]. `open` only has to know how many chapters
+        // there are; what they contain is the reader's business, one chapter at a time.
+        let chapters: Vec<Chapter> = pkg
+            .chapters
+            .iter()
+            .map(|c| Chapter::Source(c.html.clone()))
+            .collect();
         let chapter_keys: Vec<String> = pkg.chapters.iter().map(|c| basename(&c.href)).collect();
         let meta = DocumentMetadata {
             title: pkg.title.clone(),
             author: pkg.author.clone(),
         };
         Ok(Self {
-            chapters,
+            chapters: RefCell::new(chapters),
             chapter_keys,
             nav: pkg.toc,
             meta,
@@ -189,11 +217,12 @@ impl EpubBackend {
     /// fixture cannot. Everything downstream — indexing, materialization, caching — is the real path.
     #[cfg(test)]
     fn from_chapters(chapters: Vec<Vec<Block>>, viewport: crate::render::Viewport) -> Self {
+        let chapters: Vec<Chapter> = chapters.into_iter().map(Chapter::Parsed).collect();
         let chapter_keys = (0..chapters.len())
             .map(|i| format!("ch{i}.xhtml"))
             .collect();
         Self {
-            chapters,
+            chapters: RefCell::new(chapters),
             chapter_keys,
             nav: Vec::new(),
             meta: DocumentMetadata {
@@ -214,14 +243,47 @@ impl EpubBackend {
         }
     }
 
+    /// How many chapters the book has — the one thing about them that needs no parsing.
+    fn chapter_count(&self) -> usize {
+        self.chapters.borrow().len()
+    }
+
+    /// Parse chapter `index` if it has not been parsed yet. Idempotent and cheap on a repeat call.
+    fn parse_chapter(&self, index: usize) {
+        let mut chapters = self.chapters.borrow_mut();
+        let Some(slot) = chapters.get_mut(index) else {
+            return;
+        };
+        if let Chapter::Source(html) = slot {
+            // `parse_blocks` takes the source by reference, so move it out first and let the old
+            // `Chapter` (and the XHTML inside it) drop as soon as the blocks exist.
+            let html = std::mem::take(html);
+            #[cfg(test)]
+            CHAPTER_PARSES.with(|c| c.set(c.get() + 1));
+            *slot = Chapter::Parsed(parse_blocks(&html));
+        }
+    }
+
+    /// Parse every chapter. Needed only where the whole book is unavoidably in play — building a
+    /// pagination index from scratch — which is why it is a distinct, obvious call rather than
+    /// something `open` does silently.
+    fn parse_all_chapters(&self) {
+        for index in 0..self.chapter_count() {
+            self.parse_chapter(index);
+        }
+    }
+
     /// Lay out chapter `index` on its own. Pagination is per chapter by construction — a chapter
     /// always starts a fresh page and nothing carries across the boundary — so a chapter laid out
     /// alone is identical to its slice of a whole-book pass. That is what makes materializing one
     /// chapter at a time sound rather than merely convenient.
     fn lay_out_chapter(&self, index: usize, opts: &LayoutOpts) -> Vec<Page> {
-        let Some(blocks) = self.chapters.get(index) else {
+        self.parse_chapter(index);
+        let chapters = self.chapters.borrow();
+        let Some(chapter) = chapters.get(index) else {
             return vec![Page::default()];
         };
+        let blocks = chapter.blocks();
         let face = self.font.borrow();
         let font = CachedMetrics::new(&*face);
         let hyph = CachedHyphenator::new(&self.hyph);
@@ -295,7 +357,7 @@ impl EpubBackend {
         };
         if stale {
             let opts = Self::opts_for(&request);
-            let key = layout_key(&opts, request.font_id, self.chapters.len());
+            let key = layout_key(&opts, request.font_id, self.chapter_count());
             let cache = self.pagination_cache.borrow();
 
             // A stored pagination is only usable if it describes this book's chapters — a count
@@ -304,17 +366,23 @@ impl EpubBackend {
             let cached = cache
                 .as_ref()
                 .and_then(|c| c.load(&key))
-                .filter(|pages| pages.len() == self.chapters.len());
+                .filter(|pages| pages.len() == self.chapter_count());
 
             let chapter_pages = match cached {
                 Some(hit) => Some(hit),
                 None => {
+                    // The only place the whole book is unavoidably in play: counting a book's pages
+                    // means laying every chapter out. A cache hit skips this entirely, and with it
+                    // the parse of every chapter the reader is not reading (#186).
+                    self.parse_all_chapters();
+                    let chapters = self.chapters.borrow();
+                    let blocks: Vec<&[Block]> = chapters.iter().map(Chapter::blocks).collect();
                     let progress = self.progress.borrow();
                     // A book being laid out for the first time has nothing to fall back to, so
                     // that pass reports progress but cannot be cancelled — only a re-layout can.
                     let cancellable = self.laid.borrow().is_some();
                     let counted = index_chapters(
-                        &self.chapters,
+                        &blocks,
                         &self.font.borrow(),
                         &self.hyph,
                         &opts,
@@ -629,6 +697,19 @@ fn clamp_line_spacing(mult: f32) -> f32 {
 #[cfg(test)]
 thread_local! {
     static LAYOUT_PASSES: Cell<usize> = const { Cell::new(0) };
+    /// Chapters parsed on this thread — the counter behind the laziness test (#186).
+    static CHAPTER_PARSES: Cell<usize> = const { Cell::new(0) };
+}
+
+/// Chapters parsed on this thread since [`reset_chapter_parses`].
+#[cfg(test)]
+pub(crate) fn chapter_parses() -> usize {
+    CHAPTER_PARSES.with(Cell::get)
+}
+
+#[cfg(test)]
+pub(crate) fn reset_chapter_parses() {
+    CHAPTER_PARSES.with(|c| c.set(0));
 }
 
 /// Pagination passes performed on this thread since [`reset_layout_passes`].
@@ -671,7 +752,7 @@ fn layout_key(opts: &LayoutOpts, font_id: usize, chapters: usize) -> String {
 /// the pass — a book being laid out for the first time has nothing to fall back to, so that one
 /// always runs to completion. `None` means the pass was abandoned part-way (#161).
 fn index_chapters(
-    chapters: &[Vec<Block>],
+    chapters: &[&[Block]],
     font: &AbFont,
     hyph: &dyn Hyphenator,
     opts: &LayoutOpts,
