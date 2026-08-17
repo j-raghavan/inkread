@@ -1,5 +1,14 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <!-- The app theme. Its only job is the window background: the platform default is dark, and a
+         SurfaceView shows black until its first frame is pushed, so without this the very first
+         thing on screen at every launch is a black frame. On an LCD that is an imperceptible
+         flicker; on e-ink it is a full black page that forces a refresh before any content exists.
+         White costs nothing and matches the paper the whole app is drawn on. -->
+    <style name="InkRead" parent="@android:style/Theme.NoTitleBar.Fullscreen">
+        <item name="android:windowBackground">@android:color/white</item>
+    </style>
+
     <!-- Consistent dialog theme for the reader (ADR-INKREAD-0008): monochrome accents so buttons
          and controls read on e-ink instead of the platform's blue/teal default. -->
     <style name="InkDialog" parent="@android:style/Theme.Material.Light.Dialog.Alert">

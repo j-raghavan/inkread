@@ -31,7 +31,7 @@
         android:label="InkRead"
         android:supportsRtl="true"
         android:usesCleartextTraffic="true"
-        android:theme="@android:style/Theme.NoTitleBar.Fullscreen">
+        android:theme="@style/InkRead">
 
         <!-- Home screen + launcher: brand and entry points (Open / Library / Continue). -->
         <activity
