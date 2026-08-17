@@ -105,7 +105,7 @@ dependencies = [
 
 [[package]]
 name = "build-dict"
-version = "1.2.2"
+version = "1.2.3"
 dependencies = [
  "inkread-dict",
 ]
@@ -261,7 +261,7 @@ dependencies = [
 
 [[package]]
 name = "device-eink"
-version = "1.2.2"
+version = "1.2.3"
 
 [[package]]
 name = "displaydoc"
@@ -637,7 +637,7 @@ dependencies = [
 
 [[package]]
 name = "inkread-daily"
-version = "1.2.2"
+version = "1.2.3"
 dependencies = [
  "ego-tree",
  "feed-rs",
@@ -651,7 +651,7 @@ dependencies = [
 
 [[package]]
 name = "inkread-dict"
-version = "1.2.2"
+version = "1.2.3"
 dependencies = [
  "flate2",
  "rusqlite",
@@ -659,7 +659,7 @@ dependencies = [
 
 [[package]]
 name = "inkread-epub"
-version = "1.2.2"
+version = "1.2.3"
 dependencies = [
  "ab_glyph",
  "ego-tree",
@@ -673,18 +673,18 @@ dependencies = [
 
 [[package]]
 name = "inkread-ink"
-version = "1.2.2"
+version = "1.2.3"
 
 [[package]]
 name = "inkread-lua"
-version = "1.2.2"
+version = "1.2.3"
 dependencies = [
  "mlua",
 ]
 
 [[package]]
 name = "inkread-opds"
-version = "1.2.2"
+version = "1.2.3"
 dependencies = [
  "feed-rs",
  "serde",
@@ -693,14 +693,14 @@ dependencies = [
 
 [[package]]
 name = "inkread-pdftext"
-version = "1.2.2"
+version = "1.2.3"
 dependencies = [
  "inkread-epub",
 ]
 
 [[package]]
 name = "inkread-update"
-version = "1.2.2"
+version = "1.2.3"
 dependencies = [
  "semver",
  "serde",
@@ -1212,7 +1212,7 @@ dependencies = [
 
 [[package]]
 name = "reader-core"
-version = "1.2.2"
+version = "1.2.3"
 dependencies = [
  "device-eink",
  "inkread-daily",
