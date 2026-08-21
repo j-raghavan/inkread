@@ -1030,7 +1030,7 @@ fn a_books_declared_styles_reach_the_laid_out_page() {
     // …and the layout stage declines to apply it: the prose stays flush left with its indent,
     // while the centred blocks above are inset.
     let opts = EpubBackend::opts_for(&doc.current_request());
-    let pages = doc.lay_out_chapter(0, &opts);
+    let pages = doc.lay_out_chapter_upto(0, &opts, usize::MAX).0;
     let first_x: Vec<f32> = pages[0]
         .lines
         .iter()
@@ -1081,7 +1081,7 @@ fn an_illustration_is_laid_out_and_drawn_rather_than_labelled() {
 
     // Layout placed a real box, not a line of text.
     let opts = EpubBackend::opts_for(&doc.current_request());
-    let pages = doc.lay_out_chapter(0, &opts);
+    let pages = doc.lay_out_chapter_upto(0, &opts, usize::MAX).0;
     let placed = pages
         .iter()
         .flat_map(|p| &p.lines)
@@ -1125,4 +1125,210 @@ fn a_rendered_illustrated_page_carries_the_images_pixels() {
         greys > 5_000,
         "expected the 120x80 plate's pixels, found {greys}"
     );
+}
+
+// ---------------------------------------------------------------------------------------------
+// #186 — materializing only as far as the page being read.
+// ---------------------------------------------------------------------------------------------
+
+/// A book whose single chapter runs to many pages — the shape #186 measured, where showing page 0
+/// used to cost the whole chapter.
+fn one_long_chapter(paras: usize) -> EpubBackend {
+    let blocks = parse_blocks(
+        &(0..paras)
+            .map(|i| format!("<p>Paragraph {i}. Alpha bravo charlie delta echo foxtrot golf.</p>"))
+            .collect::<String>(),
+    );
+    EpubBackend::from_chapters(vec![blocks], vp(400, 600))
+}
+
+/// The core of #186: rendering one page must not lay out the whole chapter.
+#[test]
+fn opening_a_page_lays_out_only_as_far_as_that_page() {
+    let doc = one_long_chapter(400);
+    let total = doc.page_count();
+    assert!(total > 20, "need a long chapter, got {total} pages");
+
+    reset_chapter_layouts();
+    let mut bytes = vec![0u8; 400 * 600 * 4];
+    let mut buf = PixelBuffer::from_rgba(&mut bytes, 400, 600).unwrap();
+    doc.render_page(0, &mut buf).expect("renders");
+
+    let laid = chapter_pages_laid();
+    assert!(laid >= 1, "the page asked for must exist");
+    assert!(
+        laid * 4 < total,
+        "laying out page 0 produced {laid} of {total} pages — not lazy"
+    );
+}
+
+/// Reading forward must not re-lay a growing prefix on every turn. Extending a partial chapter
+/// finishes it in one pass, so a chapter costs at most two passes however far it is read.
+#[test]
+fn reading_forward_costs_at_most_two_layout_passes_per_chapter() {
+    let doc = one_long_chapter(400);
+    let total = doc.page_count();
+    reset_chapter_layouts();
+
+    let mut bytes = vec![0u8; 400 * 600 * 4];
+    for page in 0..total.min(12) {
+        let mut buf = PixelBuffer::from_rgba(&mut bytes, 400, 600).unwrap();
+        doc.render_page(page, &mut buf).expect("renders");
+    }
+    assert!(
+        chapter_layouts() <= 2,
+        "{} layout passes for one chapter read forward — quadratic re-layout",
+        chapter_layouts()
+    );
+}
+
+/// Laziness must not change what the reader sees, or a resumed position lands on different text.
+///
+/// Page 0 is the one actually served from a *partial* layout: asking for any later page flips the
+/// chapter to a full extension pass, so pages 1 and 5 below exercise that pass instead. Both
+/// matter — the prefix and the extension have to agree with a single full pass.
+#[test]
+fn pages_served_lazily_match_a_single_full_layout() {
+    let opts = EpubBackend::opts_for(&one_long_chapter(1).current_request());
+
+    let lazy = one_long_chapter(400);
+    let full = one_long_chapter(400);
+    let all = full.lay_out_chapter_upto(0, &opts, usize::MAX).0; // whole chapter in one pass
+
+    for page in [0usize, 1, 5] {
+        let got = lazy
+            .with_page(page, |p, _| p.clone())
+            .unwrap_or_else(|| panic!("page {page} missing"));
+        assert_eq!(&got, &all[page], "page {page} differs from the full layout");
+    }
+}
+
+/// A page past the end of the book is refused by the `total_pages` guard, before the chapter cache
+/// is consulted — so this costs no pagination at all.
+#[test]
+fn a_page_past_the_end_of_the_book_never_paginates() {
+    let doc = one_long_chapter(3);
+    let total = doc.page_count();
+    let mut bytes = vec![0u8; 400 * 600 * 4];
+    let mut buf = PixelBuffer::from_rgba(&mut bytes, 400, 600).unwrap();
+    doc.render_page(total - 1, &mut buf)
+        .expect("last page renders");
+
+    reset_chapter_layouts();
+    assert!(doc.with_page(total + 5, |_, _| ()).is_none());
+    assert_eq!(
+        chapter_layouts(),
+        0,
+        "an out-of-range page must not paginate"
+    );
+}
+
+/// The defensive arm: a page the pagination *index* says exists but the *layout* does not produce.
+/// That can only happen if the two have diverged — a cache written by a different layout, say — and
+/// the index guard cannot catch it, because as far as the index is concerned the page is in range.
+/// Reached here by handing the reader a cache that overcounts.
+///
+/// What must not happen is treating the missing page as "not laid out that far yet" and paginating
+/// the chapter again on every attempt.
+#[test]
+fn a_page_the_index_claims_but_the_layout_lacks_is_refused_without_relaying_out() {
+    let real_total = one_long_chapter(40).page_count();
+
+    // Same chapter count, so the cache is accepted, but one page more than the chapter has.
+    let (cache, _saved) = fake(Some(vec![real_total + 1]));
+    let doc = one_long_chapter(40);
+    doc.set_pagination_cache(cache);
+    assert_eq!(
+        doc.page_count(),
+        real_total + 1,
+        "the overcounting cache should be in force"
+    );
+
+    // The phantom page: in range per the index, absent from the layout.
+    let phantom = real_total;
+    assert!(doc.with_page(phantom, |_, _| ()).is_none(), "phantom page");
+    reset_chapter_layouts();
+    assert!(doc.with_page(phantom, |_, _| ()).is_none(), "still refused");
+    assert_eq!(
+        chapter_layouts(),
+        0,
+        "a known-complete chapter must not be laid out again for a page it does not have"
+    );
+}
+
+/// Resuming deep into a long chapter, the prefix costs almost as much as the whole chapter, and the
+/// extending pass that follows is then pure overhead — measured at +66% total work, plus tens of
+/// megabytes transiently held. Past the halfway mark the chapter is laid out once, complete.
+#[test]
+fn a_deep_resume_lays_the_chapter_out_once_instead_of_twice() {
+    let doc = one_long_chapter(400);
+    let total = doc.page_count();
+    assert!(total > 20, "need a long chapter, got {total}");
+
+    // Deep resume: one pass that FINISHES the chapter, so no extending pass can follow. Asserting
+    // completeness rather than a page count is deliberate — a bounded pass can overshoot its bound,
+    // since the check sits between blocks, so counts do not separate "stopped early" from
+    // "finished".
+    reset_chapter_layouts();
+    // Three quarters in: past the halfway threshold, but with a real tail left. At total-2 the
+    // bounded pass would run to the end anyway, so it could not tell the two policies apart.
+    let deep = total * 3 / 4;
+    assert!(doc.with_page(deep, |_, _| ()).is_some());
+    assert_eq!(chapter_layouts(), 1, "one pass");
+    assert!(
+        doc.chapter_pages.borrow()[0].complete,
+        "a deep resume must lay the chapter out completely, not take a near-full prefix that a \
+         later page then pays to extend"
+    );
+    reset_chapter_layouts();
+    assert!(doc.with_page(deep + 1, |_, _| ()).is_some());
+    assert_eq!(
+        chapter_layouts(),
+        0,
+        "the chapter was already complete; turning the page must not lay out again"
+    );
+
+    // A shallow resume still takes the cheap prefix — the threshold must not disable laziness.
+    let doc = one_long_chapter(400);
+    reset_chapter_layouts();
+    assert!(doc.with_page(0, |_, _| ()).is_some());
+    assert!(
+        chapter_pages_laid() * 4 < total,
+        "page 0 produced {} of {total} pages — the threshold broke laziness",
+        chapter_pages_laid()
+    );
+    assert!(
+        !doc.chapter_pages.borrow()[0].complete,
+        "a shallow resume should still leave the chapter partial"
+    );
+}
+
+/// The partial layout must be released before the extending pass runs, or a deep-ish resume holds
+/// the prefix and the full chapter at once.
+#[test]
+fn extending_a_chapter_does_not_hold_the_prefix_and_the_full_layout_at_once() {
+    let doc = one_long_chapter(400);
+    let total = doc.page_count();
+
+    // A prefix short enough to stay under the halfway threshold, then extend past it.
+    assert!(doc.with_page(1, |_, _| ()).is_some());
+    let cached_pages: usize = doc
+        .chapter_pages
+        .borrow()
+        .iter()
+        .map(|c| c.pages.len())
+        .sum();
+    assert!(
+        cached_pages < total,
+        "expected a partial entry, got {cached_pages}"
+    );
+
+    assert!(doc.with_page(total - 1, |_, _| ()).is_some());
+    let entries = doc.chapter_pages.borrow();
+    assert_eq!(
+        entries.len(),
+        1,
+        "the partial entry should have been replaced, not kept alongside"
+    );
+    assert!(entries[0].complete);
 }

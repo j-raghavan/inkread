@@ -13,7 +13,9 @@
 use std::cell::{Cell, Ref, RefCell};
 use std::collections::HashMap;
 
-use inkread_epub::layout::{paginate_with_images, Align, Hyphenator, ImageSizer, LayoutOpts, Page};
+use inkread_epub::layout::{
+    paginate_upto, paginate_with_images, Align, Hyphenator, ImageSizer, LayoutOpts, Page,
+};
 use inkread_epub::measure::{CachedHyphenator, CachedMetrics};
 use inkread_epub::render::{
     render_page_with_images as raster_page, AbFont, EnHyphenator, GrayCanvas, ImageSource,
@@ -167,10 +169,9 @@ pub struct EpubBackend {
     /// lets the open path apply the reader's saved typography *before* any pagination is built, so
     /// a cold open costs a single layout pass instead of one per setting (#161/#162).
     laid: RefCell<Option<Laid>>,
-    /// Recently materialized chapters as `(chapter index, its pages)`, most recent last. Bounded by
-    /// [`CHAPTER_CACHE`] and cleared whenever [`Self::laid`] is rebuilt, since a re-layout
-    /// invalidates every page in it.
-    chapter_pages: RefCell<Vec<(usize, Vec<Page>)>>,
+    /// Recently materialized chapters, most recent last. Bounded by [`CHAPTER_CACHE`] and cleared
+    /// whenever [`Self::laid`] is rebuilt, since a re-layout invalidates every page in it.
+    chapter_pages: RefCell<Vec<ChapterPages>>,
     /// Where paginations survive between launches, once a store is attached (#162).
     pagination_cache: RefCell<Option<Box<dyn PaginationCache>>>,
     /// Where a pagination in flight is reported, and where cancellation is asked about (#161).
@@ -307,56 +308,114 @@ impl EpubBackend {
         }
     }
 
-    /// Lay out chapter `index` on its own. Pagination is per chapter by construction — a chapter
-    /// always starts a fresh page and nothing carries across the boundary — so a chapter laid out
-    /// alone is identical to its slice of a whole-book pass. That is what makes materializing one
-    /// chapter at a time sound rather than merely convenient.
-    fn lay_out_chapter(&self, index: usize, opts: &LayoutOpts) -> Vec<Page> {
+    /// Lay chapter `index` out as far as `want` whole pages, returning `(pages, complete)`.
+    ///
+    /// Pagination is per chapter by construction — a chapter always starts a fresh page and nothing
+    /// carries across the boundary — so a chapter laid out alone is identical to its slice of a
+    /// whole-book pass. That is what makes materializing one chapter at a time sound rather than
+    /// merely convenient, and it extends to a *partial* chapter: `want` pages are identical to the
+    /// first `want` pages of the full pass, because a page break depends only on what precedes it.
+    ///
+    /// Materializing a whole chapter to show one of its pages is the dominant cost of opening a
+    /// book, and a reader resuming at a chapter start needs exactly one page of it (#186).
+    fn lay_out_chapter_upto(
+        &self,
+        index: usize,
+        opts: &LayoutOpts,
+        want: usize,
+    ) -> (Vec<Page>, bool) {
         self.parse_chapter(index);
         let chapters = self.chapters.borrow();
         let Some(chapter) = chapters.get(index) else {
-            return vec![Page::default()];
+            return (vec![Page::default()], true);
         };
         let blocks = chapter.blocks();
         let face = self.font.borrow();
         let font = CachedMetrics::new(&*face);
         let hyph = CachedHyphenator::new(&self.hyph);
-        let mut pages = paginate_with_images(blocks, opts, &font, &hyph, self);
-        if pages.is_empty() {
+        let (mut pages, complete) = paginate_upto(blocks, opts, &font, &hyph, self, want);
+        #[cfg(test)]
+        {
+            CHAPTER_LAYOUTS.with(|c| c.set(c.get() + 1));
+            CHAPTER_PAGES_LAID.with(|c| c.set(c.get() + pages.len()));
+        }
+        // Only a *complete* empty pagination means an empty chapter; an empty partial one just
+        // means nothing was asked for.
+        if pages.is_empty() && complete {
             pages.push(Page::default()); // an empty chapter still occupies its one page
         }
-        pages
+        (pages, complete)
     }
 
     /// Run `f` against global `page` and the layout parameters it was laid out with, materializing
     /// its chapter if it is not already cached. `None` for a page past the end of the book.
     fn with_page<R>(&self, page: usize, f: impl FnOnce(&Page, &LayoutOpts) -> R) -> Option<R> {
-        let (chapter, offset, opts) = {
+        let (chapter, offset, chapter_len, opts) = {
             let laid = self.laid();
             if page >= laid.total_pages {
                 return None;
             }
             let chapter = laid.chapter_of(page);
             let start = laid.chapter_start.get(chapter).copied().unwrap_or(0);
-            (chapter, page - start, laid.opts)
+            // The chapter's length per the pagination index — what decides whether a prefix is
+            // worth having at all (see below).
+            let end = laid
+                .chapter_start
+                .get(chapter + 1)
+                .copied()
+                .unwrap_or(laid.total_pages);
+            (chapter, page - start, end.saturating_sub(start), laid.opts)
         };
 
-        if let Some(hit) = self
-            .chapter_pages
-            .borrow()
-            .iter()
-            .find(|(c, _)| *c == chapter)
-        {
-            return hit.1.get(offset).map(|p| f(p, &opts));
-        }
+        // A cached chapter serves the page if it was laid out that far, or if we know there is no
+        // more to lay out. `f` runs while `chapter_pages` is borrowed, so it must not re-enter
+        // `with_page` — every caller passes a pure read of the page.
+        let cached = {
+            let cache = self.chapter_pages.borrow();
+            match cache.iter().find(|c| c.chapter == chapter) {
+                Some(entry) if entry.pages.len() > offset => {
+                    return entry.pages.get(offset).map(|p| f(p, &opts));
+                }
+                // Defence in depth: an in-range page always falls inside its chapter's counted
+                // length, so this is unreachable unless the pagination index and the layout have
+                // diverged. Cheap to keep, and it fails closed rather than re-paginating.
+                Some(entry) if entry.complete => return None,
+                Some(_) => true, // materialized, but not this far yet
+                None => false,
+            }
+        };
 
-        let pages = self.lay_out_chapter(chapter, &opts);
+        // Extending a partial chapter lays out the rest of it in one pass rather than one page at a
+        // time: reading forward through a long chapter would otherwise re-lay a growing prefix on
+        // every turn, which is quadratic and worse than the whole-chapter pass this replaces. So a
+        // chapter costs at most two passes — the cheap prefix that opened it, then the rest.
+        //
+        // A prefix is only worth taking when it is a small part of the chapter. Resuming deep into
+        // one — page 225 of 229, say — the prefix costs almost as much as the whole chapter, and
+        // the extending pass is then pure overhead: measured at +66% total work over laying it out
+        // once. Past the halfway mark, do the whole chapter now and be done.
+        let want = if cached || offset + 1 >= chapter_len.div_ceil(2) {
+            usize::MAX
+        } else {
+            offset + 1
+        };
+        // Drop any partial entry for this chapter BEFORE laying out the rest of it, not after:
+        // otherwise the prefix and the full pass are both live at once, which on a deep resume of a
+        // long chapter is tens of megabytes of laid-out pages held for no reason.
+        self.chapter_pages
+            .borrow_mut()
+            .retain(|c| c.chapter != chapter);
+        let (pages, complete) = self.lay_out_chapter_upto(chapter, &opts, want);
         let result = pages.get(offset).map(|p| f(p, &opts));
         let mut cache = self.chapter_pages.borrow_mut();
         if cache.len() >= CHAPTER_CACHE {
             cache.remove(0); // oldest out; the tail is what reading is walking through
         }
-        cache.push((chapter, pages));
+        cache.push(ChapterPages {
+            chapter,
+            pages,
+            complete,
+        });
         result
     }
 
@@ -734,6 +793,28 @@ thread_local! {
     static LAYOUT_PASSES: Cell<usize> = const { Cell::new(0) };
     /// Chapters parsed on this thread — the counter behind the laziness test (#186).
     static CHAPTER_PARSES: Cell<usize> = const { Cell::new(0) };
+    /// Chapter layout passes on this thread, and the pages each produced (#186). Materializing a
+    /// chapter is cost a correctness test cannot see, so laziness has to be asserted directly.
+    static CHAPTER_LAYOUTS: Cell<usize> = const { Cell::new(0) };
+    static CHAPTER_PAGES_LAID: Cell<usize> = const { Cell::new(0) };
+}
+
+/// Chapter layout passes on this thread since [`reset_chapter_layouts`].
+#[cfg(test)]
+pub(crate) fn chapter_layouts() -> usize {
+    CHAPTER_LAYOUTS.with(Cell::get)
+}
+
+/// Pages produced by those passes — what the laziness is actually about.
+#[cfg(test)]
+pub(crate) fn chapter_pages_laid() -> usize {
+    CHAPTER_PAGES_LAID.with(Cell::get)
+}
+
+#[cfg(test)]
+pub(crate) fn reset_chapter_layouts() {
+    CHAPTER_LAYOUTS.with(|c| c.set(0));
+    CHAPTER_PAGES_LAID.with(|c| c.set(0));
 }
 
 /// Chapters parsed on this thread since [`reset_chapter_parses`].
@@ -780,6 +861,16 @@ pub(crate) fn reset_layout_passes() {
 ///   which changes the page count of every illustrated chapter.
 fn layout_key(opts: &LayoutOpts, font_id: usize, chapters: usize) -> String {
     format!("v4|{:016x}|{font_id}|{chapters}", opts.layout_digest())
+}
+
+/// A materialized chapter: the pages laid out so far, and whether that is all of them (#186).
+///
+/// A chapter is first materialized only as far as the page being read, so `pages` is usually a
+/// prefix. `complete` is what stops a later page being served from a partial layout.
+struct ChapterPages {
+    chapter: usize,
+    pages: Vec<Page>,
+    complete: bool,
 }
 
 /// Paginate every chapter for `opts` and return how many pages each occupies.

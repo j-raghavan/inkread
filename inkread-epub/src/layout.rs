@@ -322,6 +322,28 @@ pub fn paginate_with_images(
     hyph: &dyn Hyphenator,
     images: &dyn ImageSizer,
 ) -> Vec<Page> {
+    paginate_upto(blocks, opts, m, hyph, images, usize::MAX).0
+}
+
+/// As [`paginate_with_images`], but stops once `max_pages` complete pages exist (#186).
+///
+/// Returns `(pages, complete)`, where `complete` is false when blocks were left unlaid. Showing one
+/// page means laying out only as far as that page: a reader resuming at the top of a long chapter
+/// otherwise pays for every page of it to see the first, which is the dominant cost of opening a
+/// book. The pages returned are byte-identical to the same prefix of a full pass — a page break
+/// depends only on what precedes it — so a partial pagination is a prefix, never an approximation.
+///
+/// An in-progress page is discarded when stopping early: it is incomplete, and the caller asked
+/// only for pages that are whole.
+#[must_use]
+pub fn paginate_upto(
+    blocks: &[Block],
+    opts: &LayoutOpts,
+    m: &dyn Metrics,
+    hyph: &dyn Hyphenator,
+    images: &dyn ImageSizer,
+    max_pages: usize,
+) -> (Vec<Page>, bool) {
     let mut pager = Pager::new(opts, hyph);
     // Chapter-relative character cursor, advanced as source text is consumed in reading order, so
     // every placed run/glyph carries a font-invariant offset (ADR-INKREAD-0012).
@@ -331,7 +353,14 @@ pub fn paginate_with_images(
     // lines" web look). Headings are bold + scaled with a margin before (0.7em) and after (0.5em);
     // the before-margin collapses at the top of a page.
     let indent = opts.font_px * 1.2;
+    let mut complete = true;
     for (block_index, block) in blocks.iter().enumerate() {
+        // Checked before the block, not after: once enough whole pages exist, laying out one more
+        // block is work the caller has said it does not need.
+        if pager.finished_page_count() >= max_pages {
+            complete = false;
+            break;
+        }
         match block {
             Block::Heading {
                 level,
@@ -454,7 +483,11 @@ pub fn paginate_with_images(
             Block::Rule => pager.add_rule(opts.para_gap),
         }
     }
-    pager.finish()
+    if complete {
+        (pager.finish(), true)
+    } else {
+        (pager.into_finished_pages(), false)
+    }
 }
 
 /// Accumulates lines into pages, breaking when the content box is full.
@@ -512,6 +545,16 @@ impl<'o> Pager<'o> {
             lines: std::mem::take(&mut self.current),
         });
         self.cursor_y = 0.0;
+    }
+
+    /// How many *whole* pages have been broken off so far (the in-progress one is not counted).
+    fn finished_page_count(&self) -> usize {
+        self.pages.len()
+    }
+
+    /// The whole pages only, discarding the page still being filled — used when stopping early.
+    fn into_finished_pages(self) -> Vec<Page> {
+        self.pages
     }
 
     fn finish(mut self) -> Vec<Page> {

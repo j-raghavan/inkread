@@ -27,8 +27,8 @@ pub use content::{parse_blocks, parse_blocks_with, Block, Inline, TextRun};
 pub use css::{BlockStyle, Stylesheet};
 pub use img::ImageError;
 pub use layout::{
-    paginate, paginate_with, paginate_with_images, Align, Hyphenator, ImageSizer, LayoutLine,
-    LayoutOpts, Metrics, NoHyphen, NoImages, Page, PlacedImage, PlacedRun,
+    paginate, paginate_upto, paginate_with, paginate_with_images, Align, Hyphenator, ImageSizer,
+    LayoutLine, LayoutOpts, Metrics, NoHyphen, NoImages, Page, PlacedImage, PlacedRun,
 };
 pub use measure::{CachedHyphenator, CachedMetrics};
 pub use render::{
