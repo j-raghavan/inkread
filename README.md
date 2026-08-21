@@ -81,7 +81,7 @@ an open [AGPL-3.0](./LICENSE) Rust core you can audit and extend.
   - Pen — write directly on the page with the stylus
   - Highlighter
   - Four ink colours (black, blue, red, green), switchable in-window
-  - Adjustable stroke thickness
+  - Adjustable stroke thickness — four pen widths, in the same in-window panel as the colours
   - Eraser
   - Lasso select — circle ink or text to move, copy, delete, or look up
   - **Annotations list** — every handwritten note in one place; tap to jump to it

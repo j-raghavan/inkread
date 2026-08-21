@@ -115,7 +115,9 @@ class StylusInkController(private val host: Host) {
     private val inkPaint = Paint().apply {
         color = Color.BLACK
         style = Paint.Style.STROKE
-        strokeWidth = INK_STROKE_WIDTH // match the firmware needle (baked was thinner than live)
+        // Overwritten per stroke in `drawStroke` from the core's stored width; this is only the
+        // initial value.
+        strokeWidth = PEN_WIDTHS[DEFAULT_PEN_WIDTH_INDEX]
         strokeCap = Paint.Cap.ROUND
         strokeJoin = Paint.Join.ROUND
         isAntiAlias = true
@@ -141,6 +143,16 @@ class StylusInkController(private val host: Host) {
     /** Current pen / highlighter colour (index into the palettes); re-tapping a tool cycles it. */
     var penColorIndex = 0
     var hlColorIndex = 0
+
+    /**
+     * Current pen thickness (index into [PEN_WIDTHS]). Defaults to [DEFAULT_PEN_WIDTH_INDEX], the
+     * width every stroke used before this was selectable, so an existing reader's ink is unchanged
+     * until they choose otherwise (#199).
+     */
+    var penWidthIndex = DEFAULT_PEN_WIDTH_INDEX
+
+    /** The selected pen line width in view pixels. */
+    val penWidthPx: Float get() = PEN_WIDTHS.getOrElse(penWidthIndex) { PEN_WIDTHS[DEFAULT_PEN_WIDTH_INDEX] }
 
     private fun penColor() = ReaderActivity.PEN_COLORS[penColorIndex]
 
@@ -241,7 +253,7 @@ class StylusInkController(private val host: Host) {
         // Highlighter = a wide, translucent band (its own core tool + colour); Pen = thin black.
         val isHl = host.activeTool == Tool.HIGHLIGHTER
         val coreTool = if (isHl) ReaderActivity.CORE_TOOL_HIGHLIGHTER else ReaderActivity.CORE_TOOL_PEN
-        val widthNorm = host.lenToNorm(if (isHl) HIGHLIGHT_WIDTH_PX else INK_STROKE_WIDTH)
+        val widthNorm = host.lenToNorm(if (isHl) HIGHLIGHT_WIDTH_PX else penWidthPx)
         val color = if (isHl) highlightColor else penColor()
         try {
             NativeBridge.nativeInkBeginStroke(host.docHandle, coreTool, color, widthNorm, System.currentTimeMillis())
@@ -345,8 +357,20 @@ class StylusInkController(private val host: Host) {
 
         // Ink-tuning constants used only by this controller (shared ones — STROKE_PAUSE_MS,
         // the CORE_TOOL_* codes, the colour palettes — stay in ReaderActivity).
-        const val INK_STROKE_WIDTH = 6f // baked-ink line width (px) tuned to match the firmware pen.
-        const val HIGHLIGHT_WIDTH_PX = 30f // wide marker band (vs INK_STROKE_WIDTH for the pen).
+        /**
+         * Selectable pen line widths in view pixels (#199), thinnest first. Stored per stroke by the
+         * core, so changing the setting restyles nothing already written — old notes keep the width
+         * they were drawn at.
+         *
+         * The default (index 2, 6px) is the width every stroke used before this was selectable, and
+         * was tuned to match the firmware needle. The thinner options exist because that needle is
+         * heavy on a Nomad's smaller panel, which is what #199 asks for.
+         */
+        val PEN_WIDTHS = floatArrayOf(2f, 4f, 6f, 9f)
+        val PEN_WIDTH_NAMES = arrayOf("Fine", "Thin", "Medium", "Bold")
+        const val DEFAULT_PEN_WIDTH_INDEX = 2
+
+        const val HIGHLIGHT_WIDTH_PX = 30f // wide marker band (vs the pen's PEN_WIDTHS).
         const val ERASE_RADIUS_PX = 22f // eraser hit radius (px): a stroke within this of the path goes.
         const val ERASE_BAND_ALPHA = 96 // live eraser band opacity: reads on the panel, hides nothing.
         const val INK_FLUSH_MS = 1500L // trailing-edge delay before the deferred ink autosave fsyncs.
