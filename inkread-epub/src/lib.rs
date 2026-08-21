@@ -25,6 +25,7 @@ pub mod render;
 mod transcode;
 pub use content::{parse_blocks, parse_blocks_with, Block, Inline, TextRun};
 pub use css::{BlockStyle, Stylesheet};
+pub use img::ImageError;
 pub use layout::{
     paginate, paginate_with, paginate_with_images, Align, Hyphenator, ImageSizer, LayoutLine,
     LayoutOpts, Metrics, NoHyphen, NoImages, Page, PlacedImage, PlacedRun,
@@ -93,9 +94,8 @@ pub struct EpubPackage {
     pub chapters: Vec<Chapter>,
     /// The table of contents (EPUB 3 nav, falling back to EPUB 2 NCX — rbook resolves this).
     pub toc: Vec<NavPoint>,
-    /// Hrefs of the manifest's image resources, in manifest order (#187). Only the names are held;
-    /// the bytes come from [`Self::image_bytes`] on demand.
-    pub image_hrefs: Vec<String>,
+    /// The book's image resources (#187), read on demand.
+    pub images: ImageStore,
     /// The book's declared block styling, merged from every `text/css` manifest resource in
     /// manifest order (#188). Pass it to [`parse_blocks_with`] when parsing a chapter.
     ///
@@ -105,13 +105,68 @@ pub struct EpubPackage {
     /// of a per-chapter copy on a large omnibus. A chapter's own `<style>` block still layers on
     /// top, per-chapter, inside [`parse_blocks_with`].
     pub stylesheet: Stylesheet,
-    /// The container bytes, retained so an illustration is extracted when it is actually drawn.
-    ///
-    /// Holding every image decoded would cost several times the file itself (RGBA8 is 4 bytes a
-    /// pixel, usually larger than the compressed original), and an illustrated book would pay all
-    /// of it at open — the cost profile #186 is about. The CBZ backend keeps its archive for
-    /// exactly this reason.
+}
+
+/// The book's images, resolved from the retained container when one is actually drawn.
+///
+/// Holding every image decoded would cost several times the file itself (RGBA8 is 4 bytes a pixel,
+/// usually larger than the compressed original), and an illustrated book would pay all of it at
+/// open — the cost profile #186 is about. The CBZ backend keeps its archive for the same reason.
+///
+/// Separated from [`EpubPackage`] so a reader can take ownership of the images without also
+/// holding a second copy of every chapter's markup.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ImageStore {
+    /// Hrefs of the manifest's image resources, in manifest order.
+    hrefs: Vec<String>,
     container: Vec<u8>,
+}
+
+impl ImageStore {
+    /// Hrefs of the manifest's image resources, in manifest order.
+    #[must_use]
+    pub fn hrefs(&self) -> &[String] {
+        &self.hrefs
+    }
+
+    /// True when the book declares no images.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.hrefs.is_empty()
+    }
+
+    /// The bytes of the image resource `src` refers to, or `None` when the book has no such
+    /// resource (a dangling `<img src>`, common enough in the wild to be routine).
+    ///
+    /// `src` is whatever the chapter's markup said, so it is resolved leniently: an exact archive
+    /// entry first, then by file name, which is how chapter hrefs are already matched to TOC
+    /// targets. Never panics on a malformed container (RR21-FR3).
+    #[must_use]
+    pub fn bytes(&self, src: &str) -> Option<Vec<u8>> {
+        let wanted = strip_fragment(src);
+        if wanted.is_empty() {
+            return None;
+        }
+        let mut zip = zip::ZipArchive::new(Cursor::new(&self.container)).ok()?;
+        let name = zip
+            .file_names()
+            .find(|n| *n == wanted)
+            .or_else(|| {
+                zip.file_names()
+                    .find(|n| basename(n) == basename(wanted) && !basename(wanted).is_empty())
+            })?
+            .to_string();
+        let mut entry = zip.by_name(&name).ok()?;
+        let mut out = Vec::with_capacity(usize::try_from(entry.size()).unwrap_or_default());
+        std::io::Read::read_to_end(&mut entry, &mut out).ok()?;
+        Some(out)
+    }
+
+    /// The intrinsic pixel size of the image `src` refers to, read from its header.
+    #[must_use]
+    pub fn size(&self, src: &str) -> Option<(u32, u32)> {
+        img::dimensions(&self.bytes(src)?)
+    }
 }
 
 impl EpubPackage {
@@ -167,20 +222,22 @@ impl EpubPackage {
 
         // Names only — reading every image here would pay an illustrated book's whole decode cost
         // at open, for pages the reader may never reach.
-        let image_hrefs: Vec<String> = epub
-            .manifest()
-            .images()
-            .filter_map(|e| e.resource().key().value().map(str::to_string))
-            .collect();
+        let images = ImageStore {
+            hrefs: epub
+                .manifest()
+                .images()
+                .filter_map(|e| e.resource().key().value().map(str::to_string))
+                .collect(),
+            container,
+        };
 
         Ok(Self {
             title,
             author,
             chapters,
             toc,
-            image_hrefs,
+            images,
             stylesheet,
-            container,
         })
     }
 
@@ -188,37 +245,6 @@ impl EpubPackage {
     #[must_use]
     pub fn chapter_count(&self) -> usize {
         self.chapters.len()
-    }
-
-    /// The bytes of the image resource `src` refers to, or `None` when the book has no such
-    /// resource (a dangling `<img src>`, which is common enough in the wild to be routine).
-    ///
-    /// `src` is whatever the chapter's markup said, so it is resolved leniently: an exact archive
-    /// entry first, then by file name, which is how chapter hrefs are already matched to TOC
-    /// targets. Never panics on a malformed container — a book with a broken zip entry simply has
-    /// no image there (RR21-FR3).
-    #[must_use]
-    pub fn image_bytes(&self, src: &str) -> Option<Vec<u8>> {
-        let wanted = strip_fragment(src);
-        let mut zip = zip::ZipArchive::new(Cursor::new(&self.container)).ok()?;
-        let name = zip
-            .file_names()
-            .find(|n| *n == wanted)
-            .or_else(|| {
-                zip.file_names()
-                    .find(|n| basename(n) == basename(wanted) && !basename(wanted).is_empty())
-            })?
-            .to_string();
-        let mut entry = zip.by_name(&name).ok()?;
-        let mut out = Vec::with_capacity(usize::try_from(entry.size()).unwrap_or_default());
-        std::io::Read::read_to_end(&mut entry, &mut out).ok()?;
-        Some(out)
-    }
-
-    /// The intrinsic pixel size of the image `src` refers to, read from its header.
-    #[must_use]
-    pub fn image_size(&self, src: &str) -> Option<(u32, u32)> {
-        img::dimensions(&self.image_bytes(src)?)
     }
 }
 
@@ -518,19 +544,19 @@ mod tests {
     #[test]
     fn a_manifest_image_is_listed_and_readable_by_href_or_file_name() {
         let pkg = EpubPackage::open(illustrated_epub()).expect("valid epub opens");
-        assert_eq!(pkg.image_hrefs.len(), 1, "{:?}", pkg.image_hrefs);
+        assert_eq!(pkg.images.hrefs().len(), 1, "{:?}", pkg.images.hrefs());
 
         // Whatever prefix the manifest recorded, the chapter's own `src` still resolves: exactly,
         // by archive path, and by bare file name.
         for src in [
-            pkg.image_hrefs[0].as_str(),
+            pkg.images.hrefs()[0].as_str(),
             "OEBPS/images/plate.png",
             "images/plate.png",
             "plate.png",
             "../images/plate.png",
             "plate.png#anchor",
         ] {
-            assert_eq!(pkg.image_size(src), Some((4, 2)), "src = {src}");
+            assert_eq!(pkg.images.size(src), Some((4, 2)), "src = {src}");
         }
     }
 
@@ -538,13 +564,13 @@ mod tests {
     fn a_dangling_image_reference_is_none_not_a_failure() {
         let pkg = EpubPackage::open(illustrated_epub()).expect("valid epub opens");
         for missing in ["nope.png", "", "images/", "#frag"] {
-            assert_eq!(pkg.image_bytes(missing), None, "src = {missing}");
-            assert_eq!(pkg.image_size(missing), None, "src = {missing}");
+            assert_eq!(pkg.images.bytes(missing), None, "src = {missing}");
+            assert_eq!(pkg.images.size(missing), None, "src = {missing}");
         }
         // A book with no images at all lists none and resolves nothing.
         let plain = EpubPackage::open(sample_epub()).expect("valid epub opens");
-        assert!(plain.image_hrefs.is_empty());
-        assert_eq!(plain.image_bytes("plate.png"), None);
+        assert!(plain.images.is_empty());
+        assert_eq!(plain.images.bytes("plate.png"), None);
     }
 
     #[test]
