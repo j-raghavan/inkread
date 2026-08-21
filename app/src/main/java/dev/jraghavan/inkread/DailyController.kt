@@ -24,7 +24,17 @@ class DailyController(private val context: Context) {
 
     /** A followed source: a display name (byline) + its feed URL. [enabled] sources are the ones a
      *  compile fetches; muting one (unchecking it) keeps it in the list without pulling it. */
-    data class Source(val name: String, val url: String, val enabled: Boolean = true)
+    /**
+     * A followed feed. [limit] is how many of its articles an issue takes (#193) — sources differ a
+     * lot in volume, and one cap for all of them either starves a good feed or floods the issue with
+     * a noisy one.
+     */
+    data class Source(
+        val name: String,
+        val url: String,
+        val enabled: Boolean = true,
+        val limit: Int = PER_SOURCE,
+    )
 
     /** A compiled issue's headline. [index] is the article's position in the issue (0-based), so a
      *  tap can open the issue at that article. */
@@ -44,8 +54,14 @@ class DailyController(private val context: Context) {
             val arr = JSONArray(prefs().getString("sources", "[]"))
             (0 until arr.length()).map {
                 val o = arr.getJSONObject(it)
-                // Pre-existing stored sources have no "enabled" key → default to on.
-                Source(o.optString("name"), o.optString("url"), o.optBoolean("enabled", true))
+                // Pre-existing stored sources have neither "enabled" nor "limit" → on, and the
+                // cap every source used before this was configurable.
+                Source(
+                    o.optString("name"),
+                    o.optString("url"),
+                    o.optBoolean("enabled", true),
+                    clampLimit(o.optInt("limit", PER_SOURCE)),
+                )
             }
         }.getOrDefault(emptyList())
 
@@ -92,7 +108,13 @@ class DailyController(private val context: Context) {
     private fun save(list: List<Source>) {
         val arr = JSONArray()
         list.forEach {
-            arr.put(JSONObject().put("name", it.name).put("url", it.url).put("enabled", it.enabled))
+            arr.put(
+                JSONObject()
+                    .put("name", it.name)
+                    .put("url", it.url)
+                    .put("enabled", it.enabled)
+                    .put("limit", clampLimit(it.limit)),
+            )
         }
         prefs().edit().putString("sources", arr.toString()).apply()
     }
@@ -144,7 +166,7 @@ class DailyController(private val context: Context) {
                 val items = fetchFeedItems(src.url, reached)
                 if (reached[0]) feedsReached++
                 itemsFound += items.length()
-                val take = minOf(items.length(), PER_SOURCE)
+                val take = minOf(items.length(), clampLimit(src.limit))
                 Log.i(TAG, "feed ${src.url}: ${items.length()} items, fetching $take")
                 // Fetch this source's article pages in parallel.
                 val tasks = (0 until take).map { i ->
@@ -168,11 +190,7 @@ class DailyController(private val context: Context) {
         }
         // Interleave: every source's 1st article, then every source's 2nd, … Source order still
         // decides ties, so the issue keeps a stable, predictable reading order.
-        for (rank in 0 until PER_SOURCE) {
-            for (list in perSource) {
-                list.getOrNull(rank)?.let { articles.put(it) }
-            }
-        }
+        interleaveByRank(perSource).forEach { articles.put(it) }
         Log.i(TAG, "compile: feedsReached=$feedsReached itemsFound=$itemsFound articles=${articles.length()}")
         // Specific failure messages so the cause is obvious without a logcat.
         if (feedsReached == 0) {
@@ -339,7 +357,8 @@ class DailyController(private val context: Context) {
     private fun dateLabelFromName(name: String): String =
         name.removePrefix("inkread-daily-").removeSuffix(".epub")
 
-    private companion object {
+    /** Internal rather than private so the pure limit/ordering logic is host-testable (#193). */
+    internal companion object {
         const val TAG = "DailyController"
 
         /** Curated popular feeds for the suggested-sources picker (stable, well-known RSS/Atom). */
@@ -355,7 +374,40 @@ class DailyController(private val context: Context) {
             Source("Daring Fireball", "https://daringfireball.net/feeds/main"),
             Source("Smashing Magazine", "https://www.smashingmagazine.com/feed/"),
         )
-        const val PER_SOURCE = 5 // articles taken per source
+        const val PER_SOURCE = 5 // default articles taken per source; per-source override in #193
+        const val MIN_PER_SOURCE = 1 // a source taking nothing should be muted, not set to zero
+        const val MAX_PER_SOURCE = 20 // a ceiling, so one busy feed cannot swamp an issue
+
+        /**
+         * Hold a per-source article limit inside [MIN_PER_SOURCE]..[MAX_PER_SOURCE].
+         *
+         * Applied on read as well as write: a limit that arrives out of range — hand-edited prefs,
+         * or a value stored by a build with a different ceiling — would otherwise decide how many
+         * articles get fetched, and zero or negative would silently drop a source the reader still
+         * sees listed as active.
+         */
+        fun clampLimit(n: Int): Int = n.coerceIn(MIN_PER_SOURCE, MAX_PER_SOURCE)
+
+        /**
+         * Round-robin the sources: every source's 1st article, then every source's 2nd, and so on.
+         * Source order decides ties, so the reading order stays stable and predictable.
+         *
+         * This runs to the longest list rather than to a fixed count (#193). With per-source limits
+         * the lists are different lengths, and a fixed bound would silently drop everything a
+         * source contributed past it — a feed set to 10 would deliver 5. Sources that run out drop
+         * away and the rest keep interleaving, so a high-limit feed tails the issue rather than
+         * being truncated.
+         */
+        fun <T> interleaveByRank(perSource: List<List<T>>): List<T> {
+            val deepest = perSource.maxOfOrNull { it.size } ?: 0
+            val out = ArrayList<T>(perSource.sumOf { it.size })
+            for (rank in 0 until deepest) {
+                for (list in perSource) {
+                    list.getOrNull(rank)?.let { out.add(it) }
+                }
+            }
+            return out
+        }
         const val MAX_PARALLEL = 6 // concurrent article fetches
         const val HEADLINES_SHOWN = 60 // headlines stored for the front page (grouped by source)
         const val TIMEOUT_MS = 10_000
