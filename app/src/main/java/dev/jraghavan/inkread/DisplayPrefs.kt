@@ -140,6 +140,16 @@ class DisplayPrefs(private val context: Context) {
         /** Index of the [TEXT_SCALES] entry nearest to [scale]. */
         fun nearestScaleIndex(scale: Float): Int = nearestIndex(TEXT_SCALES, scale)
 
+        /**
+         * The [TEXT_SCALES] index [by] steps from the one nearest [scale], clamped to the ends.
+         *
+         * Returns the *current* index at either end rather than wrapping or overshooting, so a
+         * caller can tell "already as large as it goes" from "moved" and skip a repagination that
+         * would change nothing.
+         */
+        fun steppedScaleIndex(scale: Float, by: Int): Int =
+            (nearestScaleIndex(scale) + by).coerceIn(0, TEXT_SCALES.size - 1)
+
         /** Index of the [UI_SCALES] entry nearest to [scale]. */
         fun nearestUiScaleIndex(scale: Float): Int = nearestIndex(UI_SCALES, scale)
     }
