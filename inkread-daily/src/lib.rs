@@ -12,6 +12,7 @@ mod epub;
 mod extract;
 mod feed;
 mod model;
+pub mod quote;
 
 pub use epub::assemble_epub;
 pub use extract::extract_readable;

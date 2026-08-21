@@ -146,10 +146,20 @@ fn title_page(issue: &Issue) -> String {
         }
         toc.push_str("</li>\n");
     }
+    // The quotation sits between the masthead and the contents (#195) — where a paper puts it, and
+    // read before deciding what to read.
+    let quote = crate::quote::quote_for(&issue.date).map_or(String::new(), |q| {
+        format!(
+            "<blockquote class=\"quote\"><p>{}</p>\n<p class=\"attrib\">{} · {}</p></blockquote>\n",
+            esc(q.text),
+            esc(q.author),
+            esc(q.work)
+        )
+    });
     xhtml(
         &issue.title,
         &format!(
-            "<h1>{}</h1>\n<p class=\"date\">{}</p>\n<h2>In This Issue</h2>\n<ul>\n{toc}</ul>",
+            "<h1>{}</h1>\n<p class=\"date\">{}</p>\n{quote}<h2>In This Issue</h2>\n<ul>\n{toc}</ul>",
             esc(&issue.title),
             esc(&issue.date)
         ),
