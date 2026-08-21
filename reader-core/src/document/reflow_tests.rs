@@ -1255,3 +1255,80 @@ fn a_page_the_index_claims_but_the_layout_lacks_is_refused_without_relaying_out(
         "a known-complete chapter must not be laid out again for a page it does not have"
     );
 }
+
+/// Resuming deep into a long chapter, the prefix costs almost as much as the whole chapter, and the
+/// extending pass that follows is then pure overhead — measured at +66% total work, plus tens of
+/// megabytes transiently held. Past the halfway mark the chapter is laid out once, complete.
+#[test]
+fn a_deep_resume_lays_the_chapter_out_once_instead_of_twice() {
+    let doc = one_long_chapter(400);
+    let total = doc.page_count();
+    assert!(total > 20, "need a long chapter, got {total}");
+
+    // Deep resume: one pass that FINISHES the chapter, so no extending pass can follow. Asserting
+    // completeness rather than a page count is deliberate — a bounded pass can overshoot its bound,
+    // since the check sits between blocks, so counts do not separate "stopped early" from
+    // "finished".
+    reset_chapter_layouts();
+    // Three quarters in: past the halfway threshold, but with a real tail left. At total-2 the
+    // bounded pass would run to the end anyway, so it could not tell the two policies apart.
+    let deep = total * 3 / 4;
+    assert!(doc.with_page(deep, |_, _| ()).is_some());
+    assert_eq!(chapter_layouts(), 1, "one pass");
+    assert!(
+        doc.chapter_pages.borrow()[0].complete,
+        "a deep resume must lay the chapter out completely, not take a near-full prefix that a \
+         later page then pays to extend"
+    );
+    reset_chapter_layouts();
+    assert!(doc.with_page(deep + 1, |_, _| ()).is_some());
+    assert_eq!(
+        chapter_layouts(),
+        0,
+        "the chapter was already complete; turning the page must not lay out again"
+    );
+
+    // A shallow resume still takes the cheap prefix — the threshold must not disable laziness.
+    let doc = one_long_chapter(400);
+    reset_chapter_layouts();
+    assert!(doc.with_page(0, |_, _| ()).is_some());
+    assert!(
+        chapter_pages_laid() * 4 < total,
+        "page 0 produced {} of {total} pages — the threshold broke laziness",
+        chapter_pages_laid()
+    );
+    assert!(
+        !doc.chapter_pages.borrow()[0].complete,
+        "a shallow resume should still leave the chapter partial"
+    );
+}
+
+/// The partial layout must be released before the extending pass runs, or a deep-ish resume holds
+/// the prefix and the full chapter at once.
+#[test]
+fn extending_a_chapter_does_not_hold_the_prefix_and_the_full_layout_at_once() {
+    let doc = one_long_chapter(400);
+    let total = doc.page_count();
+
+    // A prefix short enough to stay under the halfway threshold, then extend past it.
+    assert!(doc.with_page(1, |_, _| ()).is_some());
+    let cached_pages: usize = doc
+        .chapter_pages
+        .borrow()
+        .iter()
+        .map(|c| c.pages.len())
+        .sum();
+    assert!(
+        cached_pages < total,
+        "expected a partial entry, got {cached_pages}"
+    );
+
+    assert!(doc.with_page(total - 1, |_, _| ()).is_some());
+    let entries = doc.chapter_pages.borrow();
+    assert_eq!(
+        entries.len(),
+        1,
+        "the partial entry should have been replaced, not kept alongside"
+    );
+    assert!(entries[0].complete);
+}

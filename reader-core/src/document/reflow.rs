@@ -350,14 +350,21 @@ impl EpubBackend {
     /// Run `f` against global `page` and the layout parameters it was laid out with, materializing
     /// its chapter if it is not already cached. `None` for a page past the end of the book.
     fn with_page<R>(&self, page: usize, f: impl FnOnce(&Page, &LayoutOpts) -> R) -> Option<R> {
-        let (chapter, offset, opts) = {
+        let (chapter, offset, chapter_len, opts) = {
             let laid = self.laid();
             if page >= laid.total_pages {
                 return None;
             }
             let chapter = laid.chapter_of(page);
             let start = laid.chapter_start.get(chapter).copied().unwrap_or(0);
-            (chapter, page - start, laid.opts)
+            // The chapter's length per the pagination index — what decides whether a prefix is
+            // worth having at all (see below).
+            let end = laid
+                .chapter_start
+                .get(chapter + 1)
+                .copied()
+                .unwrap_or(laid.total_pages);
+            (chapter, page - start, end.saturating_sub(start), laid.opts)
         };
 
         // A cached chapter serves the page if it was laid out that far, or if we know there is no
@@ -382,11 +389,25 @@ impl EpubBackend {
         // time: reading forward through a long chapter would otherwise re-lay a growing prefix on
         // every turn, which is quadratic and worse than the whole-chapter pass this replaces. So a
         // chapter costs at most two passes — the cheap prefix that opened it, then the rest.
-        let want = if cached { usize::MAX } else { offset + 1 };
+        //
+        // A prefix is only worth taking when it is a small part of the chapter. Resuming deep into
+        // one — page 225 of 229, say — the prefix costs almost as much as the whole chapter, and
+        // the extending pass is then pure overhead: measured at +66% total work over laying it out
+        // once. Past the halfway mark, do the whole chapter now and be done.
+        let want = if cached || offset + 1 >= chapter_len.div_ceil(2) {
+            usize::MAX
+        } else {
+            offset + 1
+        };
+        // Drop any partial entry for this chapter BEFORE laying out the rest of it, not after:
+        // otherwise the prefix and the full pass are both live at once, which on a deep resume of a
+        // long chapter is tens of megabytes of laid-out pages held for no reason.
+        self.chapter_pages
+            .borrow_mut()
+            .retain(|c| c.chapter != chapter);
         let (pages, complete) = self.lay_out_chapter_upto(chapter, &opts, want);
         let result = pages.get(offset).map(|p| f(p, &opts));
         let mut cache = self.chapter_pages.borrow_mut();
-        cache.retain(|c| c.chapter != chapter); // replace any partial entry for this chapter
         if cache.len() >= CHAPTER_CACHE {
             cache.remove(0); // oldest out; the tail is what reading is walking through
         }
