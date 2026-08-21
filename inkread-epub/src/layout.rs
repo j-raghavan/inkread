@@ -18,6 +18,7 @@
 //! [`Page`]s into a `PixelBuffer`.
 
 use crate::content::{Block, Inline};
+use crate::css::BlockStyle;
 
 /// Glyph-advance measurement for a font (Phase 4 supplies a real implementation; tests use a
 /// fixed-pitch fake). `bold`/`italic` may select a different face/metrics.
@@ -70,6 +71,24 @@ impl Align {
             3 => Align::Right,
             _ => Align::Left,
         }
+    }
+}
+
+/// Which alignment a block is actually laid out with, given what the book declared and the reader's
+/// global preference (#188).
+///
+/// The book wins only for `center` and `right`. Those signal *decorative* intent — a title page, an
+/// epigraph, a verse block, a colophon — which is the damage #188 reports, and no reader's
+/// alignment preference is really a statement about those. `left` and `justify` are what books
+/// declare for ordinary body prose (`p { text-align: justify }` is near-universal), and honouring
+/// those would silently override the setting the reader chose for the text they actually read. So
+/// they defer to `user`.
+#[must_use]
+fn effective_align(style: &BlockStyle, user: Align) -> Align {
+    match style.align {
+        Some(Align::Center) => Align::Center,
+        Some(Align::Right) => Align::Right,
+        _ => user,
     }
 }
 
@@ -236,24 +255,53 @@ pub fn paginate_with(
     let indent = opts.font_px * 1.2;
     for (block_index, block) in blocks.iter().enumerate() {
         match block {
-            Block::Heading { level, content, .. } => {
+            Block::Heading {
+                level,
+                content,
+                style,
+            } => {
                 pager.gap_before(opts.font_px * 0.7);
                 let size = opts.font_px * heading_scale(*level);
-                pager.add_paragraph(content, size, 0.0, 0.0, true, block_index, &mut cursor, m);
+                // Headings are bold by default, but that is inkread's typography, not a rule: a
+                // book that says `font-weight: normal` on its title gets a normal-weight title.
+                let bold = style.bold.unwrap_or(true);
+                pager.add_paragraph(
+                    content,
+                    size,
+                    0.0,
+                    0.0,
+                    bold,
+                    effective_align(style, opts.align),
+                    block_index,
+                    &mut cursor,
+                    m,
+                );
                 pager.gap(opts.font_px * 0.5);
             }
-            Block::Paragraph { content, .. } => {
+            Block::Paragraph { content, style } => {
                 // First line indented, the rest flush left, no trailing gap — dense and book-like.
                 // The indent is the *only* thing marking where one paragraph ends and the next
                 // begins, since this typography deliberately omits the blank line between them; an
                 // indent applied to every line would leave prose with no paragraph breaks at all
                 // (#163) and would also spend 1.2em of every line's width on nothing.
+                let align = effective_align(style, opts.align);
+                // Two ways a paragraph loses that indent (#188): the book zeroes `text-indent`, or
+                // the block is centred/right-aligned. The indent is inkread's own device for
+                // marking where prose paragraphs start — on a decorative centred line it marks
+                // nothing, and it would push the text off-centre by half the indent.
+                let centred = matches!(align, Align::Center | Align::Right);
+                let first_indent = if style.indent == Some(false) || centred {
+                    0.0
+                } else {
+                    indent
+                };
                 pager.add_paragraph(
                     content,
                     opts.font_px,
-                    indent,
+                    first_indent,
                     0.0,
-                    false,
+                    style.bold.unwrap_or(false),
+                    align,
                     block_index,
                     &mut cursor,
                     m,
@@ -263,14 +311,25 @@ pub fn paginate_with(
                 ordered,
                 index,
                 content,
-                ..
+                style,
             } => {
                 let marker = if *ordered {
                     format!("{index}.")
                 } else {
                     "•".to_string()
                 };
-                pager.add_list_item(&marker, content, opts.font_px, block_index, &mut cursor, m);
+                // A list item keeps its flush-left hanging indent whatever the book declares:
+                // centring text that hangs off a marker has no sensible reading. Weight still
+                // applies.
+                pager.add_list_item(
+                    &marker,
+                    content,
+                    opts.font_px,
+                    style.bold.unwrap_or(false),
+                    block_index,
+                    &mut cursor,
+                    m,
+                );
                 pager.gap(opts.font_px * 0.15);
             }
             Block::Image { alt, .. } => {
@@ -294,6 +353,7 @@ pub fn paginate_with(
                     0.0,
                     0.0,
                     false,
+                    opts.align,
                     block_index,
                     &mut cursor,
                     m,
@@ -381,6 +441,7 @@ impl<'o> Pager<'o> {
         first_indent: f32,
         rest_indent: f32,
         bold_all: bool,
+        align: Align,
         block: usize,
         cursor: &mut usize,
         m: &dyn Metrics,
@@ -400,23 +461,19 @@ impl<'o> Pager<'o> {
         let line_h = size * self.opts.line_spacing;
         let n = lines.len();
         for (i, mut runs) in lines.into_iter().enumerate() {
-            align_line(
-                &mut runs,
-                self.opts.align,
-                self.opts.content_w(),
-                i + 1 == n,
-                m,
-            );
+            align_line(&mut runs, align, self.opts.content_w(), i + 1 == n, m);
             self.emit(runs, line_h, false);
         }
     }
 
     /// Lay out a list item with a hanging marker and indented body.
+    #[allow(clippy::too_many_arguments)]
     fn add_list_item(
         &mut self,
         marker: &str,
         inlines: &[Inline],
         size: f32,
+        bold: bool,
         block: usize,
         cursor: &mut usize,
         m: &dyn Metrics,
@@ -437,7 +494,7 @@ impl<'o> Pager<'o> {
             indent,
             indent,
             self.opts.content_w(),
-            false,
+            bold,
             block,
             cursor,
             m,
@@ -941,6 +998,186 @@ mod tests {
             })],
             style: BlockStyle::default(),
         }
+    }
+
+    /// Build the opts used by the #188 declared-style tests: 10px Mono font (5px/char), content
+    /// width 100 → 20 chars per line, and a reader whose global alignment is the default Left.
+    fn style_opts() -> LayoutOpts {
+        LayoutOpts {
+            page_w: 100.0,
+            page_h: 10_000.0,
+            margin: 0.0,
+            font_px: 10.0,
+            line_spacing: 1.0,
+            para_gap: 0.0,
+            align: Align::Left,
+        }
+    }
+
+    fn styled_para(text: &str, style: BlockStyle) -> Block {
+        let Block::Paragraph { content, .. } = para(text) else {
+            unreachable!()
+        };
+        Block::Paragraph { content, style }
+    }
+
+    fn styled_heading(text: &str, style: BlockStyle) -> Block {
+        let Block::Paragraph { content, .. } = para(text) else {
+            unreachable!()
+        };
+        Block::Heading {
+            level: 1,
+            content,
+            style,
+        }
+    }
+
+    /// #188: the title page rendered hard-left because `text-align: center` never reached layout.
+    #[test]
+    fn a_book_declared_centre_centres_even_when_the_reader_prefers_left() {
+        let opts = style_opts();
+        let style = BlockStyle {
+            align: Some(Align::Center),
+            ..Default::default()
+        };
+        let pages = paginate(&[styled_heading("PRIDE", style)], &opts, &Mono);
+        let x = pages[0].lines[0].runs[0].x;
+        // "PRIDE" at heading scale is narrower than the content box, so it must be inset.
+        assert!(x > 0.0, "declared centre was ignored: x = {x}");
+
+        // …and an undeclared heading still honours the reader's Left.
+        let plain = paginate(
+            &[styled_heading("PRIDE", BlockStyle::default())],
+            &opts,
+            &Mono,
+        );
+        assert_eq!(plain[0].lines[0].runs[0].x, 0.0);
+    }
+
+    /// The other half of the #188 policy: a book that justifies its prose must not override the
+    /// alignment the reader chose for the text they actually read.
+    #[test]
+    fn a_book_declared_justify_or_left_defers_to_the_reader() {
+        let opts = style_opts();
+        for declared in [Align::Justify, Align::Left] {
+            let style = BlockStyle {
+                align: Some(declared),
+                ..Default::default()
+            };
+            // A long paragraph so justification would visibly spread the first line's runs.
+            let text = "alpha bravo charlie delta echo foxtrot golf hotel";
+            let book = paginate(&[styled_para(text, style)], &opts, &Mono);
+            let user = paginate(&[styled_para(text, BlockStyle::default())], &opts, &Mono);
+            assert_eq!(
+                book[0].lines[0]
+                    .runs
+                    .iter()
+                    .map(|r| r.x)
+                    .collect::<Vec<_>>(),
+                user[0].lines[0]
+                    .runs
+                    .iter()
+                    .map(|r| r.x)
+                    .collect::<Vec<_>>(),
+                "book-declared {declared:?} should defer to the reader's Left"
+            );
+        }
+    }
+
+    /// The reader's own Justify still applies to blocks the book says nothing about — the policy
+    /// suppresses the *book's* left/justify, not the setting.
+    #[test]
+    fn the_readers_justify_still_applies_to_undeclared_blocks() {
+        let opts = LayoutOpts {
+            align: Align::Justify,
+            ..style_opts()
+        };
+        let text = "alpha bravo charlie delta echo foxtrot golf hotel";
+        let pages = paginate(&[styled_para(text, BlockStyle::default())], &opts, &Mono);
+        let first = &pages[0].lines[0];
+        assert!(first.runs.len() > 1);
+        let last_x = first.runs.last().unwrap().x;
+        let flush = paginate(
+            &[styled_para(text, BlockStyle::default())],
+            &LayoutOpts {
+                align: Align::Left,
+                ..style_opts()
+            },
+            &Mono,
+        );
+        assert!(
+            last_x > flush[0].lines[0].runs.last().unwrap().x,
+            "justification did not spread the line"
+        );
+    }
+
+    /// #188 / #163: the paragraph indent is applied even to blocks whose stylesheet turns it off.
+    #[test]
+    fn a_declared_zero_text_indent_drops_the_first_line_indent() {
+        let opts = style_opts();
+        let indented = paginate(
+            &[styled_para("short line", BlockStyle::default())],
+            &opts,
+            &Mono,
+        );
+        assert_eq!(indented[0].lines[0].runs[0].x, 12.0, "1.2em of 10px");
+
+        let style = BlockStyle {
+            indent: Some(false),
+            ..Default::default()
+        };
+        let flat = paginate(&[styled_para("short line", style)], &opts, &Mono);
+        assert_eq!(
+            flat[0].lines[0].runs[0].x, 0.0,
+            "text-indent: 0 was ignored"
+        );
+    }
+
+    /// A centred block must not also carry the synthetic prose indent, which would push it off
+    /// centre by half the indent.
+    #[test]
+    fn a_centred_paragraph_drops_the_indent_it_would_otherwise_carry() {
+        let opts = style_opts();
+        let centred = BlockStyle {
+            align: Some(Align::Center),
+            ..Default::default()
+        };
+        let text = "abcd"; // 4 chars * 5px = 20px wide in a 100px box
+        let pages = paginate(&[styled_para(text, centred)], &opts, &Mono);
+        assert_eq!(
+            pages[0].lines[0].runs[0].x, 40.0,
+            "expected (100 - 20) / 2 with no indent skewing it"
+        );
+    }
+
+    /// #188: headings were laid out with `bold_all = true` unconditionally.
+    #[test]
+    fn a_declared_normal_font_weight_unbolds_a_heading() {
+        let opts = style_opts();
+        let bold = paginate(
+            &[styled_heading("Title", BlockStyle::default())],
+            &opts,
+            &Mono,
+        );
+        assert!(bold[0].lines[0].runs[0].bold, "headings default to bold");
+
+        let style = BlockStyle {
+            bold: Some(false),
+            ..Default::default()
+        };
+        let normal = paginate(&[styled_heading("Title", style)], &opts, &Mono);
+        assert!(
+            !normal[0].lines[0].runs[0].bold,
+            "font-weight: normal was ignored"
+        );
+
+        // …and the converse: a paragraph the book bolds comes out bold.
+        let style = BlockStyle {
+            bold: Some(true),
+            ..Default::default()
+        };
+        let p = paginate(&[styled_para("x", style)], &opts, &Mono);
+        assert!(p[0].lines[0].runs[0].bold);
     }
 
     #[test]
