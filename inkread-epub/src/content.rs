@@ -16,7 +16,7 @@ use ego_tree::NodeRef;
 use scraper::node::Node;
 use scraper::{Html, Selector};
 
-use crate::css::{BlockStyle, Stylesheet};
+use crate::css::{self, BlockStyle, StyledNode, Stylesheet};
 
 /// Inline-level content within a [`Block`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -118,11 +118,20 @@ pub fn parse_blocks_with(html: &str, sheet: &Stylesheet) -> Vec<Block> {
         merged = s;
         &merged
     };
+    // Parsed once per chapter, not once per block: the selector engine borrows this source, which
+    // is why `Stylesheet` holds owned text.
+    let parsed = simplecss::StyleSheet::parse(sheet.source());
 
     let start = find_body(root).unwrap_or(root);
     let mut out = Vec::new();
     let mut pending: Vec<Inline> = Vec::new();
-    walk_blocks(start, &mut out, &mut pending, sheet, BlockStyle::default());
+    walk_blocks(
+        start,
+        &mut out,
+        &mut pending,
+        &parsed,
+        BlockStyle::default(),
+    );
     flush_paragraph(&mut out, &mut pending, BlockStyle::default());
     out
 }
@@ -145,13 +154,22 @@ fn style_text(doc: &Html) -> String {
 /// Resolve an element's declared style against `sheet`, folding it over what it inherits from its
 /// containers. All three properties in [`BlockStyle`] are inherited ones in CSS, and books routinely
 /// declare them on a wrapping `<div>` rather than on each block inside it.
-fn declared(el: &scraper::node::Element, sheet: &Stylesheet, inherited: BlockStyle) -> BlockStyle {
+///
+/// Note this is *narrower* than what the selector engine can express: a rule matching a container
+/// styles the blocks nested inside it, which is inheritance — the engine resolves descendant
+/// selectors such as `div.titlepage p` on its own.
+fn declared(
+    node: NodeRef<Node>,
+    el: &scraper::node::Element,
+    sheet: &simplecss::StyleSheet<'_>,
+    inherited: BlockStyle,
+) -> BlockStyle {
     let style_attr = el.attr("style");
     // Fast path for the overwhelmingly common block: no book CSS and no inline style to apply.
-    if sheet.is_empty() && style_attr.is_none() {
+    if sheet.rules.is_empty() && style_attr.is_none() {
         return inherited;
     }
-    let own = sheet.resolve(el.name(), el.attr("class"), style_attr);
+    let own = css::resolve(sheet, &StyledNode(node), style_attr);
     inherited.overlaid_with(&own)
 }
 
@@ -177,7 +195,7 @@ fn walk_blocks(
     node: NodeRef<Node>,
     out: &mut Vec<Block>,
     pending: &mut Vec<Inline>,
-    sheet: &Stylesheet,
+    sheet: &simplecss::StyleSheet<'_>,
     inherited: BlockStyle,
 ) {
     for child in node.children() {
@@ -192,7 +210,7 @@ fn walk_blocks(
                         if !is_blank(&content) {
                             out.push(Block::Paragraph {
                                 content,
-                                style: declared(el, sheet, inherited),
+                                style: declared(child, el, sheet, inherited),
                             });
                         }
                     }
@@ -204,7 +222,7 @@ fn walk_blocks(
                             out.push(Block::Heading {
                                 level,
                                 content,
-                                style: declared(el, sheet, inherited),
+                                style: declared(child, el, sheet, inherited),
                             });
                         }
                     }
@@ -220,7 +238,7 @@ fn walk_blocks(
                             name == "ol",
                             out,
                             sheet,
-                            declared(el, sheet, inherited),
+                            declared(child, el, sheet, inherited),
                         );
                     }
                     "img" => {
@@ -243,7 +261,7 @@ fn walk_blocks(
                     // blocks rather than merging across the boundary. Its declared style descends
                     // with it — a `<div class="titlepage">` styles the blocks it wraps.
                     _ => {
-                        let inner = declared(el, sheet, inherited);
+                        let inner = declared(child, el, sheet, inherited);
                         flush_paragraph(out, pending, inherited);
                         walk_blocks(child, out, pending, sheet, inner);
                         flush_paragraph(out, pending, inner);
@@ -261,7 +279,7 @@ fn walk_list(
     node: NodeRef<Node>,
     ordered: bool,
     out: &mut Vec<Block>,
-    sheet: &Stylesheet,
+    sheet: &simplecss::StyleSheet<'_>,
     inherited: BlockStyle,
 ) {
     let mut index = 0usize;
@@ -275,7 +293,7 @@ fn walk_list(
                         ordered,
                         index,
                         content,
-                        style: declared(el, sheet, inherited),
+                        style: declared(child, el, sheet, inherited),
                     });
                 }
             }
@@ -584,6 +602,29 @@ mod tests {
         };
         assert_eq!(style.align, Some(Align::Center));
         assert_eq!(style.indent, Some(false));
+    }
+
+    /// #201: `div.titlepage p` is ordinary Sigil/InDesign/calibre output. The previous hand-rolled
+    /// subset dropped every selector that reached past one element, so books written that way still
+    /// showed #188's symptom after it was "fixed".
+    #[test]
+    fn a_descendant_selector_reaches_the_block_it_matches() {
+        let sheet = Stylesheet::parse("div.titlepage p { text-align: center; text-indent: 0 }");
+        let b = parse_blocks_with(
+            &body(r#"<div class="titlepage"><p>Title</p></div><p>Ordinary prose.</p>"#),
+            &sheet,
+        );
+        let Block::Paragraph { style, .. } = &b[0] else {
+            panic!("expected the title paragraph, got {b:?}")
+        };
+        assert_eq!(style.align, Some(Align::Center));
+        assert_eq!(style.indent, Some(false));
+
+        // …and the prose outside the container is untouched by it.
+        let Block::Paragraph { style, .. } = &b[1] else {
+            panic!()
+        };
+        assert!(style.is_empty(), "{style:?}");
     }
 
     #[test]

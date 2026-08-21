@@ -28,3 +28,9 @@ hyphenation = { version = "0.8.4", features = ["embed_en-us"] }
 # (CJK) wrap between characters with the standard's prohibition rules (a line never starts with 。)
 # instead of overflowing as one unbreakable "word".
 unicode-linebreak = "0.1"
+# simplecss (MIT/Apache-2.0) — CSS selector parsing + matching for the narrow block-styling subset
+# (#188/#201). We keep the policy (which properties are honoured); the crate owns selectors,
+# combinators and specificity, which the previous hand-rolled matcher dropped. Deliberately not
+# scraper's own cssparser/selectors stack: scraper keeps its SelectorList private, so specificity is
+# unreachable through it.
+simplecss = "0.2.2"
