@@ -14,7 +14,7 @@
 
 use ego_tree::NodeRef;
 use scraper::node::Node;
-use scraper::Html;
+use scraper::{Html, Selector};
 
 use crate::css::{BlockStyle, Stylesheet};
 
@@ -81,7 +81,8 @@ struct Style {
 
 /// Tags whose *contents* are code/data, never prose. Their text nodes must never reach a [`Block`]:
 /// html5ever keeps them in the tree, so without this a `<style>` inside `<body>` (legal in HTML5,
-/// and used by a fair number of EPUBs) renders its CSS source as a visible paragraph.
+/// and used by a fair number of EPUBs) renders its CSS source as a visible paragraph. `head`/`title`
+/// are reachable only when [`find_body`] finds no `<body>` and the walk starts at the document root.
 const NON_CONTENT_TAGS: &[&str] = &["style", "script", "template", "head", "title"];
 
 /// Tags treated as inline emphasis/markup when encountered at block level (folded into the current
@@ -107,8 +108,7 @@ pub fn parse_blocks_with(html: &str, sheet: &Stylesheet) -> Vec<Block> {
     let root = doc.tree.root();
 
     // A chapter may carry its own <style>; layer it over the book-wide sheet for this chapter only.
-    let mut in_document = String::new();
-    collect_style_text(root, &mut in_document);
+    let in_document = style_text(&doc);
     let merged;
     let sheet = if in_document.trim().is_empty() {
         sheet
@@ -127,22 +127,19 @@ pub fn parse_blocks_with(html: &str, sheet: &Stylesheet) -> Vec<Block> {
     out
 }
 
-/// Concatenate the text of every `<style>` element in the document (head or body).
-fn collect_style_text(node: NodeRef<Node>, out: &mut String) {
-    for child in node.children() {
-        if let Node::Element(el) = child.value() {
-            if el.name() == "style" {
-                for t in child.children() {
-                    if let Node::Text(text) = t.value() {
-                        out.push_str(text);
-                        out.push('\n');
-                    }
-                }
-                continue;
-            }
-        }
-        collect_style_text(child, out);
-    }
+/// Concatenate the text of every `<style>` element in the document, head or body. Separated by
+/// newlines so two blocks cannot run together into one malformed rule.
+fn style_text(doc: &Html) -> String {
+    // A literal selector that always parses; `unwrap_or_default` keeps the no-panic guarantee
+    // without asserting that (RR21-FR3).
+    Selector::parse("style")
+        .map(|sel| {
+            doc.select(&sel)
+                .map(|el| el.text().collect::<String>())
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .unwrap_or_default()
 }
 
 /// Resolve an element's declared style against `sheet`, folding it over what it inherits from its
@@ -246,9 +243,10 @@ fn walk_blocks(
                     // blocks rather than merging across the boundary. Its declared style descends
                     // with it — a `<div class="titlepage">` styles the blocks it wraps.
                     _ => {
+                        let inner = declared(el, sheet, inherited);
                         flush_paragraph(out, pending, inherited);
-                        walk_blocks(child, out, pending, sheet, declared(el, sheet, inherited));
-                        flush_paragraph(out, pending, declared(el, sheet, inherited));
+                        walk_blocks(child, out, pending, sheet, inner);
+                        flush_paragraph(out, pending, inner);
                     }
                 }
             }
