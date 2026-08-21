@@ -469,6 +469,16 @@ pub trait Document {
         None
     }
 
+    /// Set the reflow **column count** (1 or 2) and repaginate, preserving the chapter (#194).
+    /// Returns the new page, or `None` for a fixed-layout format (PDF). Default: unsupported.
+    ///
+    /// A page too narrow for a readable two-column measure lays out single-column regardless; the
+    /// request is stored either way, so widening the page or shrinking the text takes effect
+    /// without the reader having to ask again.
+    fn set_columns(&self, _columns: i32, _current_page: usize) -> Option<usize> {
+        None
+    }
+
     /// Set the reflow **font family** (`font_id` = index into the bundled reading faces) and
     /// repaginate, preserving the chapter (RR4). Returns the new page, or `None` for a fixed-layout
     /// format (PDF). Default: unsupported.

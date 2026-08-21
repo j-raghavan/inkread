@@ -915,6 +915,26 @@ pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeSetLineSpac
     .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
 }
 
+// nativeSetColumns(handle, columns) : int — reflow columns (1 or 2; #194); repaginates EPUB.
+// Returns the new page index, or -1 for a fixed-layout PDF. Re-render after.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeSetColumns<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+    columns: jint,
+) -> jint {
+    env.with_env(|env| -> jni::errors::Result<jint> {
+        let session = unsafe { session_mut(handle) }.map_err(|e| throw(env, &e))?;
+        if session.set_columns(columns) {
+            Ok(session.current_page() as jint)
+        } else {
+            Ok(-1)
+        }
+    })
+    .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
+}
+
 // nativeSetAlignment(handle, code) : int — reflow alignment (0=Left,1=Justify,2=Center,3=Right; RR4);
 // repaginates EPUB. Returns the new page index, or -1 for a fixed-layout PDF. Re-render after.
 #[unsafe(no_mangle)]

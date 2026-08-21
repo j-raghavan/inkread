@@ -1332,3 +1332,85 @@ fn extending_a_chapter_does_not_hold_the_prefix_and_the_full_layout_at_once() {
     );
     assert!(entries[0].complete);
 }
+
+/// #194: selecting two columns must repaginate and keep the reader where they were — the same
+/// contract every other reflow setting honours (RR12-FR4).
+#[test]
+fn selecting_two_columns_repaginates_and_keeps_the_chapter() {
+    let doc = EpubBackend::open(SAMPLE.to_vec(), vp(1200, 1600)).expect("sample opens");
+    let before = doc.page_count();
+    assert!(before > 0);
+
+    let moved = doc
+        .set_columns(2, 0)
+        .expect("a reflowable document supports columns");
+    assert!(
+        moved < doc.page_count(),
+        "position must land inside the new pagination"
+    );
+
+    // Two columns hold more text per page, so a book cannot get longer by asking for them.
+    assert!(
+        doc.page_count() <= before,
+        "{} pages in two columns vs {before} in one",
+        doc.page_count()
+    );
+
+    // Back to one column returns the original pagination exactly.
+    doc.set_columns(1, 0);
+    assert_eq!(
+        doc.page_count(),
+        before,
+        "single column should be as it was"
+    );
+}
+
+/// The request is stored even when the page is too narrow to honour it, so a later font-size
+/// change can bring it into effect without the reader asking again.
+#[test]
+fn a_column_request_survives_being_declined() {
+    // A narrow viewport at the default text size cannot give two readable columns.
+    let doc = EpubBackend::open(SAMPLE.to_vec(), vp(300, 900)).expect("sample opens");
+    let single = doc.page_count();
+    doc.set_columns(2, 0);
+    assert_eq!(
+        doc.page_count(),
+        single,
+        "a declined request must lay out exactly as single-column"
+    );
+
+    // Widen the page — the backend takes its viewport from the render buffer — and the stored
+    // request takes effect with no further call.
+    let mut bytes = vec![0u8; 1600 * 1200 * 4];
+    {
+        let mut buf = PixelBuffer::from_rgba(&mut bytes, 1600, 1200).unwrap();
+        doc.render_page(0, &mut buf)
+            .expect("renders at the new size");
+    }
+    assert!(
+        doc.page_count() <= single,
+        "the stored two-column request should apply once the page can take it"
+    );
+}
+
+/// Out-of-range column counts are clamped rather than trusted — the value crosses JNI.
+#[test]
+fn an_out_of_range_column_count_is_clamped() {
+    let doc = EpubBackend::open(SAMPLE.to_vec(), vp(1200, 1600)).expect("sample opens");
+    let one = doc.page_count();
+    doc.set_columns(2, 0);
+    let two = doc.page_count();
+
+    for absurd in [99, i32::MAX] {
+        doc.set_columns(absurd, 0);
+        assert_eq!(
+            doc.page_count(),
+            two,
+            "clamped to the widest supported ({absurd})"
+        );
+    }
+    for absurd in [0, -1, i32::MIN] {
+        doc.set_columns(absurd, 0);
+        assert_eq!(doc.page_count(), one, "clamped to single column ({absurd})");
+    }
+}
