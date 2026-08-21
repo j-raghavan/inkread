@@ -158,6 +158,44 @@ pub fn luminance_over_white(px: &[u8]) -> u8 {
     (luma * a + 255.0 * (1.0 - a)).round().clamp(0.0, 255.0) as u8
 }
 
+/// Resample `img` to `dw x dh` grayscale, row-major, one byte per pixel.
+///
+/// Box-averaged: every destination pixel is the mean of the source pixels it covers. Layout never
+/// enlarges an image past its intrinsic size, so this is a downscale in practice — and averaging is
+/// what keeps a downscaled halftone or a fine line drawing from breaking up into aliasing artefacts
+/// on a 1-bit-ish panel, which point sampling would do. A degenerate target yields an empty buffer.
+#[must_use]
+pub fn scale_to_gray(img: &RgbaImage, dw: u32, dh: u32) -> Vec<u8> {
+    if dw == 0 || dh == 0 || img.width == 0 || img.height == 0 {
+        return Vec::new();
+    }
+    let mut out = vec![255u8; (dw as usize) * (dh as usize)];
+    for dy in 0..dh {
+        // The source rows this destination row covers, always at least one.
+        let y0 = (dy as u64 * img.height as u64 / dh as u64) as u32;
+        let y1 = (((dy + 1) as u64 * img.height as u64).div_ceil(dh as u64) as u32).max(y0 + 1);
+        for dx in 0..dw {
+            let x0 = (dx as u64 * img.width as u64 / dw as u64) as u32;
+            let x1 = (((dx + 1) as u64 * img.width as u64).div_ceil(dw as u64) as u32).max(x0 + 1);
+            let mut sum = 0u32;
+            let mut n = 0u32;
+            for sy in y0..y1.min(img.height) {
+                for sx in x0..x1.min(img.width) {
+                    let i = ((sy as usize * img.width as usize) + sx as usize) * 4;
+                    if let Some(px) = img.rgba.get(i..i + 4) {
+                        sum += u32::from(luminance_over_white(px));
+                        n += 1;
+                    }
+                }
+            }
+            if n > 0 {
+                out[dy as usize * dw as usize + dx as usize] = (sum / n) as u8;
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 #[path = "img_tests.rs"]
 mod tests;

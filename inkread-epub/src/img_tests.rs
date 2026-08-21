@@ -94,3 +94,63 @@ fn transparency_composites_over_white() {
     // Colour uses Rec. 601 luma: pure green is much lighter than pure blue.
     assert!(luminance_over_white(&[0, 255, 0, 255]) > luminance_over_white(&[0, 0, 255, 255]));
 }
+
+fn rgba(width: u32, height: u32, px: &[[u8; 4]]) -> RgbaImage {
+    RgbaImage {
+        width,
+        height,
+        rgba: px.iter().flatten().copied().collect(),
+    }
+}
+
+#[test]
+fn scaling_preserves_a_flat_tone_and_the_target_size() {
+    let img = rgba(4, 4, &[[100, 100, 100, 255]; 16]);
+    let out = scale_to_gray(&img, 2, 2);
+    assert_eq!(out.len(), 4);
+    assert!(out.iter().all(|&v| v == 100), "{out:?}");
+}
+
+/// Averaging rather than point sampling is the point: a checkerboard downscaled 2:1 must go grey,
+/// not pick one phase and alias.
+#[test]
+fn downscaling_averages_the_pixels_it_covers() {
+    let b = [0u8, 0, 0, 255];
+    let w = [255u8, 255, 255, 255];
+    let img = rgba(2, 2, &[b, w, w, b]);
+    let out = scale_to_gray(&img, 1, 1);
+    assert_eq!(out.len(), 1);
+    assert!(
+        (120..=135).contains(&out[0]),
+        "expected mid-grey, got {out:?}"
+    );
+}
+
+#[test]
+fn a_degenerate_target_or_source_yields_nothing_rather_than_panicking() {
+    let img = rgba(2, 1, &[[0, 0, 0, 255], [255, 255, 255, 255]]);
+    assert!(scale_to_gray(&img, 0, 4).is_empty());
+    assert!(scale_to_gray(&img, 4, 0).is_empty());
+    let empty = RgbaImage {
+        width: 0,
+        height: 0,
+        rgba: Vec::new(),
+    };
+    assert!(scale_to_gray(&empty, 4, 4).is_empty());
+    // A truncated pixel buffer must not index out of bounds.
+    let short = RgbaImage {
+        width: 4,
+        height: 4,
+        rgba: vec![0u8; 8],
+    };
+    assert_eq!(scale_to_gray(&short, 2, 2).len(), 4);
+}
+
+/// Scaling up is never asked for by layout, but must still be well defined.
+#[test]
+fn scaling_up_is_defined_and_sized_correctly() {
+    let img = rgba(1, 1, &[[10, 10, 10, 255]]);
+    let out = scale_to_gray(&img, 3, 2);
+    assert_eq!(out.len(), 6);
+    assert!(out.iter().all(|&v| v == 10), "{out:?}");
+}
