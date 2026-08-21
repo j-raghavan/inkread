@@ -503,6 +503,7 @@ class DailyActivity : Activity() {
         }
         val enabled = sources.map { it.enabled }.toBooleanArray()
         val removed = BooleanArray(sources.size)
+        val limits = sources.map { it.limit }.toIntArray()
 
         val list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         sources.forEachIndexed { i, s ->
@@ -526,6 +527,7 @@ class DailyActivity : Activity() {
             row.addView(cb)
             row.addView(info, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
                 .apply { marginStart = dim(8) })
+            row.addView(limitStepper(limits, i))
             row.addView(remove)
             list.addView(row)
             if (i < sources.size - 1) list.addView(blackRule(Ink.hair()))
@@ -535,11 +537,11 @@ class DailyActivity : Activity() {
             addView(list)
         }
         AlertDialog.Builder(this, R.style.InkDialog)
-            .setTitle("Sources — uncheck to mute")
+            .setTitle("Sources — uncheck to mute, ± sets articles per issue")
             .setView(scroll)
             .setPositiveButton("Save") { _, _ ->
                 val updated = sources.mapIndexedNotNull { i, s ->
-                    if (removed[i]) null else s.copy(enabled = enabled[i])
+                    if (removed[i]) null else s.copy(enabled = enabled[i], limit = limits[i])
                 }
                 daily.setSources(updated)
                 setContentView(buildView())
@@ -547,6 +549,42 @@ class DailyActivity : Activity() {
             .setNeutralButton("Add") { _, _ -> suggestedSourcesDialog() }
             .setNegativeButton("Cancel", null)
             .show()
+    }
+
+    /**
+     * The per-source article count (#193): a `- n +` stepper. A stepper rather than a text field
+     * because the range is small and this dialog is driven by finger on an e-ink panel, where a
+     * keyboard is slow to summon and each keystroke costs a refresh.
+     *
+     * Writes straight into [limits] so Save picks it up with the mutes and removals in one pass.
+     */
+    private fun limitStepper(limits: IntArray, i: Int): View {
+        lateinit var count: TextView
+        fun step(by: Int) {
+            limits[i] = DailyController.clampLimit(limits[i] + by)
+            count.text = limits[i].toString()
+        }
+        val box = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        fun button(label: String, by: Int) = TextView(this).apply {
+            text = label; setTextColor(ink); textSize = fs(17f); typeface = mono
+            setPadding(dim(10), dim(4), dim(10), dim(4))
+            isClickable = true
+            contentDescription = if (by > 0) "More articles" else "Fewer articles"
+            setOnClickListener { step(by) }
+        }
+        count = TextView(this).apply {
+            text = limits[i].toString()
+            setTextColor(ink); textSize = fs(13f); typeface = mono
+            gravity = Gravity.CENTER
+            minWidth = dim(26)
+        }
+        box.addView(button("−", -1))
+        box.addView(count)
+        box.addView(button("+", +1))
+        return box
     }
 
     private fun archiveDialog() {
