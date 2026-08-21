@@ -93,6 +93,9 @@ pub struct EpubPackage {
     pub chapters: Vec<Chapter>,
     /// The table of contents (EPUB 3 nav, falling back to EPUB 2 NCX — rbook resolves this).
     pub toc: Vec<NavPoint>,
+    /// Hrefs of the manifest's image resources, in manifest order (#187). Only the names are held;
+    /// the bytes come from [`Self::image_bytes`] on demand.
+    pub image_hrefs: Vec<String>,
     /// The book's declared block styling, merged from every `text/css` manifest resource in
     /// manifest order (#188). Pass it to [`parse_blocks_with`] when parsing a chapter.
     ///
@@ -102,6 +105,13 @@ pub struct EpubPackage {
     /// of a per-chapter copy on a large omnibus. A chapter's own `<style>` block still layers on
     /// top, per-chapter, inside [`parse_blocks_with`].
     pub stylesheet: Stylesheet,
+    /// The container bytes, retained so an illustration is extracted when it is actually drawn.
+    ///
+    /// Holding every image decoded would cost several times the file itself (RGBA8 is 4 bytes a
+    /// pixel, usually larger than the compressed original), and an illustrated book would pay all
+    /// of it at open — the cost profile #186 is about. The CBZ backend keeps its archive for
+    /// exactly this reason.
+    container: Vec<u8>,
 }
 
 impl EpubPackage {
@@ -113,6 +123,8 @@ impl EpubPackage {
         // so without this a windows-1251 Russian EPUB does not open at all. A conforming book comes
         // back from this untouched.
         let bytes = transcode::to_utf8(bytes);
+        // Kept for on-demand image extraction; rbook borrows its own copy for the parse.
+        let container = bytes.clone();
         let epub = Epub::read(Cursor::new(bytes)).map_err(|e| EpubError::Parse(e.to_string()))?;
 
         let meta = epub.metadata();
@@ -153,12 +165,22 @@ impl EpubPackage {
             }
         }
 
+        // Names only — reading every image here would pay an illustrated book's whole decode cost
+        // at open, for pages the reader may never reach.
+        let image_hrefs: Vec<String> = epub
+            .manifest()
+            .images()
+            .filter_map(|e| e.resource().key().value().map(str::to_string))
+            .collect();
+
         Ok(Self {
             title,
             author,
             chapters,
             toc,
+            image_hrefs,
             stylesheet,
+            container,
         })
     }
 
@@ -167,6 +189,49 @@ impl EpubPackage {
     pub fn chapter_count(&self) -> usize {
         self.chapters.len()
     }
+
+    /// The bytes of the image resource `src` refers to, or `None` when the book has no such
+    /// resource (a dangling `<img src>`, which is common enough in the wild to be routine).
+    ///
+    /// `src` is whatever the chapter's markup said, so it is resolved leniently: an exact archive
+    /// entry first, then by file name, which is how chapter hrefs are already matched to TOC
+    /// targets. Never panics on a malformed container — a book with a broken zip entry simply has
+    /// no image there (RR21-FR3).
+    #[must_use]
+    pub fn image_bytes(&self, src: &str) -> Option<Vec<u8>> {
+        let wanted = strip_fragment(src);
+        let mut zip = zip::ZipArchive::new(Cursor::new(&self.container)).ok()?;
+        let name = zip
+            .file_names()
+            .find(|n| *n == wanted)
+            .or_else(|| {
+                zip.file_names()
+                    .find(|n| basename(n) == basename(wanted) && !basename(wanted).is_empty())
+            })?
+            .to_string();
+        let mut entry = zip.by_name(&name).ok()?;
+        let mut out = Vec::with_capacity(usize::try_from(entry.size()).unwrap_or_default());
+        std::io::Read::read_to_end(&mut entry, &mut out).ok()?;
+        Some(out)
+    }
+
+    /// The intrinsic pixel size of the image `src` refers to, read from its header.
+    #[must_use]
+    pub fn image_size(&self, src: &str) -> Option<(u32, u32)> {
+        img::dimensions(&self.image_bytes(src)?)
+    }
+}
+
+/// The part of a path after the last `/` — archive entries and `<img src>` rarely agree on the
+/// directory prefix, and matching by file name is what the TOC path already does.
+fn basename(path: &str) -> &str {
+    path.rsplit('/').next().unwrap_or(path)
+}
+
+/// Drop a `#fragment` / `?query` suffix from a resource reference.
+fn strip_fragment(src: &str) -> &str {
+    let end = src.find(['#', '?']).unwrap_or(src.len());
+    &src[..end]
 }
 
 /// Recursively convert an rbook TOC entry into an owned [`NavPoint`].
@@ -399,6 +464,87 @@ mod tests {
         };
         assert_eq!(style.align, Some(layout::Align::Center));
         assert_eq!(style.bold, Some(false));
+    }
+
+    /// A book with a real PNG in its manifest, referenced from the chapter (#187).
+    fn illustrated_epub() -> Vec<u8> {
+        const ILLUS_OPF: &str = r#"<?xml version="1.0"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="id">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:identifier id="id">urn:uuid:illus</dc:identifier>
+    <dc:title>An Illustrated Book</dc:title>
+    <dc:language>en</dc:language>
+  </metadata>
+  <manifest>
+    <item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>
+    <item id="pic" href="images/plate.png" media-type="image/png"/>
+    <item id="c1" href="ch1.xhtml" media-type="application/xhtml+xml"/>
+    <item id="c2" href="ch2.xhtml" media-type="application/xhtml+xml"/>
+  </manifest>
+  <spine><itemref idref="c1"/><itemref idref="c2"/></spine>
+</package>"#;
+        let mut buf = Vec::new();
+        write_zip(
+            &mut buf,
+            &[
+                ("mimetype", b"application/epub+zip".to_vec()),
+                ("META-INF/container.xml", CONTAINER_XML.as_bytes().to_vec()),
+                ("OEBPS/content.opf", ILLUS_OPF.as_bytes().to_vec()),
+                ("OEBPS/nav.xhtml", NAV.as_bytes().to_vec()),
+                ("OEBPS/images/plate.png", test_png(4, 2)),
+                ("OEBPS/ch1.xhtml", CH1.as_bytes().to_vec()),
+                ("OEBPS/ch2.xhtml", CH2.as_bytes().to_vec()),
+            ],
+        );
+        buf
+    }
+
+    /// A real PNG of the given size, via the encoder rather than hand-written bytes.
+    pub(crate) fn test_png(w: u32, h: u32) -> Vec<u8> {
+        let mut out = Vec::new();
+        {
+            let mut enc = png::Encoder::new(&mut out, w, h);
+            enc.set_color(png::ColorType::Grayscale);
+            enc.set_depth(png::BitDepth::Eight);
+            let mut writer = enc.write_header().expect("header");
+            writer
+                .write_image_data(&vec![128u8; (w * h) as usize])
+                .expect("data");
+        }
+        out
+    }
+
+    /// #187: nothing downstream can draw an illustration the container never surfaces.
+    #[test]
+    fn a_manifest_image_is_listed_and_readable_by_href_or_file_name() {
+        let pkg = EpubPackage::open(illustrated_epub()).expect("valid epub opens");
+        assert_eq!(pkg.image_hrefs.len(), 1, "{:?}", pkg.image_hrefs);
+
+        // Whatever prefix the manifest recorded, the chapter's own `src` still resolves: exactly,
+        // by archive path, and by bare file name.
+        for src in [
+            pkg.image_hrefs[0].as_str(),
+            "OEBPS/images/plate.png",
+            "images/plate.png",
+            "plate.png",
+            "../images/plate.png",
+            "plate.png#anchor",
+        ] {
+            assert_eq!(pkg.image_size(src), Some((4, 2)), "src = {src}");
+        }
+    }
+
+    #[test]
+    fn a_dangling_image_reference_is_none_not_a_failure() {
+        let pkg = EpubPackage::open(illustrated_epub()).expect("valid epub opens");
+        for missing in ["nope.png", "", "images/", "#frag"] {
+            assert_eq!(pkg.image_bytes(missing), None, "src = {missing}");
+            assert_eq!(pkg.image_size(missing), None, "src = {missing}");
+        }
+        // A book with no images at all lists none and resolves nothing.
+        let plain = EpubPackage::open(sample_epub()).expect("valid epub opens");
+        assert!(plain.image_hrefs.is_empty());
+        assert_eq!(plain.image_bytes("plate.png"), None);
     }
 
     #[test]
