@@ -218,6 +218,9 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         override fun palmGuard(content: View) = this@ReaderActivity.palmGuard(content)
         override fun zoomIn() = zoomBy(ZOOM_STEP)
         override fun zoomOut() = zoomBy(1f / ZOOM_STEP)
+        override val magnifiable get() = this@ReaderActivity.magnifiable
+        override fun textLarger() = stepTextScale(+1)
+        override fun textSmaller() = stepTextScale(-1)
         override fun openSearch() = search.showSearchDialog()
         override fun openExport() = export.showExportDialog()
         override fun openDicts() = dict.showDictionariesDialog()
@@ -1654,13 +1657,45 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         }
     }
 
+    /**
+     * Step the reflow text size one preset (#212) — the reflowable counterpart of [zoomBy].
+     *
+     * Routed through the same `applyReflowScale` a pinch uses, so the button and the gesture cannot
+     * drift apart. At either end this is a no-op rather than a repagination that changes nothing;
+     * the toast still fires so a tap is never silent, which is the whole complaint behind #212.
+     */
+    private fun stepTextScale(by: Int) {
+        val cur = DisplayPrefs.nearestScaleIndex(displayPrefs.textScale)
+        val next = DisplayPrefs.steppedScaleIndex(displayPrefs.textScale, by)
+        if (next == cur) {
+            val pct = (DisplayPrefs.TEXT_SCALES[cur] * 100).toInt()
+            val end = if (by > 0) "largest" else "smallest"
+            Log.i(TAG, "text scale: at the $end preset ($pct%), no change")
+            Toast.makeText(this, "Text $pct% — already the $end", Toast.LENGTH_SHORT).show()
+            return
+        }
+        Log.i(
+            TAG,
+            "text scale: ${DisplayPrefs.TEXT_SCALES[cur]} → ${DisplayPrefs.TEXT_SCALES[next]}" +
+                " (index $cur → $next)",
+        )
+        adjust.applyReflowScale(next, announce = true)
+    }
+
     /** Multiply the zoom (clamped); snap back to fit at ~1. Used by the +/- buttons and pinch-end. */
     private fun zoomBy(factor: Float) {
-        if (!magnifiable) return // a reflowed view ignores zoom; don't strand the shell factor (#61)
+        if (!magnifiable) {
+            // The silent case behind #212: a fixed-layout control on a reflowed view. Logged rather
+            // than dropped, so "the button does nothing" is answerable from a logcat.
+            Log.i(TAG, "zoom ignored: this document is not magnifiable (reflowed view)")
+            return
+        }
         val next = (zoom * factor).coerceIn(1f, MAX_ZOOM_UI)
         if (zoom <= 1f && next > 1f) captureFitThumb() // grab the fit thumb before leaving fit
+        val from = zoom
         zoom = next
         if (zoom <= 1.01f) { zoom = 1f; panX = 0f; panY = 0f }
+        Log.i(TAG, "zoom: $from → $zoom" + if (from == zoom) " (at the limit)" else "")
         applyZoom()
     }
 
