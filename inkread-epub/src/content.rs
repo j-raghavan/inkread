@@ -63,6 +63,11 @@ struct Style {
     italic: bool,
 }
 
+/// Tags whose *contents* are code/data, never prose. Their text nodes must never reach a [`Block`]:
+/// html5ever keeps them in the tree, so without this a `<style>` inside `<body>` (legal in HTML5,
+/// and used by a fair number of EPUBs) renders its CSS source as a visible paragraph.
+const NON_CONTENT_TAGS: &[&str] = &["style", "script", "template", "head", "title"];
+
 /// Tags treated as inline emphasis/markup when encountered at block level (folded into the current
 /// anonymous paragraph rather than breaking it).
 const INLINE_TAGS: &[&str] = &[
@@ -142,6 +147,7 @@ fn walk_blocks(node: NodeRef<Node>, out: &mut Vec<Block>, pending: &mut Vec<Inli
                             });
                         }
                     }
+                    _ if NON_CONTENT_TAGS.contains(&name) => {}
                     _ if INLINE_TAGS.contains(&name) => {
                         // Inline emphasis at block level → fold into the anonymous paragraph.
                         collect_inlines_into(child, Style::default(), None, pending);
@@ -233,6 +239,7 @@ fn collect_inlines_into(
                             });
                         }
                     }
+                    _ if NON_CONTENT_TAGS.contains(&name) => {}
                     // span/code/sub/sup/… and any unknown inline wrapper: descend, keep style.
                     _ => collect_inlines_into(child, style, href, out),
                 }
@@ -431,6 +438,27 @@ mod tests {
         assert_eq!(b.len(), 2, "{b:?}");
         assert!(matches!(&b[0], Block::Paragraph { content } if run(content) == "first"));
         assert!(matches!(&b[1], Block::Paragraph { content } if run(content) == "second"));
+    }
+
+    #[test]
+    fn style_and_script_contents_never_become_visible_text() {
+        // html5ever keeps <style>/<script> in the body tree, so a transparent-container walk would
+        // emit their source as prose — CSS printed mid-chapter.
+        let b = parse_blocks(&body(
+            "<style>p { color: red }</style>\
+             <script>var x = 1;</script>\
+             <p>Real text.</p>",
+        ));
+        assert!(
+            matches!(&b[..], [Block::Paragraph { content }] if run(content) == "Real text."),
+            "{b:?}"
+        );
+        // Nested inside a paragraph, too.
+        let n = parse_blocks(&body("<p>Before<script>var y = 2;</script> after.</p>"));
+        let Block::Paragraph { content } = &n[0] else {
+            panic!()
+        };
+        assert_eq!(run(content), "Before after.");
     }
 
     #[test]
