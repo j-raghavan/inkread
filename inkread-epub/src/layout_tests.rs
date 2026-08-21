@@ -870,3 +870,123 @@ fn source_offsets_after_an_image_do_not_depend_on_it_resolving() {
         "an image occupies one character position either way"
     );
 }
+
+// ---------------------------------------------------------------------------------------------
+// #186 — stopping pagination once the requested page exists.
+// ---------------------------------------------------------------------------------------------
+
+/// A page short enough that the fixture below runs to many pages: 100px wide (20 chars a line at
+/// the 10px Mono metrics), 50px tall (5 lines a page).
+fn paged_opts() -> LayoutOpts {
+    LayoutOpts {
+        page_h: 50.0,
+        ..style_opts()
+    }
+}
+
+/// Enough prose to run to many pages at the tiny test metrics.
+fn long_book() -> Vec<Block> {
+    (0..60)
+        .map(|i| {
+            para(&format!(
+                "Paragraph {i} alpha bravo charlie delta echo foxtrot golf hotel"
+            ))
+        })
+        .collect()
+}
+
+/// The property the whole optimisation rests on: a partial pass is a *prefix* of the full one, not
+/// an approximation. A page break depends only on what precedes it, so stopping early cannot move
+/// an earlier boundary — if it could, a resumed reading position would land on a different page
+/// than the one the pagination index counted.
+#[test]
+fn a_partial_pagination_is_a_prefix_of_the_full_one() {
+    let opts = paged_opts();
+    let blocks = long_book();
+    let (full, complete) = paginate_upto(&blocks, &opts, &Mono, &NoHyphen, &NoImages, usize::MAX);
+    assert!(complete, "an unbounded pass is always complete");
+    assert!(
+        full.len() > 5,
+        "need a multi-page fixture, got {}",
+        full.len()
+    );
+
+    for want in 1..=5 {
+        let (partial, complete) = paginate_upto(&blocks, &opts, &Mono, &NoHyphen, &NoImages, want);
+        assert!(
+            !complete,
+            "{want} pages should not exhaust a {}-page book",
+            full.len()
+        );
+        assert!(partial.len() >= want, "asked {want}, got {}", partial.len());
+        for (i, page) in partial.iter().enumerate().take(want) {
+            assert_eq!(page, &full[i], "page {i} differs when stopping at {want}");
+        }
+    }
+}
+
+#[test]
+fn asking_for_more_pages_than_exist_returns_them_all_and_reports_complete() {
+    let opts = paged_opts();
+    let blocks = long_book();
+    let full = paginate_with_images(&blocks, &opts, &Mono, &NoHyphen, &NoImages);
+    let (all, complete) = paginate_upto(&blocks, &opts, &Mono, &NoHyphen, &NoImages, 10_000);
+    assert!(complete);
+    assert_eq!(all, full, "an over-large bound must not change the result");
+}
+
+/// The point of the change: laying out one page must not walk the whole chapter.
+#[test]
+fn stopping_early_does_less_work_than_a_full_pass() {
+    use std::cell::Cell;
+    struct Counting<'a>(&'a Cell<usize>);
+    impl Metrics for Counting<'_> {
+        fn advance(&self, text: &str, size_px: f32, _b: bool, _i: bool) -> f32 {
+            self.0.set(self.0.get() + 1);
+            text.chars().count() as f32 * size_px * 0.5
+        }
+    }
+    let opts = paged_opts();
+    let blocks = long_book();
+
+    let full_calls = Cell::new(0);
+    let _ = paginate_upto(
+        &blocks,
+        &opts,
+        &Counting(&full_calls),
+        &NoHyphen,
+        &NoImages,
+        usize::MAX,
+    );
+
+    let one_calls = Cell::new(0);
+    let (pages, complete) = paginate_upto(
+        &blocks,
+        &opts,
+        &Counting(&one_calls),
+        &NoHyphen,
+        &NoImages,
+        1,
+    );
+
+    assert!(!complete);
+    assert!(!pages.is_empty(), "one page must still be produced");
+    assert!(
+        one_calls.get() * 4 < full_calls.get(),
+        "laying out one page took {} measurements vs {} for the whole chapter — not a saving",
+        one_calls.get(),
+        full_calls.get()
+    );
+}
+
+#[test]
+fn a_zero_bound_lays_nothing_out_and_an_empty_book_is_complete() {
+    let opts = paged_opts();
+    let (pages, complete) = paginate_upto(&long_book(), &opts, &Mono, &NoHyphen, &NoImages, 0);
+    assert!(pages.is_empty(), "a zero bound must lay out nothing");
+    assert!(!complete);
+
+    let (pages, complete) = paginate_upto(&[], &opts, &Mono, &NoHyphen, &NoImages, 5);
+    assert!(pages.is_empty());
+    assert!(complete, "there was nothing left unlaid");
+}
