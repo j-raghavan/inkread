@@ -847,6 +847,20 @@ impl ReaderSession {
         }
     }
 
+    /// Set the reflow column count (1 or 2; #194); repaginates EPUB preserving the chapter.
+    /// `false` for a fixed-layout PDF. Re-render after.
+    pub fn set_columns(&mut self, columns: i32) -> bool {
+        match self.document.set_columns(columns, self.page) {
+            Some(new_page) => {
+                self.page = new_page.min(self.page_count().saturating_sub(1));
+                self.invalidate_render_cache(); // repagination changes what each page index renders
+                self.load_ink_for_current_page();
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Set the reflow alignment (`0=Left,1=Justify,2=Center,3=Right`; RR4); repaginates EPUB
     /// preserving the chapter. `false` for a fixed-layout PDF. Re-render after.
     pub fn set_alignment(&mut self, align_code: i32) -> bool {

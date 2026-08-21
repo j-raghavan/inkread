@@ -63,6 +63,8 @@ struct LayoutRequest {
     scale: f32,
     line_spacing: f32,
     align: Align,
+    /// Text columns per page (#194).
+    columns: u8,
     /// The bundled reading face. Not part of [`LayoutOpts`], but a different face means different
     /// metrics, so it belongs in the staleness key.
     font_id: usize,
@@ -163,6 +165,8 @@ pub struct EpubBackend {
     line_spacing: Cell<f32>,
     /// Text alignment (RR4 — default Left, matching every other reflow default). Drives repagination.
     align: Cell<Align>,
+    /// Text columns per page (#194 — default 1). Drives repagination.
+    columns: Cell<u8>,
     /// The page size to lay out for; updated by the render path when the buffer changes.
     viewport: Cell<(u32, u32)>,
     /// The current pagination index, or `None` before the first one is needed. Laying out lazily
@@ -234,6 +238,7 @@ impl EpubBackend {
             scale: Cell::new(1.0),
             line_spacing: Cell::new(DEFAULT_LINE_SPACING),
             align: Cell::new(Align::default()),
+            columns: Cell::new(1),
             viewport: Cell::new((viewport.width, viewport.height)),
             // Deferred: the first read paginates, so the saved typography applied right after open
             // is folded into that single pass rather than triggering one pass per setting.
@@ -270,6 +275,7 @@ impl EpubBackend {
             scale: Cell::new(1.0),
             line_spacing: Cell::new(DEFAULT_LINE_SPACING),
             align: Cell::new(Align::default()),
+            columns: Cell::new(1),
             viewport: Cell::new((viewport.width, viewport.height)),
             laid: RefCell::new(None),
             chapter_pages: RefCell::new(Vec::new()),
@@ -427,6 +433,7 @@ impl EpubBackend {
             scale: self.scale.get(),
             line_spacing: self.line_spacing.get(),
             align: self.align.get(),
+            columns: self.columns.get(),
             font_id: self.font_id.get(),
         }
     }
@@ -437,6 +444,7 @@ impl EpubBackend {
         let mut opts = LayoutOpts::new(w as f32, h as f32, BASE_FONT_PX * request.scale);
         opts.line_spacing = request.line_spacing;
         opts.align = request.align;
+        opts.columns = request.columns;
         opts
     }
 
@@ -718,6 +726,14 @@ impl Document for EpubBackend {
 
     fn set_alignment(&self, align_code: i32, current_page: usize) -> Option<usize> {
         self.align.set(Align::from_code(align_code));
+        self.repaginate_keeping_chapter(current_page)
+    }
+
+    fn set_columns(&self, columns: i32, current_page: usize) -> Option<usize> {
+        // Stored as asked, clamped to what the engine models. Whether two columns are actually used
+        // is the layout's call — a page too narrow for a readable measure declines them — so the
+        // request survives a font-size change that later makes them viable.
+        self.columns.set(columns.clamp(1, 2) as u8);
         self.repaginate_keeping_chapter(current_page)
     }
 
