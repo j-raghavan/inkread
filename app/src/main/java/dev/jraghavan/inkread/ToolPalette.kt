@@ -185,23 +185,71 @@ class ToolPalette(
                     val dx = e.rawX - downX; val dy = e.rawY - downY
                     if (!moved && kotlin.math.hypot(dx, dy) > touchSlop) moved = true
                     if (moved) {
-                        // Base anchor = END | CENTER_VERTICAL: X only moves left (≤0), Y from centre.
-                        val xMin = -(host.width - container.width).toFloat().coerceAtLeast(0f)
-                        val yHalf = ((host.height - container.height) / 2f).coerceAtLeast(0f)
-                        container.translationX = (startTx + dx).coerceIn(xMin, 0f)
-                        container.translationY = (startTy + dy).coerceIn(-yHalf, yHalf)
+                        container.translationX =
+                            clampX(startTx + dx, host.width, container.width)
+                        container.translationY =
+                            clampY(startTy + dy, host.height, container.height)
                     }
                     true
                 }
                 MotionEvent.ACTION_UP -> {
                     container.alpha = IDLE_ALPHA // fade back so it doesn't sit over the text
                     if (moved) { reattach(); onChrome() } // re-add forces an EPD refresh at the new spot
-                    else { expanded = !expanded; render(); reattach(); onChrome() }
+                    else { toggleExpanded() }
                     true
                 }
                 else -> false
             }
         }
+    }
+
+    /**
+     * Collapse or expand, keeping the grip under the finger and the pill on screen (#200).
+     *
+     * The pill is anchored `CENTER_VERTICAL`, so changing its height moves it *both* ways from the
+     * centre. Two things went wrong because of that. The grip jumped away from the finger that had
+     * just tapped it; and — the reported bug — a puck dragged to the top or bottom edge expanded
+     * past the edge, taking the grip with it. With the grip off screen there was no way to collapse
+     * the pill again, so the only escape was to reopen the document.
+     *
+     * The height is not known until the new children are laid out, so the correction runs on the
+     * next layout pass rather than here.
+     */
+    private fun toggleExpanded() {
+        val heightBefore = container.height
+        expanded = !expanded
+        render()
+        // A one-shot layout listener, not `post`: `render` only requests a layout, and a posted
+        // runnable can run before the traversal that measures the new children — which would read
+        // the OLD height and correct by the wrong amount.
+        container.addOnLayoutChangeListener(
+            object : View.OnLayoutChangeListener {
+                override fun onLayoutChange(
+                    v: View,
+                    left: Int,
+                    top: Int,
+                    right: Int,
+                    bottom: Int,
+                    oldLeft: Int,
+                    oldTop: Int,
+                    oldRight: Int,
+                    oldBottom: Int,
+                ) {
+                    v.removeOnLayoutChangeListener(this)
+                    val height = bottom - top
+                    container.translationY =
+                        clampY(
+                            anchorY(container.translationY, heightBefore, height),
+                            host.height,
+                            height,
+                        )
+                    container.translationX =
+                        clampX(container.translationX, host.width, right - left)
+                    reattach()
+                    onChrome()
+                }
+            },
+        )
     }
 
     private fun iconButton(tool: Tool): ImageView = ImageView(activity).apply {
@@ -250,8 +298,40 @@ class ToolPalette(
         if (expanded) { expanded = false; render() }
     }
 
-    private companion object {
+    internal companion object {
         /** Resting opacity of the docked puck — translucent so the text behind it stays readable. */
         const val IDLE_ALPHA = 0.55f
+
+        /**
+         * Clamp the horizontal offset so the pill stays inside the host. The base anchor is
+         * `END`, so the pill only ever moves left: the offset is negative, bounded by how much
+         * wider the host is than the pill.
+         */
+        fun clampX(tx: Float, hostWidth: Int, viewWidth: Int): Float {
+            val min = -(hostWidth - viewWidth).toFloat().coerceAtLeast(0f)
+            return tx.coerceIn(min, 0f)
+        }
+
+        /**
+         * Clamp the vertical offset so the pill stays inside the host. The base anchor is
+         * `CENTER_VERTICAL`, so the offset runs symmetrically about the centre and is bounded by
+         * half the slack. A pill taller than the host has no slack at all and stays centred, which
+         * is the least-bad answer: some of it is off screen whatever we do.
+         */
+        fun clampY(ty: Float, hostHeight: Int, viewHeight: Int): Float {
+            val half = ((hostHeight - viewHeight) / 2f).coerceAtLeast(0f)
+            return ty.coerceIn(-half, half)
+        }
+
+        /**
+         * The vertical offset that keeps the pill's **top** where it was when its height changes
+         * from `oldHeight` to `newHeight`.
+         *
+         * Under `CENTER_VERTICAL` the top sits at `(host - height) / 2 + ty`, so growing by `d`
+         * moves the top up by `d / 2` unless the offset compensates. The top is where the grip is,
+         * which is what the finger just tapped and what has to stay reachable.
+         */
+        fun anchorY(ty: Float, oldHeight: Int, newHeight: Int): Float =
+            ty + (newHeight - oldHeight) / 2f
     }
 }
