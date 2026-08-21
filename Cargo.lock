@@ -665,6 +665,8 @@ dependencies = [
  "ego-tree",
  "encoding_rs",
  "hyphenation",
+ "jpeg-decoder",
+ "png 0.17.16",
  "rbook",
  "scraper",
  "simplecss",

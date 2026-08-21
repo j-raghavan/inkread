@@ -18,6 +18,7 @@ use rbook::Epub;
 
 pub mod content;
 pub mod css;
+pub mod img;
 pub mod layout;
 pub mod measure;
 pub mod render;
