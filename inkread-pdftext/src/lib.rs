@@ -24,7 +24,7 @@
 //!   → group lines into **paragraphs** (vertical gap / first-line indent) → join end-of-line
 //!   **hyphenation** → classify **headings** (font-size outliers and short bold lines).
 
-use inkread_epub::{Block, Inline, TextRun};
+use inkread_epub::{Block, BlockStyle, Inline, TextRun};
 
 /// One positioned glyph — the reconstruction input. See the crate-level coordinate contract.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -628,9 +628,15 @@ fn text_block(text: &str, heading: Option<u8>) -> Block {
         italic: false,
         href: None,
     })];
+    // A PDF carries no stylesheet, so nothing is declared and the reader's own typography governs.
+    let style = BlockStyle::default();
     match heading {
-        Some(level) => Block::Heading { level, content },
-        None => Block::Paragraph { content },
+        Some(level) => Block::Heading {
+            level,
+            content,
+            style,
+        },
+        None => Block::Paragraph { content, style },
     }
 }
 
@@ -714,7 +720,7 @@ mod tests {
     /// Pull the plain text out of a block (heading or paragraph) for assertions.
     fn block_text(b: &Block) -> String {
         let content = match b {
-            Block::Heading { content, .. } | Block::Paragraph { content } => content,
+            Block::Heading { content, .. } | Block::Paragraph { content, .. } => content,
             _ => return String::new(),
         };
         content

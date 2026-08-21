@@ -285,7 +285,7 @@ fn layout_all(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use inkread_epub::{Inline, TextRun};
+    use inkread_epub::{BlockStyle, Inline, TextRun};
 
     // A heading flowed through the whole reflow pipeline (layout → render → page_chars) keeps its
     // words intact across font sizes — guards the device "regressio n" / "valu e" regression at the
@@ -300,6 +300,7 @@ mod tests {
                 italic: false,
                 href: None,
             })],
+            style: BlockStyle::default(),
         }];
         let view = ReflowView::new(vec![unit], 1404, 1872);
         for scale in [1.0_f32, 1.5, 2.0] {
