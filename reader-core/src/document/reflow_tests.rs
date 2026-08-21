@@ -10,6 +10,8 @@ const SAMPLE: &[u8] = include_bytes!("../../tests/fixtures/sample.epub");
 /// A book carrying #188's stylesheet: `h1 { text-align: center; font-weight: normal }`, a `.c`
 /// decorative paragraph, and `p { text-align: justify }` over ordinary prose.
 const STYLED: &[u8] = include_bytes!("../../tests/fixtures/styled.epub");
+/// A book with a 120x80 mid-grey PNG referenced from its chapter (#187).
+const ILLUSTRATED: &[u8] = include_bytes!("../../tests/fixtures/illustrated.epub");
 
 fn vp(w: u32, h: u32) -> Viewport {
     Viewport {
@@ -1046,14 +1048,81 @@ fn a_books_declared_styles_reach_the_laid_out_page() {
     );
 }
 
-/// The pagination cache key must move whenever line fitting changes, or a cache written before
-/// #188 would be replayed against the new layout (#163 did the same for v1 → v2).
+/// The pagination cache key must move whenever anything changes how much content fits on a page,
+/// or a cache written by an older build is replayed against a layout it does not describe and the
+/// reader lands on stale page boundaries. #163 bumped it to v2, #188 to v3, #187 to v4.
+///
+/// This is a tripwire, not a tautology: it fails until whoever changed line fitting bumps the key.
 #[test]
-fn honouring_the_stylesheet_bumped_the_pagination_cache_version() {
+fn the_pagination_cache_version_tracks_changes_to_line_fitting() {
     let opts = LayoutOpts::new(600.0, 800.0, 16.0);
     assert!(
-        layout_key(&opts, 0, 1).starts_with("v3|"),
+        layout_key(&opts, 0, 1).starts_with("v4|"),
         "{}",
         layout_key(&opts, 0, 1)
+    );
+}
+
+/// #187 end to end: an illustration has to survive the whole path — out of the container, through
+/// layout as a box with real height, and onto the rasterized page as pixels.
+#[test]
+fn an_illustration_is_laid_out_and_drawn_rather_than_labelled() {
+    let doc =
+        EpubBackend::open(ILLUSTRATED.to_vec(), vp(400, 600)).expect("illustrated epub opens");
+    doc.parse_chapter(0);
+
+    // The container surfaced the image, and its intrinsic size is readable.
+    assert_eq!(doc.images.hrefs().len(), 1, "{:?}", doc.images.hrefs());
+    assert_eq!(
+        ImageSizer::size(&doc, "images/plate.png"),
+        Some((120, 80)),
+        "intrinsic size not resolved"
+    );
+
+    // Layout placed a real box, not a line of text.
+    let opts = EpubBackend::opts_for(&doc.current_request());
+    let pages = doc.lay_out_chapter(0, &opts);
+    let placed = pages
+        .iter()
+        .flat_map(|p| &p.lines)
+        .find_map(|l| l.image.as_ref())
+        .expect("no image box was laid out");
+    assert_eq!(placed.width, 120, "a small plate must not be upscaled");
+    assert_eq!(placed.height, 80);
+
+    // …and no `[image]` placeholder text survives anywhere on the page.
+    // Runs are per word and long words may be soft-hyphenated, so join loosely and look for words.
+    let text: String = pages
+        .iter()
+        .flat_map(|p| &p.lines)
+        .flat_map(|l| &l.runs)
+        .map(|r| r.text.as_str())
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(
+        !text.contains("[image"),
+        "placeholder text remains: {text:?}"
+    );
+    assert!(
+        text.contains("before") && text.contains("after"),
+        "prose around the plate was lost: {text:?}"
+    );
+}
+
+/// The rendered page must actually carry the picture's grey, not just reserve space for it.
+#[test]
+fn a_rendered_illustrated_page_carries_the_images_pixels() {
+    let doc =
+        EpubBackend::open(ILLUSTRATED.to_vec(), vp(400, 600)).expect("illustrated epub opens");
+    let mut bytes = vec![0u8; 400 * 600 * 4];
+    let mut buf = PixelBuffer::from_rgba(&mut bytes, 400, 600).unwrap();
+    let greys = {
+        doc.render_page(0, &mut buf).expect("renders");
+        // The fixture's plate is a flat mid-grey; nothing else on the page draws that tone.
+        bytes.chunks_exact(4).filter(|px| px[0] == 90).count()
+    };
+    assert!(
+        greys > 5_000,
+        "expected the 120x80 plate's pixels, found {greys}"
     );
 }

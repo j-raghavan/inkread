@@ -34,3 +34,7 @@ unicode-linebreak = "0.1"
 # scraper's own cssparser/selectors stack: scraper keeps its SelectorList private, so specificity is
 # unreachable through it.
 simplecss = "0.2.2"
+# Raster decode for EPUB illustrations (#187). The same lean codec pair the CBZ page reader uses —
+# one decoder serves both paths (see `img.rs`), so this adds no codec that was not already shipping.
+jpeg-decoder = { workspace = true }
+png = { workspace = true }

@@ -275,76 +275,23 @@ fn crop_image(img: &DecodedImage, crop: NormRect) -> Option<DecodedImage> {
     Some(DecodedImage { rgba, w: cw, h: ch })
 }
 
-/// Decode a PNG or JPEG page image to RGBA8, sniffing the codec by magic. A non-image / unsupported
-/// payload is a typed error, never a panic (RR21-FR3).
+/// Decode a PNG or JPEG page image to RGBA8. The codecs live in `inkread_epub::img`, shared with
+/// the EPUB illustration path (#187), so there is one decoder rather than one per format backend.
+/// A non-image / unsupported payload is a typed error, never a panic (RR21-FR3).
 fn decode_image(raw: &[u8]) -> CoreResult<DecodedImage> {
-    if raw.starts_with(&[0x89, b'P', b'N', b'G']) {
-        decode_png(raw)
-    } else if raw.starts_with(&[0xFF, 0xD8]) {
-        decode_jpeg(raw)
-    } else {
-        Err(CoreError::UnsupportedFormat(
-            "cbz: page entry is not PNG or JPEG".into(),
-        ))
-    }
-}
-
-fn decode_png(raw: &[u8]) -> CoreResult<DecodedImage> {
-    let mut dec = png::Decoder::new(Cursor::new(raw));
-    // Expand palette/low-bit-depth to 8-bit channels and drop 16-bit down to 8, so the frame is one
-    // of Grayscale / GrayscaleAlpha / Rgb / Rgba at 8 bits — the cases we map to RGBA below.
-    dec.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
-    let mut reader = dec
-        .read_info()
-        .map_err(|e| CoreError::CorruptDocument(format!("cbz png: {e}")))?;
-    let mut buf = vec![0u8; reader.output_buffer_size()];
-    let info = reader
-        .next_frame(&mut buf)
-        .map_err(|e| CoreError::CorruptDocument(format!("cbz png frame: {e}")))?;
-    let (w, h) = (info.width, info.height);
-    let src = &buf[..info.buffer_size()];
-    let rgba = match info.color_type {
-        png::ColorType::Rgba => src.to_vec(),
-        png::ColorType::Rgb => expand(src, 3, |p| [p[0], p[1], p[2], 255]),
-        png::ColorType::GrayscaleAlpha => expand(src, 2, |p| [p[0], p[0], p[0], p[1]]),
-        png::ColorType::Grayscale => expand(src, 1, |p| [p[0], p[0], p[0], 255]),
-        png::ColorType::Indexed => {
-            return Err(CoreError::CorruptDocument(
-                "cbz png: indexed not expanded".into(),
-            ))
+    let img = inkread_epub::img::decode(raw).map_err(|e| match e {
+        inkread_epub::img::ImageError::Unsupported(m) => {
+            CoreError::UnsupportedFormat(format!("cbz: {m}"))
         }
-    };
-    Ok(DecodedImage { rgba, w, h })
-}
-
-fn decode_jpeg(raw: &[u8]) -> CoreResult<DecodedImage> {
-    let mut dec = jpeg_decoder::Decoder::new(Cursor::new(raw));
-    let pixels = dec
-        .decode()
-        .map_err(|e| CoreError::CorruptDocument(format!("cbz jpeg: {e}")))?;
-    let info = dec
-        .info()
-        .ok_or_else(|| CoreError::CorruptDocument("cbz jpeg: no image info".into()))?;
-    let (w, h) = (info.width as u32, info.height as u32);
-    let rgba = match info.pixel_format {
-        jpeg_decoder::PixelFormat::RGB24 => expand(&pixels, 3, |p| [p[0], p[1], p[2], 255]),
-        jpeg_decoder::PixelFormat::L8 => expand(&pixels, 1, |p| [p[0], p[0], p[0], 255]),
-        other => {
-            return Err(CoreError::UnsupportedFormat(format!(
-                "cbz jpeg: unsupported pixel format {other:?}"
-            )))
+        inkread_epub::img::ImageError::Corrupt(m) => {
+            CoreError::CorruptDocument(format!("cbz: {m}"))
         }
-    };
-    Ok(DecodedImage { rgba, w, h })
-}
-
-/// Map a tightly-packed `stride`-byte-per-pixel buffer to RGBA8 via `f`.
-fn expand(src: &[u8], stride: usize, f: impl Fn(&[u8]) -> [u8; 4]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(src.len() / stride * 4);
-    for p in src.chunks_exact(stride) {
-        out.extend_from_slice(&f(p));
-    }
-    out
+    })?;
+    Ok(DecodedImage {
+        rgba: img.rgba,
+        w: img.width,
+        h: img.height,
+    })
 }
 
 #[cfg(test)]

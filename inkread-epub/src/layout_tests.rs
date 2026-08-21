@@ -694,3 +694,179 @@ fn run_anchors_are_font_size_invariant() {
     };
     assert_eq!(narrow(10.0), narrow(20.0));
 }
+
+// ---------------------------------------------------------------------------------------------
+// #187 — illustrations laid out as boxes rather than `[image]` text.
+// ---------------------------------------------------------------------------------------------
+
+/// A sizer over a fixed table, so layout geometry is asserted without decoding anything.
+struct Sizes(&'static [(&'static str, u32, u32)]);
+
+impl ImageSizer for Sizes {
+    fn size(&self, src: &str) -> Option<(u32, u32)> {
+        self.0
+            .iter()
+            .find(|(s, _, _)| *s == src)
+            .map(|(_, w, h)| (*w, *h))
+    }
+}
+
+fn image_block(src: &str) -> Block {
+    Block::Image {
+        src: src.into(),
+        alt: "a plate".into(),
+    }
+}
+
+/// 200x200 content box, so fits are easy to read off.
+fn image_opts() -> LayoutOpts {
+    LayoutOpts {
+        page_w: 200.0,
+        page_h: 200.0,
+        margin: 0.0,
+        font_px: 10.0,
+        line_spacing: 1.0,
+        para_gap: 0.0,
+        align: Align::Left,
+    }
+}
+
+fn only_image(pages: &[Page]) -> &PlacedImage {
+    pages
+        .iter()
+        .flat_map(|p| &p.lines)
+        .find_map(|l| l.image.as_ref())
+        .expect("no image was laid out")
+}
+
+#[test]
+fn an_image_is_scaled_to_fit_and_centred() {
+    let opts = image_opts();
+    // Wider than the box: scaled by width, centred vertically-irrelevant, x = 0.
+    let wide = paginate_with_images(
+        &[image_block("w.png")],
+        &opts,
+        &Mono,
+        &NoHyphen,
+        &Sizes(&[("w.png", 400, 100)]),
+    );
+    let img = only_image(&wide);
+    assert_eq!((img.width, img.height), (200, 50), "aspect ratio not kept");
+    assert_eq!(img.x, 0, "a full-width image has no slack to centre in");
+
+    // Narrower than the box: centred, never enlarged.
+    let narrow = paginate_with_images(
+        &[image_block("n.png")],
+        &opts,
+        &Mono,
+        &NoHyphen,
+        &Sizes(&[("n.png", 50, 20)]),
+    );
+    let img = only_image(&narrow);
+    assert_eq!(
+        (img.width, img.height),
+        (50, 20),
+        "a small image must not be upscaled"
+    );
+    assert_eq!(img.x, 75, "expected (200 - 50) / 2");
+}
+
+/// A plate taller than the page has to shrink to fit one, or it could never be shown at all.
+#[test]
+fn an_oversized_image_is_capped_to_a_single_page() {
+    let opts = image_opts();
+    let pages = paginate_with_images(
+        &[image_block("tall.png")],
+        &opts,
+        &Mono,
+        &NoHyphen,
+        &Sizes(&[("tall.png", 100, 1000)]),
+    );
+    let img = only_image(&pages);
+    assert!(img.height <= 200, "taller than the content box: {img:?}");
+    assert_eq!((img.width, img.height), (20, 200), "scaled by height");
+    assert_eq!(pages.len(), 1);
+}
+
+/// The image has to occupy real vertical space, or pagination would overlap it with the prose
+/// after it — the whole point of a box rather than a text line.
+#[test]
+fn an_image_takes_its_height_from_the_page_and_pushes_prose_on() {
+    let opts = image_opts();
+    let blocks = vec![image_block("p.png"), para("after the plate")];
+    let pages = paginate_with_images(
+        &blocks,
+        &opts,
+        &Mono,
+        &NoHyphen,
+        &Sizes(&[("p.png", 200, 195)]),
+    );
+    // 195px image + its trailing gap leaves no room for a 10px line on a 200px page.
+    assert_eq!(pages.len(), 2, "{pages:#?}");
+    assert!(pages[0].lines.iter().any(|l| l.image.is_some()));
+    assert!(pages[1].lines.iter().any(|l| !l.runs.is_empty()));
+}
+
+/// An unresolvable image must still tell the reader something is missing.
+#[test]
+fn an_unresolvable_image_falls_back_to_the_named_placeholder() {
+    let opts = image_opts();
+    let pages = paginate_with_images(
+        &[image_block("gone.png")],
+        &opts,
+        &Mono,
+        &NoHyphen,
+        &Sizes(&[]),
+    );
+    assert!(
+        pages
+            .iter()
+            .flat_map(|p| &p.lines)
+            .all(|l| l.image.is_none()),
+        "nothing should be placed"
+    );
+    let text: String = pages
+        .iter()
+        .flat_map(|p| &p.lines)
+        .flat_map(|l| &l.runs)
+        .map(|r| r.text.as_str())
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(text.contains("a plate"), "alt text was dropped: {text:?}");
+
+    // A zero-dimension image is treated as unresolvable rather than dividing by zero.
+    let degenerate = paginate_with_images(
+        &[image_block("z.png")],
+        &opts,
+        &Mono,
+        &NoHyphen,
+        &Sizes(&[("z.png", 0, 10)]),
+    );
+    assert!(degenerate
+        .iter()
+        .flat_map(|p| &p.lines)
+        .all(|l| l.image.is_none()));
+}
+
+/// Offsets after an image must not depend on whether it resolved, or a reading position saved
+/// with images available would move when one later fails (ADR-INKREAD-0012).
+#[test]
+fn source_offsets_after_an_image_do_not_depend_on_it_resolving() {
+    let opts = image_opts();
+    let blocks = vec![image_block("p.png"), para("after")];
+    let offset = |sizer: &dyn ImageSizer| -> usize {
+        paginate_with_images(&blocks, &opts, &Mono, &NoHyphen, sizer)
+            .iter()
+            .flat_map(|p| &p.lines)
+            .flat_map(|l| &l.runs)
+            .find(|r| r.text == "after")
+            .expect("prose run")
+            .anchor
+            .char_offset
+    };
+    assert_eq!(
+        offset(&Sizes(&[("p.png", 40, 40)])),
+        offset(&Sizes(&[])),
+        "an image occupies one character position either way"
+    );
+}

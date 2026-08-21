@@ -235,6 +235,17 @@ impl GrayCanvas {
         }
     }
 
+    /// Write pixel `(x, y)` to `value` outright, clipping outside the canvas. Used for imagery,
+    /// which replaces the page rather than inking over it.
+    #[inline]
+    fn put(&mut self, x: i32, y: i32, value: u8) {
+        if x < 0 || y < 0 || x >= self.width as i32 || y >= self.height as i32 {
+            return;
+        }
+        let idx = y as usize * self.width as usize + x as usize;
+        self.pixels[idx] = value;
+    }
+
     /// Darken pixel `(x, y)` by `coverage` ∈ [0,1] (alpha-over black onto the current value).
     #[inline]
     fn blend(&mut self, x: i32, y: i32, coverage: f32) {
@@ -248,11 +259,76 @@ impl GrayCanvas {
     }
 }
 
+/// Draw one laid-out illustration into `canvas`, decoded and resampled to the box layout reserved.
+///
+/// A picture that will not resolve or will not decode leaves its box blank rather than failing the
+/// page: a book with one broken image still reads (RR21-FR3).
+fn draw_image(
+    placed: &crate::layout::PlacedImage,
+    margin: f32,
+    top: f32,
+    images: &dyn ImageSource,
+    canvas: &mut GrayCanvas,
+) {
+    let Some(raw) = images.bytes(&placed.src) else {
+        return;
+    };
+    let Ok(decoded) = crate::img::decode(&raw) else {
+        return;
+    };
+    let gray = crate::img::scale_to_gray(&decoded, placed.width, placed.height);
+    if gray.is_empty() {
+        return;
+    }
+    let x0 = (margin.round() as i32) + placed.x;
+    let y0 = (margin + top).round() as i32;
+    for row in 0..placed.height {
+        for col in 0..placed.width {
+            let Some(&v) = gray.get(row as usize * placed.width as usize + col as usize) else {
+                continue;
+            };
+            canvas.put(x0 + col as i32, y0 + row as i32, v);
+        }
+    }
+}
+
 /// Rasterize a laid-out [`Page`] into `canvas` at the page's pixel size, offsetting content by
 /// `opts.margin`. The canvas should be `opts.page_w × opts.page_h`; out-of-bounds pixels are clipped.
 pub fn render_page(page: &Page, opts: &LayoutOpts, font: &AbFont, canvas: &mut GrayCanvas) {
+    render_page_with_images(page, opts, font, &NoImageBytes, canvas);
+}
+
+/// Supplies the encoded bytes of an image, so the renderer can draw it. Injected rather than owned:
+/// the render stage holds no resources, exactly as layout holds none (#187).
+pub trait ImageSource {
+    /// The encoded (PNG/JPEG) bytes for `src`, or `None` when it cannot be resolved.
+    fn bytes(&self, src: &str) -> Option<Vec<u8>>;
+}
+
+/// The no-images source: nothing resolves, so laid-out images are skipped.
+pub struct NoImageBytes;
+
+impl ImageSource for NoImageBytes {
+    fn bytes(&self, _src: &str) -> Option<Vec<u8>> {
+        None
+    }
+}
+
+/// As [`render_page`], with `images` resolving illustrations to their bytes so they are drawn
+/// rather than left blank (#187).
+pub fn render_page_with_images(
+    page: &Page,
+    opts: &LayoutOpts,
+    font: &AbFont,
+    images: &dyn ImageSource,
+    canvas: &mut GrayCanvas,
+) {
     let margin = opts.margin;
     for line in &page.lines {
+        if let Some(placed) = &line.image {
+            draw_image(placed, margin, line.top, images, canvas);
+            continue;
+        }
         if line.rule {
             // A hairline rule across the content width, vertically centred in the line slot.
             let y = (margin + line.top + line.height * 0.5).round() as i32;
@@ -640,6 +716,114 @@ mod tests {
             "bold heading inks more: {} vs {}",
             ink_count(&c_bold),
             ink_count(&c_plain)
+        );
+    }
+
+    /// #187 — an illustration reaches the canvas as pixels.
+    struct OneImage(Vec<u8>);
+
+    impl ImageSource for OneImage {
+        fn bytes(&self, src: &str) -> Option<Vec<u8>> {
+            (src == "plate.png").then(|| self.0.clone())
+        }
+    }
+
+    /// A solid mid-grey PNG of the given size.
+    fn grey_png(w: u32, h: u32, level: u8) -> Vec<u8> {
+        let mut out = Vec::new();
+        {
+            let mut enc = png::Encoder::new(&mut out, w, h);
+            enc.set_color(png::ColorType::Grayscale);
+            enc.set_depth(png::BitDepth::Eight);
+            let mut writer = enc.write_header().expect("header");
+            writer
+                .write_image_data(&vec![level; (w * h) as usize])
+                .expect("data");
+        }
+        out
+    }
+
+    struct FixedSize(u32, u32);
+
+    impl crate::layout::ImageSizer for FixedSize {
+        fn size(&self, _src: &str) -> Option<(u32, u32)> {
+            Some((self.0, self.1))
+        }
+    }
+
+    fn image_page(opts: &LayoutOpts, w: u32, h: u32) -> Page {
+        let blocks = [Block::Image {
+            src: "plate.png".into(),
+            alt: String::new(),
+        }];
+        crate::layout::paginate_with_images(
+            &blocks,
+            opts,
+            &crate::measure::CachedMetrics::new(&AbFont::default_font()),
+            &crate::layout::NoHyphen,
+            &FixedSize(w, h),
+        )
+        .remove(0)
+    }
+
+    #[test]
+    fn a_laid_out_image_is_drawn_onto_the_canvas() {
+        let opts = LayoutOpts::new(200.0, 200.0, 16.0);
+        let page = image_page(&opts, 40, 40);
+        let mut canvas = GrayCanvas::new(200, 200);
+        render_page_with_images(
+            &page,
+            &opts,
+            &AbFont::default_font(),
+            &OneImage(grey_png(40, 40, 100)),
+            &mut canvas,
+        );
+        let drawn = canvas.pixels.iter().filter(|&&p| p == 100).count();
+        assert!(drawn > 1_000, "expected a block of grey, got {drawn} px");
+    }
+
+    /// The same page rendered without a source must not fail — just leave the box empty.
+    #[test]
+    fn an_unresolvable_or_corrupt_image_leaves_the_page_blank_not_broken() {
+        let opts = LayoutOpts::new(200.0, 200.0, 16.0);
+        let page = image_page(&opts, 40, 40);
+        for source in [
+            Box::new(NoImageBytes) as Box<dyn ImageSource>,
+            Box::new(OneImage(b"not an image".to_vec())),
+            Box::new(OneImage(Vec::new())),
+        ] {
+            let mut canvas = GrayCanvas::new(200, 200);
+            render_page_with_images(
+                &page,
+                &opts,
+                &AbFont::default_font(),
+                source.as_ref(),
+                &mut canvas,
+            );
+            assert!(
+                canvas.pixels.iter().all(|&p| p == 255),
+                "nothing should have been drawn"
+            );
+        }
+    }
+
+    /// An image whose box runs past the canvas must clip, not panic or wrap.
+    #[test]
+    fn drawing_clips_at_the_canvas_edge() {
+        let opts = LayoutOpts::new(200.0, 200.0, 16.0);
+        let page = image_page(&opts, 400, 400);
+        let mut canvas = GrayCanvas::new(60, 60); // deliberately smaller than the page
+        render_page_with_images(
+            &page,
+            &opts,
+            &AbFont::default_font(),
+            &OneImage(grey_png(40, 40, 100)),
+            &mut canvas,
+        );
+        assert_eq!(
+            canvas.pixels.len(),
+            60 * 60,
+            "buffer must be untouched in size"
         );
     }
 }

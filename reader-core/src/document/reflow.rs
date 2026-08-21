@@ -11,11 +11,14 @@
 //! text) remain follow-ups.
 
 use std::cell::{Cell, Ref, RefCell};
+use std::collections::HashMap;
 
-use inkread_epub::layout::{paginate_with, Align, Hyphenator, LayoutOpts, Page};
+use inkread_epub::layout::{paginate_with_images, Align, Hyphenator, ImageSizer, LayoutOpts, Page};
 use inkread_epub::measure::{CachedHyphenator, CachedMetrics};
-use inkread_epub::render::{render_page as raster_page, AbFont, EnHyphenator, GrayCanvas};
-use inkread_epub::{parse_blocks_with, Block, EpubPackage, NavPoint, Stylesheet};
+use inkread_epub::render::{
+    render_page_with_images as raster_page, AbFont, EnHyphenator, GrayCanvas, ImageSource,
+};
+use inkread_epub::{parse_blocks_with, Block, EpubPackage, ImageStore, NavPoint, Stylesheet};
 
 use crate::document::text_select::{self, CharBox, NormRect, TextAnchor, TextSelection};
 use crate::document::{Document, DocumentMetadata, SearchMatch, TocEntry};
@@ -175,6 +178,28 @@ pub struct EpubBackend {
     /// The book's declared block styling, applied as each chapter is parsed (#188). A property of
     /// the book, not a setting, so it never invalidates a pagination the way typography does.
     stylesheet: Stylesheet,
+    /// The book's illustrations (#187), read from the container when one is laid out or drawn.
+    images: ImageStore,
+    /// Intrinsic sizes already looked up, since laying out a chapter asks for every image in it and
+    /// each miss costs a container read.
+    image_sizes: RefCell<HashMap<String, Option<(u32, u32)>>>,
+}
+
+impl ImageSizer for EpubBackend {
+    fn size(&self, src: &str) -> Option<(u32, u32)> {
+        if let Some(hit) = self.image_sizes.borrow().get(src) {
+            return *hit;
+        }
+        let size = self.images.size(src);
+        self.image_sizes.borrow_mut().insert(src.to_string(), size);
+        size
+    }
+}
+
+impl ImageSource for EpubBackend {
+    fn bytes(&self, src: &str) -> Option<Vec<u8>> {
+        self.images.bytes(src)
+    }
 }
 
 impl EpubBackend {
@@ -198,6 +223,8 @@ impl EpubBackend {
             chapters: RefCell::new(chapters),
             chapter_keys,
             stylesheet: pkg.stylesheet,
+            images: pkg.images,
+            image_sizes: RefCell::new(HashMap::new()),
             nav: pkg.toc,
             meta,
             font: RefCell::new(AbFont::default_font()),
@@ -229,6 +256,8 @@ impl EpubBackend {
             chapters: RefCell::new(chapters),
             chapter_keys,
             stylesheet: Stylesheet::default(),
+            images: ImageStore::default(),
+            image_sizes: RefCell::new(HashMap::new()),
             nav: Vec::new(),
             meta: DocumentMetadata {
                 title: Some("Synthetic".into()),
@@ -292,7 +321,7 @@ impl EpubBackend {
         let face = self.font.borrow();
         let font = CachedMetrics::new(&*face);
         let hyph = CachedHyphenator::new(&self.hyph);
-        let mut pages = paginate_with(blocks, opts, &font, &hyph);
+        let mut pages = paginate_with_images(blocks, opts, &font, &hyph, self);
         if pages.is_empty() {
             pages.push(Page::default()); // an empty chapter still occupies its one page
         }
@@ -390,6 +419,7 @@ impl EpubBackend {
                         &blocks,
                         &self.font.borrow(),
                         &self.hyph,
+                        self,
                         &opts,
                         progress.as_deref(),
                         cancellable,
@@ -569,7 +599,7 @@ impl Document for EpubBackend {
         let canvas = self
             .with_page(index, |page, opts| {
                 let mut canvas = GrayCanvas::new(w, h);
-                raster_page(page, opts, &self.font.borrow(), &mut canvas);
+                raster_page(page, opts, &self.font.borrow(), self, &mut canvas);
                 canvas
             })
             .ok_or(CoreError::PageOutOfRange {
@@ -746,8 +776,10 @@ pub(crate) fn reset_layout_passes() {
 ///   changes how much text fits on a line and therefore every page count in the cache.
 /// - `v2` → `v3`: the book's stylesheet is honoured (#188). A declared `text-indent: 0`, or a
 ///   centred block, drops the first-line indent, so lines fit differently than a `v2` pass assumed.
+/// - `v3` → `v4`: illustrations occupy a real box instead of one line of `[image]` text (#187),
+///   which changes the page count of every illustrated chapter.
 fn layout_key(opts: &LayoutOpts, font_id: usize, chapters: usize) -> String {
-    format!("v3|{:016x}|{font_id}|{chapters}", opts.layout_digest())
+    format!("v4|{:016x}|{font_id}|{chapters}", opts.layout_digest())
 }
 
 /// Paginate every chapter for `opts` and return how many pages each occupies.
@@ -758,10 +790,12 @@ fn layout_key(opts: &LayoutOpts, font_id: usize, chapters: usize) -> String {
 /// Progress is reported throughout. `cancellable` says whether `progress` is also allowed to stop
 /// the pass — a book being laid out for the first time has nothing to fall back to, so that one
 /// always runs to completion. `None` means the pass was abandoned part-way (#161).
+#[allow(clippy::too_many_arguments)]
 fn index_chapters(
     chapters: &[&[Block]],
     font: &AbFont,
     hyph: &dyn Hyphenator,
+    images: &dyn ImageSizer,
     opts: &LayoutOpts,
     progress: Option<&dyn PaginationProgress>,
     cancellable: bool,
@@ -780,7 +814,11 @@ fn index_chapters(
         if cancellable && progress.is_some_and(PaginationProgress::cancelled) {
             return None;
         }
-        counts.push(paginate_with(blocks, opts, &font, &hyph).len().max(1));
+        counts.push(
+            paginate_with_images(blocks, opts, &font, &hyph, images)
+                .len()
+                .max(1),
+        );
         if let Some(p) = progress {
             p.chapter_done(counts.len(), total);
         }
