@@ -236,13 +236,13 @@ pub fn paginate_with(
     let indent = opts.font_px * 1.2;
     for (block_index, block) in blocks.iter().enumerate() {
         match block {
-            Block::Heading { level, content } => {
+            Block::Heading { level, content, .. } => {
                 pager.gap_before(opts.font_px * 0.7);
                 let size = opts.font_px * heading_scale(*level);
                 pager.add_paragraph(content, size, 0.0, 0.0, true, block_index, &mut cursor, m);
                 pager.gap(opts.font_px * 0.5);
             }
-            Block::Paragraph { content } => {
+            Block::Paragraph { content, .. } => {
                 // First line indented, the rest flush left, no trailing gap — dense and book-like.
                 // The indent is the *only* thing marking where one paragraph ends and the next
                 // begins, since this typography deliberately omits the blank line between them; an
@@ -263,6 +263,7 @@ pub fn paginate_with(
                 ordered,
                 index,
                 content,
+                ..
             } => {
                 let marker = if *ordered {
                     format!("{index}.")
@@ -919,6 +920,7 @@ mod tests {
 
     use super::*;
     use crate::content::{parse_blocks, TextRun};
+    use crate::css::BlockStyle;
 
     /// Fixed-pitch metrics: every char advances `0.5 * size` (bold/italic ignored). Deterministic, so
     /// wrapping/pagination can be asserted exactly without a font.
@@ -937,6 +939,7 @@ mod tests {
                 italic: false,
                 href: None,
             })],
+            style: BlockStyle::default(),
         }
     }
 
@@ -1034,6 +1037,7 @@ mod tests {
                 italic: false,
                 href: None,
             })],
+            style: BlockStyle::default(),
         };
         let pages = paginate(&[item], &cjk_opts(), &Mono);
         let lines: Vec<&LayoutLine> = pages.iter().flat_map(|p| &p.lines).collect();
@@ -1149,6 +1153,7 @@ mod tests {
                     italic: false,
                     href: None,
                 })],
+                style: BlockStyle::default(),
             }],
             &opts,
             &Mono,
@@ -1171,6 +1176,7 @@ mod tests {
                     italic: false,
                     href: None,
                 })],
+                style: BlockStyle::default(),
             }],
             &opts,
             &Mono,
@@ -1265,6 +1271,7 @@ mod tests {
                         italic: false,
                         href: None,
                     })],
+                    style: BlockStyle::default(),
                 },
                 para("after"),
             ],

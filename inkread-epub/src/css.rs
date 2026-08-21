@@ -39,6 +39,14 @@ impl BlockStyle {
         self.align.is_none() && self.indent.is_none() && self.bold.is_none()
     }
 
+    /// Return `self` with every property `higher` declares overridden — the inheritance step, used
+    /// to fold a container's declared style into the block nested inside it.
+    #[must_use]
+    pub fn overlaid_with(mut self, higher: &BlockStyle) -> BlockStyle {
+        self.overlay(higher);
+        self
+    }
+
     /// Overlay `higher` onto `self`; every property `higher` declares wins.
     fn overlay(&mut self, higher: &BlockStyle) {
         if higher.align.is_some() {

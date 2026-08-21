@@ -6,12 +6,17 @@
 //! drop presentational noise; a full CSS cascade is a Phase 3 concern (most EPUB body styling is
 //! carried by these semantic tags, which suffices for a first reflow).
 //!
+//! Blocks additionally carry the narrow set of *declared* styles the book asked for (#188) —
+//! see [`crate::css`]. That is a lookup, not a cascade: the simplified content model stands.
+//!
 //! The HTML is parsed with `scraper` (html5ever) into a transient tree that never escapes this
 //! function — only the owned `Vec<Block>` (all `String`/`Vec`, so `Send + Sync`) is returned.
 
 use ego_tree::NodeRef;
 use scraper::node::Node;
 use scraper::Html;
+
+use crate::css::{BlockStyle, Stylesheet};
 
 /// Inline-level content within a [`Block`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -41,14 +46,25 @@ pub struct TextRun {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Block {
     /// A heading (`<h1>`–`<h6>`); `level` is 1–6.
-    Heading { level: u8, content: Vec<Inline> },
+    Heading {
+        level: u8,
+        content: Vec<Inline>,
+        /// What the book's stylesheet declared for this block (#188).
+        style: BlockStyle,
+    },
     /// A paragraph (`<p>`, or an anonymous block of loose inline content).
-    Paragraph { content: Vec<Inline> },
+    Paragraph {
+        content: Vec<Inline>,
+        /// What the book's stylesheet declared for this block (#188).
+        style: BlockStyle,
+    },
     /// A list item flattened out of its `<ul>`/`<ol>`; `ordered` + 1-based `index` drive the marker.
     ListItem {
         ordered: bool,
         index: usize,
         content: Vec<Inline>,
+        /// What the book's stylesheet declared for this block (#188).
+        style: BlockStyle,
     },
     /// A standalone (block-level) image.
     Image { src: String, alt: String },
@@ -75,18 +91,71 @@ const INLINE_TAGS: &[&str] = &[
     "abbr", "time", "kbd", "samp", "var", "s", "del", "ins",
 ];
 
-/// Parse a chapter's XHTML into a linear [`Block`] sequence. Resolves `<body>` and walks it; loose
-/// inline content between block elements becomes anonymous paragraphs. Never panics.
+/// Parse a chapter's XHTML into a linear [`Block`] sequence, with no stylesheet — every block's
+/// declared style is empty. See [`parse_blocks_with`].
 #[must_use]
 pub fn parse_blocks(html: &str) -> Vec<Block> {
+    parse_blocks_with(html, &Stylesheet::default())
+}
+
+/// Parse a chapter's XHTML against the book's `sheet`. Resolves `<body>` and walks it; loose inline
+/// content between block elements becomes anonymous paragraphs. The chapter's own `<style>` blocks
+/// are layered over `sheet` (later source wins). Never panics.
+#[must_use]
+pub fn parse_blocks_with(html: &str, sheet: &Stylesheet) -> Vec<Block> {
     let doc = Html::parse_document(html);
     let root = doc.tree.root();
+
+    // A chapter may carry its own <style>; layer it over the book-wide sheet for this chapter only.
+    let mut in_document = String::new();
+    collect_style_text(root, &mut in_document);
+    let merged;
+    let sheet = if in_document.trim().is_empty() {
+        sheet
+    } else {
+        let mut s = sheet.clone();
+        s.add(&in_document);
+        merged = s;
+        &merged
+    };
+
     let start = find_body(root).unwrap_or(root);
     let mut out = Vec::new();
     let mut pending: Vec<Inline> = Vec::new();
-    walk_blocks(start, &mut out, &mut pending);
-    flush_paragraph(&mut out, &mut pending);
+    walk_blocks(start, &mut out, &mut pending, sheet, BlockStyle::default());
+    flush_paragraph(&mut out, &mut pending, BlockStyle::default());
     out
+}
+
+/// Concatenate the text of every `<style>` element in the document (head or body).
+fn collect_style_text(node: NodeRef<Node>, out: &mut String) {
+    for child in node.children() {
+        if let Node::Element(el) = child.value() {
+            if el.name() == "style" {
+                for t in child.children() {
+                    if let Node::Text(text) = t.value() {
+                        out.push_str(text);
+                        out.push('\n');
+                    }
+                }
+                continue;
+            }
+        }
+        collect_style_text(child, out);
+    }
+}
+
+/// Resolve an element's declared style against `sheet`, folding it over what it inherits from its
+/// containers. All three properties in [`BlockStyle`] are inherited ones in CSS, and books routinely
+/// declare them on a wrapping `<div>` rather than on each block inside it.
+fn declared(el: &scraper::node::Element, sheet: &Stylesheet, inherited: BlockStyle) -> BlockStyle {
+    let style_attr = el.attr("style");
+    // Fast path for the overwhelmingly common block: no book CSS and no inline style to apply.
+    if sheet.is_empty() && style_attr.is_none() {
+        return inherited;
+    }
+    let own = sheet.resolve(el.name(), el.attr("class"), style_attr);
+    inherited.overlaid_with(&own)
 }
 
 /// Depth-first search for the `<body>` element.
@@ -105,8 +174,15 @@ fn find_body<'a>(node: NodeRef<'a, Node>) -> Option<NodeRef<'a, Node>> {
 }
 
 /// Walk block-level structure under `node`, emitting [`Block`]s into `out`. Loose inline content
-/// accumulates in `pending` and is flushed as a paragraph when a block boundary is hit.
-fn walk_blocks(node: NodeRef<Node>, out: &mut Vec<Block>, pending: &mut Vec<Inline>) {
+/// accumulates in `pending` and is flushed as a paragraph when a block boundary is hit. `inherited`
+/// carries the declared style of the enclosing containers down to the blocks nested inside them.
+fn walk_blocks(
+    node: NodeRef<Node>,
+    out: &mut Vec<Block>,
+    pending: &mut Vec<Inline>,
+    sheet: &Stylesheet,
+    inherited: BlockStyle,
+) {
     for child in node.children() {
         match child.value() {
             Node::Text(t) => push_text(pending, t, Style::default(), None),
@@ -114,32 +190,45 @@ fn walk_blocks(node: NodeRef<Node>, out: &mut Vec<Block>, pending: &mut Vec<Inli
                 let name = el.name();
                 match name {
                     "p" => {
-                        flush_paragraph(out, pending);
+                        flush_paragraph(out, pending, inherited);
                         let content = collect_inlines(child);
                         if !is_blank(&content) {
-                            out.push(Block::Paragraph { content });
+                            out.push(Block::Paragraph {
+                                content,
+                                style: declared(el, sheet, inherited),
+                            });
                         }
                     }
                     "h1" | "h2" | "h3" | "h4" | "h5" | "h6" => {
-                        flush_paragraph(out, pending);
+                        flush_paragraph(out, pending, inherited);
                         let level = name.as_bytes()[1] - b'0';
                         let content = collect_inlines(child);
                         if !is_blank(&content) {
-                            out.push(Block::Heading { level, content });
+                            out.push(Block::Heading {
+                                level,
+                                content,
+                                style: declared(el, sheet, inherited),
+                            });
                         }
                     }
                     "br" => pending.push(Inline::Break),
                     "hr" => {
-                        flush_paragraph(out, pending);
+                        flush_paragraph(out, pending, inherited);
                         out.push(Block::Rule);
                     }
                     "ul" | "ol" => {
-                        flush_paragraph(out, pending);
-                        walk_list(child, name == "ol", out);
+                        flush_paragraph(out, pending, inherited);
+                        walk_list(
+                            child,
+                            name == "ol",
+                            out,
+                            sheet,
+                            declared(el, sheet, inherited),
+                        );
                     }
                     "img" => {
                         // Standalone (block-level) image.
-                        flush_paragraph(out, pending);
+                        flush_paragraph(out, pending, inherited);
                         if let Some(src) = el.attr("src") {
                             out.push(Block::Image {
                                 src: src.to_string(),
@@ -154,11 +243,12 @@ fn walk_blocks(node: NodeRef<Node>, out: &mut Vec<Block>, pending: &mut Vec<Inli
                     }
                     // Any other element (div/section/blockquote/figure/article/… or unknown) is a
                     // transparent block container: flush, then descend so its content forms its own
-                    // blocks rather than merging across the boundary.
+                    // blocks rather than merging across the boundary. Its declared style descends
+                    // with it — a `<div class="titlepage">` styles the blocks it wraps.
                     _ => {
-                        flush_paragraph(out, pending);
-                        walk_blocks(child, out, pending);
-                        flush_paragraph(out, pending);
+                        flush_paragraph(out, pending, inherited);
+                        walk_blocks(child, out, pending, sheet, declared(el, sheet, inherited));
+                        flush_paragraph(out, pending, declared(el, sheet, inherited));
                     }
                 }
             }
@@ -167,8 +257,15 @@ fn walk_blocks(node: NodeRef<Node>, out: &mut Vec<Block>, pending: &mut Vec<Inli
     }
 }
 
-/// Emit each `<li>` of a list as a flattened [`Block::ListItem`].
-fn walk_list(node: NodeRef<Node>, ordered: bool, out: &mut Vec<Block>) {
+/// Emit each `<li>` of a list as a flattened [`Block::ListItem`]; `inherited` is the list's own
+/// declared style, which its items inherit.
+fn walk_list(
+    node: NodeRef<Node>,
+    ordered: bool,
+    out: &mut Vec<Block>,
+    sheet: &Stylesheet,
+    inherited: BlockStyle,
+) {
     let mut index = 0usize;
     for child in node.children() {
         if let Node::Element(el) = child.value() {
@@ -180,6 +277,7 @@ fn walk_list(node: NodeRef<Node>, ordered: bool, out: &mut Vec<Block>) {
                         ordered,
                         index,
                         content,
+                        style: declared(el, sheet, inherited),
                     });
                 }
             }
@@ -271,7 +369,8 @@ fn push_text(out: &mut Vec<Inline>, raw: &str, style: Style, href: Option<&str>)
 }
 
 /// Flush the pending anonymous-block inlines as a paragraph (if non-blank), clearing the buffer.
-fn flush_paragraph(out: &mut Vec<Block>, pending: &mut Vec<Inline>) {
+/// An anonymous block has no element of its own, so it takes the enclosing container's `style`.
+fn flush_paragraph(out: &mut Vec<Block>, pending: &mut Vec<Inline>, style: BlockStyle) {
     if pending.is_empty() {
         return;
     }
@@ -279,6 +378,7 @@ fn flush_paragraph(out: &mut Vec<Block>, pending: &mut Vec<Inline>) {
     if !is_blank(pending) {
         out.push(Block::Paragraph {
             content: std::mem::take(pending),
+            style,
         });
     } else {
         pending.clear();
@@ -328,6 +428,7 @@ fn is_blank(inlines: &[Inline]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::layout::Align;
 
     fn body(inner: &str) -> String {
         format!("<html><body>{inner}</body></html>")
@@ -350,7 +451,7 @@ mod tests {
         assert_eq!(b.len(), 2);
         assert!(matches!(b[0], Block::Heading { level: 2, .. }));
         match &b[1] {
-            Block::Paragraph { content } => assert_eq!(run(content), "Hello world."),
+            Block::Paragraph { content, .. } => assert_eq!(run(content), "Hello world."),
             _ => panic!("expected paragraph"),
         }
     }
@@ -360,7 +461,7 @@ mod tests {
         let b = parse_blocks(&body(
             r#"<p>plain <b>bold</b> <i>it</i> <a href="x.html">link</a></p>"#,
         ));
-        let Block::Paragraph { content } = &b[0] else {
+        let Block::Paragraph { content, .. } = &b[0] else {
             panic!("paragraph")
         };
         // runs: "plain ", "bold", " ", "it", " ", "link"
@@ -379,7 +480,7 @@ mod tests {
     #[test]
     fn whitespace_is_collapsed_and_edges_trimmed() {
         let b = parse_blocks(&body("<p>  lots\n   of   space  </p>"));
-        let Block::Paragraph { content } = &b[0] else {
+        let Block::Paragraph { content, .. } = &b[0] else {
             panic!()
         };
         assert_eq!(run(content), "lots of space");
@@ -403,7 +504,7 @@ mod tests {
     #[test]
     fn br_becomes_break_and_hr_becomes_rule() {
         let b = parse_blocks(&body("<p>a<br/>b</p><hr/>"));
-        let Block::Paragraph { content } = &b[0] else {
+        let Block::Paragraph { content, .. } = &b[0] else {
             panic!()
         };
         assert!(content.iter().any(|i| matches!(i, Inline::Break)));
@@ -414,7 +515,7 @@ mod tests {
     fn loose_inline_text_becomes_anonymous_paragraph() {
         let b = parse_blocks(&body("Just loose text with <em>emphasis</em>."));
         assert_eq!(b.len(), 1);
-        let Block::Paragraph { content } = &b[0] else {
+        let Block::Paragraph { content, .. } = &b[0] else {
             panic!("expected anonymous paragraph")
         };
         assert_eq!(run(content), "Just loose text with emphasis.");
@@ -425,7 +526,7 @@ mod tests {
         let b = parse_blocks(&body(
             r#"<p>Tom &amp; Jerry</p><img src="a.png" alt="pic"/>"#,
         ));
-        let Block::Paragraph { content } = &b[0] else {
+        let Block::Paragraph { content, .. } = &b[0] else {
             panic!()
         };
         assert_eq!(run(content), "Tom & Jerry");
@@ -436,8 +537,8 @@ mod tests {
     fn divs_do_not_merge_across_block_boundaries() {
         let b = parse_blocks(&body("<div>first</div><div>second</div>"));
         assert_eq!(b.len(), 2, "{b:?}");
-        assert!(matches!(&b[0], Block::Paragraph { content } if run(content) == "first"));
-        assert!(matches!(&b[1], Block::Paragraph { content } if run(content) == "second"));
+        assert!(matches!(&b[0], Block::Paragraph { content, .. } if run(content) == "first"));
+        assert!(matches!(&b[1], Block::Paragraph { content, .. } if run(content) == "second"));
     }
 
     #[test]
@@ -450,15 +551,111 @@ mod tests {
              <p>Real text.</p>",
         ));
         assert!(
-            matches!(&b[..], [Block::Paragraph { content }] if run(content) == "Real text."),
+            matches!(&b[..], [Block::Paragraph { content, .. }] if run(content) == "Real text."),
             "{b:?}"
         );
         // Nested inside a paragraph, too.
         let n = parse_blocks(&body("<p>Before<script>var y = 2;</script> after.</p>"));
-        let Block::Paragraph { content } = &n[0] else {
+        let Block::Paragraph { content, .. } = &n[0] else {
             panic!()
         };
         assert_eq!(run(content), "Before after.");
+    }
+
+    /// #188: the reported failure — Project Gutenberg's *Pride and Prejudice* title page rendered
+    /// as left-aligned bold fragments because the book's stylesheet was never consulted.
+    #[test]
+    fn a_declared_style_reaches_the_block_it_applies_to() {
+        let sheet = Stylesheet::parse(
+            "h1 { text-align: center; font-weight: normal } .c { text-align: center; text-indent: 0% }",
+        );
+        let b = parse_blocks_with(
+            &body(
+                r#"<h1><i>PRIDE.<br/>and<br/>PREJUDICE</i></h1><p class="c">A decorative line.</p>"#,
+            ),
+            &sheet,
+        );
+        let Block::Heading { style, .. } = &b[0] else {
+            panic!("expected heading, got {b:?}")
+        };
+        assert_eq!(style.align, Some(Align::Center));
+        assert_eq!(style.bold, Some(false));
+
+        let Block::Paragraph { style, .. } = &b[1] else {
+            panic!()
+        };
+        assert_eq!(style.align, Some(Align::Center));
+        assert_eq!(style.indent, Some(false));
+    }
+
+    #[test]
+    fn a_container_declaration_is_inherited_by_the_blocks_it_wraps() {
+        // All three properties inherit in CSS, and books routinely style a wrapping <div> rather
+        // than each block inside it.
+        let sheet = Stylesheet::parse(".titlepage { text-align: center; text-indent: 0 }");
+        let b = parse_blocks_with(
+            &body(r#"<div class="titlepage"><p>Title</p>loose text<ul><li>item</li></ul></div>"#),
+            &sheet,
+        );
+        for block in &b {
+            let style = match block {
+                Block::Paragraph { style, .. }
+                | Block::Heading { style, .. }
+                | Block::ListItem { style, .. } => style,
+                other => panic!("unexpected {other:?}"),
+            };
+            assert_eq!(style.align, Some(Align::Center), "{block:?}");
+            assert_eq!(style.indent, Some(false), "{block:?}");
+        }
+        assert_eq!(b.len(), 3, "paragraph, anonymous block, list item: {b:?}");
+    }
+
+    #[test]
+    fn a_blocks_own_declaration_overrides_what_it_inherits() {
+        let sheet = Stylesheet::parse(".mid { text-align: center } p { text-align: right }");
+        let b = parse_blocks_with(&body(r#"<div class="mid"><p>x</p></div>"#), &sheet);
+        let Block::Paragraph { style, .. } = &b[0] else {
+            panic!()
+        };
+        assert_eq!(
+            style.align,
+            Some(Align::Right),
+            "own rule beats the inherited one"
+        );
+    }
+
+    #[test]
+    fn an_in_document_style_block_layers_over_the_book_stylesheet() {
+        let book = Stylesheet::parse("p { text-align: left }");
+        let b = parse_blocks_with(
+            "<html><head><style>p { text-align: center }</style></head><body><p>x</p></body></html>",
+            &book,
+        );
+        let Block::Paragraph { style, .. } = &b[0] else {
+            panic!()
+        };
+        assert_eq!(
+            style.align,
+            Some(Align::Center),
+            "the chapter's own <style> wins"
+        );
+    }
+
+    #[test]
+    fn without_a_stylesheet_every_block_declares_nothing() {
+        // parse_blocks stays the unstyled path; a book with no CSS must be byte-for-byte as before.
+        let b = parse_blocks(&body(
+            r#"<h1 class="c">T</h1><p style="text-align: center">x</p>"#,
+        ));
+        let Block::Heading { style, .. } = &b[0] else {
+            panic!()
+        };
+        assert!(style.is_empty(), "no sheet, no class lookup: {style:?}");
+        // …but an inline style= attribute is carried by the element itself, so it still applies.
+        let Block::Paragraph { style, .. } = &b[1] else {
+            panic!()
+        };
+        assert_eq!(style.align, Some(Align::Center));
     }
 
     #[test]
@@ -466,6 +663,8 @@ mod tests {
         assert!(parse_blocks("<html><body></body></html>").is_empty());
         // Bare text gets wrapped in an implicit body by the parser → one anonymous paragraph.
         let b = parse_blocks("just words");
-        assert!(matches!(&b[..], [Block::Paragraph { content }] if run(content) == "just words"));
+        assert!(
+            matches!(&b[..], [Block::Paragraph { content, .. }] if run(content) == "just words")
+        );
     }
 }
