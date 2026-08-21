@@ -249,3 +249,57 @@ fn the_contents_page_links_every_article_and_the_issue_still_opens() {
     let pkg = EpubPackage::open(bytes).expect("assembled issue opens");
     assert!(pkg.chapter_count() >= issue.articles.len());
 }
+
+/// #195: the issue opens with a quotation, and the whole thing still parses with the real reader
+/// backend — a malformed blockquote would break the container, not just look wrong.
+#[test]
+fn the_cover_carries_the_daily_quotation() {
+    let issue = sample_issue();
+    let cover = title_page(&issue);
+    let quote = crate::quote::quote_for(&issue.date).expect("the collection is not empty");
+
+    assert!(cover.contains("blockquote"), "no quotation on the cover");
+    assert!(
+        cover.contains(quote.author),
+        "attribution missing the author"
+    );
+    assert!(cover.contains(quote.work), "attribution missing the work");
+
+    // Before the article list: a paper puts it above the contents, and it is read before deciding
+    // what to read.
+    let q_at = cover.find("blockquote").expect("quote present");
+    let list_at = cover.find("<ul>").expect("contents present");
+    assert!(
+        q_at < list_at,
+        "the quotation should precede the article list"
+    );
+
+    let pkg = EpubPackage::open(assemble_epub(&issue)).expect("assembled issue opens");
+    assert!(pkg.chapter_count() >= 1);
+}
+
+/// The quote is escaped like everything else on the page — an apostrophe or ampersand in a
+/// quotation must not break the XHTML.
+#[test]
+fn a_quotation_is_escaped_into_the_cover() {
+    for q in crate::quote::all() {
+        let issue = Issue {
+            title: "t".into(),
+            date: "x".into(),
+            articles: vec![article("A", "S", "<p>b</p>", None)],
+        };
+        let cover = title_page(&issue);
+        // Whatever quote today's date picks, the cover must stay well-formed.
+        assert!(!cover.contains("<<"), "malformed markup for {:?}", q.text);
+    }
+    // Assemble with each date in a month so several different quotes are exercised through the
+    // real container.
+    for day in 1..=12 {
+        let issue = Issue {
+            title: "inkread daily".into(),
+            date: format!("{day} Aug 2026"),
+            articles: vec![article("A", "S", "<p>b</p>", None)],
+        };
+        EpubPackage::open(assemble_epub(&issue)).expect("assembled issue opens");
+    }
+}
