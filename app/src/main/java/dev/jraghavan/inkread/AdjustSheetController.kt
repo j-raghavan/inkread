@@ -329,6 +329,14 @@ class AdjustSheetController(private val host: Host) {
             host.diag { "DIAG alignment=$which" }
             applyReflow { NativeBridge.nativeSetAlignment(host.docHandle, which) }
         }))
+        // #194. The core declines two columns on a page too narrow for a readable measure, so this
+        // can read as "nothing happened" — the stored setting still stands and takes effect if the
+        // text is made smaller or the page turned landscape.
+        container.addView(settingRow("Columns", segmented(listOf("Single", "Two"), prefs.columns - 1) { which ->
+            prefs.columns = which + 1
+            host.diag { "DIAG columns=${prefs.columns}" }
+            applyReflow { NativeBridge.nativeSetColumns(host.docHandle, prefs.columns) }
+        }))
         return container
     }
 

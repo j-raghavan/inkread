@@ -89,6 +89,11 @@ class DisplayPrefs(private val context: Context) {
         get() = typography.getInt("alignment", 0).coerceIn(0, 3)
         set(i) = typography.edit().putInt("alignment", i).apply()
 
+    /** Text columns per page (#194): 1 or 2. Stored per reader, applied where the page can take it. */
+    var columns: Int
+        get() = typography.getInt("columns", 1).coerceIn(1, 2)
+        set(i) = typography.edit().putInt("columns", i.coerceIn(1, 2)).apply()
+
     /** The segmented index for the saved multiplier (nearest [LINE_SPACINGS] entry; default Medium). */
     fun lineSpacingIndex(): Int {
         val m = lineSpacingMult

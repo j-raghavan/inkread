@@ -885,17 +885,23 @@ impl ReaderSession {
     /// operation, repaginating once (RR4). The open path uses this instead of four separate setters
     /// so restoring a reader's saved settings costs a single layout pass (#161/#162). `false` for a
     /// fixed-layout document. Re-render after.
+    #[allow(clippy::too_many_arguments)]
     pub fn set_typography(
         &mut self,
         scale: f32,
         font_id: i32,
         line_spacing: f32,
         align_code: i32,
+        columns: i32,
     ) -> bool {
-        match self
-            .document
-            .set_typography(scale, font_id, line_spacing, align_code, self.page)
-        {
+        match self.document.set_typography(
+            scale,
+            font_id,
+            line_spacing,
+            align_code,
+            columns,
+            self.page,
+        ) {
             Some(new_page) => {
                 self.page = new_page.min(self.page_count().saturating_sub(1));
                 self.invalidate_render_cache(); // repagination changes what each page index renders
