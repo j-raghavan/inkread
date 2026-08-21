@@ -92,6 +92,7 @@ fn layout_digest_is_pinned_against_algorithm_drift() {
         line_spacing: 1.4,
         para_gap: 11.2,
         align: Align::Left,
+        columns: 1,
     };
     assert_eq!(opts.layout_digest(), 17_685_407_801_978_826_572);
 }
@@ -134,6 +135,7 @@ fn style_opts() -> LayoutOpts {
         line_spacing: 1.0,
         para_gap: 0.0,
         align: Align::Left,
+        columns: 1,
     }
 }
 
@@ -311,6 +313,7 @@ fn long_paragraph_wraps_to_multiple_lines() {
         line_spacing: 1.0,
         para_gap: 0.0,
         align: Align::Left,
+        columns: 1,
     };
     let words = "aaaa ".repeat(12); // 12 words of 4 chars → ~ wraps
     let pages = paginate(&[para(words.trim())], &opts, &Mono);
@@ -341,6 +344,7 @@ fn cjk_opts() -> LayoutOpts {
         line_spacing: 1.0,
         para_gap: 0.0,
         align: Align::Left,
+        columns: 1,
     }
 }
 
@@ -477,6 +481,7 @@ fn content_overflow_breaks_into_pages() {
         line_spacing: 1.0,
         para_gap: 0.0,
         align: Align::Left,
+        columns: 1,
     };
     let blocks: Vec<Block> = (0..7).map(|_| para("x")).collect();
     let pages = paginate(&blocks, &opts, &Mono);
@@ -495,6 +500,7 @@ fn heading_uses_a_larger_line_height() {
         line_spacing: 1.0,
         para_gap: 0.0,
         align: Align::Left,
+        columns: 1,
     };
     let pages = paginate(
         &[Block::Heading {
@@ -569,6 +575,7 @@ fn wide(font_px: f32) -> LayoutOpts {
         line_spacing: 1.0,
         para_gap: 0.0,
         align: Align::Left,
+        columns: 1,
     }
 }
 
@@ -645,6 +652,7 @@ fn narrow_para() -> LayoutOpts {
         line_spacing: 1.0,
         para_gap: 0.0,
         align: Align::Left,
+        columns: 1,
     }
 }
 
@@ -728,6 +736,7 @@ fn image_opts() -> LayoutOpts {
         line_spacing: 1.0,
         para_gap: 0.0,
         align: Align::Left,
+        columns: 1,
     }
 }
 
@@ -989,4 +998,182 @@ fn a_zero_bound_lays_nothing_out_and_an_empty_book_is_complete() {
     let (pages, complete) = paginate_upto(&[], &opts, &Mono, &NoHyphen, &NoImages, 5);
     assert!(pages.is_empty());
     assert!(complete, "there was nothing left unlaid");
+}
+
+// ---------------------------------------------------------------------------------------------
+// #194 — two-column layout.
+// ---------------------------------------------------------------------------------------------
+
+/// A page wide enough for two real columns at the test metrics: 400px wide, 50px tall, margin 0,
+/// 10px font. Two columns = (400 - 0 gutter) / 2 = 200px each — well over the 18em floor.
+fn two_col_opts() -> LayoutOpts {
+    LayoutOpts {
+        page_w: 400.0,
+        page_h: 50.0,
+        margin: 0.0,
+        font_px: 10.0,
+        line_spacing: 1.0,
+        para_gap: 0.0,
+        align: Align::Left,
+        columns: 2,
+    }
+}
+
+fn words_of(page: &Page) -> Vec<String> {
+    page.lines
+        .iter()
+        .flat_map(|l| &l.runs)
+        .map(|r| r.text.clone())
+        .collect()
+}
+
+/// The heart of it: text must fill the left column, then the right, then move to the next page.
+/// Getting this wrong reads as scrambled prose, not as a layout bug.
+#[test]
+fn text_fills_the_first_column_then_the_second() {
+    let opts = two_col_opts();
+    let blocks: Vec<Block> = (0..40).map(|i| para(&format!("w{i}"))).collect();
+    let single = paginate(&blocks, &LayoutOpts { columns: 1, ..opts }, &Mono);
+    let double = paginate(&blocks, &opts, &Mono);
+
+    // Same words, same order — only their positions differ.
+    let flat = |pages: &[Page]| -> Vec<String> { pages.iter().flat_map(words_of).collect() };
+    assert_eq!(flat(&single), flat(&double), "reading order changed");
+
+    // Two columns hold twice the text, so the page count roughly halves.
+    assert!(
+        double.len() < single.len(),
+        "two columns produced {} pages vs {} single",
+        double.len(),
+        single.len()
+    );
+
+    // On page 1 the left column's words all precede the right column's, and the right column starts
+    // at the second column's origin.
+    let first = &double[0];
+    let dx = opts.column_width() + opts.margin.max(0.0);
+    let left: Vec<&PlacedRun> = first
+        .lines
+        .iter()
+        .flat_map(|l| &l.runs)
+        .filter(|r| r.x < dx.max(1.0))
+        .collect();
+    let right: Vec<&PlacedRun> = first
+        .lines
+        .iter()
+        .flat_map(|l| &l.runs)
+        .filter(|r| r.x >= dx.max(1.0))
+        .collect();
+    assert!(
+        !left.is_empty() && !right.is_empty(),
+        "expected both columns filled"
+    );
+    let last_left = left.last().unwrap().anchor.char_offset;
+    let first_right = right.first().unwrap().anchor.char_offset;
+    assert!(
+        first_right > last_left,
+        "the right column must continue from the left, not precede it ({first_right} vs {last_left})"
+    );
+}
+
+/// Both columns start at the top of the page — that is what makes them columns rather than a
+/// continuation down the page.
+#[test]
+fn both_columns_start_at_the_top_of_the_page() {
+    let opts = two_col_opts();
+    let blocks: Vec<Block> = (0..40).map(|i| para(&format!("w{i}"))).collect();
+    let pages = paginate(&blocks, &opts, &Mono);
+    let dx = opts.column_width();
+    let top_of = |right: bool| -> f32 {
+        pages[0]
+            .lines
+            .iter()
+            .filter(|l| l.runs.iter().any(|r| (r.x >= dx) == right))
+            .map(|l| l.top)
+            .fold(f32::INFINITY, f32::min)
+    };
+    assert_eq!(top_of(false), top_of(true), "columns must share a top edge");
+}
+
+/// A page too narrow for a readable measure declines the request rather than honouring it badly.
+#[test]
+fn a_page_too_narrow_for_two_columns_stays_single() {
+    // 200px wide at a 10px font: each column would be 100px = 10em, under the 18em floor.
+    let narrow = LayoutOpts {
+        page_w: 200.0,
+        ..two_col_opts()
+    };
+    assert_eq!(narrow.effective_columns(), 1, "should have declined");
+    assert_eq!(
+        narrow.column_width(),
+        LayoutOpts {
+            columns: 1,
+            ..narrow
+        }
+        .column_width(),
+        "a declined request must lay out exactly as single-column"
+    );
+
+    // …and a page that IS wide enough honours it.
+    assert_eq!(two_col_opts().effective_columns(), 2);
+}
+
+/// A larger font makes a column narrower in ems, so the same page can stop supporting two columns.
+#[test]
+fn the_fallback_follows_the_font_size_not_just_the_page_width() {
+    let base = two_col_opts();
+    assert_eq!(base.effective_columns(), 2);
+    let huge = LayoutOpts {
+        font_px: 20.0,
+        ..base
+    };
+    assert_eq!(
+        huge.effective_columns(),
+        1,
+        "200px column is 10em at a 20px font"
+    );
+}
+
+/// The digest keys persisted paginations. Two columns must not be served a single-column index.
+#[test]
+fn the_column_count_changes_the_layout_digest() {
+    let one = two_col_opts_with(1);
+    let two = two_col_opts_with(2);
+    assert_ne!(one.layout_digest(), two.layout_digest());
+    // …but a single-column page digests exactly as it did before columns existed, so paginations
+    // already cached are not thrown away.
+    assert_eq!(
+        one.layout_digest(),
+        LayoutOpts { columns: 0, ..one }.layout_digest()
+    );
+}
+
+fn two_col_opts_with(columns: u8) -> LayoutOpts {
+    LayoutOpts {
+        columns,
+        ..two_col_opts()
+    }
+}
+
+/// A rule must not run across the gutter — that reads as a divider between columns.
+#[test]
+fn a_rule_spans_only_its_own_column() {
+    let opts = two_col_opts();
+    let mut blocks: Vec<Block> = (0..20).map(|i| para(&format!("w{i}"))).collect();
+    blocks.push(Block::Rule);
+    blocks.extend((20..40).map(|i| para(&format!("w{i}"))));
+    let pages = paginate(&blocks, &opts, &Mono);
+    let rules: Vec<f32> = pages
+        .iter()
+        .flat_map(|p| &p.lines)
+        .filter(|l| l.rule)
+        .map(|l| l.column_x)
+        .collect();
+    assert!(!rules.is_empty(), "the fixture should produce a rule");
+    for x in &rules {
+        assert!(
+            *x == 0.0 || (*x - (opts.column_width() + opts.margin)).abs() < 0.5,
+            "a rule sits at a column origin, got {x}"
+        );
+    }
 }

@@ -330,10 +330,12 @@ pub fn render_page_with_images(
             continue;
         }
         if line.rule {
-            // A hairline rule across the content width, vertically centred in the line slot.
+            // A hairline rule across the content width, vertically centred in the line slot. On a
+            // two-column page it spans only its own column (#194) — a rule running across the
+            // gutter would read as a divider between the columns rather than within one.
             let y = (margin + line.top + line.height * 0.5).round() as i32;
-            let x0 = margin.round() as i32;
-            let x1 = (opts.page_w - margin).round() as i32;
+            let x0 = (margin + line.column_x).round() as i32;
+            let x1 = (margin + line.column_x + opts.column_width()).round() as i32;
             for x in x0..x1 {
                 canvas.blend(x, y, 0.6);
             }
