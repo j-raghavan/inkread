@@ -358,7 +358,7 @@ pub fn paginate_upto(
     for (block_index, block) in blocks.iter().enumerate() {
         // Checked before the block, not after: once enough whole pages exist, laying out one more
         // block is work the caller has said it does not need.
-        if pager.finished_pages() >= max_pages {
+        if pager.finished_page_count() >= max_pages {
             complete = false;
             break;
         }
@@ -549,7 +549,7 @@ impl<'o> Pager<'o> {
     }
 
     /// How many *whole* pages have been broken off so far (the in-progress one is not counted).
-    fn finished_pages(&self) -> usize {
+    fn finished_page_count(&self) -> usize {
         self.pages.len()
     }
 

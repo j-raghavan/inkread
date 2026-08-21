@@ -308,19 +308,16 @@ impl EpubBackend {
         }
     }
 
-    /// Lay out chapter `index` on its own. Pagination is per chapter by construction — a chapter
-    /// always starts a fresh page and nothing carries across the boundary — so a chapter laid out
-    /// alone is identical to its slice of a whole-book pass. That is what makes materializing one
-    /// chapter at a time sound rather than merely convenient.
-    #[cfg(test)]
-    fn lay_out_chapter(&self, index: usize, opts: &LayoutOpts) -> Vec<Page> {
-        self.lay_out_chapter_upto(index, opts, usize::MAX).0
-    }
-
-    /// Lay chapter `index` out as far as `want` whole pages, returning `(pages, complete)` (#186).
+    /// Lay chapter `index` out as far as `want` whole pages, returning `(pages, complete)`.
+    ///
+    /// Pagination is per chapter by construction — a chapter always starts a fresh page and nothing
+    /// carries across the boundary — so a chapter laid out alone is identical to its slice of a
+    /// whole-book pass. That is what makes materializing one chapter at a time sound rather than
+    /// merely convenient, and it extends to a *partial* chapter: `want` pages are identical to the
+    /// first `want` pages of the full pass, because a page break depends only on what precedes it.
     ///
     /// Materializing a whole chapter to show one of its pages is the dominant cost of opening a
-    /// book, and a reader resuming at a chapter start needs exactly one page of it.
+    /// book, and a reader resuming at a chapter start needs exactly one page of it (#186).
     fn lay_out_chapter_upto(
         &self,
         index: usize,
@@ -364,15 +361,19 @@ impl EpubBackend {
         };
 
         // A cached chapter serves the page if it was laid out that far, or if we know there is no
-        // more to lay out.
+        // more to lay out. `f` runs while `chapter_pages` is borrowed, so it must not re-enter
+        // `with_page` — every caller passes a pure read of the page.
         let cached = {
             let cache = self.chapter_pages.borrow();
             match cache.iter().find(|c| c.chapter == chapter) {
                 Some(entry) if entry.pages.len() > offset => {
                     return entry.pages.get(offset).map(|p| f(p, &opts));
                 }
-                Some(entry) if entry.complete => return None, // past the end of a finished chapter
-                Some(_) => true,                              // materialized, but not this far yet
+                // Defence in depth: an in-range page always falls inside its chapter's counted
+                // length, so this is unreachable unless the pagination index and the layout have
+                // diverged. Cheap to keep, and it fails closed rather than re-paginating.
+                Some(entry) if entry.complete => return None,
+                Some(_) => true, // materialized, but not this far yet
                 None => false,
             }
         };

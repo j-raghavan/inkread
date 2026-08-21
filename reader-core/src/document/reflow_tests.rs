@@ -1030,7 +1030,7 @@ fn a_books_declared_styles_reach_the_laid_out_page() {
     // …and the layout stage declines to apply it: the prose stays flush left with its indent,
     // while the centred blocks above are inset.
     let opts = EpubBackend::opts_for(&doc.current_request());
-    let pages = doc.lay_out_chapter(0, &opts);
+    let pages = doc.lay_out_chapter_upto(0, &opts, usize::MAX).0;
     let first_x: Vec<f32> = pages[0]
         .lines
         .iter()
@@ -1081,7 +1081,7 @@ fn an_illustration_is_laid_out_and_drawn_rather_than_labelled() {
 
     // Layout placed a real box, not a line of text.
     let opts = EpubBackend::opts_for(&doc.current_request());
-    let pages = doc.lay_out_chapter(0, &opts);
+    let pages = doc.lay_out_chapter_upto(0, &opts, usize::MAX).0;
     let placed = pages
         .iter()
         .flat_map(|p| &p.lines)
@@ -1190,7 +1190,7 @@ fn a_page_from_a_partial_layout_matches_the_full_layout() {
 
     let lazy = one_long_chapter(400);
     let full = one_long_chapter(400);
-    let all = full.lay_out_chapter(0, &opts); // whole chapter in one pass
+    let all = full.lay_out_chapter_upto(0, &opts, usize::MAX).0; // whole chapter in one pass
 
     for page in [0usize, 1, 5] {
         let got = lazy

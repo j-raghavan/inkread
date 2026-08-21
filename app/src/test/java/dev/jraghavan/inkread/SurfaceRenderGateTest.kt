@@ -37,8 +37,8 @@ class SurfaceRenderGateTest {
         gate.onSurfaceCreated()
         assertTrue(gate.needsRender(1920, 2560, documentOpen = false))
         assertTrue(gate.needsRender(2560, 1920, documentOpen = true))
-        assertFalse(gate.needsRender(2560, 1920, documentOpen = true), "settled at the new size")
-        assertTrue(gate.needsRender(1920, 2560, documentOpen = true), "and back again")
+        assertFalse("settled at the new size", gate.needsRender(2560, 1920, documentOpen = true))
+        assertTrue("and back again", gate.needsRender(1920, 2560, documentOpen = true))
     }
 
     /**
@@ -55,10 +55,10 @@ class SurfaceRenderGateTest {
 
         gate.onSurfaceCreated() // back from elsewhere: new surface, same size
         assertTrue(
-            gate.needsRender(1920, 2560, documentOpen = true),
             "a new surface has nothing drawn on it yet",
+            gate.needsRender(1920, 2560, documentOpen = true),
         )
-        assertFalse(gate.needsRender(1920, 2560, documentOpen = true), "settled again")
+        assertFalse("settled again", gate.needsRender(1920, 2560, documentOpen = true))
     }
 
     /**
@@ -70,13 +70,7 @@ class SurfaceRenderGateTest {
         val gate = SurfaceRenderGate()
         gate.onSurfaceCreated()
         repeat(3) {
-            assertTrue(gate.needsRender(1920, 2560, documentOpen = false), "call $it")
+            assertTrue("call $it", gate.needsRender(1920, 2560, documentOpen = false))
         }
     }
 }
-
-private fun assertTrue(condition: Boolean, message: String) =
-    org.junit.Assert.assertTrue(message, condition)
-
-private fun assertFalse(condition: Boolean, message: String) =
-    org.junit.Assert.assertFalse(message, condition)

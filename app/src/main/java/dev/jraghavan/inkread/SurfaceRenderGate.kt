@@ -35,6 +35,16 @@ class SurfaceRenderGate {
      * Report whether a `surfaceChanged` at `width` x `height` needs to render, recording it when it
      * does. `documentOpen` is false before a document exists — nothing can be redundant then, since
      * the work that call does is the open itself.
+     *
+     * The generation read here is whatever is current when this runs, not the one in force when the
+     * callback was delivered: `surfaceChanged` hands its work to the engine thread, so a queued call
+     * can be overtaken by a destroy/recreate. That is harmless — the late call then records the new
+     * generation and renders, and the blit targets whichever surface is live — but it does mean a
+     * render is attributed to the generation it *lands* in, not the one it was queued from.
+     *
+     * The render is recorded before it happens, so a failure while rendering leaves the gate
+     * marked. The next callback arrives with `documentOpen = false` and renders anyway, which is
+     * why that is safe rather than merely unlikely.
      */
     fun needsRender(width: Int, height: Int, documentOpen: Boolean): Boolean {
         val redundant = documentOpen &&
