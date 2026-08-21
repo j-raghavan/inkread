@@ -1226,7 +1226,6 @@ dependencies = [
  "inkread-pdftext",
  "inkread-update",
  "jni",
- "jpeg-decoder",
  "pdfium-render",
  "png 0.17.16",
  "rusqlite",
