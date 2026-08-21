@@ -847,6 +847,26 @@ impl ReaderSession {
         }
     }
 
+    /// Columns the layout is actually using — see [`Document::effective_columns`] (#194).
+    #[must_use]
+    pub fn effective_columns(&self) -> i32 {
+        self.document.effective_columns()
+    }
+
+    /// Set the reflow column count (1 or 2; #194); repaginates EPUB preserving the chapter.
+    /// `false` for a fixed-layout PDF. Re-render after.
+    pub fn set_columns(&mut self, columns: i32) -> bool {
+        match self.document.set_columns(columns, self.page) {
+            Some(new_page) => {
+                self.page = new_page.min(self.page_count().saturating_sub(1));
+                self.invalidate_render_cache(); // repagination changes what each page index renders
+                self.load_ink_for_current_page();
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Set the reflow alignment (`0=Left,1=Justify,2=Center,3=Right`; RR4); repaginates EPUB
     /// preserving the chapter. `false` for a fixed-layout PDF. Re-render after.
     pub fn set_alignment(&mut self, align_code: i32) -> bool {
@@ -871,17 +891,23 @@ impl ReaderSession {
     /// operation, repaginating once (RR4). The open path uses this instead of four separate setters
     /// so restoring a reader's saved settings costs a single layout pass (#161/#162). `false` for a
     /// fixed-layout document. Re-render after.
+    #[allow(clippy::too_many_arguments)]
     pub fn set_typography(
         &mut self,
         scale: f32,
         font_id: i32,
         line_spacing: f32,
         align_code: i32,
+        columns: i32,
     ) -> bool {
-        match self
-            .document
-            .set_typography(scale, font_id, line_spacing, align_code, self.page)
-        {
+        match self.document.set_typography(
+            scale,
+            font_id,
+            line_spacing,
+            align_code,
+            columns,
+            self.page,
+        ) {
             Some(new_page) => {
                 self.page = new_page.min(self.page_count().saturating_sub(1));
                 self.invalidate_render_cache(); // repagination changes what each page index renders

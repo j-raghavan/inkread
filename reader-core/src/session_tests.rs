@@ -1437,6 +1437,7 @@ fn reading_typography() -> Typography {
         font_id: 0,
         line_spacing: 1.7,
         align_code: 1,
+        columns: 1,
     }
 }
 

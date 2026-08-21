@@ -802,7 +802,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             NativeBridge.nativeOpenDocumentWithStore(
                 path, capsBytes, viewW, viewH, DPI, dbPath, bookId,
                 displayPrefs.textScale, displayPrefs.font,
-                displayPrefs.lineSpacingMult, displayPrefs.alignment,
+                displayPrefs.lineSpacingMult, displayPrefs.alignment, displayPrefs.columns,
             )
         } catch (e: RuntimeException) {
             Log.e(TAG, "open failed: ${e.message}")
@@ -1852,6 +1852,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
                             displayPrefs.font,
                             displayPrefs.lineSpacingMult,
                             displayPrefs.alignment,
+                            displayPrefs.columns,
                         )
                     } catch (e: RuntimeException) {}
                 }

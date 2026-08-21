@@ -63,6 +63,8 @@ struct LayoutRequest {
     scale: f32,
     line_spacing: f32,
     align: Align,
+    /// Text columns per page (#194).
+    columns: u8,
     /// The bundled reading face. Not part of [`LayoutOpts`], but a different face means different
     /// metrics, so it belongs in the staleness key.
     font_id: usize,
@@ -163,6 +165,8 @@ pub struct EpubBackend {
     line_spacing: Cell<f32>,
     /// Text alignment (RR4 — default Left, matching every other reflow default). Drives repagination.
     align: Cell<Align>,
+    /// Text columns per page (#194 — default 1). Drives repagination.
+    columns: Cell<u8>,
     /// The page size to lay out for; updated by the render path when the buffer changes.
     viewport: Cell<(u32, u32)>,
     /// The current pagination index, or `None` before the first one is needed. Laying out lazily
@@ -234,6 +238,7 @@ impl EpubBackend {
             scale: Cell::new(1.0),
             line_spacing: Cell::new(DEFAULT_LINE_SPACING),
             align: Cell::new(Align::default()),
+            columns: Cell::new(1),
             viewport: Cell::new((viewport.width, viewport.height)),
             // Deferred: the first read paginates, so the saved typography applied right after open
             // is folded into that single pass rather than triggering one pass per setting.
@@ -270,6 +275,7 @@ impl EpubBackend {
             scale: Cell::new(1.0),
             line_spacing: Cell::new(DEFAULT_LINE_SPACING),
             align: Cell::new(Align::default()),
+            columns: Cell::new(1),
             viewport: Cell::new((viewport.width, viewport.height)),
             laid: RefCell::new(None),
             chapter_pages: RefCell::new(Vec::new()),
@@ -377,9 +383,15 @@ impl EpubBackend {
                     return entry.pages.get(offset).map(|p| f(p, &opts));
                 }
                 // Defence in depth: an in-range page always falls inside its chapter's counted
-                // length, so this is unreachable unless the pagination index and the layout have
-                // diverged. Cheap to keep, and it fails closed rather than re-paginating.
-                Some(entry) if entry.complete => return None,
+                // length, so this is reached only when the pagination index and the layout have
+                // diverged. Fails closed rather than re-paginating, and says so — the caller
+                // otherwise reports it as a plain out-of-range page, which is misleading: the index
+                // believes the page exists, and that disagreement is the actual fault.
+                Some(entry) if entry.complete => {
+                    #[cfg(test)]
+                    DIVERGED.with(|d| d.set(d.get() + 1));
+                    return None;
+                }
                 Some(_) => true, // materialized, but not this far yet
                 None => false,
             }
@@ -427,6 +439,7 @@ impl EpubBackend {
             scale: self.scale.get(),
             line_spacing: self.line_spacing.get(),
             align: self.align.get(),
+            columns: self.columns.get(),
             font_id: self.font_id.get(),
         }
     }
@@ -437,6 +450,7 @@ impl EpubBackend {
         let mut opts = LayoutOpts::new(w as f32, h as f32, BASE_FONT_PX * request.scale);
         opts.line_spacing = request.line_spacing;
         opts.align = request.align;
+        opts.columns = request.columns;
         opts
     }
 
@@ -721,6 +735,18 @@ impl Document for EpubBackend {
         self.repaginate_keeping_chapter(current_page)
     }
 
+    fn set_columns(&self, columns: i32, current_page: usize) -> Option<usize> {
+        // Stored as asked, clamped to what the engine models. Whether two columns are actually used
+        // is the layout's call — a page too narrow for a readable measure declines them — so the
+        // request survives a font-size change that later makes them viable.
+        self.columns.set(columns.clamp(1, 2) as u8);
+        self.repaginate_keeping_chapter(current_page)
+    }
+
+    fn effective_columns(&self) -> i32 {
+        i32::from(Self::opts_for(&self.current_request()).effective_columns())
+    }
+
     fn set_font(&self, font_id: i32, current_page: usize) -> Option<usize> {
         // Swap the reading face, then repaginate (new metrics → new line breaks), keeping the chapter.
         self.apply_font(font_id);
@@ -741,12 +767,14 @@ impl Document for EpubBackend {
         font_id: i32,
         line_spacing: f32,
         align_code: i32,
+        columns: i32,
         current_page: usize,
     ) -> Option<usize> {
         self.scale.set(clamp_scale(scale));
         self.apply_font(font_id);
         self.line_spacing.set(clamp_line_spacing(line_spacing));
         self.align.set(Align::from_code(align_code));
+        self.columns.set(columns.clamp(1, 2) as u8);
         self.repaginate_keeping_chapter(current_page)
     }
 
@@ -793,10 +821,18 @@ thread_local! {
     static LAYOUT_PASSES: Cell<usize> = const { Cell::new(0) };
     /// Chapters parsed on this thread — the counter behind the laziness test (#186).
     static CHAPTER_PARSES: Cell<usize> = const { Cell::new(0) };
+    /// Times the index/layout divergence guard fired (#194 surfaced one in the wild).
+    static DIVERGED: Cell<usize> = const { Cell::new(0) };
     /// Chapter layout passes on this thread, and the pages each produced (#186). Materializing a
     /// chapter is cost a correctness test cannot see, so laziness has to be asserted directly.
     static CHAPTER_LAYOUTS: Cell<usize> = const { Cell::new(0) };
     static CHAPTER_PAGES_LAID: Cell<usize> = const { Cell::new(0) };
+}
+
+/// Times the divergence guard fired on this thread.
+#[cfg(test)]
+pub(crate) fn diverged() -> usize {
+    DIVERGED.with(Cell::get)
 }
 
 /// Chapter layout passes on this thread since [`reset_chapter_layouts`].

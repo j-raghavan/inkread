@@ -47,6 +47,20 @@ impl Hyphenator for NoHyphen {
 }
 
 /// Viewport + typography for a layout pass (all pixels). Repagination on a font-size or margin
+/// Narrowest column worth setting, in ems of the body size (#194).
+///
+/// A comfortable single-column measure is 45-75 characters, but newspaper columns are deliberately
+/// far tighter — 30-35 is normal, which is the look this feature exists to produce. At roughly half
+/// an em per character, 14 em is about **28 characters**: tight, and squarely in newspaper
+/// territory.
+///
+/// The floor is in ems, not pixels, because what matters is characters per line: raising the text
+/// size narrows the measure even though the page has not changed. Set from measurement rather than
+/// taste — at a comfortable reading size on a 1920px panel (56px text) a column comes out at 14 em,
+/// so a floor above that declines the feature exactly where it was asked for. Below this the line
+/// breaks every few words and justified text opens rivers, which is worse than one column.
+const MIN_COLUMN_EM: f32 = 14.0;
+
 /// Horizontal text alignment for reflowed lines (RR4 — KOReader's "Alignment").
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Align {
@@ -108,6 +122,9 @@ pub struct LayoutOpts {
     pub para_gap: f32,
     /// Horizontal alignment of reflowed lines (RR4).
     pub align: Align,
+    /// Text columns per page — 1 (default) or 2 (#194). A page too narrow to give two columns a
+    /// readable measure falls back to one; see [`LayoutOpts::effective_columns`].
+    pub columns: u8,
 }
 
 impl LayoutOpts {
@@ -122,11 +139,56 @@ impl LayoutOpts {
             line_spacing: 1.4,
             para_gap: font_px * 0.7,
             align: Align::Left,
+            columns: 1,
         }
     }
 
-    fn content_w(&self) -> f32 {
+    /// The gap between columns. Reuses the page margin rather than adding a knob: it is already
+    /// tuned to the panel, and a gutter narrower than the outer margin reads as a mistake.
+    fn gutter(&self) -> f32 {
+        self.margin
+    }
+
+    /// The full text measure, ignoring columns.
+    fn text_w(&self) -> f32 {
         (self.page_w - 2.0 * self.margin).max(1.0)
+    }
+
+    /// Columns actually used, which is not always what was asked for (#194).
+    ///
+    /// Two columns on a narrow page produce a measure too short to read — words break every few
+    /// characters and justification opens rivers. Below [`MIN_COLUMN_EM`] ems the request is
+    /// declined and the page stays single-column, which is what the reader wants even though it is
+    /// not what they asked for.
+    #[must_use]
+    pub fn effective_columns(&self) -> u8 {
+        if self.columns <= 1 {
+            return 1;
+        }
+        let each = (self.text_w() - self.gutter()) / f32::from(self.columns);
+        if each < MIN_COLUMN_EM * self.font_px {
+            1
+        } else {
+            self.columns
+        }
+    }
+
+    /// One column's width — what a rule spans, and what a caller drawing column-wide furniture
+    /// needs. Same as [`Self::content_w`], exposed because the renderer is outside this module.
+    #[must_use]
+    pub fn column_width(&self) -> f32 {
+        self.content_w()
+    }
+
+    /// The measure lines are broken to — one column's width, which for a single-column page is the
+    /// whole text width. Line breaking, justification and image fitting all read this, so columns
+    /// need no special handling anywhere below this point.
+    fn content_w(&self) -> f32 {
+        let cols = self.effective_columns();
+        if cols <= 1 {
+            return self.text_w();
+        }
+        ((self.text_w() - self.gutter()) / f32::from(cols)).max(1.0)
     }
 
     fn content_h(&self) -> f32 {
@@ -165,6 +227,13 @@ impl LayoutOpts {
             }
         }
         eat(self.align as u8);
+        // Folded in only when it changes the layout. A single-column page lays out exactly as it
+        // did before columns existed, so leaving its digest alone keeps every pagination already
+        // cached — rebuilding one is the cost #186 is about, and there is nothing to gain by
+        // discarding them all for a field most books never set.
+        if self.columns > 1 {
+            eat(self.columns);
+        }
         h
     }
 }
@@ -210,6 +279,11 @@ pub struct LayoutLine {
     /// An illustration occupying this line's box (#187). Mutually exclusive with `runs` in
     /// practice: an image block emits one line that is nothing but the picture.
     pub image: Option<PlacedImage>,
+    /// Left edge of the column this line sits in, relative to the content origin (#194). Zero for a
+    /// single-column page and for the first column. Runs already carry their own absolute-in-content
+    /// `x`; this exists for the things that span a whole column rather than sitting at an `x` — the
+    /// horizontal rule, which would otherwise run across both columns.
+    pub column_x: f32,
 }
 
 /// An illustration placed in the content box: where it sits and how big it is drawn, not its
@@ -354,10 +428,13 @@ pub fn paginate_upto(
     // the before-margin collapses at the top of a page.
     let indent = opts.font_px * 1.2;
     let mut complete = true;
+    // `max_pages` counts pages, but the pager is producing *columns* — a two-column page needs two
+    // of them before it is whole.
+    let column_budget = max_pages.saturating_mul(usize::from(opts.effective_columns()));
     for (block_index, block) in blocks.iter().enumerate() {
         // Checked before the block, not after: once enough whole pages exist, laying out one more
         // block is work the caller has said it does not need.
-        if pager.finished_page_count() >= max_pages {
+        if pager.finished_page_count() >= column_budget {
             complete = false;
             break;
         }
@@ -483,11 +560,51 @@ pub fn paginate_upto(
             Block::Rule => pager.add_rule(opts.para_gap),
         }
     }
-    if complete {
-        (pager.finish(), true)
+    let columns = opts.effective_columns();
+    let laid = if complete {
+        pager.finish()
     } else {
-        (pager.into_finished_pages(), false)
+        pager.into_finished_pages()
+    };
+    (combine_columns(laid, opts, columns), complete)
+}
+
+/// Fold a run of single-column pages into multi-column ones (#194).
+///
+/// The pagination above lays out to the *column* measure, so what it produced is a sequence of
+/// columns in reading order. A two-column page is simply the next two of them side by side: the
+/// second column's content is shifted right by one column plus the gutter, and its vertical
+/// positions are already correct, because every column starts at the top of the page.
+///
+/// That is why columns need no special handling in line breaking, justification, image fitting or
+/// page breaking — by the time this runs, all of it has already happened against the right measure.
+fn combine_columns(pages: Vec<Page>, opts: &LayoutOpts, columns: u8) -> Vec<Page> {
+    if columns <= 1 {
+        return pages;
     }
+    let dx = opts.content_w() + opts.gutter();
+    pages
+        .chunks(usize::from(columns))
+        .map(|chunk| {
+            let mut lines = Vec::new();
+            for (index, column) in chunk.iter().enumerate() {
+                let shift = dx * index as f32;
+                lines.extend(column.lines.iter().cloned().map(|mut line| {
+                    if shift != 0.0 {
+                        for run in &mut line.runs {
+                            run.x += shift;
+                        }
+                        if let Some(image) = &mut line.image {
+                            image.x += shift.round() as i32;
+                        }
+                        line.column_x += shift;
+                    }
+                    line
+                }));
+            }
+            Page { lines }
+        })
+        .collect()
 }
 
 /// Accumulates lines into pages, breaking when the content box is full.
@@ -523,6 +640,7 @@ impl<'o> Pager<'o> {
             runs,
             rule,
             image: None,
+            column_x: 0.0,
         });
         self.cursor_y += height;
     }
@@ -679,6 +797,7 @@ impl<'o> Pager<'o> {
             runs: Vec::new(),
             rule: false,
             image: Some(image),
+            column_x: 0.0,
         });
         self.cursor_y += height;
     }

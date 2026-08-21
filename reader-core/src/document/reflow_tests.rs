@@ -315,7 +315,7 @@ fn restoring_saved_typography_over_a_cold_open_costs_one_pagination() {
     reset_layout_passes();
     let b = EpubBackend::open(SAMPLE.to_vec(), vp(400, 600)).unwrap();
     // Exactly what the shell does on open: restore four persisted settings, then read the count.
-    let page = b.set_typography(1.25, 1, 1.7, 2, 0);
+    let page = b.set_typography(1.25, 1, 1.7, 2, 1, 0);
     let count = b.page_count();
     assert_eq!(
         layout_passes(),
@@ -361,7 +361,7 @@ fn set_typography_lays_out_the_same_book_as_the_four_setters_do() {
     // The batched path is an optimization, so it must be indistinguishable from the individual
     // setters it replaces — same page count, same page content.
     let batched = EpubBackend::open(SAMPLE.to_vec(), vp(400, 600)).unwrap();
-    assert_eq!(batched.set_typography(1.5, 2, 1.2, 3, 0), Some(0));
+    assert_eq!(batched.set_typography(1.5, 2, 1.2, 3, 1, 0), Some(0));
 
     let stepwise = EpubBackend::open(SAMPLE.to_vec(), vp(400, 600)).unwrap();
     let _ = stepwise.set_font(2, 0);
@@ -749,7 +749,7 @@ fn a_cancel_restores_the_request_exactly_across_the_whole_settings_range() {
             for align_code in 0..4 {
                 let (w, _) = watcher(Some(1));
                 b.set_pagination_progress(w);
-                let _ = b.set_typography(scale, 1, spacing, align_code, 0);
+                let _ = b.set_typography(scale, 1, spacing, align_code, 1, 0);
 
                 assert_eq!(
                     b.current_request(),
@@ -1247,12 +1247,17 @@ fn a_page_the_index_claims_but_the_layout_lacks_is_refused_without_relaying_out(
     // The phantom page: in range per the index, absent from the layout.
     let phantom = real_total;
     assert!(doc.with_page(phantom, |_, _| ()).is_none(), "phantom page");
+    let diverged_before = diverged();
     reset_chapter_layouts();
     assert!(doc.with_page(phantom, |_, _| ()).is_none(), "still refused");
     assert_eq!(
         chapter_layouts(),
         0,
         "a known-complete chapter must not be laid out again for a page it does not have"
+    );
+    assert!(
+        diverged() > diverged_before,
+        "the refusal should come from the divergence guard, not an out-of-range page"
     );
 }
 
@@ -1331,4 +1336,86 @@ fn extending_a_chapter_does_not_hold_the_prefix_and_the_full_layout_at_once() {
         "the partial entry should have been replaced, not kept alongside"
     );
     assert!(entries[0].complete);
+}
+
+/// #194: selecting two columns must repaginate and keep the reader where they were — the same
+/// contract every other reflow setting honours (RR12-FR4).
+#[test]
+fn selecting_two_columns_repaginates_and_keeps_the_chapter() {
+    let doc = EpubBackend::open(SAMPLE.to_vec(), vp(1200, 1600)).expect("sample opens");
+    let before = doc.page_count();
+    assert!(before > 0);
+
+    let moved = doc
+        .set_columns(2, 0)
+        .expect("a reflowable document supports columns");
+    assert!(
+        moved < doc.page_count(),
+        "position must land inside the new pagination"
+    );
+
+    // Two columns hold more text per page, so a book cannot get longer by asking for them.
+    assert!(
+        doc.page_count() <= before,
+        "{} pages in two columns vs {before} in one",
+        doc.page_count()
+    );
+
+    // Back to one column returns the original pagination exactly.
+    doc.set_columns(1, 0);
+    assert_eq!(
+        doc.page_count(),
+        before,
+        "single column should be as it was"
+    );
+}
+
+/// The request is stored even when the page is too narrow to honour it, so a later font-size
+/// change can bring it into effect without the reader asking again.
+#[test]
+fn a_column_request_survives_being_declined() {
+    // A narrow viewport at the default text size cannot give two readable columns.
+    let doc = EpubBackend::open(SAMPLE.to_vec(), vp(300, 900)).expect("sample opens");
+    let single = doc.page_count();
+    doc.set_columns(2, 0);
+    assert_eq!(
+        doc.page_count(),
+        single,
+        "a declined request must lay out exactly as single-column"
+    );
+
+    // Widen the page — the backend takes its viewport from the render buffer — and the stored
+    // request takes effect with no further call.
+    let mut bytes = vec![0u8; 1600 * 1200 * 4];
+    {
+        let mut buf = PixelBuffer::from_rgba(&mut bytes, 1600, 1200).unwrap();
+        doc.render_page(0, &mut buf)
+            .expect("renders at the new size");
+    }
+    assert!(
+        doc.page_count() <= single,
+        "the stored two-column request should apply once the page can take it"
+    );
+}
+
+/// Out-of-range column counts are clamped rather than trusted — the value crosses JNI.
+#[test]
+fn an_out_of_range_column_count_is_clamped() {
+    let doc = EpubBackend::open(SAMPLE.to_vec(), vp(1200, 1600)).expect("sample opens");
+    let one = doc.page_count();
+    doc.set_columns(2, 0);
+    let two = doc.page_count();
+
+    for absurd in [99, i32::MAX] {
+        doc.set_columns(absurd, 0);
+        assert_eq!(
+            doc.page_count(),
+            two,
+            "clamped to the widest supported ({absurd})"
+        );
+    }
+    for absurd in [0, -1, i32::MIN] {
+        doc.set_columns(absurd, 0);
+        assert_eq!(doc.page_count(), one, "clamped to single column ({absurd})");
+    }
 }

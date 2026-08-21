@@ -103,6 +103,8 @@ pub struct Typography {
     pub line_spacing: f32,
     /// `0=Left, 1=Justify, 2=Center, 3=Right`.
     pub align_code: i32,
+    /// Text columns per page — 1 or 2 (#194).
+    pub columns: i32,
 }
 
 impl Default for Typography {
@@ -114,6 +116,7 @@ impl Default for Typography {
             font_id: 0,
             line_spacing: 1.4,
             align_code: 0,
+            columns: 1,
         }
     }
 }
@@ -469,6 +472,23 @@ pub trait Document {
         None
     }
 
+    /// Set the reflow **column count** (1 or 2) and repaginate, preserving the chapter (#194).
+    /// Returns the new page, or `None` for a fixed-layout format (PDF). Default: unsupported.
+    ///
+    /// A page too narrow for a readable two-column measure lays out single-column regardless; the
+    /// request is stored either way, so widening the page or shrinking the text takes effect
+    /// without the reader having to ask again.
+    fn set_columns(&self, _columns: i32, _current_page: usize) -> Option<usize> {
+        None
+    }
+
+    /// Columns the layout is **actually** using, which is not always what was asked for: a page too
+    /// narrow for a readable measure lays out single-column regardless (#194). The shell needs this
+    /// to tell the reader their request was declined rather than ignored. Default: 1.
+    fn effective_columns(&self) -> i32 {
+        1
+    }
+
     /// Set the reflow **font family** (`font_id` = index into the bundled reading faces) and
     /// repaginate, preserving the chapter (RR4). Returns the new page, or `None` for a fixed-layout
     /// format (PDF). Default: unsupported.
@@ -494,6 +514,7 @@ pub trait Document {
             t.font_id,
             t.line_spacing,
             t.align_code,
+            t.columns,
             current_page,
         )
     }
@@ -505,12 +526,14 @@ pub trait Document {
     /// in seconds and opening in minutes (#161/#162). Returns the new page, or `None` for a format
     /// with no reflow at all. The default composes the individual setters — correct for any backend,
     /// and a backend that can fold them into a single pass overrides this.
+    #[allow(clippy::too_many_arguments)]
     fn set_typography(
         &self,
         scale: f32,
         font_id: i32,
         line_spacing: f32,
         align_code: i32,
+        columns: i32,
         current_page: usize,
     ) -> Option<usize> {
         // Threaded, not batched: each step repaginates, so the next must resolve its chapter
@@ -531,6 +554,10 @@ pub trait Document {
             at = p;
         }
         if let Some(p) = self.set_alignment(align_code, at) {
+            page = Some(p);
+            at = p;
+        }
+        if let Some(p) = self.set_columns(columns, at) {
             page = Some(p);
         }
         page
