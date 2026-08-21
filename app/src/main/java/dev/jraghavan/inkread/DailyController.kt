@@ -179,6 +179,9 @@ class DailyController(private val context: Context) {
                             .put("source", src.name)
                             .put("url", item.optString("url"))
                             .put("published", item.optString("published"))
+                            // The feed's own description, for the contents page (#198). Absent on
+                            // feeds that give none; the core falls back to a body excerpt.
+                            .put("summary", item.optString("summary"))
                             .put("html", html)
                     }
                 }

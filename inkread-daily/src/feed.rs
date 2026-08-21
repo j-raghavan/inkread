@@ -18,6 +18,9 @@ pub struct FeedItem {
     pub url: String,
     /// Published (or, failing that, updated) date, formatted "DD Mon YYYY"; `None` if the feed omits it.
     pub published: Option<String>,
+    /// The entry's own `description`/`summary`, when the feed carries one (#198) — the publisher's
+    /// line about the piece, used for the contents page in preference to an excerpt of its opening.
+    pub summary: Option<String>,
 }
 
 /// Parse an RSS / Atom / JSON feed into its entries, in document order. Tolerant of malformed input.
@@ -42,6 +45,13 @@ pub fn parse_feed(xml: &str) -> Vec<FeedItem> {
                 .published
                 .or(e.updated)
                 .map(|d| d.format("%d %b %Y").to_string()),
+            // Same double-decode as the title: a summary goes on the contents page, so a stray
+            // "&#8217;" would be read by a person. Markup is left alone here and stripped where the
+            // excerpt is built — many feeds put a whole HTML paragraph in `description`.
+            summary: e
+                .summary
+                .map(|t| crate::extract::decode_entities(t.content.trim()))
+                .filter(|t| !t.is_empty()),
         })
         .collect()
 }

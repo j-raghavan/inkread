@@ -120,25 +120,45 @@ fn nav(issue: &Issue) -> String {
     )
 }
 
-/// The cover/title page: issue title, date, and a contents list.
+/// The cover: issue title, date, and the **In This Issue** contents (#198).
+///
+/// A newspaper opens with a contents page so you can decide what is worth reading before committing
+/// to a page turn — which matters more on e-ink, where browsing costs a refresh each way. Every
+/// entry is a link into the article, carries its source, and shows a short excerpt where one can be
+/// had.
 fn title_page(issue: &Issue) -> String {
     let mut toc = String::new();
-    for art in &issue.articles {
+    for (i, art) in issue.articles.iter().enumerate() {
+        // `article_path` is the packaged path; inside the OPF everything is relative to OEBPS/.
+        let href = article_path(i).trim_start_matches("OEBPS/").to_string();
         toc.push_str(&format!(
-            "    <li>{}<br/><span class=\"src\">{}</span></li>\n",
+            "    <li><a href=\"{href}\">{}</a><br/><span class=\"src\">{}</span>",
             esc(&art.title),
             esc(&art.source)
         ));
+        // Title-only when there is nothing worth showing — an empty or near-empty line under every
+        // headline reads worse than no line at all.
+        if let Some(text) = art.excerpt(EXCERPT_CHARS) {
+            toc.push_str(&format!(
+                "<br/><span class=\"excerpt\">{}</span>",
+                esc(&text)
+            ));
+        }
+        toc.push_str("</li>\n");
     }
     xhtml(
         &issue.title,
         &format!(
-            "<h1>{}</h1>\n<p class=\"date\">{}</p>\n<ul>\n{toc}</ul>",
+            "<h1>{}</h1>\n<p class=\"date\">{}</p>\n<h2>In This Issue</h2>\n<ul>\n{toc}</ul>",
             esc(&issue.title),
             esc(&issue.date)
         ),
     )
 }
+
+/// How much of an article to show under its headline. Long enough to say what the piece is about,
+/// short enough that a dozen of them still fit a contents page.
+const EXCERPT_CHARS: usize = 160;
 
 /// One article document: headline, a source · date byline, then the clean article body.
 fn article_xhtml(issue: &Issue, i: usize) -> String {
