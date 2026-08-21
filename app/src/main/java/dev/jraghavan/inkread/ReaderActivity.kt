@@ -546,7 +546,11 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
 
     // ---- SurfaceHolder lifecycle → core (RR21-FR4) ----
 
+    /** Keeps a repeat `surfaceChanged` from re-rendering the page it just drew (#186). */
+    private val renderGate = SurfaceRenderGate()
+
     override fun surfaceCreated(holder: SurfaceHolder) {
+        renderGate.onSurfaceCreated()
         // Paint the surface white the instant it exists, on this thread. The size arrives in
         // surfaceChanged, whose work is handed to the engine thread — so the "Loading…" frame can be
         // queued behind whatever that thread is already doing. Until something is pushed, a
@@ -703,6 +707,14 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
     // ---- engine-thread work ----
 
     private fun onSurfaceSized(width: Int, height: Int) {
+        // Android delivers surfaceChanged more than once per surface, at the same size. Rendering
+        // each one drew the opening page twice — a full page layout and an EPD refresh thrown away
+        // on the slowest path there is (#186). A recreated surface still renders: see
+        // [SurfaceRenderGate].
+        if (!renderGate.needsRender(width, height, docHandle != 0L)) {
+            diag { "DIAG surfaceChanged ${width}x$height ignored (already rendered)" }
+            return
+        }
         viewW = width
         viewH = height
         bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
