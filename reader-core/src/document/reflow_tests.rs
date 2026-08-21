@@ -4,8 +4,12 @@
 
 use super::*;
 use crate::render::Viewport;
+use inkread_epub::parse_blocks;
 
 const SAMPLE: &[u8] = include_bytes!("../../tests/fixtures/sample.epub");
+/// A book carrying #188's stylesheet: `h1 { text-align: center; font-weight: normal }`, a `.c`
+/// decorative paragraph, and `p { text-align: justify }` over ordinary prose.
+const STYLED: &[u8] = include_bytes!("../../tests/fixtures/styled.epub");
 
 fn vp(w: u32, h: u32) -> Viewport {
     Viewport {
@@ -987,5 +991,69 @@ fn a_chapter_is_parsed_at_most_once() {
         chapter_parses(),
         0,
         "already-parsed chapters are not re-parsed"
+    );
+}
+
+/// #188 end to end: a book's stylesheet has to survive the whole path — out of the zip, through
+/// EpubPackage, into chapter parsing, and onto the laid-out runs — or the title page still renders
+/// hard left. Asserted on real geometry, with the reader on the default Left alignment.
+#[test]
+fn a_books_declared_styles_reach_the_laid_out_page() {
+    let doc = EpubBackend::open(STYLED.to_vec(), vp(600, 800)).expect("styled epub opens");
+    doc.parse_chapter(0);
+    let chapters = doc.chapters.borrow();
+    let blocks = chapters[0].blocks();
+
+    // The <h1> title: centred and unbolded by the book.
+    let Some(Block::Heading { style, .. }) = blocks.first() else {
+        panic!("expected the title heading, got {blocks:?}")
+    };
+    assert_eq!(style.align, Some(Align::Center), "text-align was dropped");
+    assert_eq!(style.bold, Some(false), "font-weight: normal was dropped");
+
+    // The .c decorative paragraph: centred, and opting out of the first-line indent.
+    let Some(Block::Paragraph { style, .. }) = blocks.get(1) else {
+        panic!("expected the decorative paragraph, got {blocks:?}")
+    };
+    assert_eq!(style.align, Some(Align::Center));
+    assert_eq!(style.indent, Some(false), "text-indent: 0% was dropped");
+
+    // The ordinary prose paragraph: the book justifies it, which must NOT override the reader.
+    let Some(Block::Paragraph { style, .. }) = blocks.get(2) else {
+        panic!("expected the prose paragraph, got {blocks:?}")
+    };
+    assert_eq!(style.align, Some(Align::Justify), "parsed faithfully…");
+    drop(chapters);
+
+    // …and the layout stage declines to apply it: the prose stays flush left with its indent,
+    // while the centred blocks above are inset.
+    let opts = EpubBackend::opts_for(&doc.current_request());
+    let pages = doc.lay_out_chapter(0, &opts);
+    let first_x: Vec<f32> = pages[0]
+        .lines
+        .iter()
+        .filter(|l| !l.runs.is_empty())
+        .map(|l| l.runs[0].x)
+        .collect();
+    assert!(
+        first_x.iter().any(|x| *x > 0.0),
+        "nothing was centred: {first_x:?}"
+    );
+    let prose_x = *first_x.last().expect("a prose line");
+    assert!(
+        prose_x < 30.0,
+        "book-declared justify shifted the reader's left-aligned prose: {prose_x}"
+    );
+}
+
+/// The pagination cache key must move whenever line fitting changes, or a cache written before
+/// #188 would be replayed against the new layout (#163 did the same for v1 → v2).
+#[test]
+fn honouring_the_stylesheet_bumped_the_pagination_cache_version() {
+    let opts = LayoutOpts::new(600.0, 800.0, 16.0);
+    assert!(
+        layout_key(&opts, 0, 1).starts_with("v3|"),
+        "{}",
+        layout_key(&opts, 0, 1)
     );
 }

@@ -9,7 +9,7 @@
 //! Blank lines separate paragraphs; a single newline inside a paragraph is a soft wrap (joined with a
 //! space and re-wrapped to the viewport), matching how a reader expects flowed prose to behave.
 
-use inkread_epub::{Block, Inline, TextRun};
+use inkread_epub::{Block, BlockStyle, Inline, TextRun};
 
 use crate::document::reflow_view::ReflowView;
 use crate::document::text_select::{self, NormRect, TextSelection};
@@ -117,6 +117,8 @@ fn push_paragraph(blocks: &mut Vec<Block>, para: &mut String) {
                 italic: false,
                 href: None,
             })],
+            // Plain text carries no stylesheet: the reader's own typography governs throughout.
+            style: BlockStyle::default(),
         });
     }
     para.clear();
@@ -137,7 +139,7 @@ mod tests {
     /// Concatenate a paragraph block's text runs (test helper).
     fn block_text(b: &Block) -> String {
         match b {
-            Block::Paragraph { content } => content
+            Block::Paragraph { content, .. } => content
                 .iter()
                 .filter_map(|i| match i {
                     Inline::Run(r) => Some(r.text.as_str()),

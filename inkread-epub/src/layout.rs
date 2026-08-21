@@ -18,6 +18,7 @@
 //! [`Page`]s into a `PixelBuffer`.
 
 use crate::content::{Block, Inline};
+use crate::css::BlockStyle;
 
 /// Glyph-advance measurement for a font (Phase 4 supplies a real implementation; tests use a
 /// fixed-pitch fake). `bold`/`italic` may select a different face/metrics.
@@ -70,6 +71,23 @@ impl Align {
             3 => Align::Right,
             _ => Align::Left,
         }
+    }
+}
+
+/// Which alignment a block is actually laid out with, given what the book declared and the reader's
+/// global preference (#188).
+///
+/// The book wins only for `center` and `right`. Those signal *decorative* intent — a title page, an
+/// epigraph, a verse block, a colophon — which is the damage #188 reports, and no reader's
+/// alignment preference is really a statement about those. `left` and `justify` are what books
+/// declare for ordinary body prose (`p { text-align: justify }` is near-universal), and honouring
+/// those would silently override the setting the reader chose for the text they actually read. So
+/// they defer to `user`.
+fn effective_align(style: &BlockStyle, user: Align) -> Align {
+    match style.align {
+        Some(Align::Center) => Align::Center,
+        Some(Align::Right) => Align::Right,
+        _ => user,
     }
 }
 
@@ -236,24 +254,53 @@ pub fn paginate_with(
     let indent = opts.font_px * 1.2;
     for (block_index, block) in blocks.iter().enumerate() {
         match block {
-            Block::Heading { level, content } => {
+            Block::Heading {
+                level,
+                content,
+                style,
+            } => {
                 pager.gap_before(opts.font_px * 0.7);
                 let size = opts.font_px * heading_scale(*level);
-                pager.add_paragraph(content, size, 0.0, 0.0, true, block_index, &mut cursor, m);
+                // Headings are bold by default, but that is inkread's typography, not a rule: a
+                // book that says `font-weight: normal` on its title gets a normal-weight title.
+                let bold = style.bold.unwrap_or(true);
+                pager.add_paragraph(
+                    content,
+                    size,
+                    0.0,
+                    0.0,
+                    bold,
+                    effective_align(style, opts.align),
+                    block_index,
+                    &mut cursor,
+                    m,
+                );
                 pager.gap(opts.font_px * 0.5);
             }
-            Block::Paragraph { content } => {
+            Block::Paragraph { content, style } => {
                 // First line indented, the rest flush left, no trailing gap — dense and book-like.
                 // The indent is the *only* thing marking where one paragraph ends and the next
                 // begins, since this typography deliberately omits the blank line between them; an
                 // indent applied to every line would leave prose with no paragraph breaks at all
                 // (#163) and would also spend 1.2em of every line's width on nothing.
+                let align = effective_align(style, opts.align);
+                // Two ways a paragraph loses that indent (#188): the book zeroes `text-indent`, or
+                // the block is centred/right-aligned. The indent is inkread's own device for
+                // marking where prose paragraphs start — on a decorative centred line it marks
+                // nothing, and it would push the text off-centre by half the indent.
+                let centred = matches!(align, Align::Center | Align::Right);
+                let first_indent = if style.indent == Some(false) || centred {
+                    0.0
+                } else {
+                    indent
+                };
                 pager.add_paragraph(
                     content,
                     opts.font_px,
-                    indent,
+                    first_indent,
                     0.0,
-                    false,
+                    style.bold.unwrap_or(false),
+                    align,
                     block_index,
                     &mut cursor,
                     m,
@@ -263,13 +310,25 @@ pub fn paginate_with(
                 ordered,
                 index,
                 content,
+                style,
             } => {
                 let marker = if *ordered {
                     format!("{index}.")
                 } else {
                     "•".to_string()
                 };
-                pager.add_list_item(&marker, content, opts.font_px, block_index, &mut cursor, m);
+                // A list item keeps its flush-left hanging indent whatever the book declares:
+                // centring text that hangs off a marker has no sensible reading. Weight still
+                // applies.
+                pager.add_list_item(
+                    &marker,
+                    content,
+                    opts.font_px,
+                    style.bold.unwrap_or(false),
+                    block_index,
+                    &mut cursor,
+                    m,
+                );
                 pager.gap(opts.font_px * 0.15);
             }
             Block::Image { alt, .. } => {
@@ -293,6 +352,7 @@ pub fn paginate_with(
                     0.0,
                     0.0,
                     false,
+                    opts.align,
                     block_index,
                     &mut cursor,
                     m,
@@ -380,6 +440,7 @@ impl<'o> Pager<'o> {
         first_indent: f32,
         rest_indent: f32,
         bold_all: bool,
+        align: Align,
         block: usize,
         cursor: &mut usize,
         m: &dyn Metrics,
@@ -399,23 +460,19 @@ impl<'o> Pager<'o> {
         let line_h = size * self.opts.line_spacing;
         let n = lines.len();
         for (i, mut runs) in lines.into_iter().enumerate() {
-            align_line(
-                &mut runs,
-                self.opts.align,
-                self.opts.content_w(),
-                i + 1 == n,
-                m,
-            );
+            align_line(&mut runs, align, self.opts.content_w(), i + 1 == n, m);
             self.emit(runs, line_h, false);
         }
     }
 
     /// Lay out a list item with a hanging marker and indented body.
+    #[allow(clippy::too_many_arguments)]
     fn add_list_item(
         &mut self,
         marker: &str,
         inlines: &[Inline],
         size: f32,
+        bold: bool,
         block: usize,
         cursor: &mut usize,
         m: &dyn Metrics,
@@ -436,7 +493,7 @@ impl<'o> Pager<'o> {
             indent,
             indent,
             self.opts.content_w(),
-            false,
+            bold,
             block,
             cursor,
             m,
@@ -822,532 +879,5 @@ fn hyphenate_fit<'w>(
 }
 
 #[cfg(test)]
-mod tests {
-    #[test]
-    fn layout_digest_is_stable_and_sensitive_to_layout_fields() {
-        let base = LayoutOpts::new(400.0, 600.0, 16.0);
-        // Deterministic: identical opts → identical digest (same process AND across
-        // processes — the persisted cache key contract).
-        assert_eq!(
-            base.layout_digest(),
-            LayoutOpts::new(400.0, 600.0, 16.0).layout_digest()
-        );
-
-        // Every layout-affecting field flips the digest.
-        let d = base.layout_digest();
-        assert_ne!(
-            d,
-            LayoutOpts {
-                page_w: 401.0,
-                ..base
-            }
-            .layout_digest(),
-            "width"
-        );
-        assert_ne!(
-            d,
-            LayoutOpts {
-                page_h: 601.0,
-                ..base
-            }
-            .layout_digest(),
-            "height"
-        );
-        assert_ne!(
-            d,
-            LayoutOpts {
-                margin: base.margin + 1.0,
-                ..base
-            }
-            .layout_digest(),
-            "margin"
-        );
-        assert_ne!(
-            d,
-            LayoutOpts {
-                font_px: 17.0,
-                ..base
-            }
-            .layout_digest(),
-            "font"
-        );
-        assert_ne!(
-            d,
-            LayoutOpts {
-                line_spacing: 1.5,
-                ..base
-            }
-            .layout_digest(),
-            "line spacing"
-        );
-        assert_ne!(
-            d,
-            LayoutOpts {
-                para_gap: base.para_gap + 1.0,
-                ..base
-            }
-            .layout_digest(),
-            "para gap"
-        );
-        assert_ne!(
-            d,
-            LayoutOpts {
-                align: Align::Justify,
-                ..base
-            }
-            .layout_digest(),
-            "align"
-        );
-    }
-
-    #[test]
-    fn layout_digest_is_pinned_against_algorithm_drift() {
-        // The digest keys persisted paginations (ADR-INKREAD-0013 D1); pin a known value so a future
-        // change to the FNV constants/algorithm — which would silently orphan every cached
-        // pagination — is caught here, exactly as reader-core's identity fingerprint is pinned.
-        let opts = LayoutOpts {
-            page_w: 400.0,
-            page_h: 600.0,
-            margin: 24.0,
-            font_px: 16.0,
-            line_spacing: 1.4,
-            para_gap: 11.2,
-            align: Align::Left,
-        };
-        assert_eq!(opts.layout_digest(), 17_685_407_801_978_826_572);
-    }
-
-    use super::*;
-    use crate::content::{parse_blocks, TextRun};
-
-    /// Fixed-pitch metrics: every char advances `0.5 * size` (bold/italic ignored). Deterministic, so
-    /// wrapping/pagination can be asserted exactly without a font.
-    struct Mono;
-    impl Metrics for Mono {
-        fn advance(&self, text: &str, size_px: f32, _b: bool, _i: bool) -> f32 {
-            text.chars().count() as f32 * size_px * 0.5
-        }
-    }
-
-    fn para(text: &str) -> Block {
-        Block::Paragraph {
-            content: vec![Inline::Run(TextRun {
-                text: text.into(),
-                bold: false,
-                italic: false,
-                href: None,
-            })],
-        }
-    }
-
-    #[test]
-    fn long_paragraph_wraps_to_multiple_lines() {
-        // 10px font → 5px/char. content_w = 100 → 20 chars/line. 60-char paragraph → 3 lines.
-        let opts = LayoutOpts {
-            page_w: 100.0 + 2.0 * 0.0,
-            page_h: 10_000.0,
-            margin: 0.0,
-            font_px: 10.0,
-            line_spacing: 1.0,
-            para_gap: 0.0,
-            align: Align::Left,
-        };
-        let words = "aaaa ".repeat(12); // 12 words of 4 chars → ~ wraps
-        let pages = paginate(&[para(words.trim())], &opts, &Mono);
-        assert_eq!(pages.len(), 1);
-        assert!(
-            pages[0].lines.len() >= 3,
-            "wrapped: {}",
-            pages[0].lines.len()
-        );
-        // No run exceeds the content width.
-        for line in &pages[0].lines {
-            for r in &line.runs {
-                let w = r.x + r.text.chars().count() as f32 * 5.0;
-                assert!(w <= 100.0 + 0.01, "run overflows: {w}");
-            }
-        }
-    }
-
-    /// The narrow test viewport for the unspaced-script (CJK) wrapping tests: 10px font → 5px/char
-    /// (Mono); content 50px. The paragraph's 12px (1.2em) indent applies to the **first line only**,
-    /// so 7 chars fit there and 10 on every line after it.
-    fn cjk_opts() -> LayoutOpts {
-        LayoutOpts {
-            page_w: 50.0,
-            page_h: 10_000.0,
-            margin: 0.0,
-            font_px: 10.0,
-            line_spacing: 1.0,
-            para_gap: 0.0,
-            align: Align::Left,
-        }
-    }
-
-    /// Each line's runs joined (the CJK tests place one run per line).
-    fn line_texts(pages: &[Page]) -> Vec<String> {
-        pages
-            .iter()
-            .flat_map(|p| &p.lines)
-            .map(|l| l.runs.iter().map(|r| r.text.as_str()).collect())
-            .collect()
-    }
-
-    /// #163: the first-line indent must land on the first line and nowhere else.
-    ///
-    /// This typography omits the blank line between paragraphs on purpose, so the indent is the
-    /// *only* thing marking where one paragraph ends and the next begins. Applying it to every line
-    /// — which is what the code did — left prose with no paragraph breaks at all, and spent 1.2em of
-    /// every line's width on nothing.
-    #[test]
-    fn only_a_paragraphs_first_line_is_indented() {
-        let pages = paginate(
-            &[para("alpha bravo charlie delta echo foxtrot")],
-            &cjk_opts(),
-            &Mono,
-        );
-        let lines: Vec<&LayoutLine> = pages.iter().flat_map(|p| &p.lines).collect();
-        assert!(
-            lines.len() > 1,
-            "need a wrapped paragraph to test: {lines:?}"
-        );
-
-        assert_eq!(
-            lines[0].runs[0].x, 12.0,
-            "the first line carries the 1.2em indent"
-        );
-        for (i, line) in lines.iter().enumerate().skip(1) {
-            assert_eq!(line.runs[0].x, 0.0, "line {i} must start flush left");
-        }
-    }
-
-    /// The counterpart: a list item's indent is a *hanging* indent, so it applies to every line and
-    /// the marker hangs to the left of the first. The two must not be conflated.
-    #[test]
-    fn a_list_items_body_stays_indented_on_every_line() {
-        let item = Block::ListItem {
-            ordered: false,
-            index: 1,
-            content: vec![Inline::Run(TextRun {
-                text: "alpha bravo charlie delta echo".into(),
-                bold: false,
-                italic: false,
-                href: None,
-            })],
-        };
-        let pages = paginate(&[item], &cjk_opts(), &Mono);
-        let lines: Vec<&LayoutLine> = pages.iter().flat_map(|p| &p.lines).collect();
-        assert!(lines.len() > 1, "need a wrapped item to test");
-
-        // The marker hangs at the content origin; the body starts indented past it.
-        assert_eq!(lines[0].runs[0].text, "•");
-        assert_eq!(lines[0].runs[0].x, 0.0, "the marker hangs left");
-        let body_x = lines[0].runs[1].x;
-        assert!(body_x > 0.0, "the body is inset past the marker");
-        for (i, line) in lines.iter().enumerate().skip(1) {
-            assert_eq!(
-                line.runs[0].x, body_x,
-                "wrapped line {i} stays under the body, not the marker"
-            );
-        }
-    }
-
-    #[test]
-    fn cjk_paragraph_wraps_between_characters() {
-        // No spaces, so the whole paragraph is one token — before UAX #14 it overflowed as a single
-        // unbreakable "word". 22 Han chars wrap greedily to 7 (the indented first line) + 10 + 5,
-        // nothing lost.
-        let text = "书山有路勤为径学海无涯苦作舟读万卷书行万里路";
-        let pages = paginate(&[para(text)], &cjk_opts(), &Mono);
-        let lines = line_texts(&pages);
-        assert_eq!(lines.len(), 3, "22 chars as 7+10+5: {lines:?}");
-        assert_eq!(
-            lines[0].chars().count(),
-            7,
-            "the indented first line is narrower"
-        );
-        assert_eq!(
-            lines[1].chars().count(),
-            10,
-            "later lines get the full column"
-        );
-        assert_eq!(lines.concat(), text, "no characters dropped or reordered");
-        // No line overflows the content box, indented or not.
-        for line in pages.iter().flat_map(|p| &p.lines) {
-            for r in &line.runs {
-                assert!(r.x + r.text.chars().count() as f32 * 5.0 <= 50.0 + 0.01);
-            }
-        }
-    }
-
-    #[test]
-    fn cjk_break_honors_kinsoku_and_anchors_stay_font_invariant() {
-        // Naive 7-chars-per-line breaking would start line 2 with 。— UAX #14 forbids a break
-        // before a closing form, so the break retreats to after 六 and 。hangs onto 七's line.
-        let pages = paginate(&[para("一二三四五六七。八九十")], &cjk_opts(), &Mono);
-        let lines = line_texts(&pages);
-        assert_eq!(lines, ["一二三四五六", "七。八九十"]);
-        assert!(lines.iter().all(|l| !l.starts_with('。')));
-        // The continuation run keeps a chapter-relative anchor = chars consumed before it
-        // (ADR-INKREAD-0012 — a highlight re-resolves across reflow).
-        let runs: Vec<&PlacedRun> = pages
-            .iter()
-            .flat_map(|p| &p.lines)
-            .flat_map(|l| &l.runs)
-            .collect();
-        assert_eq!(runs[0].anchor.char_offset, 0);
-        assert_eq!(runs[1].anchor.char_offset, 6);
-    }
-
-    #[test]
-    fn mixed_latin_cjk_breaks_at_the_script_boundary_opportunities() {
-        // "Hello你好世界" is one token (no spaces). Latin-internal positions are not eligible —
-        // only UAX #14 opportunities adjacent to an unspaced-script char — so the line fills to
-        // "Hello你好" (7 chars, 35px ≤ 38px) and wraps cleanly, no overflow, no hyphen.
-        let pages = paginate(&[para("Hello你好世界")], &cjk_opts(), &Mono);
-        let lines = line_texts(&pages);
-        assert_eq!(lines, ["Hello你好", "世界"]);
-        assert!(!lines[0].ends_with('-'), "no hyphen for an unspaced break");
-    }
-
-    #[test]
-    fn content_overflow_breaks_into_pages() {
-        // line height 10px, content_h 30px → 3 lines/page. 7 short paragraphs → 3 pages.
-        let opts = LayoutOpts {
-            page_w: 1000.0,
-            page_h: 30.0,
-            margin: 0.0,
-            font_px: 10.0,
-            line_spacing: 1.0,
-            para_gap: 0.0,
-            align: Align::Left,
-        };
-        let blocks: Vec<Block> = (0..7).map(|_| para("x")).collect();
-        let pages = paginate(&blocks, &opts, &Mono);
-        assert_eq!(pages.len(), 3, "7 lines / 3 per page");
-        assert_eq!(pages[0].lines.len(), 3);
-        assert_eq!(pages[2].lines.len(), 1);
-    }
-
-    #[test]
-    fn heading_uses_a_larger_line_height() {
-        let opts = LayoutOpts {
-            page_w: 10_000.0,
-            page_h: 10_000.0,
-            margin: 0.0,
-            font_px: 10.0,
-            line_spacing: 1.0,
-            para_gap: 0.0,
-            align: Align::Left,
-        };
-        let pages = paginate(
-            &[Block::Heading {
-                level: 1,
-                content: vec![Inline::Run(TextRun {
-                    text: "Title".into(),
-                    bold: false,
-                    italic: false,
-                    href: None,
-                })],
-            }],
-            &opts,
-            &Mono,
-        );
-        let line = &pages[0].lines[0];
-        assert_eq!(line.height, 18.0, "h1 = 1.8 * 10"); // heading_scale(1)=1.8
-        assert!(line.runs[0].bold, "headings render bold");
-    }
-
-    #[test]
-    fn list_item_has_marker_and_hanging_indent() {
-        let opts = LayoutOpts::new(1000.0, 1000.0, 10.0);
-        let pages = paginate(
-            &[Block::ListItem {
-                ordered: true,
-                index: 3,
-                content: vec![Inline::Run(TextRun {
-                    text: "item text".into(),
-                    bold: false,
-                    italic: false,
-                    href: None,
-                })],
-            }],
-            &opts,
-            &Mono,
-        );
-        let runs = &pages[0].lines[0].runs;
-        assert_eq!(runs[0].text, "3.", "ordered marker");
-        assert_eq!(runs[0].x, 0.0, "marker at content origin");
-        assert!(runs[1].x > 0.0, "body hangs past the marker");
-    }
-
-    #[test]
-    fn integrates_with_phase2_parsing() {
-        let blocks = parse_blocks("<html><body><h2>Hi</h2><p>one two three</p></body></html>");
-        let opts = LayoutOpts::new(400.0, 600.0, 16.0);
-        let pages = paginate(&blocks, &opts, &Mono);
-        assert!(!pages.is_empty());
-        let all_text: String = pages[0]
-            .lines
-            .iter()
-            .flat_map(|l| l.runs.iter())
-            .map(|r| r.text.clone())
-            .collect::<Vec<_>>()
-            .join(" ");
-        assert!(all_text.contains("Hi") && all_text.contains("three"));
-    }
-
-    #[test]
-    fn empty_blocks_make_no_pages() {
-        assert!(paginate(&[], &LayoutOpts::new(400.0, 600.0, 16.0), &Mono).is_empty());
-    }
-
-    /// Collect every placed run as `(block, char_offset, text)` in reading order.
-    fn run_anchors(pages: &[Page]) -> Vec<(usize, usize, String)> {
-        pages
-            .iter()
-            .flat_map(|p| p.lines.iter())
-            .flat_map(|l| l.runs.iter())
-            .map(|r| (r.anchor.block, r.anchor.char_offset, r.text.clone()))
-            .collect()
-    }
-
-    fn wide(font_px: f32) -> LayoutOpts {
-        LayoutOpts {
-            page_w: 100_000.0,
-            page_h: 100_000.0,
-            margin: 0.0,
-            font_px,
-            line_spacing: 1.0,
-            para_gap: 0.0,
-            align: Align::Left,
-        }
-    }
-
-    #[test]
-    fn run_anchors_track_chapter_character_offsets() {
-        // "alpha"(5)@0, space@5, "beta"(4)@6, space@10, "gamma"@11.
-        let pages = paginate(&[para("alpha beta gamma")], &wide(10.0), &Mono);
-        assert_eq!(
-            run_anchors(&pages),
-            vec![
-                (0, 0, "alpha".into()),
-                (0, 6, "beta".into()),
-                (0, 11, "gamma".into()),
-            ]
-        );
-    }
-
-    #[test]
-    fn block_index_increments_and_offset_continues_across_blocks() {
-        // block 0 "one two": one@0, two@4 → cursor 7; block 1 "three"@7.
-        let pages = paginate(&[para("one two"), para("three")], &wide(10.0), &Mono);
-        assert_eq!(
-            run_anchors(&pages),
-            vec![
-                (0, 0, "one".into()),
-                (0, 4, "two".into()),
-                (1, 7, "three".into()),
-            ]
-        );
-    }
-
-    #[test]
-    fn list_marker_shares_body_offset_and_does_not_consume_budget() {
-        let pages = paginate(
-            &[
-                Block::ListItem {
-                    ordered: true,
-                    index: 1,
-                    content: vec![Inline::Run(TextRun {
-                        text: "first".into(),
-                        bold: false,
-                        italic: false,
-                        href: None,
-                    })],
-                },
-                para("after"),
-            ],
-            &LayoutOpts::new(1000.0, 1000.0, 10.0),
-            &Mono,
-        );
-        let anchors = run_anchors(&pages);
-        // Marker "1." and body "first" both anchor at offset 0 of block 0; the marker adds no budget,
-        // so "after" (block 1) starts at 5 (= len("first")), not 7.
-        assert_eq!(anchors[0], (0, 0, "1.".into()), "marker shares body start");
-        assert_eq!(anchors[1], (0, 0, "first".into()), "body at block start");
-        assert_eq!(
-            anchors[2],
-            (1, 5, "after".into()),
-            "marker consumed no offset"
-        );
-    }
-
-    /// A test hyphenator allowing breaks at fixed byte offsets (regardless of the word).
-    struct HyphenAt(Vec<usize>);
-    impl Hyphenator for HyphenAt {
-        fn opportunities(&self, _word: &str) -> Vec<usize> {
-            self.0.clone()
-        }
-    }
-
-    fn narrow_para() -> LayoutOpts {
-        // Mono 10px → 5px/char; content 60 wide, paragraph indent 12 → 48px usable.
-        LayoutOpts {
-            page_w: 60.0,
-            page_h: 10_000.0,
-            margin: 0.0,
-            font_px: 10.0,
-            line_spacing: 1.0,
-            para_gap: 0.0,
-            align: Align::Left,
-        }
-    }
-
-    #[test]
-    fn long_word_hyphenates_and_suffix_keeps_its_anchor() {
-        // "hyphenation" (11 chars = 55px) overflows the 48px column; a break after 5 bytes fits
-        // ("hyphe" 25px + hyphen 5px = 30 ≤ 48), so it splits and the suffix anchors after the prefix.
-        let pages = paginate_with(
-            &[para("hyphenation")],
-            &narrow_para(),
-            &Mono,
-            &HyphenAt(vec![5]),
-        );
-        let runs: Vec<_> = pages[0].lines.iter().flat_map(|l| l.runs.iter()).collect();
-        assert_eq!(runs[0].text, "hyphe-", "prefix carries a trailing hyphen");
-        assert_eq!(runs[1].text, "nation", "suffix continues on the next line");
-        assert_eq!(runs[0].anchor.char_offset, 0);
-        assert_eq!(
-            runs[1].anchor.char_offset, 5,
-            "suffix anchored at prefix length (reflow-stable)"
-        );
-    }
-
-    #[test]
-    fn default_paginate_never_hyphenates() {
-        // The default ([`NoHyphen`]) places an overflowing word whole, on its own line.
-        let pages = paginate(&[para("hyphenation")], &narrow_para(), &Mono);
-        let runs: Vec<_> = pages[0].lines.iter().flat_map(|l| l.runs.iter()).collect();
-        assert_eq!(runs.len(), 1);
-        assert_eq!(runs[0].text, "hyphenation");
-    }
-
-    #[test]
-    fn run_anchors_are_font_size_invariant() {
-        // Wrapping differs by size, but each word keeps its (block, char_offset) — the reflow-stable
-        // property a highlight/Digest anchor relies on (ADR-INKREAD-0012).
-        let blocks = [
-            para("the quick brown fox jumps over"),
-            para("the lazy dog sleeps soundly"),
-        ];
-        let narrow = |fp: f32| {
-            let opts = LayoutOpts {
-                page_w: 60.0,
-                ..wide(fp)
-            };
-            run_anchors(&paginate(&blocks, &opts, &Mono))
-        };
-        assert_eq!(narrow(10.0), narrow(20.0));
-    }
-}
+#[path = "layout_tests.rs"]
+mod tests;

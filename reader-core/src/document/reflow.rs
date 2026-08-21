@@ -15,7 +15,7 @@ use std::cell::{Cell, Ref, RefCell};
 use inkread_epub::layout::{paginate_with, Align, Hyphenator, LayoutOpts, Page};
 use inkread_epub::measure::{CachedHyphenator, CachedMetrics};
 use inkread_epub::render::{render_page as raster_page, AbFont, EnHyphenator, GrayCanvas};
-use inkread_epub::{parse_blocks, Block, EpubPackage, NavPoint};
+use inkread_epub::{parse_blocks_with, Block, EpubPackage, NavPoint, Stylesheet};
 
 use crate::document::text_select::{self, CharBox, NormRect, TextAnchor, TextSelection};
 use crate::document::{Document, DocumentMetadata, SearchMatch, TocEntry};
@@ -172,6 +172,9 @@ pub struct EpubBackend {
     pagination_cache: RefCell<Option<Box<dyn PaginationCache>>>,
     /// Where a pagination in flight is reported, and where cancellation is asked about (#161).
     progress: RefCell<Option<Box<dyn PaginationProgress>>>,
+    /// The book's declared block styling, applied as each chapter is parsed (#188). A property of
+    /// the book, not a setting, so it never invalidates a pagination the way typography does.
+    stylesheet: Stylesheet,
 }
 
 impl EpubBackend {
@@ -194,6 +197,7 @@ impl EpubBackend {
         Ok(Self {
             chapters: RefCell::new(chapters),
             chapter_keys,
+            stylesheet: pkg.stylesheet,
             nav: pkg.toc,
             meta,
             font: RefCell::new(AbFont::default_font()),
@@ -224,6 +228,7 @@ impl EpubBackend {
         Self {
             chapters: RefCell::new(chapters),
             chapter_keys,
+            stylesheet: Stylesheet::default(),
             nav: Vec::new(),
             meta: DocumentMetadata {
                 title: Some("Synthetic".into()),
@@ -255,12 +260,12 @@ impl EpubBackend {
             return;
         };
         if let Chapter::Source(html) = slot {
-            // `parse_blocks` takes the source by reference, so move it out first and let the old
-            // `Chapter` (and the XHTML inside it) drop as soon as the blocks exist.
+            // `parse_blocks_with` takes the source by reference, so move it out first and let the
+            // old `Chapter` (and the XHTML inside it) drop as soon as the blocks exist.
             let html = std::mem::take(html);
             #[cfg(test)]
             CHAPTER_PARSES.with(|c| c.set(c.get() + 1));
-            *slot = Chapter::Parsed(parse_blocks(&html));
+            *slot = Chapter::Parsed(parse_blocks_with(&html, &self.stylesheet));
         }
     }
 
@@ -739,8 +744,10 @@ pub(crate) fn reset_layout_passes() {
 ///
 /// - `v1` → `v2`: the paragraph first-line indent stopped applying to every line (#163), which
 ///   changes how much text fits on a line and therefore every page count in the cache.
+/// - `v2` → `v3`: the book's stylesheet is honoured (#188). A declared `text-indent: 0`, or a
+///   centred block, drops the first-line indent, so lines fit differently than a `v2` pass assumed.
 fn layout_key(opts: &LayoutOpts, font_id: usize, chapters: usize) -> String {
-    format!("v2|{:016x}|{font_id}|{chapters}", opts.layout_digest())
+    format!("v3|{:016x}|{font_id}|{chapters}", opts.layout_digest())
 }
 
 /// Paginate every chapter for `opts` and return how many pages each occupies.

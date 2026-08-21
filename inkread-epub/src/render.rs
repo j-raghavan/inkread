@@ -394,6 +394,7 @@ pub fn page_glyphs(page: &Page, opts: &LayoutOpts, font: &AbFont) -> Vec<PlacedG
 mod tests {
     use super::*;
     use crate::content::{Block, Inline, TextRun};
+    use crate::css::BlockStyle;
     use crate::layout::paginate;
 
     fn paragraph(text: &str) -> Block {
@@ -404,6 +405,7 @@ mod tests {
                 italic: false,
                 href: None,
             })],
+            style: BlockStyle::default(),
         }
     }
 
@@ -622,6 +624,7 @@ mod tests {
                 italic: false,
                 href: None,
             })],
+            style: BlockStyle::default(),
         };
         let pg_bold = paginate(&[heading], &opts, &font);
         let mut c_bold = GrayCanvas::new(400, 600);
