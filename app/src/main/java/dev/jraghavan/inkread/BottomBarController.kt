@@ -68,6 +68,14 @@ class BottomBarController(private val host: Host) {
         fun palmGuard(content: View): View
 
         /** Quick zoom from the bar (the shell owns the zoom model + step constant). */
+        /** True when the document magnifies (fixed-layout). A reflowed view resizes text instead. */
+        val magnifiable: Boolean
+
+        /** Step the reflow text size — what a pinch already does on a reflowable document. */
+        fun textLarger()
+
+        fun textSmaller()
+
         fun zoomIn()
 
         fun zoomOut()
@@ -245,10 +253,20 @@ class BottomBarController(private val host: Host) {
         control(R.drawable.ic_menu_contents, "Contents") { showContentsLazy() }
         control(R.drawable.ic_menu_search, "Search") { host.openSearch() }
         // Quick zoom (circle −/+ icons — not magnifiers, which are reserved for Search). Also in Adjust → Zoom.
-        // Zoom is stepwise: reaching a comfortable size takes several taps, and dismissing after
+        // Stepwise either way: reaching a comfortable size takes several taps, and dismissing after
         // each one made every step cost reopening the bar (#164).
-        control(R.drawable.ic_menu_zoom_out, "Zoom −", staysOpen = true) { host.zoomOut() }
-        control(R.drawable.ic_menu_zoom_in, "Zoom +", staysOpen = true) { host.zoomIn() }
+        //
+        // A reflowed view cannot magnify — `zoomBy` returns early for it (#61) — so offering Zoom
+        // there was a control that did nothing at all, while a pinch on the same page quietly
+        // changed the text size instead (#212). Same buttons, same intent, wired to whichever of
+        // the two the document actually supports, and labelled for it.
+        if (host.magnifiable) {
+            control(R.drawable.ic_menu_zoom_out, "Zoom −", staysOpen = true) { host.zoomOut() }
+            control(R.drawable.ic_menu_zoom_in, "Zoom +", staysOpen = true) { host.zoomIn() }
+        } else {
+            control(R.drawable.ic_menu_zoom_out, "Text −", staysOpen = true) { host.textSmaller() }
+            control(R.drawable.ic_menu_zoom_in, "Text +", staysOpen = true) { host.textLarger() }
+        }
         control(R.drawable.ic_menu_export, "Export") { host.openExport() }
         control(R.drawable.ic_menu_dict, "Dicts") { host.openDicts() }
         // Document controls consolidated into one KOReader-style tabbed sheet (Rotate/Fit/Font/Display).
