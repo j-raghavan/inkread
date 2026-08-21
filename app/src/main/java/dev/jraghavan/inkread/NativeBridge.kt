@@ -252,6 +252,10 @@ object NativeBridge {
      *  regardless — the request is still stored. Re-render after. */
     external fun nativeSetColumns(handle: Long, columns: Int): Int
 
+    /** Columns the layout is ACTUALLY using — a narrow page reduces two to one whatever was asked
+     *  for (#194). Lets the shell say a request was declined rather than leave it looking ignored. */
+    external fun nativeEffectiveColumns(handle: Long): Int
+
     /** Apply ALL reflow typography at once, repaginating ONCE (RR4). Use this on the open path to
      *  restore persisted settings — the individual setters each repaginate, so applying four of
      *  them in a row costs four full passes over the book (#161/#162). Returns the new page, or -1

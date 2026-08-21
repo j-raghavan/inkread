@@ -49,11 +49,17 @@ impl Hyphenator for NoHyphen {
 /// Viewport + typography for a layout pass (all pixels). Repagination on a font-size or margin
 /// Narrowest column worth setting, in ems of the body size (#194).
 ///
-/// Typography puts a comfortable measure at 45-75 characters; below roughly 20 the line breaks
-/// every few words and justified text opens rivers. 18 em is about 30-35 characters at a normal
-/// face — tight, but still readable — so it is the point at which a two-column request is declined
-/// rather than honoured badly.
-const MIN_COLUMN_EM: f32 = 18.0;
+/// A comfortable single-column measure is 45-75 characters, but newspaper columns are deliberately
+/// far tighter — 30-35 is normal, which is the look this feature exists to produce. At roughly half
+/// an em per character, 14 em is about **28 characters**: tight, and squarely in newspaper
+/// territory.
+///
+/// The floor is in ems, not pixels, because what matters is characters per line: raising the text
+/// size narrows the measure even though the page has not changed. Set from measurement rather than
+/// taste — at a comfortable reading size on a 1920px panel (56px text) a column comes out at 14 em,
+/// so a floor above that declines the feature exactly where it was asked for. Below this the line
+/// breaks every few words and justified text opens rivers, which is worse than one column.
+const MIN_COLUMN_EM: f32 = 14.0;
 
 /// Horizontal text alignment for reflowed lines (RR4 — KOReader's "Alignment").
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

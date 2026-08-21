@@ -847,6 +847,12 @@ impl ReaderSession {
         }
     }
 
+    /// Columns the layout is actually using — see [`Document::effective_columns`] (#194).
+    #[must_use]
+    pub fn effective_columns(&self) -> i32 {
+        self.document.effective_columns()
+    }
+
     /// Set the reflow column count (1 or 2; #194); repaginates EPUB preserving the chapter.
     /// `false` for a fixed-layout PDF. Re-render after.
     pub fn set_columns(&mut self, columns: i32) -> bool {

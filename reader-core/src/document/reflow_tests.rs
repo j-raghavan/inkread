@@ -1247,12 +1247,17 @@ fn a_page_the_index_claims_but_the_layout_lacks_is_refused_without_relaying_out(
     // The phantom page: in range per the index, absent from the layout.
     let phantom = real_total;
     assert!(doc.with_page(phantom, |_, _| ()).is_none(), "phantom page");
+    let diverged_before = diverged();
     reset_chapter_layouts();
     assert!(doc.with_page(phantom, |_, _| ()).is_none(), "still refused");
     assert_eq!(
         chapter_layouts(),
         0,
         "a known-complete chapter must not be laid out again for a page it does not have"
+    );
+    assert!(
+        diverged() > diverged_before,
+        "the refusal should come from the divergence guard, not an out-of-range page"
     );
 }
 

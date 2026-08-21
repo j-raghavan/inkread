@@ -383,9 +383,15 @@ impl EpubBackend {
                     return entry.pages.get(offset).map(|p| f(p, &opts));
                 }
                 // Defence in depth: an in-range page always falls inside its chapter's counted
-                // length, so this is unreachable unless the pagination index and the layout have
-                // diverged. Cheap to keep, and it fails closed rather than re-paginating.
-                Some(entry) if entry.complete => return None,
+                // length, so this is reached only when the pagination index and the layout have
+                // diverged. Fails closed rather than re-paginating, and says so — the caller
+                // otherwise reports it as a plain out-of-range page, which is misleading: the index
+                // believes the page exists, and that disagreement is the actual fault.
+                Some(entry) if entry.complete => {
+                    #[cfg(test)]
+                    DIVERGED.with(|d| d.set(d.get() + 1));
+                    return None;
+                }
                 Some(_) => true, // materialized, but not this far yet
                 None => false,
             }
@@ -737,6 +743,10 @@ impl Document for EpubBackend {
         self.repaginate_keeping_chapter(current_page)
     }
 
+    fn effective_columns(&self) -> i32 {
+        i32::from(Self::opts_for(&self.current_request()).effective_columns())
+    }
+
     fn set_font(&self, font_id: i32, current_page: usize) -> Option<usize> {
         // Swap the reading face, then repaginate (new metrics → new line breaks), keeping the chapter.
         self.apply_font(font_id);
@@ -811,10 +821,18 @@ thread_local! {
     static LAYOUT_PASSES: Cell<usize> = const { Cell::new(0) };
     /// Chapters parsed on this thread — the counter behind the laziness test (#186).
     static CHAPTER_PARSES: Cell<usize> = const { Cell::new(0) };
+    /// Times the index/layout divergence guard fired (#194 surfaced one in the wild).
+    static DIVERGED: Cell<usize> = const { Cell::new(0) };
     /// Chapter layout passes on this thread, and the pages each produced (#186). Materializing a
     /// chapter is cost a correctness test cannot see, so laziness has to be asserted directly.
     static CHAPTER_LAYOUTS: Cell<usize> = const { Cell::new(0) };
     static CHAPTER_PAGES_LAID: Cell<usize> = const { Cell::new(0) };
+}
+
+/// Times the divergence guard fired on this thread.
+#[cfg(test)]
+pub(crate) fn diverged() -> usize {
+    DIVERGED.with(Cell::get)
 }
 
 /// Chapter layout passes on this thread since [`reset_chapter_layouts`].
