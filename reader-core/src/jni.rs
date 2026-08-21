@@ -212,6 +212,7 @@ pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeOpenDocumen
     font_id: jint,
     line_spacing: jfloat,
     align_code: jint,
+    columns: jint,
 ) -> jlong {
     env.with_env(|env| -> jni::errors::Result<jlong> {
         let path: String = path.try_to_string(env)?;
@@ -226,6 +227,7 @@ pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeOpenDocumen
             font_id,
             line_spacing,
             align_code,
+            columns,
         };
 
         let bytes = read_document_file(&path).map_err(|e| throw(env, &e))?;
@@ -915,6 +917,41 @@ pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeSetLineSpac
     .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
 }
 
+// nativeEffectiveColumns(handle) : int — columns the layout is ACTUALLY using, which a narrow page
+// can reduce to 1 whatever was asked for (#194). Lets the shell say the request was declined.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeEffectiveColumns<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+) -> jint {
+    env.with_env(|env| -> jni::errors::Result<jint> {
+        let session = unsafe { session_mut(handle) }.map_err(|e| throw(env, &e))?;
+        Ok(session.effective_columns())
+    })
+    .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
+}
+
+// nativeSetColumns(handle, columns) : int — reflow columns (1 or 2; #194); repaginates EPUB.
+// Returns the new page index, or -1 for a fixed-layout PDF. Re-render after.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeSetColumns<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+    columns: jint,
+) -> jint {
+    env.with_env(|env| -> jni::errors::Result<jint> {
+        let session = unsafe { session_mut(handle) }.map_err(|e| throw(env, &e))?;
+        if session.set_columns(columns) {
+            Ok(session.current_page() as jint)
+        } else {
+            Ok(-1)
+        }
+    })
+    .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
+}
+
 // nativeSetAlignment(handle, code) : int — reflow alignment (0=Left,1=Justify,2=Center,3=Right; RR4);
 // repaginates EPUB. Returns the new page index, or -1 for a fixed-layout PDF. Re-render after.
 #[unsafe(no_mangle)]
@@ -1014,10 +1051,11 @@ pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeSetTypograp
     font_id: jint,
     line_spacing: jfloat,
     align_code: jint,
+    columns: jint,
 ) -> jint {
     env.with_env(|env| -> jni::errors::Result<jint> {
         let session = unsafe { session_mut(handle) }.map_err(|e| throw(env, &e))?;
-        if session.set_typography(scale, font_id, line_spacing, align_code) {
+        if session.set_typography(scale, font_id, line_spacing, align_code, columns) {
             Ok(session.current_page() as jint)
         } else {
             Ok(-1)
