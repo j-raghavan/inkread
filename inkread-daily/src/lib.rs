@@ -45,6 +45,10 @@ struct RawArticle {
     published: Option<String>,
     /// Raw fetched article HTML — the core runs readability extraction over it.
     html: String,
+    /// The feed's own description/summary for this entry, when it had one (#198). Optional so an
+    /// issue compiled by an older shell still parses.
+    #[serde(default)]
+    summary: Option<String>,
 }
 
 /// Assemble an issue EPUB from the shell's fetched JSON: each article's raw `html` is run through
@@ -65,6 +69,7 @@ pub fn assemble_issue_from_json(json: &str) -> Result<Vec<u8>, String> {
                 url: a.url,
                 published: a.published,
                 body_html,
+                summary: a.summary,
             }
         })
         .collect();
