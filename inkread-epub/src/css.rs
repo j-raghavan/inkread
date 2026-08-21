@@ -18,7 +18,7 @@ use crate::layout::Align;
 ///
 /// Every field is `Option` so "the book said nothing" stays distinguishable from "the book asked
 /// for the default" — the layout stage needs that difference to decide whether a reader's global
-/// alignment preference applies (see `layout::declared_align`).
+/// alignment preference applies (see `effective_align` in `layout`).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct BlockStyle {
     /// `text-align`, if declared.
@@ -42,7 +42,7 @@ impl BlockStyle {
     /// Return `self` with every property `higher` declares overridden — the inheritance step, used
     /// to fold a container's declared style into the block nested inside it.
     #[must_use]
-    pub fn overlaid_with(mut self, higher: &BlockStyle) -> BlockStyle {
+    pub(crate) fn overlaid_with(mut self, higher: &BlockStyle) -> BlockStyle {
         self.overlay(higher);
         self
     }
@@ -61,14 +61,8 @@ impl BlockStyle {
     }
 }
 
-/// Parse a `style="…"` attribute body — the declarations alone, with no selector.
-#[must_use]
-pub fn parse_inline(style_attr: &str) -> BlockStyle {
-    parse_declarations(style_attr)
-}
-
 /// One parsed rule: a simple selector plus the declarations it carries.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct Rule {
     /// Element name to match (`h1`), or `None` for "any element" (`.c`, `*`).
     tag: Option<String>,
@@ -86,19 +80,6 @@ struct Rule {
 pub struct Stylesheet {
     rules: Vec<Rule>,
 }
-
-// `Rule` holds no float/interior mutability, but `BlockStyle` is `PartialEq` only, so derive by hand
-// to keep `Stylesheet` comparable in tests without leaking the requirement onto `Rule`'s fields.
-impl PartialEq for Rule {
-    fn eq(&self, other: &Self) -> bool {
-        self.tag == other.tag
-            && self.class == other.class
-            && self.specificity == other.specificity
-            && self.order == other.order
-            && self.style == other.style
-    }
-}
-impl Eq for Rule {}
 
 impl Stylesheet {
     /// Parse a stylesheet. Malformed input yields fewer rules, never an error and never a panic —
@@ -144,6 +125,9 @@ impl Stylesheet {
                 }
             }
         }
+        // Sorted once here rather than on every lookup: `resolve` runs per block per chapter, and
+        // `order` is monotonic across `add` calls, so a later source re-sorts correctly.
+        self.rules.sort_by_key(|r| (r.specificity, r.order));
     }
 
     /// True when no rule was understood (an absent, empty, or entirely unsupported stylesheet).
@@ -162,19 +146,12 @@ impl Stylesheet {
         style_attr: Option<&str>,
     ) -> BlockStyle {
         let mut out = BlockStyle::default();
-        if !self.rules.is_empty() {
-            let mut matched: Vec<&Rule> = self
-                .rules
-                .iter()
-                .filter(|r| r.matches(tag, class_attr))
-                .collect();
-            matched.sort_by_key(|r| (r.specificity, r.order));
-            for rule in matched {
-                out.overlay(&rule.style);
-            }
+        // `rules` is already in specificity order, so this is a single allocation-free pass.
+        for rule in self.rules.iter().filter(|r| r.matches(tag, class_attr)) {
+            out.overlay(&rule.style);
         }
         if let Some(inline) = style_attr {
-            out.overlay(&parse_inline(inline));
+            out.overlay(&parse_declarations(inline));
         }
         out
     }
@@ -527,6 +504,38 @@ mod tests {
                 .resolve("p", None, None)
                 .align,
             Some(Align::Center)
+        );
+    }
+
+    /// Every index this parser takes is either a `find` on an ASCII delimiter or a `char_indices`
+    /// offset, so slices land on char boundaries — but a book's CSS is arbitrary bytes, and a slice
+    /// off a boundary panics. Pin it: non-ASCII in comments, selectors, values and class names, and
+    /// unterminated constructs around them (RR21-FR3).
+    #[test]
+    fn multibyte_css_never_panics_and_still_parses() {
+        for css in [
+            "/* коммент */ h1 { text-align: center }",
+            "/* незакрытый h1 { text-align: center }",
+            ".Ünicöde { text-align: center }",
+            "h1 { text-align: cëntre }",
+            "h1 { font-family: \"日本語\"; text-align: center }",
+            "日本語 { text-align: center }",
+            "h1 { text-indent: 0日 }",
+            "/*日*/{日}h1{text-align:center}",
+            "h1 { text-align: center /* 日",
+            "🙂 { text-align: center } h1 { text-align: right }",
+        ] {
+            let sheet = Stylesheet::parse(css); // must not panic
+            let _ = sheet.resolve("h1", Some("Ünicöde"), Some("text-align: 日"));
+        }
+        // Non-ASCII around a rule must not stop the rule itself being understood.
+        let sheet = Stylesheet::parse("/* коммент */ h1 { text-align: center }");
+        assert_eq!(sheet.resolve("h1", None, None).align, Some(Align::Center));
+        // A non-ASCII class name still matches itself.
+        let sheet = Stylesheet::parse(".Ünicöde { text-align: right }");
+        assert_eq!(
+            sheet.resolve("p", Some("Ünicöde"), None).align,
+            Some(Align::Right)
         );
     }
 
