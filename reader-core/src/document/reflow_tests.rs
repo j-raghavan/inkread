@@ -315,7 +315,7 @@ fn restoring_saved_typography_over_a_cold_open_costs_one_pagination() {
     reset_layout_passes();
     let b = EpubBackend::open(SAMPLE.to_vec(), vp(400, 600)).unwrap();
     // Exactly what the shell does on open: restore four persisted settings, then read the count.
-    let page = b.set_typography(1.25, 1, 1.7, 2, 0);
+    let page = b.set_typography(1.25, 1, 1.7, 2, 1, 0);
     let count = b.page_count();
     assert_eq!(
         layout_passes(),
@@ -361,7 +361,7 @@ fn set_typography_lays_out_the_same_book_as_the_four_setters_do() {
     // The batched path is an optimization, so it must be indistinguishable from the individual
     // setters it replaces — same page count, same page content.
     let batched = EpubBackend::open(SAMPLE.to_vec(), vp(400, 600)).unwrap();
-    assert_eq!(batched.set_typography(1.5, 2, 1.2, 3, 0), Some(0));
+    assert_eq!(batched.set_typography(1.5, 2, 1.2, 3, 1, 0), Some(0));
 
     let stepwise = EpubBackend::open(SAMPLE.to_vec(), vp(400, 600)).unwrap();
     let _ = stepwise.set_font(2, 0);
@@ -749,7 +749,7 @@ fn a_cancel_restores_the_request_exactly_across_the_whole_settings_range() {
             for align_code in 0..4 {
                 let (w, _) = watcher(Some(1));
                 b.set_pagination_progress(w);
-                let _ = b.set_typography(scale, 1, spacing, align_code, 0);
+                let _ = b.set_typography(scale, 1, spacing, align_code, 1, 0);
 
                 assert_eq!(
                     b.current_request(),

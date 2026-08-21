@@ -757,12 +757,14 @@ impl Document for EpubBackend {
         font_id: i32,
         line_spacing: f32,
         align_code: i32,
+        columns: i32,
         current_page: usize,
     ) -> Option<usize> {
         self.scale.set(clamp_scale(scale));
         self.apply_font(font_id);
         self.line_spacing.set(clamp_line_spacing(line_spacing));
         self.align.set(Align::from_code(align_code));
+        self.columns.set(columns.clamp(1, 2) as u8);
         self.repaginate_keeping_chapter(current_page)
     }
 

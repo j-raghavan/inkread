@@ -212,6 +212,7 @@ pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeOpenDocumen
     font_id: jint,
     line_spacing: jfloat,
     align_code: jint,
+    columns: jint,
 ) -> jlong {
     env.with_env(|env| -> jni::errors::Result<jlong> {
         let path: String = path.try_to_string(env)?;
@@ -226,6 +227,7 @@ pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeOpenDocumen
             font_id,
             line_spacing,
             align_code,
+            columns,
         };
 
         let bytes = read_document_file(&path).map_err(|e| throw(env, &e))?;
@@ -1034,10 +1036,11 @@ pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeSetTypograp
     font_id: jint,
     line_spacing: jfloat,
     align_code: jint,
+    columns: jint,
 ) -> jint {
     env.with_env(|env| -> jni::errors::Result<jint> {
         let session = unsafe { session_mut(handle) }.map_err(|e| throw(env, &e))?;
-        if session.set_typography(scale, font_id, line_spacing, align_code) {
+        if session.set_typography(scale, font_id, line_spacing, align_code, columns) {
             Ok(session.current_page() as jint)
         } else {
             Ok(-1)
