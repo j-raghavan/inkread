@@ -1126,3 +1126,96 @@ fn a_rendered_illustrated_page_carries_the_images_pixels() {
         "expected the 120x80 plate's pixels, found {greys}"
     );
 }
+
+// ---------------------------------------------------------------------------------------------
+// #186 — materializing only as far as the page being read.
+// ---------------------------------------------------------------------------------------------
+
+/// A book whose single chapter runs to many pages — the shape #186 measured, where showing page 0
+/// used to cost the whole chapter.
+fn one_long_chapter(paras: usize) -> EpubBackend {
+    let blocks = parse_blocks(
+        &(0..paras)
+            .map(|i| format!("<p>Paragraph {i}. Alpha bravo charlie delta echo foxtrot golf.</p>"))
+            .collect::<String>(),
+    );
+    EpubBackend::from_chapters(vec![blocks], vp(400, 600))
+}
+
+/// The core of #186: rendering one page must not lay out the whole chapter.
+#[test]
+fn opening_a_page_lays_out_only_as_far_as_that_page() {
+    let doc = one_long_chapter(400);
+    let total = doc.page_count();
+    assert!(total > 20, "need a long chapter, got {total} pages");
+
+    reset_chapter_layouts();
+    let mut bytes = vec![0u8; 400 * 600 * 4];
+    let mut buf = PixelBuffer::from_rgba(&mut bytes, 400, 600).unwrap();
+    doc.render_page(0, &mut buf).expect("renders");
+
+    let laid = chapter_pages_laid();
+    assert!(laid >= 1, "the page asked for must exist");
+    assert!(
+        laid * 4 < total,
+        "laying out page 0 produced {laid} of {total} pages — not lazy"
+    );
+}
+
+/// Reading forward must not re-lay a growing prefix on every turn. Extending a partial chapter
+/// finishes it in one pass, so a chapter costs at most two passes however far it is read.
+#[test]
+fn reading_forward_costs_at_most_two_layout_passes_per_chapter() {
+    let doc = one_long_chapter(400);
+    let total = doc.page_count();
+    reset_chapter_layouts();
+
+    let mut bytes = vec![0u8; 400 * 600 * 4];
+    for page in 0..total.min(12) {
+        let mut buf = PixelBuffer::from_rgba(&mut bytes, 400, 600).unwrap();
+        doc.render_page(page, &mut buf).expect("renders");
+    }
+    assert!(
+        chapter_layouts() <= 2,
+        "{} layout passes for one chapter read forward — quadratic re-layout",
+        chapter_layouts()
+    );
+}
+
+/// Laziness must not change what the reader sees: a page served from a partial layout has to be
+/// identical to the same page from a full one, or a resumed position lands on different text.
+#[test]
+fn a_page_from_a_partial_layout_matches_the_full_layout() {
+    let opts = EpubBackend::opts_for(&one_long_chapter(1).current_request());
+
+    let lazy = one_long_chapter(400);
+    let full = one_long_chapter(400);
+    let all = full.lay_out_chapter(0, &opts); // whole chapter in one pass
+
+    for page in [0usize, 1, 5] {
+        let got = lazy
+            .with_page(page, |p, _| p.clone())
+            .unwrap_or_else(|| panic!("page {page} missing"));
+        assert_eq!(&got, &all[page], "page {page} differs from the full layout");
+    }
+}
+
+/// A page past the end must still be refused once the chapter is known to be finished, rather than
+/// being mistaken for "not laid out that far yet" and re-paginated forever.
+#[test]
+fn a_page_past_the_end_is_refused_not_relaid() {
+    let doc = one_long_chapter(3);
+    let total = doc.page_count();
+    let mut bytes = vec![0u8; 400 * 600 * 4];
+    let mut buf = PixelBuffer::from_rgba(&mut bytes, 400, 600).unwrap();
+    doc.render_page(total - 1, &mut buf)
+        .expect("last page renders");
+
+    reset_chapter_layouts();
+    assert!(doc.with_page(total + 5, |_, _| ()).is_none());
+    assert_eq!(
+        chapter_layouts(),
+        0,
+        "an out-of-range page must not paginate"
+    );
+}
