@@ -917,6 +917,21 @@ pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeSetLineSpac
     .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
 }
 
+// nativeEffectiveColumns(handle) : int — columns the layout is ACTUALLY using, which a narrow page
+// can reduce to 1 whatever was asked for (#194). Lets the shell say the request was declined.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeEffectiveColumns<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+) -> jint {
+    env.with_env(|env| -> jni::errors::Result<jint> {
+        let session = unsafe { session_mut(handle) }.map_err(|e| throw(env, &e))?;
+        Ok(session.effective_columns())
+    })
+    .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
+}
+
 // nativeSetColumns(handle, columns) : int — reflow columns (1 or 2; #194); repaginates EPUB.
 // Returns the new page index, or -1 for a fixed-layout PDF. Re-render after.
 #[unsafe(no_mangle)]

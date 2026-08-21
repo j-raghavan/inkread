@@ -1177,3 +1177,38 @@ fn a_rule_spans_only_its_own_column() {
         );
     }
 }
+
+/// The case #194 was actually reported for, and the one the first attempt got wrong: a Nomad at a
+/// comfortable reading size. 1920px wide, 56px text (a 1.5x scale on the 38px base) — the column
+/// comes out at 14 em, so a floor set any higher declines the feature precisely where it was asked
+/// for. Pinned with real numbers rather than taste.
+#[test]
+fn a_nomad_at_a_comfortable_reading_size_gets_two_columns() {
+    let opts = LayoutOpts {
+        columns: 2,
+        ..LayoutOpts::new(1920.0, 2560.0, 56.0)
+    };
+    assert_eq!(
+        opts.effective_columns(),
+        2,
+        "column was {:.1} em",
+        opts.column_width() / opts.font_px
+    );
+    // Comfortably inside newspaper territory: about 28 characters at half an em each.
+    let ems = opts.column_width() / opts.font_px;
+    assert!(
+        (13.0..=16.0).contains(&ems),
+        "expected ~14 em, got {ems:.1}"
+    );
+
+    // Raise the text far enough and it is declined again — the floor still protects the measure.
+    let huge = LayoutOpts {
+        columns: 2,
+        ..LayoutOpts::new(1920.0, 2560.0, 90.0)
+    };
+    assert_eq!(
+        huge.effective_columns(),
+        1,
+        "90px text leaves under 9 em a column"
+    );
+}

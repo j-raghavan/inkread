@@ -482,6 +482,13 @@ pub trait Document {
         None
     }
 
+    /// Columns the layout is **actually** using, which is not always what was asked for: a page too
+    /// narrow for a readable measure lays out single-column regardless (#194). The shell needs this
+    /// to tell the reader their request was declined rather than ignored. Default: 1.
+    fn effective_columns(&self) -> i32 {
+        1
+    }
+
     /// Set the reflow **font family** (`font_id` = index into the bundled reading faces) and
     /// repaginate, preserving the chapter (RR4). Returns the new page, or `None` for a fixed-layout
     /// format (PDF). Default: unsupported.
