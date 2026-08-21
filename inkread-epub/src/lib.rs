@@ -22,7 +22,7 @@ pub mod layout;
 pub mod measure;
 pub mod render;
 mod transcode;
-pub use content::{parse_blocks, Block, Inline, TextRun};
+pub use content::{parse_blocks, parse_blocks_with, Block, Inline, TextRun};
 pub use css::{BlockStyle, Stylesheet};
 pub use layout::{
     paginate, paginate_with, Align, Hyphenator, LayoutLine, LayoutOpts, Metrics, NoHyphen, Page,
@@ -78,9 +78,10 @@ pub struct NavPoint {
     pub children: Vec<NavPoint>,
 }
 
-/// A parsed EPUB: its metadata, reading-order [`Chapter`]s, and TOC tree — the owned, render-engine-
-/// agnostic shape Phase 2 lays out. (Resource streaming for images/CSS arrives with the layout
-/// stage; Phase 1 carries the text spine, which dominates a typical book's content.)
+/// A parsed EPUB: its metadata, reading-order [`Chapter`]s, TOC tree, and the narrow slice of its
+/// styling inkread honours — the owned, render-engine-agnostic shape Phase 2 lays out. (Resource
+/// streaming for images arrives with the layout stage; Phase 1 carries the text spine, which
+/// dominates a typical book's content.)
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EpubPackage {
     /// Document title, if declared.
@@ -91,6 +92,15 @@ pub struct EpubPackage {
     pub chapters: Vec<Chapter>,
     /// The table of contents (EPUB 3 nav, falling back to EPUB 2 NCX — rbook resolves this).
     pub toc: Vec<NavPoint>,
+    /// The book's declared block styling, merged from every `text/css` manifest resource in
+    /// manifest order (#188). Pass it to [`parse_blocks_with`] when parsing a chapter.
+    ///
+    /// Merging the book's stylesheets into one sheet rather than resolving each chapter's `<link>`
+    /// elements is deliberate: virtually every EPUB ships one or two book-wide stylesheets whose
+    /// rules are authored to apply throughout, and one merged sheet costs a fraction of the memory
+    /// of a per-chapter copy on a large omnibus. A chapter's own `<style>` block still layers on
+    /// top, per-chapter, inside [`parse_blocks_with`].
+    pub stylesheet: Stylesheet,
 }
 
 impl EpubPackage {
@@ -133,11 +143,21 @@ impl EpubPackage {
             .map(|root| root.iter().map(convert_nav).collect())
             .unwrap_or_default();
 
+        // A stylesheet that will not read is skipped, never fatal: a book with broken CSS must
+        // still open, just unstyled (RR21-FR3).
+        let mut stylesheet = Stylesheet::default();
+        for entry in epub.manifest().styles() {
+            if let Ok(css) = entry.read_str() {
+                stylesheet.add(&css);
+            }
+        }
+
         Ok(Self {
             title,
             author,
             chapters,
             toc,
+            stylesheet,
         })
     }
 
@@ -322,6 +342,68 @@ mod tests {
             .as_deref()
             .unwrap_or("")
             .contains("ch1.xhtml"));
+    }
+
+    /// A book whose manifest declares a stylesheet, styled the way #188's *Pride and Prejudice*
+    /// title page is.
+    fn styled_epub() -> Vec<u8> {
+        const STYLED_OPF: &str = r#"<?xml version="1.0"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="id">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:identifier id="id">urn:uuid:test</dc:identifier>
+    <dc:title>The Test Book</dc:title>
+    <dc:language>en</dc:language>
+  </metadata>
+  <manifest>
+    <item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>
+    <item id="css" href="style.css" media-type="text/css"/>
+    <item id="c1" href="ch1.xhtml" media-type="application/xhtml+xml"/>
+    <item id="c2" href="ch2.xhtml" media-type="application/xhtml+xml"/>
+  </manifest>
+  <spine>
+    <itemref idref="c1"/>
+    <itemref idref="c2"/>
+  </spine>
+</package>"#;
+        const CSS: &str = "h1 { text-align: center; font-weight: normal }\n.c { text-indent: 0 }";
+        let mut buf = Vec::new();
+        write_zip(
+            &mut buf,
+            &[
+                ("mimetype", b"application/epub+zip".to_vec()),
+                ("META-INF/container.xml", CONTAINER_XML.as_bytes().to_vec()),
+                ("OEBPS/content.opf", STYLED_OPF.as_bytes().to_vec()),
+                ("OEBPS/nav.xhtml", NAV.as_bytes().to_vec()),
+                ("OEBPS/style.css", CSS.as_bytes().to_vec()),
+                ("OEBPS/ch1.xhtml", CH1.as_bytes().to_vec()),
+                ("OEBPS/ch2.xhtml", CH2.as_bytes().to_vec()),
+            ],
+        );
+        buf
+    }
+
+    /// #188: the book's stylesheet has to survive the trip out of the zip, or nothing downstream
+    /// can honour it.
+    #[test]
+    fn the_manifests_stylesheet_is_read_and_applies_to_a_parsed_chapter() {
+        let pkg = EpubPackage::open(styled_epub()).expect("valid epub opens");
+        assert!(
+            !pkg.stylesheet.is_empty(),
+            "manifest stylesheet was not read"
+        );
+
+        let blocks = parse_blocks_with(&pkg.chapters[0].html, &pkg.stylesheet);
+        let Some(Block::Heading { style, .. }) = blocks.first() else {
+            panic!("expected a heading, got {blocks:?}")
+        };
+        assert_eq!(style.align, Some(layout::Align::Center));
+        assert_eq!(style.bold, Some(false));
+    }
+
+    #[test]
+    fn a_book_without_any_css_has_an_empty_stylesheet() {
+        let pkg = EpubPackage::open(sample_epub()).expect("valid epub opens");
+        assert!(pkg.stylesheet.is_empty());
     }
 
     #[test]
