@@ -336,7 +336,6 @@ pub fn paginate_with_images(
 /// An in-progress page is discarded when stopping early: it is incomplete, and the caller asked
 /// only for pages that are whole.
 #[must_use]
-#[allow(clippy::too_many_arguments)]
 pub fn paginate_upto(
     blocks: &[Block],
     opts: &LayoutOpts,

@@ -1182,10 +1182,13 @@ fn reading_forward_costs_at_most_two_layout_passes_per_chapter() {
     );
 }
 
-/// Laziness must not change what the reader sees: a page served from a partial layout has to be
-/// identical to the same page from a full one, or a resumed position lands on different text.
+/// Laziness must not change what the reader sees, or a resumed position lands on different text.
+///
+/// Page 0 is the one actually served from a *partial* layout: asking for any later page flips the
+/// chapter to a full extension pass, so pages 1 and 5 below exercise that pass instead. Both
+/// matter — the prefix and the extension have to agree with a single full pass.
 #[test]
-fn a_page_from_a_partial_layout_matches_the_full_layout() {
+fn pages_served_lazily_match_a_single_full_layout() {
     let opts = EpubBackend::opts_for(&one_long_chapter(1).current_request());
 
     let lazy = one_long_chapter(400);
@@ -1200,10 +1203,10 @@ fn a_page_from_a_partial_layout_matches_the_full_layout() {
     }
 }
 
-/// A page past the end must still be refused once the chapter is known to be finished, rather than
-/// being mistaken for "not laid out that far yet" and re-paginated forever.
+/// A page past the end of the book is refused by the `total_pages` guard, before the chapter cache
+/// is consulted — so this costs no pagination at all.
 #[test]
-fn a_page_past_the_end_is_refused_not_relaid() {
+fn a_page_past_the_end_of_the_book_never_paginates() {
     let doc = one_long_chapter(3);
     let total = doc.page_count();
     let mut bytes = vec![0u8; 400 * 600 * 4];
@@ -1217,5 +1220,38 @@ fn a_page_past_the_end_is_refused_not_relaid() {
         chapter_layouts(),
         0,
         "an out-of-range page must not paginate"
+    );
+}
+
+/// The defensive arm: a page the pagination *index* says exists but the *layout* does not produce.
+/// That can only happen if the two have diverged — a cache written by a different layout, say — and
+/// the index guard cannot catch it, because as far as the index is concerned the page is in range.
+/// Reached here by handing the reader a cache that overcounts.
+///
+/// What must not happen is treating the missing page as "not laid out that far yet" and paginating
+/// the chapter again on every attempt.
+#[test]
+fn a_page_the_index_claims_but_the_layout_lacks_is_refused_without_relaying_out() {
+    let real_total = one_long_chapter(40).page_count();
+
+    // Same chapter count, so the cache is accepted, but one page more than the chapter has.
+    let (cache, _saved) = fake(Some(vec![real_total + 1]));
+    let doc = one_long_chapter(40);
+    doc.set_pagination_cache(cache);
+    assert_eq!(
+        doc.page_count(),
+        real_total + 1,
+        "the overcounting cache should be in force"
+    );
+
+    // The phantom page: in range per the index, absent from the layout.
+    let phantom = real_total;
+    assert!(doc.with_page(phantom, |_, _| ()).is_none(), "phantom page");
+    reset_chapter_layouts();
+    assert!(doc.with_page(phantom, |_, _| ()).is_none(), "still refused");
+    assert_eq!(
+        chapter_layouts(),
+        0,
+        "a known-complete chapter must not be laid out again for a page it does not have"
     );
 }
