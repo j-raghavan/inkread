@@ -577,8 +577,30 @@ fn render_cache_serves_revisits_and_invalidates_on_change() {
     render(&mut s, &mut buf);
     assert_eq!(renders.get(), 3);
 
-    // A viewport change invalidates the cache (geometry changed underneath the keys).
+    // Re-setting the SAME viewport changes nothing, so it must not throw the cache away (#186):
+    // a surface can be handed its size more than once, and on the open path that discards exactly
+    // the page just rendered. Note this session's viewport IS 100x120x226 — the assertion below
+    // used to pass that very value and expect invalidation, which pinned the wasteful behaviour.
+    let before = s.caches().render().len();
+    assert!(
+        before > 0,
+        "need a populated cache for this to mean anything"
+    );
     s.set_viewport(Viewport::new(100, 120, 226));
+    assert_eq!(
+        s.caches().render().len(),
+        before,
+        "an identical viewport must not invalidate the cache"
+    );
+    render(&mut s, &mut buf);
+    assert_eq!(
+        renders.get(),
+        3,
+        "and the cached page must still serve the render"
+    );
+
+    // A real geometry change does invalidate it — the keys no longer describe the buffers.
+    s.set_viewport(Viewport::new(120, 140, 226));
     assert_eq!(s.caches().render().len(), 0);
 }
 

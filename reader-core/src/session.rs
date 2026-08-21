@@ -482,6 +482,13 @@ impl ReaderSession {
     /// policy's full-screen rect. Returns nothing; the shell re-renders + re-asks for
     /// a refresh afterward.
     pub fn set_viewport(&mut self, viewport: Viewport) {
+        // A surface can be handed the same size more than once (Android delivers surfaceChanged
+        // repeatedly for one surface). Rebuilding the policy and dropping every cached render for a
+        // viewport that did not change throws away exactly the work that was about to be reused —
+        // on the open path, that is the page just rendered (#186).
+        if self.viewport == viewport {
+            return;
+        }
         self.viewport = viewport;
         let caps = self.policy.capabilities();
         let screen = Rect::full(viewport.width, viewport.height);
