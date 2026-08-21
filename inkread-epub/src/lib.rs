@@ -17,11 +17,13 @@ use rbook::ebook::toc::TocEntry as RbookTocEntry;
 use rbook::Epub;
 
 pub mod content;
+pub mod css;
 pub mod layout;
 pub mod measure;
 pub mod render;
 mod transcode;
 pub use content::{parse_blocks, Block, Inline, TextRun};
+pub use css::{BlockStyle, Stylesheet};
 pub use layout::{
     paginate, paginate_with, Align, Hyphenator, LayoutLine, LayoutOpts, Metrics, NoHyphen, Page,
     PlacedRun,
