@@ -207,12 +207,78 @@ pub struct LayoutLine {
     pub height: f32,
     pub runs: Vec<PlacedRun>,
     pub rule: bool,
+    /// An illustration occupying this line's box (#187). Mutually exclusive with `runs` in
+    /// practice: an image block emits one line that is nothing but the picture.
+    pub image: Option<PlacedImage>,
+}
+
+/// An illustration placed in the content box: where it sits and how big it is drawn, not its
+/// pixels. The renderer resolves `src` to bytes when it draws — layout never decodes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlacedImage {
+    /// The resource reference from the book's markup, resolved by the renderer.
+    pub src: String,
+    /// The `alt` text, for the fallback when the image cannot be drawn.
+    pub alt: String,
+    /// Left offset within the content box (images are centred).
+    pub x: i32,
+    /// Drawn width in pixels.
+    pub width: u32,
+    /// Drawn height in pixels.
+    pub height: u32,
+}
+
+/// Supplies the intrinsic pixel size of an image, so layout can reserve a box without decoding.
+/// Injected like [`Metrics`] and [`Hyphenator`] — the layout stage owns no resources.
+pub trait ImageSizer {
+    /// Intrinsic `(width, height)` of `src`, or `None` when it cannot be resolved.
+    fn size(&self, src: &str) -> Option<(u32, u32)>;
+}
+
+/// The no-images sizer: every lookup misses, so image blocks fall back to their text placeholder.
+pub struct NoImages;
+
+impl ImageSizer for NoImages {
+    fn size(&self, _src: &str) -> Option<(u32, u32)> {
+        None
+    }
 }
 
 /// A laid-out page: the lines that fall within the content box.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Page {
     pub lines: Vec<LayoutLine>,
+}
+
+/// Fit an image into the content box, preserving its aspect ratio and centring it.
+///
+/// Never enlarged past its intrinsic size — upscaling a small decorative glyph to the page width
+/// looks like a defect — and never larger than one page, so an oversized plate scales down to fit
+/// rather than being clipped or forcing an unbreakable overflow.
+fn fit_image(
+    src: &str,
+    alt: &str,
+    opts: &LayoutOpts,
+    images: &dyn ImageSizer,
+) -> Option<PlacedImage> {
+    let (iw, ih) = images.size(src)?;
+    if iw == 0 || ih == 0 {
+        return None;
+    }
+    let (fw, fh) = (iw as f32, ih as f32);
+    let content_w = opts.content_w();
+    // The vertical budget is a whole page: `add_image` starts a new page when it will not fit on
+    // this one, so an image capped at the content height always has somewhere to go.
+    let scale = (content_w / fw).min(opts.content_h() / fh).min(1.0);
+    let width = (fw * scale).round().max(1.0);
+    let height = (fh * scale).round().max(1.0);
+    Some(PlacedImage {
+        src: src.to_string(),
+        alt: alt.to_string(),
+        x: ((content_w - width) * 0.5).round() as i32,
+        width: width as u32,
+        height: height as u32,
+    })
 }
 
 /// Heading size multipliers by level (`h1`..`h6`).
@@ -242,6 +308,19 @@ pub fn paginate_with(
     opts: &LayoutOpts,
     m: &dyn Metrics,
     hyph: &dyn Hyphenator,
+) -> Vec<Page> {
+    paginate_with_images(blocks, opts, m, hyph, &NoImages)
+}
+
+/// As [`paginate_with`], with `images` supplying intrinsic sizes so illustrations are laid out as
+/// boxes rather than `[image]` placeholders (#187).
+#[must_use]
+pub fn paginate_with_images(
+    blocks: &[Block],
+    opts: &LayoutOpts,
+    m: &dyn Metrics,
+    hyph: &dyn Hyphenator,
+    images: &dyn ImageSizer,
 ) -> Vec<Page> {
     let mut pager = Pager::new(opts, hyph);
     // Chapter-relative character cursor, advanced as source text is consumed in reading order, so
@@ -331,9 +410,18 @@ pub fn paginate_with(
                 );
                 pager.gap(opts.font_px * 0.15);
             }
-            Block::Image { alt, .. } => {
-                // Phase 3 reserves a labelled placeholder; Phase 4 renders the decoded image at its
-                // intrinsic (viewport-fit) size.
+            Block::Image { src, alt } => {
+                if let Some(placed) = fit_image(src, alt, opts, images) {
+                    // An image occupies one character position, as `<br>` does, so the offsets of
+                    // everything after it stay stable whether or not it resolves (ADR-INKREAD-0012).
+                    cursor += 1;
+                    pager.gap_before(opts.font_px * 0.4);
+                    pager.add_image(placed);
+                    pager.gap(opts.font_px * 0.4);
+                    continue;
+                }
+                // Unresolvable (a dangling src, an unreadable codec): fall back to naming what is
+                // missing rather than dropping it silently.
                 let label = if alt.is_empty() {
                     "[image]".to_string()
                 } else {
@@ -346,6 +434,9 @@ pub fn paginate_with(
                     href: None,
                 })];
                 pager.gap_before(opts.font_px * 0.4);
+                // The label is synthetic, like a list item's marker: it must not consume source-
+                // character budget, or offsets after an image would depend on whether it resolved.
+                let at = cursor;
                 pager.add_paragraph(
                     &run,
                     opts.font_px,
@@ -357,6 +448,7 @@ pub fn paginate_with(
                     &mut cursor,
                     m,
                 );
+                cursor = at + 1;
                 pager.gap(opts.font_px * 0.4);
             }
             Block::Rule => pager.add_rule(opts.para_gap),
@@ -397,6 +489,7 @@ impl<'o> Pager<'o> {
             height,
             runs,
             rule,
+            image: None,
         });
         self.cursor_y += height;
     }
@@ -528,6 +621,23 @@ impl<'o> Pager<'o> {
         for runs in lines {
             self.emit(runs, line_h, false);
         }
+    }
+
+    /// Emit an illustration as a line of its own.
+    fn add_image(&mut self, image: PlacedImage) {
+        let height = image.height as f32;
+        if self.cursor_y + height > self.opts.content_h() && !self.current.is_empty() {
+            self.break_page();
+        }
+        let top = self.cursor_y;
+        self.current.push(LayoutLine {
+            top,
+            height,
+            runs: Vec::new(),
+            rule: false,
+            image: Some(image),
+        });
+        self.cursor_y += height;
     }
 
     /// Emit a horizontal-rule line occupying a small vertical slot.

@@ -26,8 +26,8 @@ mod transcode;
 pub use content::{parse_blocks, parse_blocks_with, Block, Inline, TextRun};
 pub use css::{BlockStyle, Stylesheet};
 pub use layout::{
-    paginate, paginate_with, Align, Hyphenator, LayoutLine, LayoutOpts, Metrics, NoHyphen, Page,
-    PlacedRun,
+    paginate, paginate_with, paginate_with_images, Align, Hyphenator, ImageSizer, LayoutLine,
+    LayoutOpts, Metrics, NoHyphen, NoImages, Page, PlacedImage, PlacedRun,
 };
 pub use measure::{CachedHyphenator, CachedMetrics};
 pub use render::{
