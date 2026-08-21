@@ -202,13 +202,20 @@ class BottomBarController(private val host: Host) {
             setPadding(dp(2), dp(6), dp(2), dp(12))
         }
         // One control = a line icon over a small label (Boox/NeoReader bottom-bar style, frame 069).
-        fun control(iconRes: Int, label: String, onClick: () -> Unit) {
+        //
+        // [staysOpen] keeps the bar up for a control that acts on the page in place and that a
+        // reader repeats — zoom, in practice (#164). Everything else navigates away or opens
+        // another sheet, where leaving the bar behind would just cover what you asked for.
+        fun control(iconRes: Int, label: String, staysOpen: Boolean = false, onClick: () -> Unit) {
             val cell = LinearLayout(activity).apply {
                 orientation = LinearLayout.VERTICAL
                 gravity = Gravity.CENTER
                 setPadding(dp(2), dp(8), dp(2), dp(8))
                 isClickable = true
-                setOnClickListener { dialog.dismiss(); onClick() }
+                setOnClickListener {
+                    if (!staysOpen) dialog.dismiss()
+                    onClick()
+                }
             }
             cell.addView(
                 ImageView(activity).apply {
@@ -238,8 +245,10 @@ class BottomBarController(private val host: Host) {
         control(R.drawable.ic_menu_contents, "Contents") { showContentsLazy() }
         control(R.drawable.ic_menu_search, "Search") { host.openSearch() }
         // Quick zoom (circle −/+ icons — not magnifiers, which are reserved for Search). Also in Adjust → Zoom.
-        control(R.drawable.ic_menu_zoom_out, "Zoom −") { host.zoomOut() }
-        control(R.drawable.ic_menu_zoom_in, "Zoom +") { host.zoomIn() }
+        // Zoom is stepwise: reaching a comfortable size takes several taps, and dismissing after
+        // each one made every step cost reopening the bar (#164).
+        control(R.drawable.ic_menu_zoom_out, "Zoom −", staysOpen = true) { host.zoomOut() }
+        control(R.drawable.ic_menu_zoom_in, "Zoom +", staysOpen = true) { host.zoomIn() }
         control(R.drawable.ic_menu_export, "Export") { host.openExport() }
         control(R.drawable.ic_menu_dict, "Dicts") { host.openDicts() }
         // Document controls consolidated into one KOReader-style tabbed sheet (Rotate/Fit/Font/Display).
