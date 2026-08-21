@@ -160,7 +160,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
     // ---- lasso (ADR-INKREAD-0010) ----
     /** The floating selection toolbar; created in onCreate. */
     private lateinit var selectionToolbar: SelectionToolbar
-    private lateinit var colorPalette: ColorPalette
+    private lateinit var toolOptions: ToolOptions
     /** Persistent Lasso discoverability banner (shown while Lasso is active with no selection). */
     private var lassoHint: TextView? = null
     /** In-document search (RR2) — owns its own query/hit state + dialogs (SRP). The shell only
@@ -517,7 +517,12 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             onRedo = { lasso.inkRedo() },
         )
         selectionToolbar = SelectionToolbar(this, root) { action -> lasso.onSelectionAction(action) }
-        colorPalette = ColorPalette(this, root)
+        toolOptions = ToolOptions(this, root)
+        // Restore the saved pen thickness (#199) before any stroke can be committed, so the first
+        // stroke after a relaunch is the width the reader chose rather than the default.
+        stylus.penWidthIndex = prefs
+            .getInt(KEY_PEN_WIDTH, StylusInkController.DEFAULT_PEN_WIDTH_INDEX)
+            .coerceIn(0, StylusInkController.PEN_WIDTHS.size - 1)
         // Persistent affordance for Lasso (discoverability): a slim top banner shown while the
         // Lasso tool is active and nothing is selected. Tells the user the loop gesture; hidden
         // once a selection exists or another tool is chosen.
@@ -601,7 +606,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         sessionStartMs = 0L
         if (::toolPalette.isInitialized) toolPalette.dismiss() // close any open palette popup
         if (::selectionToolbar.isInitialized) selectionToolbar.dismiss()
-        if (::colorPalette.isInitialized) colorPalette.dismiss()
+        if (::toolOptions.isInitialized) toolOptions.dismiss()
         mainHandler.removeCallbacks(fingerLongPress) // drop any pending finger gesture on leaving
         mainHandler.removeCallbacks(pendingCentreMenu) // don't pop the bar on a paused/finishing activity (#54)
         dismissReflowProgress() // don't leak the "Reflowing…" dialog if backgrounded mid-reflow (#55)
@@ -1526,7 +1531,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             return true
         }
         // Re-tapping the active Pen/Highlighter shows (or restyles, in place) its colour column — an
-        // in-window view (see ColorPalette), so it never steals focus and the firmware keeps the
+        // in-window view (see ToolOptions), so it never steals focus and the firmware keeps the
         // live-ink overlay (the only thing that displays committed strokes on the current page). The
         // column is PERSISTENT: it is never collapsed/removed while the tool stays active, because
         // removing the overlay view disturbs that firmware overlay and a sideloaded app cannot force
@@ -1534,17 +1539,17 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         // only on a tool switch (a deliberate context change). No Toast on pick: a Toast is a separate
         // window that steals focus and drops the overlay — the ringed swatch is the feedback.
         if (chosen == Tool.HIGHLIGHTER && tool == Tool.HIGHLIGHTER) {
-            if (colorPalette.isShowing()) collapseColorPalette()
-            else openColorColumn("Highlighter", HIGHLIGHT_COLORS, HIGHLIGHT_COLOR_NAMES, stylus.hlColorIndex) { stylus.hlColorIndex = it }
+            if (toolOptions.isShowing()) collapseToolOptions()
+            else openToolOptions("Highlighter", HIGHLIGHT_COLORS, HIGHLIGHT_COLOR_NAMES, stylus.hlColorIndex) { stylus.hlColorIndex = it }
             return true
         }
         if (chosen == Tool.PEN && tool == Tool.PEN) {
-            if (colorPalette.isShowing()) collapseColorPalette()
-            else openColorColumn("Pen", PEN_COLORS, PEN_COLOR_NAMES, stylus.penColorIndex) { stylus.penColorIndex = it }
+            if (toolOptions.isShowing()) collapseToolOptions()
+            else openPenOptions()
             return true
         }
         if (chosen == tool) return true
-        colorPalette.dismiss() // close the colour column when switching tools
+        toolOptions.dismiss() // close the colour column when switching tools
         tool = chosen
         applyToolInkState("tool")
         // A tool switch ends any lasso selection (it's page- and tool-specific).
@@ -1575,21 +1580,44 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
      * EPD frame-done). [postJump] of the current page runs clearAll + renderAndBlit(baked ink) +
      * executeAll(refresh command stream), which re-displays the committed strokes.
      */
-    private fun collapseColorPalette() {
-        colorPalette.dismiss()
+    private fun collapseToolOptions() {
+        toolOptions.dismiss()
         postJump(currentPage)
     }
 
     /**
      * Mount the colour column, then repaint the current page — the SHOW-side mirror of
-     * [collapseColorPalette]. Adding the overlay view triggers the firmware's full auto-refresh, which
+     * [collapseToolOptions]. Adding the overlay view triggers the firmware's full auto-refresh, which
      * repaints the page from the app surface and wipes the live-ink overlay; strokes drawn since the
      * last page render live ONLY on that overlay, so without this repaint they vanish until a page turn
      * re-bakes them (the "tap Pen → annotations disappear" report, #50). [postJump] of the current page
      * re-bakes the committed strokes (renderAndBlit) and drives a real EPD frame, restoring them.
      */
-    private fun openColorColumn(title: String, colors: IntArray, names: Array<String>, sel: Int, onPick: (Int) -> Unit) {
-        colorPalette.show(title, colors, names, sel, onPick)
+    private fun openToolOptions(title: String, colors: IntArray, names: Array<String>, sel: Int, onPick: (Int) -> Unit) {
+        toolOptions.show(title, colors, names, sel, onPick)
+        postJump(currentPage)
+    }
+
+    /**
+     * The pen's options: colour plus line thickness (#199). The thickness is persisted, so it
+     * survives a relaunch the way the reader's other typography choices do; strokes already written
+     * keep the width they were drawn at, since the core stores width per stroke.
+     */
+    private fun openPenOptions() {
+        toolOptions.show(
+            "Pen",
+            PEN_COLORS,
+            PEN_COLOR_NAMES,
+            stylus.penColorIndex,
+            StylusInkController.PEN_WIDTHS,
+            StylusInkController.PEN_WIDTH_NAMES,
+            stylus.penWidthIndex,
+            { stylus.penColorIndex = it },
+            {
+                stylus.penWidthIndex = it
+                prefs.edit().putInt(KEY_PEN_WIDTH, it).apply()
+            },
+        )
         postJump(currentPage)
     }
 
@@ -1875,6 +1903,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         const val PREFS = "inkread"
         const val KEY_BOOK_PATH = "book_path" // stored PDF under app storage (RR27).
         const val KEY_BOOK_ID = "book_id" // stable per-book id (the stored file name).
+        const val KEY_PEN_WIDTH = "pen_width" // selected pen thickness, an index into PEN_WIDTHS (#199).
         const val PALM_REJECT_MS = 1000L // a finger tap within this long of a stylus event = palm.
         // Public, Partner-synced folder the annotated PDF export is written to (Android external
         // storage root + this) so it reaches the desktop. "Document" is in the Supernote sync set.
