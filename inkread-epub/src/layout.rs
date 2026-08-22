@@ -61,6 +61,14 @@ impl Hyphenator for NoHyphen {
 /// breaks every few words and justified text opens rivers, which is worse than one column.
 const MIN_COLUMN_EM: f32 = 14.0;
 
+/// The narrowest a table cell may be before the row gives up and stacks its cells instead.
+///
+/// Lower than [`MIN_COLUMN_EM`] on purpose. Page columns are continuous prose and a short measure
+/// there is merely bad typography; a table cell holds a phrase whose *pairing* with the cell beside
+/// it is the point, and keeping that pairing is worth a tighter measure than prose would tolerate.
+/// Below this the words break every few characters and nothing is gained.
+const MIN_CELL_EM: f32 = 6.0;
+
 /// Horizontal text alignment for reflowed lines (RR4 — KOReader's "Alignment").
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Align {
@@ -557,6 +565,18 @@ pub fn paginate_upto(
                 cursor = at + 1;
                 pager.gap(opts.font_px * 0.4);
             }
+            Block::Row { cells, style } => {
+                pager.add_row(
+                    cells,
+                    opts.font_px,
+                    style.bold.unwrap_or(false),
+                    effective_align(style, opts.align),
+                    block_index,
+                    &mut cursor,
+                    m,
+                );
+                pager.gap(opts.para_gap * 0.5);
+            }
             Block::Rule => pager.add_rule(opts.para_gap),
         }
     }
@@ -715,6 +735,73 @@ impl<'o> Pager<'o> {
         let n = lines.len();
         for (i, mut runs) in lines.into_iter().enumerate() {
             align_line(&mut runs, align, self.opts.content_w(), i + 1 == n, m);
+            self.emit(runs, line_h, false);
+        }
+    }
+
+    /// Lay out one table row: each cell broken to its own share of the measure, then the cells'
+    /// lines emitted side by side.
+    ///
+    /// The cells are flowed independently and then zipped, so a row is as tall as its tallest cell
+    /// and short cells simply leave whitespace beneath them. That is what makes a parallel text
+    /// readable across: line *n* of the original and line *n* of the translation share a line box,
+    /// however differently the two languages wrap.
+    ///
+    /// The character cursor advances cell by cell in source order, so a source anchor taken inside
+    /// a row still maps back to the character it came from (ADR-INKREAD-0012).
+    ///
+    /// A row taller than the page splits at a line boundary like any other content, and because
+    /// every cell contributes to the same line boxes, the split keeps the columns aligned.
+    #[allow(clippy::too_many_arguments)]
+    fn add_row(
+        &mut self,
+        cells: &[Vec<Inline>],
+        size: f32,
+        bold_all: bool,
+        align: Align,
+        block: usize,
+        cursor: &mut usize,
+        m: &dyn Metrics,
+    ) {
+        if cells.is_empty() {
+            return;
+        }
+        let n = cells.len() as f32;
+        let gutter = self.opts.gutter();
+        let measure = self.opts.content_w();
+        // Cells share the measure equally, the gutters coming out of it. A row of so many cells
+        // that none has a usable measure is laid out as a single column instead: unreadably narrow
+        // columns are worse than the interleaving this replaced.
+        let cell_w = ((measure - gutter * (n - 1.0)) / n).max(1.0);
+        if cell_w < MIN_CELL_EM * size {
+            for cell in cells {
+                self.add_paragraph(cell, size, 0.0, 0.0, bold_all, align, block, cursor, m);
+            }
+            return;
+        }
+        let mut columns: Vec<Vec<Vec<PlacedRun>>> = Vec::with_capacity(cells.len());
+        for (index, cell) in cells.iter().enumerate() {
+            let mut lines = break_lines(
+                cell, size, 0.0, 0.0, cell_w, bold_all, block, cursor, m, self.hyph,
+            );
+            let last = lines.len();
+            let dx = index as f32 * (cell_w + gutter);
+            for (i, runs) in lines.iter_mut().enumerate() {
+                align_line(runs, align, cell_w, i + 1 == last, m);
+                for run in runs.iter_mut() {
+                    run.x += dx;
+                }
+            }
+            columns.push(lines);
+        }
+        let line_h = size * self.opts.line_spacing;
+        let rows = columns.iter().map(Vec::len).max().unwrap_or(0);
+        for i in 0..rows {
+            let runs: Vec<PlacedRun> = columns
+                .iter()
+                .filter_map(|c| c.get(i))
+                .flat_map(|l| l.iter().cloned())
+                .collect();
             self.emit(runs, line_h, false);
         }
     }

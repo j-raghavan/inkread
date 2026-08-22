@@ -75,6 +75,38 @@ class SettingsActivity : Activity() {
             ) { onExportOverwriteTapped() },
         )
 
+        // ── Reading ────────────────────────────────────────────────────────────────
+        column.addView(spacer(dp(34)))
+        column.addView(eyebrow("Reading"))
+        column.addView(spacer(dp(12)))
+        column.addView(
+            toggleRow(
+                title = "Tool palette across the top",
+                desc = "Lay the annotation tools out horizontally at the top of the page instead " +
+                    "of vertically down the right edge. The palette is a fixed, finger-sized " +
+                    "width while the page margin is a fraction of the screen, so down the side it " +
+                    "clips the end of every line it covers; across the top it covers part of one " +
+                    "line. It opens collapsed in the corner each time, so it never covers " +
+                    "anything you did not just reach for. Takes effect the next time a document " +
+                    "is opened.",
+                on = AppSettings.toolbarHorizontal(this),
+            ) {
+                AppSettings.setToolbarHorizontal(this, !AppSettings.toolbarHorizontal(this)); refresh()
+            },
+        )
+
+        column.addView(
+            toggleRow(
+                title = "Dock the tool palette on the left",
+                desc = "Put the palette against the left edge instead of the right — the left top " +
+                    "corner when it runs across the top. Takes effect the next time a document is " +
+                    "opened.",
+                on = AppSettings.toolbarOnLeft(this),
+            ) {
+                AppSettings.setToolbarOnLeft(this, !AppSettings.toolbarOnLeft(this)); refresh()
+            },
+        )
+
         // ── Dictionary ─────────────────────────────────────────────────────────────
         column.addView(spacer(dp(34)))
         column.addView(eyebrow("Dictionary"))

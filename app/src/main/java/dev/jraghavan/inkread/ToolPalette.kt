@@ -62,10 +62,26 @@ class ToolPalette(
     /** Global ink undo / redo (these are actions, not tools — they don't change the active tool). */
     private val onUndo: () -> Unit = {},
     private val onRedo: () -> Unit = {},
+    /** Which way the strip runs (#200). */
+    private val orientation: Orientation = Orientation.VERTICAL,
+    /** Which side it docks to: [Anchor.END] is the right edge, [Anchor.START] the left. */
+    private val side: Anchor = Anchor.END,
+    /**
+     * Extra clearance along the docked side, in pixels, for chrome the strip must not cover (#200).
+     *
+     * The host owns this because the host owns the chrome. A strip docked into a corner that already
+     * holds something does not merely look wrong — it eats the touches meant for it, since the strip
+     * consumes every event inside its bounds.
+     */
+    private val dockClearance: Int = 0,
     /** Where the reader last parked the pill (#200); null opens it at the default dock. */
     private val savedPosition: Position? = null,
     /** The pill came to rest somewhere new — persist it so the next document opens there (#200). */
     private val onMoved: (Position) -> Unit = {},
+    /** Whether to open already expanded — the state the reader last left it in (#200). */
+    private val startExpanded: Boolean = false,
+    /** The reader opened or closed the strip; remember it for the next book (#200). */
+    private val onExpandedChanged: (Boolean) -> Unit = {},
 ) {
     var current: Tool = Tool.PEN
         private set
@@ -74,10 +90,34 @@ class ToolPalette(
     private fun dp(v: Int) = (v * density).toInt()
     private val touchSlop = ViewConfiguration.get(activity).scaledTouchSlop
 
-    // Opens collapsed (a small circular inkwell puck) so it never covers the text on document open;
-    // tap to expand into the tool strip.
-    private var expanded = false
-    private val container = LinearLayout(activity).apply { orientation = LinearLayout.VERTICAL }
+    /**
+     * Open or shut, carried over from the last book (#200).
+     *
+     * Not reset on open. Whether the tools are out is a working posture, not a per-document
+     * property: a reader who is annotating opens the next book to annotate it too, and having to
+     * reach for the strip again each time is friction in exactly the place they were trying to
+     * avoid it.
+     */
+    private var expanded = startExpanded
+    private val horizontal get() = orientation == Orientation.HORIZONTAL
+
+    /**
+     * Which host edge each axis is measured from, matching the container's layout gravity.
+     *
+     * Both forms dock to a side; only the cross axis differs. A horizontal bar sits against the top,
+     * so it lands in a corner — which is the point. Collapsed in the middle of the top edge it would
+     * float in the centre of the page with nothing to relate to, and expanding from there pushed it
+     * hard against one side with 920px of dead space behind it.
+     */
+    private val axisX get() = side
+    private val axisY get() = if (horizontal) Anchor.START else Anchor.CENTER
+
+    /** The axis the strip grows along when it expands — the one it is laid out on. */
+    private val growthAxis get() = if (horizontal) axisX else axisY
+
+    private val container = LinearLayout(activity).apply {
+        this.orientation = if (horizontal) LinearLayout.HORIZONTAL else LinearLayout.VERTICAL
+    }
 
     init {
         host.addView(
@@ -86,8 +126,16 @@ class ToolPalette(
                 ViewGroup.LayoutParams.WRAP_CONTENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT,
             ).apply {
-                gravity = Gravity.END or Gravity.CENTER_VERTICAL
-                marginEnd = dp(6)
+                // The docked edge is the one the strip runs along: a vertical pill hugs the
+                // right, a horizontal bar sits across the top, which is where it was asked for.
+                val sideGravity = if (side == Anchor.START) Gravity.START else Gravity.END
+                gravity = sideGravity or if (horizontal) Gravity.TOP else Gravity.CENTER_VERTICAL
+                val inset = dp(6)
+                // Clearance applies along the docked side, and only to the horizontal form: the
+                // vertical pill rides the middle of its edge and never reaches the corner.
+                val docked = inset + if (horizontal) dockClearance else 0
+                if (horizontal) topMargin = inset
+                if (side == Anchor.START) marginStart = docked else marginEnd = docked
             },
         )
         container.alpha = IDLE_ALPHA // see-through while reading so it doesn't cover the text
@@ -105,8 +153,8 @@ class ToolPalette(
      * the pill would sit at the default dock on the panel while being somewhere else to the touch.
      */
     private fun restore(position: Position) = onNextLayout { width, height ->
-        container.translationX = translationXFor(position.x, host.width, width)
-        container.translationY = translationYFor(position.y, host.height, height)
+        container.translationX = offsetForFraction(axisX, position.x, host.width, width)
+        container.translationY = offsetForFraction(axisY, position.y, host.height, height)
         reattach()
         onChrome()
     }
@@ -150,8 +198,8 @@ class ToolPalette(
         if (host.width <= 0 || host.height <= 0 || container.width <= 0 || container.height <= 0) return
         onMoved(
             Position(
-                fractionX(container.translationX, host.width, container.width),
-                fractionY(container.translationY, host.height, container.height),
+                fraction(axisX, container.translationX, host.width, container.width),
+                fraction(axisY, container.translationY, host.height, container.height),
             ),
         )
     }
@@ -170,13 +218,23 @@ class ToolPalette(
         container.removeAllViews()
         if (expanded) {
             container.background = pill()
-            container.setPadding(dp(5), dp(7), dp(5), dp(7))
-            container.addView(handle()) // grip: collapse / move
-            container.addView(divider())
-            for (tool in Tool.values()) container.addView(iconButton(tool))
-            container.addView(divider())
-            container.addView(actionButton(R.drawable.ic_sel_undo, "Undo", onUndo))
-            container.addView(actionButton(R.drawable.ic_sel_redo, "Redo", onRedo))
+            if (horizontal) {
+                container.setPadding(dp(7), dp(5), dp(7), dp(5))
+            } else {
+                container.setPadding(dp(5), dp(7), dp(5), dp(7))
+            }
+            // The grip belongs on the docked edge, so the strip grows inward from it and the grip
+            // itself never moves. Docked right, that means building the row back to front.
+            val parts = buildList {
+                add(handle()) // grip: collapse / move
+                add(divider())
+                for (tool in Tool.values()) add(iconButton(tool))
+                add(divider())
+                add(actionButton(R.drawable.ic_sel_undo, "Undo", onUndo))
+                add(actionButton(R.drawable.ic_sel_redo, "Redo", onRedo))
+            }
+            val ordered = if (horizontal && side == Anchor.END) parts.reversed() else parts
+            for (view in ordered) container.addView(view)
         } else {
             // Collapsed: a circular inkwell puck — tap to expand, drag to move.
             container.background = circle()
@@ -200,9 +258,17 @@ class ToolPalette(
     /** A hairline separator between the handle, the tools, and the undo/redo actions. */
     private fun divider(): View = View(activity).apply {
         setBackgroundColor(Ink.hairline)
-        layoutParams = LinearLayout.LayoutParams(dp(42), Ink.hair()).apply {
-            gravity = Gravity.CENTER_HORIZONTAL
-            val v = dp(4); setMargins(0, v, 0, v)
+        // The separator runs across the strip, so it swaps axis with it.
+        layoutParams = if (horizontal) {
+            LinearLayout.LayoutParams(Ink.hair(), dp(42)).apply {
+                gravity = Gravity.CENTER_VERTICAL
+                val h = dp(4); setMargins(h, 0, h, 0)
+            }
+        } else {
+            LinearLayout.LayoutParams(dp(42), Ink.hair()).apply {
+                gravity = Gravity.CENTER_HORIZONTAL
+                val v = dp(4); setMargins(0, v, 0, v)
+            }
         }
     }
 
@@ -252,9 +318,9 @@ class ToolPalette(
                     if (!moved && kotlin.math.hypot(dx, dy) > touchSlop) moved = true
                     if (moved) {
                         container.translationX =
-                            clampX(startTx + dx, host.width, container.width)
+                            clamp(axisX, startTx + dx, host.width, container.width)
                         container.translationY =
-                            clampY(startTy + dy, host.height, container.height)
+                            clamp(axisY, startTy + dy, host.height, container.height)
                     }
                     true
                 }
@@ -282,10 +348,11 @@ class ToolPalette(
      * next layout pass rather than here.
      */
     private fun toggleExpanded() {
-        val heightBefore = container.height
+        val sizeBefore = if (horizontal) container.width else container.height
         expanded = !expanded
+        onExpandedChanged(expanded)
         render()
-        reanchor(heightBefore) {
+        reanchor(sizeBefore) {
             reattach()
             persist() // the clamp may have nudged the pill; remember where it actually landed
             onChrome()
@@ -301,10 +368,25 @@ class ToolPalette(
      * the offset compensates. The corner is where the grip is — the thing the finger just tapped,
      * and the only way to collapse the pill again.
      */
-    private fun reanchor(heightBefore: Int, onSettled: () -> Unit) = onNextLayout { width, height ->
-        container.translationY =
-            clampY(anchorY(container.translationY, heightBefore, height), host.height, height)
-        container.translationX = clampX(container.translationX, host.width, width)
+    private fun reanchor(sizeBefore: Int, onSettled: () -> Unit) = onNextLayout { width, height ->
+        // Only the axis the strip grows along needs its docked edge held; the other just re-clamps.
+        if (horizontal) {
+            container.translationX = clamp(
+                axisX,
+                keepEdge(growthAxis, container.translationX, sizeBefore, width),
+                host.width,
+                width,
+            )
+            container.translationY = clamp(axisY, container.translationY, host.height, height)
+        } else {
+            container.translationY = clamp(
+                axisY,
+                keepEdge(growthAxis, container.translationY, sizeBefore, height),
+                host.height,
+                height,
+            )
+            container.translationX = clamp(axisX, container.translationX, host.width, width)
+        }
         onSettled()
     }
 
@@ -350,20 +432,23 @@ class ToolPalette(
     }
 
     /**
-     * Collapse the pill (call from the host's onPause) — it stays docked, never removed.
+     * Which edge of the host an axis is measured from — the layout gravity, as arithmetic.
      *
-     * Re-anchored like any other collapse: this used to shrink the pill without compensating, so
-     * backgrounding the app and returning to it left the puck half the pill's height further down
-     * the screen than the reader had put it. Nothing is persisted or repainted here — the panel is
-     * going away, and the corner the reader chose was already recorded when they chose it.
+     * A vertical pill hangs off the right edge and is centred down the page; a horizontal bar
+     * sits against the top and is centred across it. The same offset therefore means different
+     * things on different axes, and every clamp, fraction and re-anchor below has to know which.
      */
-    fun dismiss() {
-        if (!expanded) return
-        val heightBefore = container.height
-        expanded = false
-        render()
-        reanchor(heightBefore) {}
-    }
+    enum class Anchor { START, CENTER, END }
+
+    /**
+     * Which way the strip runs (#200).
+     *
+     * Both forms are the same strip; only the axis it grows along and the edge it docks to differ.
+     * [HORIZONTAL] answers the request for a toolbar across the top: on a narrow panel a vertical
+     * pill is wider than the page margin, so it clips the end of every line it spans -- twenty of
+     * them -- while a horizontal one at the top clips part of a single line.
+     */
+    enum class Orientation { VERTICAL, HORIZONTAL }
 
     /**
      * A parked position for the pill, held as host-relative fractions (#200). Persisted by the
@@ -387,15 +472,45 @@ class ToolPalette(
         /** Resting opacity of the docked puck — translucent so the text behind it stays readable. */
         const val IDLE_ALPHA = 0.55f
 
-        /**
-         * Clamp the horizontal offset so the pill stays inside the host. The base anchor is
-         * `END`, so the pill only ever moves left: the offset is negative, bounded by how much
-         * wider the host is than the pill.
-         */
-        fun clampX(tx: Float, hostWidth: Int, viewWidth: Int): Float {
-            val min = -(hostWidth - viewWidth).toFloat().coerceAtLeast(0f)
-            return tx.coerceIn(min, 0f)
+        /** Where the view's leading edge sits, given its anchor and offset. */
+        fun edge(anchor: Anchor, offset: Float, host: Int, view: Int): Float {
+            val slack = (host - view).toFloat()
+            return when (anchor) {
+                Anchor.START -> offset
+                Anchor.CENTER -> slack / 2f + offset
+                Anchor.END -> slack + offset
+            }
         }
+
+        /** The offset that puts the view's leading edge at [edge] — the inverse of [edge]. */
+        fun offsetFor(anchor: Anchor, edge: Float, host: Int, view: Int): Float {
+            val slack = (host - view).toFloat()
+            return when (anchor) {
+                Anchor.START -> edge
+                Anchor.CENTER -> edge - slack / 2f
+                Anchor.END -> edge - slack
+            }
+        }
+
+        /**
+         * Clamp an offset so the view stays inside the host, whichever edge it is anchored to.
+         *
+         * A view with no slack — larger than its host — stays where its gravity puts it rather than
+         * being pushed to an edge: some of it is off screen whatever we do, and moving it would only
+         * change which part.
+         */
+        fun clamp(anchor: Anchor, offset: Float, host: Int, view: Int): Float {
+            val slack = (host - view).toFloat()
+            if (slack <= 0f) return 0f
+            return offsetFor(anchor, edge(anchor, offset, host, view).coerceIn(0f, slack), host, view)
+        }
+
+        /**
+         * Clamp the horizontal offset of a *vertical* pill, which hangs off the `END` edge.
+         * Kept as its own name because that is what the vertical form's call sites mean.
+         */
+        fun clampX(tx: Float, hostWidth: Int, viewWidth: Int): Float =
+            clamp(Anchor.END, tx, hostWidth, viewWidth)
 
         /**
          * Clamp the vertical offset so the pill stays inside the host. The base anchor is
@@ -403,10 +518,8 @@ class ToolPalette(
          * half the slack. A pill taller than the host has no slack at all and stays centred, which
          * is the least-bad answer: some of it is off screen whatever we do.
          */
-        fun clampY(ty: Float, hostHeight: Int, viewHeight: Int): Float {
-            val half = ((hostHeight - viewHeight) / 2f).coerceAtLeast(0f)
-            return ty.coerceIn(-half, half)
-        }
+        fun clampY(ty: Float, hostHeight: Int, viewHeight: Int): Float =
+            clamp(Anchor.CENTER, ty, hostHeight, viewHeight)
 
         /**
          * The vertical offset that keeps the pill's **top** where it was when its height changes
@@ -417,7 +530,22 @@ class ToolPalette(
          * which is what the finger just tapped and what has to stay reachable.
          */
         fun anchorY(ty: Float, oldHeight: Int, newHeight: Int): Float =
-            ty + (newHeight - oldHeight) / 2f
+            keepEdge(Anchor.CENTER, ty, oldHeight, newHeight)
+
+        /**
+         * The offset that keeps the strip's **docked edge** still when it grows or shrinks.
+         *
+         * The docked edge is the one the grip sits on — the thing the finger just tapped, and the
+         * only way to collapse the strip again. A strip anchored to an edge already holds that edge
+         * for free: under `START` the near edge is the offset itself, and under `END` the far edge
+         * is `host + offset`, neither of which involves the strip's size. Only `CENTER` has to
+         * compensate, by half the growth, because a centred strip grows both ways.
+         */
+        fun keepEdge(anchor: Anchor, offset: Float, oldSize: Int, newSize: Int): Float =
+            when (anchor) {
+                Anchor.START, Anchor.END -> offset
+                Anchor.CENTER -> offset + (newSize - oldSize) / 2f
+            }
 
         /**
          * Where the pill's **top-left corner** sits, as a fraction of the host's width and height.
@@ -427,11 +555,14 @@ class ToolPalette(
          * size changing between its collapsed and expanded forms. The corner is where the grip is,
          * which is the part the reader actually aims at.
          */
+        fun fraction(anchor: Anchor, offset: Float, host: Int, view: Int): Float =
+            if (host <= 0) 0f else edge(anchor, offset, host, view) / host
+
         fun fractionX(tx: Float, hostWidth: Int, viewWidth: Int): Float =
-            if (hostWidth <= 0) 0f else ((hostWidth - viewWidth) + tx) / hostWidth
+            fraction(Anchor.END, tx, hostWidth, viewWidth)
 
         fun fractionY(ty: Float, hostHeight: Int, viewHeight: Int): Float =
-            if (hostHeight <= 0) 0f else ((hostHeight - viewHeight) / 2f + ty) / hostHeight
+            fraction(Anchor.CENTER, ty, hostHeight, viewHeight)
 
         /**
          * Turn a remembered [fractionX] back into a horizontal offset for the *current* geometry,
@@ -442,18 +573,17 @@ class ToolPalette(
          * a position that was legal then can be off screen now. Restoring the pill out of reach
          * would recreate the very trap #200 was opened about.
          */
-        fun translationXFor(fraction: Float, hostWidth: Int, viewWidth: Int): Float =
-            if (hostWidth <= 0 || !fraction.isFinite()) {
+        fun offsetForFraction(anchor: Anchor, fraction: Float, host: Int, view: Int): Float =
+            if (host <= 0 || !fraction.isFinite()) {
                 0f
             } else {
-                clampX(fraction * hostWidth - (hostWidth - viewWidth), hostWidth, viewWidth)
+                clamp(anchor, offsetFor(anchor, fraction * host, host, view), host, view)
             }
 
+        fun translationXFor(fraction: Float, hostWidth: Int, viewWidth: Int): Float =
+            offsetForFraction(Anchor.END, fraction, hostWidth, viewWidth)
+
         fun translationYFor(fraction: Float, hostHeight: Int, viewHeight: Int): Float =
-            if (hostHeight <= 0 || !fraction.isFinite()) {
-                0f
-            } else {
-                clampY(fraction * hostHeight - (hostHeight - viewHeight) / 2f, hostHeight, viewHeight)
-            }
+            offsetForFraction(Anchor.CENTER, fraction, hostHeight, viewHeight)
     }
 }

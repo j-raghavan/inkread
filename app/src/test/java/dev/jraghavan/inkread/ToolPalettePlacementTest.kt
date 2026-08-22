@@ -1,5 +1,6 @@
 package dev.jraghavan.inkread
 
+import dev.jraghavan.inkread.ToolPalette.Anchor
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -213,5 +214,138 @@ class ToolPalettePlacementTest {
         assertEquals(0f, ToolPalette.fractionY(10f, 0, 0), 0.01f)
         assertEquals(0f, ToolPalette.translationXFor(0.5f, 0, 0), 0.01f)
         assertEquals(0f, ToolPalette.translationYFor(0.5f, 0, 0), 0.01f)
+    }
+
+    // ── The horizontal form: same strip, different axis (#200) ────────────────────────────────────
+
+    /** A horizontal bar docks TOP and centres across the width; a vertical pill is END/CENTER. */
+    @Test
+    fun eachAnchorMeasuresFromItsOwnEdge() {
+        assertEquals("START counts from the top/left", 0f, ToolPalette.edge(Anchor.START, 0f, hostH, pill), 0.5f)
+        assertEquals(
+            "CENTER leaves half the slack before it",
+            (hostH - pill) / 2f,
+            ToolPalette.edge(Anchor.CENTER, 0f, hostH, pill),
+            0.5f,
+        )
+        assertEquals(
+            "END sits flush against the far edge",
+            (hostH - pill).toFloat(),
+            ToolPalette.edge(Anchor.END, 0f, hostH, pill),
+            0.5f,
+        )
+    }
+
+    /** Offsets and edges must invert exactly, or a saved position drifts every time it round-trips. */
+    @Test
+    fun edgeAndOffsetAreInverses() {
+        for (anchor in Anchor.entries) {
+            for (offset in listOf(-500f, -1f, 0f, 1f, 500f)) {
+                val e = ToolPalette.edge(anchor, offset, hostH, pill)
+                assertEquals(
+                    "$anchor did not round-trip at $offset",
+                    offset,
+                    ToolPalette.offsetFor(anchor, e, hostH, pill),
+                    0.01f,
+                )
+            }
+        }
+    }
+
+    /** Whatever the anchor, the strip must end up inside the host — that is the whole job. */
+    @Test
+    fun everyAnchorClampsTheStripInsideTheHost() {
+        for (anchor in Anchor.entries) {
+            for (offset in listOf(-99_999f, 99_999f)) {
+                val clamped = ToolPalette.clamp(anchor, offset, hostH, pill)
+                val leading = ToolPalette.edge(anchor, clamped, hostH, pill)
+                assertTrue("$anchor ran off the near edge: $leading", leading >= -0.5f)
+                assertTrue(
+                    "$anchor ran off the far edge: ${leading + pill}",
+                    leading + pill <= hostH + 0.5f,
+                )
+            }
+        }
+    }
+
+    /**
+     * A top-docked bar grows downward from a fixed top edge, so expanding must not move it at all.
+     * Under CENTER it would drift by half the growth — which is the bug this maths exists to stop,
+     * in its horizontal form.
+     */
+    @Test
+    fun aCornerDockedStripDoesNotDriftWhenItExpands() {
+        val parked = 300f
+        // A strip anchored to an edge holds that edge for free — its offset does not involve size.
+        assertEquals(parked, ToolPalette.keepEdge(Anchor.START, parked, puck, pill), 0.01f)
+        assertEquals(parked, ToolPalette.keepEdge(Anchor.END, parked, puck, pill), 0.01f)
+        // Only a centred strip grows both ways and has to compensate.
+        assertEquals(
+            parked + (pill - puck) / 2f,
+            ToolPalette.keepEdge(Anchor.CENTER, parked, puck, pill),
+            0.01f,
+        )
+    }
+
+    /**
+     * The measured bug this replaces: expanded from the centre of a 1920px panel the strip ended up
+     * 920px from the left and 32px from the right, because growth ran outward from the grip instead
+     * of the strip being anchored to a corner at all. Docked, the edge it grows from cannot move.
+     */
+    @Test
+    fun aCornerDockedStripKeepsItsDockedEdgeExactly() {
+        val host = 1920
+        for ((anchor, edgeOf) in listOf<Pair<Anchor, (Float, Int) -> Float>>(
+            Anchor.START to { off, view -> ToolPalette.edge(Anchor.START, off, host, view) },
+            Anchor.END to { off, view -> ToolPalette.edge(Anchor.END, off, host, view) + view },
+        )) {
+            val before = edgeOf(0f, puck)
+            val after = edgeOf(ToolPalette.keepEdge(anchor, 0f, puck, pill), pill)
+            assertEquals("$anchor moved its docked edge", before, after, 0.5f)
+        }
+    }
+
+    /** A parked horizontal bar must survive a round trip on its own anchors, like the vertical one. */
+    @Test
+    fun aHorizontalBarComesBackWhereItWasParked() {
+        val tx = -240f // centred across the width, nudged left
+        val ty = 120f // measured down from the top edge
+        assertEquals(
+            tx,
+            ToolPalette.offsetForFraction(Anchor.CENTER, ToolPalette.fraction(Anchor.CENTER, tx, hostW, pill), hostW, pill),
+            0.5f,
+        )
+        assertEquals(
+            ty,
+            ToolPalette.offsetForFraction(Anchor.START, ToolPalette.fraction(Anchor.START, ty, hostH, puck), hostH, puck),
+            0.5f,
+        )
+    }
+
+    /** A strip wider than its host has no good answer; it must not throw or invert its bounds. */
+    @Test
+    fun anOversizedStripIsClampedRatherThanCrashing() {
+        for (anchor in Anchor.entries) {
+            assertEquals("$anchor", 0f, ToolPalette.clamp(anchor, 500f, 100, 4000), 0.01f)
+            assertEquals("$anchor", 0f, ToolPalette.clamp(anchor, -500f, 0, 0), 0.01f)
+        }
+    }
+
+    /**
+     * The strip must not sit in the bookmark dog-ear's corner (#200).
+     *
+     * Not a cosmetic clash: the palette consumes every touch inside its bounds, so a puck parked in
+     * that corner silently eats the tap that toggles a bookmark. Measured on a 1920px panel the puck
+     * landed at x 1789..1909 — wholly inside the zone, which starts at 1651.
+     */
+    @Test
+    fun aTopRightStripClearsTheBookmarkTapZone() {
+        val clearance = kotlin.math.ceil(hostW * ReaderActivity.BOOKMARK_ZONE_W).toInt()
+        val zoneStartsAt = hostW * (1f - ReaderActivity.BOOKMARK_ZONE_W)
+        val stripRightEdge = hostW - clearance
+        assertTrue(
+            "the strip's right edge ($stripRightEdge) must not enter the zone (from $zoneStartsAt)",
+            stripRightEdge <= zoneStartsAt + 0.5f,
+        )
     }
 }

@@ -14,6 +14,7 @@ import android.net.Uri
 import android.os.Environment
 import android.provider.Settings
 import android.os.Bundle
+import kotlin.math.ceil
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
@@ -159,7 +160,15 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
     /** The floating tool puck/palette overlay; created in onCreate. */
     private lateinit var toolPalette: ToolPalette
 
-    /** The tool palette's last parked corner (#200), or null when it has never been moved. */
+    /** Whether the reader has asked for the tool palette to run across the top (#200). */
+    private val paletteHorizontal: Boolean get() = AppSettings.toolbarHorizontal(this)
+
+    /**
+     * The vertical pill's last parked spot (#200), or null when it has never been moved.
+     *
+     * Only the vertical form remembers a position. The horizontal bar docks to a corner chosen in
+     * Settings and opens there every time, so there is nothing free-form to store.
+     */
     private fun parkedPalettePosition(): ToolPalette.Position? =
         ToolPalette.Position.of(
             prefs.getFloat(KEY_PALETTE_X, Float.NaN),
@@ -529,9 +538,39 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             onRedo = { lasso.inkRedo() },
             // Reopen the toolbar where the reader last parked it (#200) rather than at the default
             // dock — repositioning it on every document open was the standing annoyance.
-            savedPosition = parkedPalettePosition(),
+            orientation = if (paletteHorizontal) {
+                ToolPalette.Orientation.HORIZONTAL
+            } else {
+                ToolPalette.Orientation.VERTICAL
+            },
+            side = if (AppSettings.toolbarOnLeft(this)) {
+                ToolPalette.Anchor.START
+            } else {
+                ToolPalette.Anchor.END
+            },
+            // Docked into the top-right corner the strip lands on the bookmark ribbon — and, worse,
+            // inside its tap target, swallowing the touch that toggles a bookmark. Hold it clear.
+            dockClearance = if (AppSettings.toolbarOnLeft(this)) {
+                0
+            } else {
+                // Rounded up: truncating leaves the strip a fraction of a pixel inside the zone.
+                ceil(resources.displayMetrics.widthPixels * BOOKMARK_ZONE_W).toInt()
+            },
+            // The horizontal bar is corner-docked, and the corner *is* its position: every book
+            // opens it collapsed there. It can still be dragged aside mid-read, but that is a
+            // this-book-only move and is deliberately not carried into the next one.
+            savedPosition = if (paletteHorizontal) null else parkedPalettePosition(),
+            startExpanded = prefs.getBoolean(KEY_PALETTE_EXPANDED, false),
+            onExpandedChanged = { open ->
+                prefs.edit().putBoolean(KEY_PALETTE_EXPANDED, open).apply()
+            },
             onMoved = { at ->
-                prefs.edit().putFloat(KEY_PALETTE_X, at.x).putFloat(KEY_PALETTE_Y, at.y).apply()
+                if (!paletteHorizontal) {
+                    prefs.edit()
+                        .putFloat(KEY_PALETTE_X, at.x)
+                        .putFloat(KEY_PALETTE_Y, at.y)
+                        .apply()
+                }
             },
         )
         selectionToolbar = SelectionToolbar(this, root) { action -> lasso.onSelectionAction(action) }
@@ -626,7 +665,8 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             ReadingStats.record(this, minutes, (currentPage - sessionStartPage).coerceAtLeast(0))
         }
         sessionStartMs = 0L
-        if (::toolPalette.isInitialized) toolPalette.dismiss() // close any open palette popup
+        // The tool palette is deliberately NOT collapsed here. Whether the tools are out is the
+        // reader's working posture and survives leaving the app, the way the chosen tool does.
         if (::selectionToolbar.isInitialized) selectionToolbar.dismiss()
         if (::toolOptions.isInitialized) toolOptions.dismiss()
         mainHandler.removeCallbacks(fingerLongPress) // drop any pending finger gesture on leaving
@@ -1416,7 +1456,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             }
         }
         // Top-right corner → toggle the bookmark dog-ear (Kindle/KOReader convention).
-        if (w > 0f && h > 0f && x > w * 0.86f && y < h * 0.08f) {
+        if (w > 0f && h > 0f && x > w * (1f - BOOKMARK_ZONE_W) && y < h * BOOKMARK_ZONE_H) {
             bottomBar.toggleBookmark()
             return
         }
@@ -1968,6 +2008,17 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         const val KEY_BOOK_PATH = "book_path" // stored PDF under app storage (RR27).
         const val KEY_BOOK_ID = "book_id" // stable per-book id (the stored file name).
         const val KEY_PEN_WIDTH = "pen_width" // selected pen thickness, an index into PEN_WIDTHS (#199).
+        /**
+         * The bookmark dog-ear's tap target: the top [BOOKMARK_ZONE_H] of the rightmost
+         * [BOOKMARK_ZONE_W] of the page, as fractions so it holds on any panel.
+         *
+         * Named because two things need it and they must not drift apart: the tap handler that
+         * toggles the bookmark, and the tool palette, which has to keep out of it (#200).
+         */
+        const val BOOKMARK_ZONE_W = 0.14f
+        const val BOOKMARK_ZONE_H = 0.08f
+
+        const val KEY_PALETTE_EXPANDED = "palette_expanded" // tools out or put away (#200).
         const val KEY_PALETTE_X = "palette_x" // parked tool-palette corner, host fractions (#200).
         const val KEY_PALETTE_Y = "palette_y"
         const val PALM_REJECT_MS = 1000L // a finger tap within this long of a stylus event = palm.
