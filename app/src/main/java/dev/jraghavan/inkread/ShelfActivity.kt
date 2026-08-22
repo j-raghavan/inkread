@@ -117,7 +117,7 @@ class ShelfActivity : Activity() {
             isClickable = true
             setOnClickListener { open(book) }
             addView(TextView(this@ShelfActivity).apply {
-                text = Books.metaTitle(this@ShelfActivity, book.name) ?: Books.title(book)
+                text = titleOf(book)
                 setTextColor(ink); textSize = Ink.sp(18f); typeface = serif
                 maxLines = 2; setLineSpacing(0f, 1.1f)
             })
@@ -133,10 +133,22 @@ class ShelfActivity : Activity() {
                 setTextColor(Ink.muted); textSize = Ink.sp(11f); typeface = mono; letterSpacing = 0.08f
                 setPadding(0, dp(5), 0, 0)
             })
+            Books.disambiguatingFileName(titleOf(book), book.name)?.let { name ->
+                addView(TextView(this@ShelfActivity).apply {
+                    text = name
+                    setTextColor(Ink.muted); textSize = Ink.sp(10f); typeface = mono
+                    setPadding(0, dp(3), 0, 0); maxLines = 1
+                    ellipsize = android.text.TextUtils.TruncateAt.MIDDLE // keep the tail: v2, (1)…
+                })
+            }
         }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
 
         addView(Ink.pillButton(this@ShelfActivity, "Remove", primary = false) { confirmRemove(book) })
     }
+
+    /** The name this book is listed under: its metadata title, else the file name. */
+    private fun titleOf(book: File): String =
+        Books.metaTitle(this, book.name) ?: Books.title(book)
 
     /** Format · size · how far in you are — enough to decide whether it can go. */
     private fun subtitleFor(book: File): String {
@@ -156,7 +168,7 @@ class ShelfActivity : Activity() {
      * copies the file in, so removing one never touches the original the reader picked.
      */
     private fun confirmRemove(book: File) {
-        val title = Books.metaTitle(this, book.name) ?: Books.title(book)
+        val title = titleOf(book)
         val hasNotes = Books.hasNotes(book)
         val freed = Books.humanSize(Books.sizeOnDisk(book))
         val message = if (hasNotes) {

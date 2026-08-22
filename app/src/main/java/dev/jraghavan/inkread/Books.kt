@@ -140,6 +140,18 @@ object Books {
     /** `page-NNNN.inkbin` — the core's committed-ink page files (`SidecarPaths::page_file`). */
     private val INK_PAGE_FILE = Regex("^page-\\d+\\.inkbin$")
 
+    /**
+     * The file name to show beside [displayTitle], or null when it would merely repeat it.
+     *
+     * Books are listed by their metadata title, which is the right name to read by but a poor way
+     * to tell two files apart: a reader holding three copies of the same work sees the same line
+     * three times with no way to reach the file name (#227). Showing it always would be noise on
+     * the common shelf, where the title *is* the file name, so it appears only when it adds
+     * something — which is exactly the ambiguous case.
+     */
+    fun disambiguatingFileName(displayTitle: String, fileName: String): String? =
+        fileName.takeIf { !it.substringBeforeLast('.').equals(displayTitle.trim(), ignoreCase = true) }
+
     /** Bytes this book occupies, its annotations included — what removing it actually frees. */
     fun sizeOnDisk(file: File): Long =
         file.length() + sidecarDir(file).walkBottomUp().filter { it.isFile }.sumOf { it.length() }
