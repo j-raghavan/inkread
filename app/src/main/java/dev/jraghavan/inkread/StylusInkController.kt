@@ -259,6 +259,11 @@ class StylusInkController(private val host: Host) {
             NativeBridge.nativeInkBeginStroke(host.docHandle, coreTool, color, widthNorm, System.currentTimeMillis())
             NativeBridge.nativeInkAddPoints(host.docHandle, toNormPoints(raw))
             NativeBridge.nativeInkEndStroke(host.docHandle)
+            Log.i(
+                TAG,
+                "stroke: tool=${host.activeTool} width=${if (isHl) HIGHLIGHT_WIDTH_PX else penWidthPx}px" +
+                    " points=${raw.size / 2}",
+            )
             scheduleInkFlush() // deferred autosave: persist on a trailing debounce, not this fsync
             host.diag { "DIAG commitStroke OK ${raw.size / 2} pts tool=${host.activeTool} → core page ${host.currentPage}" }
         } catch (e: RuntimeException) {
@@ -362,12 +367,25 @@ class StylusInkController(private val host: Host) {
          * core, so changing the setting restyles nothing already written — old notes keep the width
          * they were drawn at.
          *
-         * The default (index 2, 6px) is the width every stroke used before this was selectable, and
-         * was tuned to match the firmware needle. The thinner options exist because that needle is
-         * heavy on a Nomad's smaller panel, which is what #199 asks for.
+         * **The default matches the firmware nib** (#126). While you write, the stroke on screen is
+         * painted by the firmware's EMR overlay at its own fixed width; what inkread stores is baked
+         * over the top at the next full render. If the two differ, the stroke visibly changes
+         * thickness the moment it bakes — which is what #126 reports as "renders fat, then refreshes
+         * thinner".
+         *
+         * Measured on a Nomad at a 1920px viewport: strokes baked at 9px are indistinguishable from
+         * the live nib, while the previous 6px default was visibly thinner. So 9px is the default,
+         * and the ladder is built around it rather than under it.
+         *
+         * The other widths are a deliberate trade the reader makes: a stroke narrower or wider than
+         * the nib *will* change thickness when it bakes, because the firmware's live width is not
+         * ours to set. Only suppressing the firmware overlay and drawing the stroke ourselves could
+         * avoid that, and the highlighter — which does exactly that — is the reason not to (#126).
          */
-        val PEN_WIDTHS = floatArrayOf(2f, 4f, 6f, 9f)
-        val PEN_WIDTH_NAMES = arrayOf("Fine", "Thin", "Medium", "Bold")
+        val PEN_WIDTHS = floatArrayOf(4f, 6f, 9f, 12f, 16f)
+        val PEN_WIDTH_NAMES = arrayOf("Fine", "Thin", "Medium", "Bold", "Heavy")
+
+        /** Index of the width that matches the firmware nib; see [PEN_WIDTHS]. */
         const val DEFAULT_PEN_WIDTH_INDEX = 2
 
         const val HIGHLIGHT_WIDTH_PX = 30f // wide marker band (vs the pen's PEN_WIDTHS).
