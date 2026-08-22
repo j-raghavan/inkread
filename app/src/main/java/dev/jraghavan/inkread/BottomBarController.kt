@@ -544,7 +544,11 @@ class BottomBarController(private val host: Host) {
         fun dp(v: Int) = (v * d).toInt()
         val file = java.io.File(host.requestedPath ?: return null)
         val title = Books.metaTitle(activity, file.name) ?: Books.title(file)
-        val name = Books.disambiguatingFileName(title, file.name) ?: return null
+        val name = Books.disambiguatingFileName(title, file.name)
+        // Say which way it went. "Nothing shown" is the correct answer when the file is named after
+        // its title, and is indistinguishable from a broken line unless the log states the reason.
+        Log.i(TAG, "file name line: file=${file.name} title=$title -> ${name ?: "(same, hidden)"}")
+        if (name == null) return null
         return TextView(activity).apply {
             text = name
             setTextColor(Ink.muted)

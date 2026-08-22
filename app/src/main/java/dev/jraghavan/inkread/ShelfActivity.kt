@@ -4,6 +4,7 @@ import android.app.Activity
 import android.app.AlertDialog
 import android.content.Intent
 import android.os.Bundle
+import android.util.Log
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
@@ -55,6 +56,15 @@ class ShelfActivity : Activity() {
     private fun render() {
         Books.sweepPartialDownloads(this)
         val books = ordered(Books.list(this))
+        // Report what was decided, not merely that we ran: the shelf's three visible judgements
+        // (order, notes flag, file-name disclosure) are all invisible to a log otherwise, and a
+        // wrong one looks exactly like a right one on a panel that cannot be screenshotted.
+        Log.i(
+            TAG,
+            "shelf: ${books.size} books, sort=$sort, withNotes=${books.count { Books.hasNotes(it) }}, " +
+                "named=${books.count { Books.disambiguatingFileName(titleOf(it), it.name) != null }} — " +
+                books.take(4).joinToString(", ") { it.name },
+        )
         column.removeAllViews()
         column.addView(header(books))
 
@@ -135,6 +145,7 @@ class ShelfActivity : Activity() {
         contentDescription = "Sort by ${option.label}"
         setOnClickListener {
             if (option != sort) {
+                Log.i(TAG, "sort: $sort -> $option")
                 sort = option
                 prefs.edit().putString(KEY_SORT, option.name).apply()
                 render()
@@ -235,6 +246,7 @@ class ShelfActivity : Activity() {
             "Remove “$title” from inkread? This deletes inkread’s own copy and frees $freed. " +
                 "A file you imported stays where it is."
         }
+        Log.i(TAG, "remove dialog: ${book.name} hasNotes=$hasNotes (offers 'Remove with notes'=$hasNotes)")
         val dialog = AlertDialog.Builder(this, R.style.InkDialog)
             .setTitle("Remove from inkread")
             .setMessage(message)
@@ -277,6 +289,7 @@ class ShelfActivity : Activity() {
     }
 
     private companion object {
+        const val TAG = "ShelfActivity"
         const val PREFS = "shelf"
         const val KEY_SORT = "sort" // the reader's chosen order, kept between visits (#227).
     }
