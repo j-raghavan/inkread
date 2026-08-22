@@ -170,6 +170,7 @@ class BottomBarController(private val host: Host) {
             gravity = Gravity.CENTER; setPadding(dp(8), dp(2), dp(8), dp(2)); isClickable = true
             setOnClickListener { dialog.dismiss(); chapterJump(dir) }
         }
+        fileNameLine()?.let(container::addView)
         container.addView(
             LinearLayout(activity).apply {
                 orientation = LinearLayout.HORIZONTAL
@@ -530,4 +531,29 @@ class BottomBarController(private val host: Host) {
     companion object {
         private const val TAG = "BottomBar"
     }
+
+    /**
+     * The open document's file name, shown only when it differs from the title it is listed under.
+     *
+     * The title is on screen everywhere; the file name was reachable nowhere, which leaves a reader
+     * holding several copies of one work unable to tell which one they have open (#227). It goes
+     * here rather than behind a twelfth control in a row that is already full on a small panel.
+     */
+    private fun fileNameLine(): View? {
+        val d = activity.resources.displayMetrics.density
+        fun dp(v: Int) = (v * d).toInt()
+        val file = java.io.File(host.requestedPath ?: return null)
+        val title = Books.metaTitle(activity, file.name) ?: Books.title(file)
+        val name = Books.disambiguatingFileName(title, file.name) ?: return null
+        return TextView(activity).apply {
+            text = name
+            setTextColor(Ink.muted)
+            textSize = Ink.sp(11f)
+            typeface = Ink.mono
+            maxLines = 1
+            ellipsize = android.text.TextUtils.TruncateAt.MIDDLE
+            setPadding(dp(24), dp(12), dp(24), 0)
+        }
+    }
+
 }
