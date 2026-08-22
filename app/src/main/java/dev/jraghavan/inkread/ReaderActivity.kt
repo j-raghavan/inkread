@@ -163,19 +163,15 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
     private val paletteHorizontal: Boolean get() = AppSettings.toolbarHorizontal(this)
 
     /**
-     * Parked positions are kept **per orientation**.
+     * The vertical pill's last parked spot (#200), or null when it has never been moved.
      *
-     * The two forms measure their offsets from different edges, so one set of fractions cannot mean
-     * the same place in both. Sharing a key would land the strip somewhere the reader never put it
-     * every time they changed the setting — legal, since it is clamped on screen, but arbitrary.
+     * Only the vertical form remembers a position. The horizontal bar docks to a corner chosen in
+     * Settings and opens there every time, so there is nothing free-form to store.
      */
-    private fun paletteKey(axis: String) = if (paletteHorizontal) "${axis}_h" else axis
-
-    /** The tool palette's last parked corner (#200), or null when it has never been moved. */
     private fun parkedPalettePosition(): ToolPalette.Position? =
         ToolPalette.Position.of(
-            prefs.getFloat(paletteKey(KEY_PALETTE_X), Float.NaN),
-            prefs.getFloat(paletteKey(KEY_PALETTE_Y), Float.NaN),
+            prefs.getFloat(KEY_PALETTE_X, Float.NaN),
+            prefs.getFloat(KEY_PALETTE_Y, Float.NaN),
         )
 
     // ---- lasso (ADR-INKREAD-0010) ----
@@ -546,12 +542,22 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             } else {
                 ToolPalette.Orientation.VERTICAL
             },
-            savedPosition = parkedPalettePosition(),
+            side = if (AppSettings.toolbarOnLeft(this)) {
+                ToolPalette.Anchor.START
+            } else {
+                ToolPalette.Anchor.END
+            },
+            // The horizontal bar is corner-docked, and the corner *is* its position: every book
+            // opens it collapsed there. It can still be dragged aside mid-read, but that is a
+            // this-book-only move and is deliberately not carried into the next one.
+            savedPosition = if (paletteHorizontal) null else parkedPalettePosition(),
             onMoved = { at ->
-                prefs.edit()
-                    .putFloat(paletteKey(KEY_PALETTE_X), at.x)
-                    .putFloat(paletteKey(KEY_PALETTE_Y), at.y)
-                    .apply()
+                if (!paletteHorizontal) {
+                    prefs.edit()
+                        .putFloat(KEY_PALETTE_X, at.x)
+                        .putFloat(KEY_PALETTE_Y, at.y)
+                        .apply()
+                }
             },
         )
         selectionToolbar = SelectionToolbar(this, root) { action -> lasso.onSelectionAction(action) }

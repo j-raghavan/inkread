@@ -16,6 +16,7 @@ object AppSettings {
     private const val KEY_UPDATE_SKIP_VERSION = "update_skip_version"
     private const val KEY_UPDATE_LAST_CHECK_MS = "update_last_check_ms"
     private const val KEY_TOOLBAR_HORIZONTAL = "toolbar_horizontal"
+    private const val KEY_TOOLBAR_ON_LEFT = "toolbar_on_left"
     private const val KEY_OPDS_URL = "opds_url"
     private const val KEY_OPDS_USER = "opds_user"
     private const val KEY_OPDS_PASSWORD = "opds_password"
@@ -57,6 +58,18 @@ object AppSettings {
 
     fun setToolbarHorizontal(c: Context, value: Boolean) =
         prefs(c).edit().putBoolean(KEY_TOOLBAR_HORIZONTAL, value).apply()
+
+    /**
+     * Which side the tool palette docks to — left when true, right by default (#200).
+     *
+     * Applies to both forms: the vertical pill hangs off that edge, and the horizontal bar lands in
+     * that top corner and grows inward from it. Right by default because that is where the palette
+     * has always been, and because it is the far edge from most readers' holding hand.
+     */
+    fun toolbarOnLeft(c: Context): Boolean = prefs(c).getBoolean(KEY_TOOLBAR_ON_LEFT, false)
+
+    fun setToolbarOnLeft(c: Context, value: Boolean) =
+        prefs(c).edit().putBoolean(KEY_TOOLBAR_ON_LEFT, value).apply()
 
     // ── Self-update (ADR-INKREAD-0014) ────────────────────────────────────────────────────────────
 

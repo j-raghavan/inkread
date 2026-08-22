@@ -274,20 +274,35 @@ class ToolPalettePlacementTest {
      * in its horizontal form.
      */
     @Test
-    fun aTopDockedBarDoesNotDriftWhenItExpands() {
+    fun aCornerDockedStripDoesNotDriftWhenItExpands() {
         val parked = 300f
+        // A strip anchored to an edge holds that edge for free — its offset does not involve size.
+        assertEquals(parked, ToolPalette.keepEdge(Anchor.START, parked, puck, pill), 0.01f)
+        assertEquals(parked, ToolPalette.keepEdge(Anchor.END, parked, puck, pill), 0.01f)
+        // Only a centred strip grows both ways and has to compensate.
         assertEquals(
-            "a START-anchored strip keeps its offset when it grows",
-            parked,
-            ToolPalette.keepEdge(Anchor.START, parked, puck, pill),
-            0.01f,
-        )
-        assertEquals(
-            "a CENTER-anchored strip must compensate by half the growth",
             parked + (pill - puck) / 2f,
             ToolPalette.keepEdge(Anchor.CENTER, parked, puck, pill),
             0.01f,
         )
+    }
+
+    /**
+     * The measured bug this replaces: expanded from the centre of a 1920px panel the strip ended up
+     * 920px from the left and 32px from the right, because growth ran outward from the grip instead
+     * of the strip being anchored to a corner at all. Docked, the edge it grows from cannot move.
+     */
+    @Test
+    fun aCornerDockedStripKeepsItsDockedEdgeExactly() {
+        val host = 1920
+        for ((anchor, edgeOf) in listOf<Pair<Anchor, (Float, Int) -> Float>>(
+            Anchor.START to { off, view -> ToolPalette.edge(Anchor.START, off, host, view) },
+            Anchor.END to { off, view -> ToolPalette.edge(Anchor.END, off, host, view) + view },
+        )) {
+            val before = edgeOf(0f, puck)
+            val after = edgeOf(ToolPalette.keepEdge(anchor, 0f, puck, pill), pill)
+            assertEquals("$anchor moved its docked edge", before, after, 0.5f)
+        }
     }
 
     /** A parked horizontal bar must survive a round trip on its own anchors, like the vertical one. */

@@ -62,8 +62,10 @@ class ToolPalette(
     /** Global ink undo / redo (these are actions, not tools — they don't change the active tool). */
     private val onUndo: () -> Unit = {},
     private val onRedo: () -> Unit = {},
-    /** Which way the strip runs and which edge it docks to (#200). */
+    /** Which way the strip runs (#200). */
     private val orientation: Orientation = Orientation.VERTICAL,
+    /** Which side it docks to: [Anchor.END] is the right edge, [Anchor.START] the left. */
+    private val side: Anchor = Anchor.END,
     /** Where the reader last parked the pill (#200); null opens it at the default dock. */
     private val savedPosition: Position? = null,
     /** The pill came to rest somewhere new — persist it so the next document opens there (#200). */
@@ -81,9 +83,19 @@ class ToolPalette(
     private var expanded = false
     private val horizontal get() = orientation == Orientation.HORIZONTAL
 
-    /** Which host edge each axis is measured from, matching the container's layout gravity. */
-    private val axisX get() = if (horizontal) Anchor.CENTER else Anchor.END
+    /**
+     * Which host edge each axis is measured from, matching the container's layout gravity.
+     *
+     * Both forms dock to a side; only the cross axis differs. A horizontal bar sits against the top,
+     * so it lands in a corner — which is the point. Collapsed in the middle of the top edge it would
+     * float in the centre of the page with nothing to relate to, and expanding from there pushed it
+     * hard against one side with 920px of dead space behind it.
+     */
+    private val axisX get() = side
     private val axisY get() = if (horizontal) Anchor.START else Anchor.CENTER
+
+    /** The axis the strip grows along when it expands — the one it is laid out on. */
+    private val growthAxis get() = if (horizontal) axisX else axisY
 
     private val container = LinearLayout(activity).apply {
         this.orientation = if (horizontal) LinearLayout.HORIZONTAL else LinearLayout.VERTICAL
@@ -98,12 +110,11 @@ class ToolPalette(
             ).apply {
                 // The docked edge is the one the strip runs along: a vertical pill hugs the
                 // right, a horizontal bar sits across the top, which is where it was asked for.
-                gravity = if (horizontal) {
-                    Gravity.TOP or Gravity.CENTER_HORIZONTAL
-                } else {
-                    Gravity.END or Gravity.CENTER_VERTICAL
-                }
-                if (horizontal) topMargin = dp(6) else marginEnd = dp(6)
+                val sideGravity = if (side == Anchor.START) Gravity.START else Gravity.END
+                gravity = sideGravity or if (horizontal) Gravity.TOP else Gravity.CENTER_VERTICAL
+                val inset = dp(6)
+                if (horizontal) topMargin = inset
+                if (side == Anchor.START) marginStart = inset else marginEnd = inset
             },
         )
         container.alpha = IDLE_ALPHA // see-through while reading so it doesn't cover the text
@@ -191,12 +202,18 @@ class ToolPalette(
             } else {
                 container.setPadding(dp(5), dp(7), dp(5), dp(7))
             }
-            container.addView(handle()) // grip: collapse / move
-            container.addView(divider())
-            for (tool in Tool.values()) container.addView(iconButton(tool))
-            container.addView(divider())
-            container.addView(actionButton(R.drawable.ic_sel_undo, "Undo", onUndo))
-            container.addView(actionButton(R.drawable.ic_sel_redo, "Redo", onRedo))
+            // The grip belongs on the docked edge, so the strip grows inward from it and the grip
+            // itself never moves. Docked right, that means building the row back to front.
+            val parts = buildList {
+                add(handle()) // grip: collapse / move
+                add(divider())
+                for (tool in Tool.values()) add(iconButton(tool))
+                add(divider())
+                add(actionButton(R.drawable.ic_sel_undo, "Undo", onUndo))
+                add(actionButton(R.drawable.ic_sel_redo, "Redo", onRedo))
+            }
+            val ordered = if (horizontal && side == Anchor.END) parts.reversed() else parts
+            for (view in ordered) container.addView(view)
         } else {
             // Collapsed: a circular inkwell puck — tap to expand, drag to move.
             container.background = circle()
@@ -330,14 +347,22 @@ class ToolPalette(
      * and the only way to collapse the pill again.
      */
     private fun reanchor(sizeBefore: Int, onSettled: () -> Unit) = onNextLayout { width, height ->
-        // The strip grows along its own axis, so that is the one whose leading edge must be held.
+        // Only the axis the strip grows along needs its docked edge held; the other just re-clamps.
         if (horizontal) {
-            container.translationX =
-                clamp(axisX, keepEdge(axisX, container.translationX, sizeBefore, width), host.width, width)
+            container.translationX = clamp(
+                axisX,
+                keepEdge(growthAxis, container.translationX, sizeBefore, width),
+                host.width,
+                width,
+            )
             container.translationY = clamp(axisY, container.translationY, host.height, height)
         } else {
-            container.translationY =
-                clamp(axisY, keepEdge(axisY, container.translationY, sizeBefore, height), host.height, height)
+            container.translationY = clamp(
+                axisY,
+                keepEdge(growthAxis, container.translationY, sizeBefore, height),
+                host.height,
+                height,
+            )
             container.translationX = clamp(axisX, container.translationX, host.width, width)
         }
         onSettled()
@@ -502,22 +527,19 @@ class ToolPalette(
             keepEdge(Anchor.CENTER, ty, oldHeight, newHeight)
 
         /**
-         * The offset that keeps the view's **leading edge** still when it changes size along the
-         * axis it grows on.
+         * The offset that keeps the strip's **docked edge** still when it grows or shrinks.
          *
-         * The leading edge is where the grip is: the thing the finger just tapped, and the only way
-         * to collapse the strip again. Under a `CENTER` anchor a size change moves that edge by half
-         * the difference unless the offset compensates; under `END` it moves by the whole
-         * difference; under `START` it does not move at all.
+         * The docked edge is the one the grip sits on — the thing the finger just tapped, and the
+         * only way to collapse the strip again. A strip anchored to an edge already holds that edge
+         * for free: under `START` the near edge is the offset itself, and under `END` the far edge
+         * is `host + offset`, neither of which involves the strip's size. Only `CENTER` has to
+         * compensate, by half the growth, because a centred strip grows both ways.
          */
-        fun keepEdge(anchor: Anchor, offset: Float, oldSize: Int, newSize: Int): Float {
-            val grew = (newSize - oldSize).toFloat()
-            return when (anchor) {
-                Anchor.START -> offset
-                Anchor.CENTER -> offset + grew / 2f
-                Anchor.END -> offset + grew
+        fun keepEdge(anchor: Anchor, offset: Float, oldSize: Int, newSize: Int): Float =
+            when (anchor) {
+                Anchor.START, Anchor.END -> offset
+                Anchor.CENTER -> offset + (newSize - oldSize) / 2f
             }
-        }
 
         /**
          * Where the pill's **top-left corner** sits, as a fraction of the host's width and height.
