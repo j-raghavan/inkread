@@ -1,6 +1,7 @@
 package dev.jraghavan.inkread
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -190,6 +191,19 @@ class ToolPalettePlacementTest {
         assertEquals(0f, ToolPalette.translationYFor(Float.NaN, hostH, puck), 0.01f)
         assertEquals(0f, ToolPalette.translationXFor(Float.POSITIVE_INFINITY, hostW, puck), 0.01f)
         assertEquals(0f, ToolPalette.translationYFor(Float.NEGATIVE_INFINITY, hostH, puck), 0.01f)
+    }
+
+    /**
+     * A stored pair decodes to a position only when both halves are real. The absent-preference
+     * default is NaN, and letting one through would put the pill nowhere at all.
+     */
+    @Test
+    fun onlyAFullyFinitePairDecodesToAPosition() {
+        assertEquals(ToolPalette.Position(0.25f, 0.75f), ToolPalette.Position.of(0.25f, 0.75f))
+        assertNull("never parked", ToolPalette.Position.of(Float.NaN, Float.NaN))
+        assertNull("half-written pair", ToolPalette.Position.of(0.25f, Float.NaN))
+        assertNull("half-written pair", ToolPalette.Position.of(Float.NaN, 0.75f))
+        assertNull(ToolPalette.Position.of(Float.POSITIVE_INFINITY, 0.5f))
     }
 
     /** Before the first layout pass the host has no size; reading or restoring must stay finite. */

@@ -159,6 +159,13 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
     /** The floating tool puck/palette overlay; created in onCreate. */
     private lateinit var toolPalette: ToolPalette
 
+    /** The tool palette's last parked corner (#200), or null when it has never been moved. */
+    private fun parkedPalettePosition(): ToolPalette.Position? =
+        ToolPalette.Position.of(
+            prefs.getFloat(KEY_PALETTE_X, Float.NaN),
+            prefs.getFloat(KEY_PALETTE_Y, Float.NaN),
+        )
+
     // ---- lasso (ADR-INKREAD-0010) ----
     /** The floating selection toolbar; created in onCreate. */
     private lateinit var selectionToolbar: SelectionToolbar
@@ -520,6 +527,12 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             onChrome = { engine.execute { repaintPanel() } },
             onUndo = { lasso.inkUndo() },
             onRedo = { lasso.inkRedo() },
+            // Reopen the toolbar where the reader last parked it (#200) rather than at the default
+            // dock — repositioning it on every document open was the standing annoyance.
+            savedPosition = parkedPalettePosition(),
+            onMoved = { at ->
+                prefs.edit().putFloat(KEY_PALETTE_X, at.x).putFloat(KEY_PALETTE_Y, at.y).apply()
+            },
         )
         selectionToolbar = SelectionToolbar(this, root) { action -> lasso.onSelectionAction(action) }
         toolOptions = ToolOptions(this, root)
@@ -1954,6 +1967,8 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         const val KEY_BOOK_PATH = "book_path" // stored PDF under app storage (RR27).
         const val KEY_BOOK_ID = "book_id" // stable per-book id (the stored file name).
         const val KEY_PEN_WIDTH = "pen_width" // selected pen thickness, an index into PEN_WIDTHS (#199).
+        const val KEY_PALETTE_X = "palette_x" // parked tool-palette corner, host fractions (#200).
+        const val KEY_PALETTE_Y = "palette_y"
         const val PALM_REJECT_MS = 1000L // a finger tap within this long of a stylus event = palm.
         // Public, Partner-synced folder the annotated PDF export is written to (Android external
         // storage root + this) so it reaches the desktop. "Document" is in the Supernote sync set.
