@@ -557,6 +557,25 @@ pub fn paginate_upto(
                 cursor = at + 1;
                 pager.gap(opts.font_px * 0.4);
             }
+            Block::Row { cells, style } => {
+                // Structure now exists; placement does not yet. Each cell is flowed one after the
+                // other, which is exactly what an unrecognised `<table>` already produced, so this
+                // commit changes no output. Side-by-side placement follows.
+                let align = effective_align(style, opts.align);
+                for cell in cells {
+                    pager.add_paragraph(
+                        cell,
+                        opts.font_px,
+                        0.0,
+                        0.0,
+                        style.bold.unwrap_or(false),
+                        align,
+                        block_index,
+                        &mut cursor,
+                        m,
+                    );
+                }
+            }
             Block::Rule => pager.add_rule(opts.para_gap),
         }
     }

@@ -66,6 +66,17 @@ pub enum Block {
         /// What the book's stylesheet declared for this block (#188).
         style: BlockStyle,
     },
+    /// One row of a `<table>`, its cells laid side by side (#200).
+    ///
+    /// Tables are how parallel texts are built — a bilingual juxtalinear edition puts the original
+    /// in one cell and the translation in the next, and reading it means reading *across*. Treated
+    /// as an unknown container the grid flattens into document order, which is row-by-row then
+    /// cell-by-cell, so the two languages interleave down the page and the correspondence the book
+    /// is entirely about is lost.
+    Row {
+        cells: Vec<Vec<Inline>>,
+        style: BlockStyle,
+    },
     /// A standalone (block-level) image.
     Image { src: String, alt: String },
     /// A horizontal rule (`<hr/>`) — a section divider.
@@ -231,6 +242,10 @@ fn walk_blocks(
                         flush_paragraph(out, pending, inherited);
                         out.push(Block::Rule);
                     }
+                    "table" => {
+                        flush_paragraph(out, pending, inherited);
+                        walk_table(child, out, sheet, declared(child, el, sheet, inherited));
+                    }
                     "ul" | "ol" => {
                         flush_paragraph(out, pending, inherited);
                         walk_list(
@@ -266,6 +281,55 @@ fn walk_blocks(
                         walk_blocks(child, out, pending, sheet, inner);
                         flush_paragraph(out, pending, inner);
                     }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Emit each `<tr>` of a table as a [`Block::Row`]; `inherited` is the table's own declared style.
+///
+/// Section wrappers (`<thead>`/`<tbody>`/`<tfoot>`) are transparent — they group rows without
+/// changing them. A `<caption>` is prose about the table and becomes an ordinary paragraph rather
+/// than being dropped. Anything else inside a table is ignored: it has no meaning outside a row.
+fn walk_table(
+    node: NodeRef<Node>,
+    out: &mut Vec<Block>,
+    sheet: &simplecss::StyleSheet<'_>,
+    inherited: BlockStyle,
+) {
+    for child in node.children() {
+        let Node::Element(el) = child.value() else {
+            continue;
+        };
+        match el.name() {
+            "thead" | "tbody" | "tfoot" => walk_table(child, out, sheet, inherited),
+            "caption" => {
+                let content = collect_inlines(child);
+                if !is_blank(&content) {
+                    out.push(Block::Paragraph {
+                        content,
+                        style: declared(child, el, sheet, inherited),
+                    });
+                }
+            }
+            "tr" => {
+                let cells: Vec<Vec<Inline>> = child
+                    .children()
+                    .filter_map(|c| match c.value() {
+                        Node::Element(ce) if matches!(ce.name(), "td" | "th") => {
+                            Some(collect_inlines(c))
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                // A row of nothing but spacing cells is layout scaffolding, not content.
+                if !cells.is_empty() && !cells.iter().all(|c| is_blank(c)) {
+                    out.push(Block::Row {
+                        cells,
+                        style: declared(child, el, sheet, inherited),
+                    });
                 }
             }
             _ => {}
@@ -704,6 +768,121 @@ mod tests {
         let b = parse_blocks("just words");
         assert!(
             matches!(&b[..], [Block::Paragraph { content, .. }] if run(content) == "just words")
+        );
+    }
+}
+
+#[cfg(test)]
+mod table_tests {
+    use super::*;
+
+    fn text_of(inlines: &[Inline]) -> String {
+        inlines
+            .iter()
+            .map(|i| match i {
+                Inline::Run(r) => r.text.as_str(),
+                _ => "",
+            })
+            .collect()
+    }
+
+    fn rows(html: &str) -> Vec<Vec<String>> {
+        parse_blocks(html)
+            .into_iter()
+            .filter_map(|b| match b {
+                Block::Row { cells, .. } => Some(cells.iter().map(|c| text_of(c)).collect()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The case this exists for: a bilingual juxtalinear text, read across rather than down.
+    #[test]
+    fn a_parallel_text_keeps_its_pairs_together() {
+        let html = "<table>\
+             <tr><td>Au commencement</td><td>In the beginning</td></tr>\
+             <tr><td>la terre etait vide</td><td>the earth was empty</td></tr>\
+             </table>";
+        assert_eq!(
+            rows(html),
+            vec![
+                vec![
+                    "Au commencement".to_string(),
+                    "In the beginning".to_string()
+                ],
+                vec![
+                    "la terre etait vide".to_string(),
+                    "the earth was empty".to_string()
+                ],
+            ],
+        );
+    }
+
+    /// `<thead>`/`<tbody>`/`<tfoot>` group rows without changing them.
+    #[test]
+    fn section_wrappers_are_transparent() {
+        let html = "<table>\
+             <thead><tr><th>Source</th><th>Gloss</th></tr></thead>\
+             <tbody><tr><td>lupus</td><td>wolf</td></tr></tbody>\
+             <tfoot><tr><td>fin</td><td>end</td></tr></tfoot>\
+             </table>";
+        assert_eq!(
+            rows(html),
+            vec![
+                vec!["Source".to_string(), "Gloss".to_string()],
+                vec!["lupus".to_string(), "wolf".to_string()],
+                vec!["fin".to_string(), "end".to_string()],
+            ],
+        );
+    }
+
+    /// A caption is prose about the table; dropping it would lose text the author wrote.
+    #[test]
+    fn a_caption_survives_as_a_paragraph() {
+        let blocks =
+            parse_blocks("<table><caption>Genesis 1:1</caption><tr><td>a</td></tr></table>");
+        let captions: Vec<String> = blocks
+            .iter()
+            .filter_map(|b| match b {
+                Block::Paragraph { content, .. } => Some(text_of(content)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(captions, vec!["Genesis 1:1".to_string()]);
+    }
+
+    /// Spacer rows are layout scaffolding, and an empty row would take a line of the page.
+    #[test]
+    fn rows_with_no_content_are_dropped() {
+        assert!(rows("<table><tr><td> </td><td></td></tr></table>").is_empty());
+    }
+
+    /// A single-cell table is how a lot of EPUB2 does plain layout; it must behave like prose.
+    #[test]
+    fn a_one_cell_row_is_still_a_row_of_one() {
+        assert_eq!(
+            rows("<table><tr><td>just text</td></tr></table>"),
+            vec![vec!["just text".to_string()]]
+        );
+    }
+
+    /// Inline emphasis inside a cell is preserved rather than flattened away.
+    #[test]
+    fn cells_keep_their_inline_emphasis() {
+        let blocks = parse_blocks("<table><tr><td>plain <em>stressed</em></td></tr></table>");
+        let Some(Block::Row { cells, .. }) = blocks.into_iter().next() else {
+            panic!("expected a row");
+        };
+        let italics: Vec<bool> = cells[0]
+            .iter()
+            .filter_map(|i| match i {
+                Inline::Run(r) => Some(r.italic),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            italics.contains(&true),
+            "the <em> run should still be italic"
         );
     }
 }
