@@ -150,18 +150,25 @@ class ShelfActivity : Activity() {
     /**
      * Confirm before deleting, and make the annotations an explicit, separate decision — a reader who
      * is clearing space must not lose handwriting they did not think they were discarding.
+     *
+     * The wording says *inkread's own copy* rather than "from this device", which read as though the
+     * source document were being deleted (#227). Books live in the app's private storage: an import
+     * copies the file in, so removing one never touches the original the reader picked.
      */
     private fun confirmRemove(book: File) {
         val title = Books.metaTitle(this, book.name) ?: Books.title(book)
         val hasNotes = Books.hasNotes(book)
+        val freed = Books.humanSize(Books.sizeOnDisk(book))
         val message = if (hasNotes) {
-            "Remove “$title” from this device? Your handwritten notes stay, and come back if you " +
-                "add the book again."
+            "Remove “$title” from inkread? This deletes inkread’s own copy and frees $freed. " +
+                "A file you imported stays where it is. Your handwritten notes are kept, and come " +
+                "back if you add the book again."
         } else {
-            "Remove “$title” from this device? It frees ${Books.humanSize(Books.sizeOnDisk(book))}."
+            "Remove “$title” from inkread? This deletes inkread’s own copy and frees $freed. " +
+                "A file you imported stays where it is."
         }
         val dialog = AlertDialog.Builder(this, R.style.InkDialog)
-            .setTitle("Remove from device")
+            .setTitle("Remove from inkread")
             .setMessage(message)
             .setPositiveButton("Remove") { _, _ -> doRemove(book, alsoNotes = false) }
             .setNegativeButton("Cancel", null)
