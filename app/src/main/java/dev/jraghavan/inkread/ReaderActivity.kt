@@ -159,11 +159,23 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
     /** The floating tool puck/palette overlay; created in onCreate. */
     private lateinit var toolPalette: ToolPalette
 
+    /** Whether the reader has asked for the tool palette to run across the top (#200). */
+    private val paletteHorizontal: Boolean get() = AppSettings.toolbarHorizontal(this)
+
+    /**
+     * Parked positions are kept **per orientation**.
+     *
+     * The two forms measure their offsets from different edges, so one set of fractions cannot mean
+     * the same place in both. Sharing a key would land the strip somewhere the reader never put it
+     * every time they changed the setting — legal, since it is clamped on screen, but arbitrary.
+     */
+    private fun paletteKey(axis: String) = if (paletteHorizontal) "${axis}_h" else axis
+
     /** The tool palette's last parked corner (#200), or null when it has never been moved. */
     private fun parkedPalettePosition(): ToolPalette.Position? =
         ToolPalette.Position.of(
-            prefs.getFloat(KEY_PALETTE_X, Float.NaN),
-            prefs.getFloat(KEY_PALETTE_Y, Float.NaN),
+            prefs.getFloat(paletteKey(KEY_PALETTE_X), Float.NaN),
+            prefs.getFloat(paletteKey(KEY_PALETTE_Y), Float.NaN),
         )
 
     // ---- lasso (ADR-INKREAD-0010) ----
@@ -529,9 +541,17 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             onRedo = { lasso.inkRedo() },
             // Reopen the toolbar where the reader last parked it (#200) rather than at the default
             // dock — repositioning it on every document open was the standing annoyance.
+            orientation = if (paletteHorizontal) {
+                ToolPalette.Orientation.HORIZONTAL
+            } else {
+                ToolPalette.Orientation.VERTICAL
+            },
             savedPosition = parkedPalettePosition(),
             onMoved = { at ->
-                prefs.edit().putFloat(KEY_PALETTE_X, at.x).putFloat(KEY_PALETTE_Y, at.y).apply()
+                prefs.edit()
+                    .putFloat(paletteKey(KEY_PALETTE_X), at.x)
+                    .putFloat(paletteKey(KEY_PALETTE_Y), at.y)
+                    .apply()
             },
         )
         selectionToolbar = SelectionToolbar(this, root) { action -> lasso.onSelectionAction(action) }

@@ -15,6 +15,7 @@ object AppSettings {
     private const val KEY_AUTO_INSTALL_UPDATES = "auto_install_updates"
     private const val KEY_UPDATE_SKIP_VERSION = "update_skip_version"
     private const val KEY_UPDATE_LAST_CHECK_MS = "update_last_check_ms"
+    private const val KEY_TOOLBAR_HORIZONTAL = "toolbar_horizontal"
     private const val KEY_OPDS_URL = "opds_url"
     private const val KEY_OPDS_USER = "opds_user"
     private const val KEY_OPDS_PASSWORD = "opds_password"
@@ -40,6 +41,22 @@ object AppSettings {
 
     fun setOnlineLookup(c: Context, value: Boolean) =
         prefs(c).edit().putBoolean(KEY_ONLINE_LOOKUP, value).apply()
+
+    /**
+     * When true the floating tool palette runs **across the top** instead of down the right edge
+     * (#200).
+     *
+     * Off by default, because the vertical pill is what everyone has been using. The horizontal form
+     * exists because the two forms cost different things: the strip is a fixed, finger-sized width
+     * while the page margin is a fraction of the panel, so on a narrower device the pill is wider
+     * than the margin and clips the end of every line it spans — around twenty of them. Across the
+     * top it clips part of a single line instead, and the smaller the screen the bigger that
+     * difference is.
+     */
+    fun toolbarHorizontal(c: Context): Boolean = prefs(c).getBoolean(KEY_TOOLBAR_HORIZONTAL, false)
+
+    fun setToolbarHorizontal(c: Context, value: Boolean) =
+        prefs(c).edit().putBoolean(KEY_TOOLBAR_HORIZONTAL, value).apply()
 
     // ── Self-update (ADR-INKREAD-0014) ────────────────────────────────────────────────────────────
 

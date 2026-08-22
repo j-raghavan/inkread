@@ -1,5 +1,6 @@
 package dev.jraghavan.inkread
 
+import dev.jraghavan.inkread.ToolPalette.Anchor
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -213,5 +214,105 @@ class ToolPalettePlacementTest {
         assertEquals(0f, ToolPalette.fractionY(10f, 0, 0), 0.01f)
         assertEquals(0f, ToolPalette.translationXFor(0.5f, 0, 0), 0.01f)
         assertEquals(0f, ToolPalette.translationYFor(0.5f, 0, 0), 0.01f)
+    }
+
+    // ── The horizontal form: same strip, different axis (#200) ────────────────────────────────────
+
+    /** A horizontal bar docks TOP and centres across the width; a vertical pill is END/CENTER. */
+    @Test
+    fun eachAnchorMeasuresFromItsOwnEdge() {
+        assertEquals("START counts from the top/left", 0f, ToolPalette.edge(Anchor.START, 0f, hostH, pill), 0.5f)
+        assertEquals(
+            "CENTER leaves half the slack before it",
+            (hostH - pill) / 2f,
+            ToolPalette.edge(Anchor.CENTER, 0f, hostH, pill),
+            0.5f,
+        )
+        assertEquals(
+            "END sits flush against the far edge",
+            (hostH - pill).toFloat(),
+            ToolPalette.edge(Anchor.END, 0f, hostH, pill),
+            0.5f,
+        )
+    }
+
+    /** Offsets and edges must invert exactly, or a saved position drifts every time it round-trips. */
+    @Test
+    fun edgeAndOffsetAreInverses() {
+        for (anchor in Anchor.entries) {
+            for (offset in listOf(-500f, -1f, 0f, 1f, 500f)) {
+                val e = ToolPalette.edge(anchor, offset, hostH, pill)
+                assertEquals(
+                    "$anchor did not round-trip at $offset",
+                    offset,
+                    ToolPalette.offsetFor(anchor, e, hostH, pill),
+                    0.01f,
+                )
+            }
+        }
+    }
+
+    /** Whatever the anchor, the strip must end up inside the host — that is the whole job. */
+    @Test
+    fun everyAnchorClampsTheStripInsideTheHost() {
+        for (anchor in Anchor.entries) {
+            for (offset in listOf(-99_999f, 99_999f)) {
+                val clamped = ToolPalette.clamp(anchor, offset, hostH, pill)
+                val leading = ToolPalette.edge(anchor, clamped, hostH, pill)
+                assertTrue("$anchor ran off the near edge: $leading", leading >= -0.5f)
+                assertTrue(
+                    "$anchor ran off the far edge: ${leading + pill}",
+                    leading + pill <= hostH + 0.5f,
+                )
+            }
+        }
+    }
+
+    /**
+     * A top-docked bar grows downward from a fixed top edge, so expanding must not move it at all.
+     * Under CENTER it would drift by half the growth — which is the bug this maths exists to stop,
+     * in its horizontal form.
+     */
+    @Test
+    fun aTopDockedBarDoesNotDriftWhenItExpands() {
+        val parked = 300f
+        assertEquals(
+            "a START-anchored strip keeps its offset when it grows",
+            parked,
+            ToolPalette.keepEdge(Anchor.START, parked, puck, pill),
+            0.01f,
+        )
+        assertEquals(
+            "a CENTER-anchored strip must compensate by half the growth",
+            parked + (pill - puck) / 2f,
+            ToolPalette.keepEdge(Anchor.CENTER, parked, puck, pill),
+            0.01f,
+        )
+    }
+
+    /** A parked horizontal bar must survive a round trip on its own anchors, like the vertical one. */
+    @Test
+    fun aHorizontalBarComesBackWhereItWasParked() {
+        val tx = -240f // centred across the width, nudged left
+        val ty = 120f // measured down from the top edge
+        assertEquals(
+            tx,
+            ToolPalette.offsetForFraction(Anchor.CENTER, ToolPalette.fraction(Anchor.CENTER, tx, hostW, pill), hostW, pill),
+            0.5f,
+        )
+        assertEquals(
+            ty,
+            ToolPalette.offsetForFraction(Anchor.START, ToolPalette.fraction(Anchor.START, ty, hostH, puck), hostH, puck),
+            0.5f,
+        )
+    }
+
+    /** A strip wider than its host has no good answer; it must not throw or invert its bounds. */
+    @Test
+    fun anOversizedStripIsClampedRatherThanCrashing() {
+        for (anchor in Anchor.entries) {
+            assertEquals("$anchor", 0f, ToolPalette.clamp(anchor, 500f, 100, 4000), 0.01f)
+            assertEquals("$anchor", 0f, ToolPalette.clamp(anchor, -500f, 0, 0), 0.01f)
+        }
     }
 }
