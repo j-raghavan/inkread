@@ -62,6 +62,10 @@ class ToolPalette(
     /** Global ink undo / redo (these are actions, not tools — they don't change the active tool). */
     private val onUndo: () -> Unit = {},
     private val onRedo: () -> Unit = {},
+    /** Where the reader last parked the pill (#200); null opens it at the default dock. */
+    private val savedPosition: Position? = null,
+    /** The pill came to rest somewhere new — persist it so the next document opens there (#200). */
+    private val onMoved: (Position) -> Unit = {},
 ) {
     var current: Tool = Tool.PEN
         private set
@@ -88,6 +92,68 @@ class ToolPalette(
         )
         container.alpha = IDLE_ALPHA // see-through while reading so it doesn't cover the text
         render()
+        savedPosition?.let(::restore)
+    }
+
+    /**
+     * Put the pill back where the reader parked it, once the first layout pass has given the host
+     * and the pill real sizes (#200).
+     *
+     * Restoring is deliberately clamped rather than trusted: the fraction may have been saved on
+     * the other rotation or on another panel, and a corner that was on screen then can be off it
+     * now. [reattach] afterwards because a bare translate does not refresh this EPD — without it
+     * the pill would sit at the default dock on the panel while being somewhere else to the touch.
+     */
+    private fun restore(position: Position) = onNextLayout { width, height ->
+        container.translationX = translationXFor(position.x, host.width, width)
+        container.translationY = translationYFor(position.y, host.height, height)
+        reattach()
+        onChrome()
+    }
+
+    /**
+     * Run [action] with the container's size after the next layout pass.
+     *
+     * A one-shot layout listener, not `post`: [render] only *requests* a layout, and a posted
+     * runnable can run before the traversal that measures the new children — which would read the
+     * stale size and correct by the wrong amount.
+     */
+    private fun onNextLayout(action: (width: Int, height: Int) -> Unit) {
+        container.addOnLayoutChangeListener(
+            object : View.OnLayoutChangeListener {
+                override fun onLayoutChange(
+                    v: View,
+                    left: Int,
+                    top: Int,
+                    right: Int,
+                    bottom: Int,
+                    oldLeft: Int,
+                    oldTop: Int,
+                    oldRight: Int,
+                    oldBottom: Int,
+                ) {
+                    v.removeOnLayoutChangeListener(this)
+                    action(right - left, bottom - top)
+                }
+            },
+        )
+    }
+
+    /**
+     * Hand the pill's resting place to the host to remember (#200).
+     *
+     * Never from a degenerate layout. A zero-sized host reads as the default dock, and writing that
+     * would quietly discard the corner the reader had chosen — losing the parked position is the
+     * one failure this whole change exists to prevent, so an unmeasured pill records nothing.
+     */
+    private fun persist() {
+        if (host.width <= 0 || host.height <= 0 || container.width <= 0 || container.height <= 0) return
+        onMoved(
+            Position(
+                fractionX(container.translationX, host.width, container.width),
+                fractionY(container.translationY, host.height, container.height),
+            ),
+        )
     }
 
     /** Rounded white pill with a black keyline — high contrast on e-ink (Inkwell card language). */
@@ -194,7 +260,7 @@ class ToolPalette(
                 }
                 MotionEvent.ACTION_UP -> {
                     container.alpha = IDLE_ALPHA // fade back so it doesn't sit over the text
-                    if (moved) { reattach(); onChrome() } // re-add forces an EPD refresh at the new spot
+                    if (moved) { reattach(); persist(); onChrome() } // re-add forces an EPD refresh at the new spot
                     else { toggleExpanded() }
                     true
                 }
@@ -219,37 +285,27 @@ class ToolPalette(
         val heightBefore = container.height
         expanded = !expanded
         render()
-        // A one-shot layout listener, not `post`: `render` only requests a layout, and a posted
-        // runnable can run before the traversal that measures the new children — which would read
-        // the OLD height and correct by the wrong amount.
-        container.addOnLayoutChangeListener(
-            object : View.OnLayoutChangeListener {
-                override fun onLayoutChange(
-                    v: View,
-                    left: Int,
-                    top: Int,
-                    right: Int,
-                    bottom: Int,
-                    oldLeft: Int,
-                    oldTop: Int,
-                    oldRight: Int,
-                    oldBottom: Int,
-                ) {
-                    v.removeOnLayoutChangeListener(this)
-                    val height = bottom - top
-                    container.translationY =
-                        clampY(
-                            anchorY(container.translationY, heightBefore, height),
-                            host.height,
-                            height,
-                        )
-                    container.translationX =
-                        clampX(container.translationX, host.width, right - left)
-                    reattach()
-                    onChrome()
-                }
-            },
-        )
+        reanchor(heightBefore) {
+            reattach()
+            persist() // the clamp may have nudged the pill; remember where it actually landed
+            onChrome()
+        }
+    }
+
+    /**
+     * After the pill changes size, put its **top-left corner** back where it was and pull it inside
+     * the host, then run [onSettled].
+     *
+     * Every size change needs this, not just the deliberate ones: the pill is anchored
+     * `CENTER_VERTICAL`, so growing or shrinking it moves the corner by half the difference unless
+     * the offset compensates. The corner is where the grip is — the thing the finger just tapped,
+     * and the only way to collapse the pill again.
+     */
+    private fun reanchor(heightBefore: Int, onSettled: () -> Unit) = onNextLayout { width, height ->
+        container.translationY =
+            clampY(anchorY(container.translationY, heightBefore, height), host.height, height)
+        container.translationX = clampX(container.translationX, host.width, width)
+        onSettled()
     }
 
     private fun iconButton(tool: Tool): ImageView = ImageView(activity).apply {
@@ -293,9 +349,38 @@ class ToolPalette(
         android.util.Log.i("ToolPalette", "reattach: expanded=$expanded tx=$tx ty=$ty")
     }
 
-    /** Collapse the pill (call from the host's onPause) — it stays docked, never removed. */
+    /**
+     * Collapse the pill (call from the host's onPause) — it stays docked, never removed.
+     *
+     * Re-anchored like any other collapse: this used to shrink the pill without compensating, so
+     * backgrounding the app and returning to it left the puck half the pill's height further down
+     * the screen than the reader had put it. Nothing is persisted or repainted here — the panel is
+     * going away, and the corner the reader chose was already recorded when they chose it.
+     */
     fun dismiss() {
-        if (expanded) { expanded = false; render() }
+        if (!expanded) return
+        val heightBefore = container.height
+        expanded = false
+        render()
+        reanchor(heightBefore) {}
+    }
+
+    /**
+     * A parked position for the pill, held as host-relative fractions (#200). Persisted by the
+     * host so the toolbar reopens where the reader left it instead of back at the default dock.
+     */
+    data class Position(val x: Float, val y: Float) {
+        companion object {
+            /**
+             * Decode a stored pair, or null when there isn't one to decode.
+             *
+             * "Never parked" and "parked before this feature existed" both read back as the NaN
+             * default, and a NaN that reached a layout pass would place the pill nowhere at all —
+             * so anything non-finite means the default dock, not a position.
+             */
+            fun of(x: Float, y: Float): Position? =
+                if (x.isFinite() && y.isFinite()) Position(x, y) else null
+        }
     }
 
     internal companion object {
@@ -333,5 +418,42 @@ class ToolPalette(
          */
         fun anchorY(ty: Float, oldHeight: Int, newHeight: Int): Float =
             ty + (newHeight - oldHeight) / 2f
+
+        /**
+         * Where the pill's **top-left corner** sits, as a fraction of the host's width and height.
+         *
+         * Fractions rather than raw pixels because a remembered position has to survive things the
+         * pixels do not: a rotation, a different panel (a Nomad is not a Manta), and the pill's own
+         * size changing between its collapsed and expanded forms. The corner is where the grip is,
+         * which is the part the reader actually aims at.
+         */
+        fun fractionX(tx: Float, hostWidth: Int, viewWidth: Int): Float =
+            if (hostWidth <= 0) 0f else ((hostWidth - viewWidth) + tx) / hostWidth
+
+        fun fractionY(ty: Float, hostHeight: Int, viewHeight: Int): Float =
+            if (hostHeight <= 0) 0f else ((hostHeight - viewHeight) / 2f + ty) / hostHeight
+
+        /**
+         * Turn a remembered [fractionX] back into a horizontal offset for the *current* geometry,
+         * clamped so it lands on screen.
+         *
+         * The clamp is the point, not a formality: the fraction may have been saved on the other
+         * rotation, on another device, or against a pill that a later build sized differently, and
+         * a position that was legal then can be off screen now. Restoring the pill out of reach
+         * would recreate the very trap #200 was opened about.
+         */
+        fun translationXFor(fraction: Float, hostWidth: Int, viewWidth: Int): Float =
+            if (hostWidth <= 0 || !fraction.isFinite()) {
+                0f
+            } else {
+                clampX(fraction * hostWidth - (hostWidth - viewWidth), hostWidth, viewWidth)
+            }
+
+        fun translationYFor(fraction: Float, hostHeight: Int, viewHeight: Int): Float =
+            if (hostHeight <= 0 || !fraction.isFinite()) {
+                0f
+            } else {
+                clampY(fraction * hostHeight - (hostHeight - viewHeight) / 2f, hostHeight, viewHeight)
+            }
     }
 }
