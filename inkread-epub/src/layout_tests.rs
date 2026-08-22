@@ -1212,3 +1212,127 @@ fn a_nomad_at_a_comfortable_reading_size_gets_two_columns() {
         "90px text leaves under 9 em a column"
     );
 }
+
+// ── Table rows laid out side by side (#200) ───────────────────────────────────────────────────
+
+mod row_layout {
+    use super::*;
+
+    fn cell(text: &str) -> Vec<Inline> {
+        vec![Inline::Run(TextRun {
+            text: text.to_string(),
+            bold: false,
+            italic: false,
+            href: None,
+        })]
+    }
+
+    fn row(cells: &[&str]) -> Block {
+        Block::Row {
+            cells: cells.iter().map(|c| cell(c)).collect(),
+            style: BlockStyle::default(),
+        }
+    }
+
+    /// A wide page, so two cells comfortably clear MIN_CELL_EM.
+    fn opts() -> LayoutOpts {
+        LayoutOpts::new(1200.0, 1600.0, 20.0)
+    }
+
+    fn lines(blocks: &[Block], opts: &LayoutOpts) -> Vec<LayoutLine> {
+        paginate(blocks, opts, &Mono)
+            .into_iter()
+            .flat_map(|p| p.lines)
+            .collect()
+    }
+
+    /// The whole point: the pair shares a line box, so the text reads across.
+    #[test]
+    fn a_two_cell_row_puts_both_cells_on_one_line() {
+        let out = lines(&[row(&["alpha", "beta"])], &opts());
+        assert_eq!(out.len(), 1, "one line, not one per cell");
+        let texts: Vec<&str> = out[0].runs.iter().map(|r| r.text.as_str()).collect();
+        assert_eq!(texts, vec!["alpha", "beta"]);
+        assert!(
+            out[0].runs[0].x < out[0].runs[1].x,
+            "the second cell must sit to the right of the first",
+        );
+    }
+
+    /// The regression this replaces: cells used to become separate stacked blocks.
+    #[test]
+    fn cells_are_not_stacked_vertically() {
+        let out = lines(&[row(&["alpha", "beta"])], &opts());
+        let tops: Vec<f32> = out.iter().map(|l| l.top).collect();
+        assert_eq!(tops.len(), 1, "stacked cells would give two tops: {tops:?}");
+    }
+
+    /// Cells occupy their own share of the measure and do not overlap.
+    #[test]
+    fn cells_divide_the_measure_without_overlapping() {
+        let o = opts();
+        let out = lines(&[row(&["alpha", "beta", "gamma"])], &o);
+        let xs: Vec<f32> = out[0].runs.iter().map(|r| r.x).collect();
+        assert_eq!(xs.len(), 3);
+        assert!(xs[0] < xs[1] && xs[1] < xs[2], "cells out of order: {xs:?}");
+        assert!(
+            xs[2] < o.column_width(),
+            "the last cell must start inside the measure",
+        );
+    }
+
+    /// A row is as tall as its tallest cell; the short one leaves whitespace beneath it.
+    #[test]
+    fn a_row_is_as_tall_as_its_tallest_cell() {
+        let long = "one two three four five six seven eight nine ten eleven twelve";
+        let out = lines(&[row(&[long, "short"])], &opts());
+        assert!(out.len() > 1, "the long cell should wrap to several lines");
+        // Every line after the first belongs to the long cell alone.
+        let first_line_cells = out[0].runs.len();
+        assert!(first_line_cells >= 2, "both cells start on the first line");
+    }
+
+    /// Rows keep the reading order of their source, so anchors still map back to characters.
+    #[test]
+    fn character_offsets_advance_in_source_order() {
+        let out = lines(&[row(&["alpha", "beta"])], &opts());
+        let offsets: Vec<usize> = out[0].runs.iter().map(|r| r.anchor.char_offset).collect();
+        assert!(
+            offsets.windows(2).all(|w| w[0] <= w[1]),
+            "offsets must not go backwards across cells: {offsets:?}",
+        );
+    }
+
+    /// Too many cells to give any of them a readable measure: stack rather than shred the words.
+    #[test]
+    fn an_unusably_narrow_row_falls_back_to_stacking() {
+        let cells = ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l"];
+        // A narrow page makes twelve cells hopeless.
+        let narrow = LayoutOpts::new(300.0, 800.0, 20.0);
+        let out = lines(&[row(&cells)], &narrow);
+        assert!(
+            out.len() > 1,
+            "unusably narrow cells should stack, not share one line",
+        );
+    }
+
+    /// A single-cell table is how a lot of EPUB2 does plain layout, so a lone cell must get the
+    /// whole measure — not a half-width column with the other half left empty.
+    #[test]
+    fn a_one_cell_row_uses_the_full_measure() {
+        let o = opts();
+        let text = "one two three four five six seven eight nine ten eleven twelve thirteen";
+        let alone = lines(&[row(&[text])], &o);
+        let shared = lines(&[row(&[text, "x"])], &o);
+        assert!(
+            alone.len() < shared.len(),
+            "a lone cell wrapped as much as a half-width one ({} vs {} lines): it is not              getting the full measure",
+            alone.len(),
+            shared.len(),
+        );
+        assert_eq!(
+            alone[0].runs[0].x, 0.0,
+            "a cell carries no first-line indent"
+        );
+    }
+}
