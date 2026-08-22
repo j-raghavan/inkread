@@ -35,6 +35,30 @@ data class DeviceCapabilities(
          * (RR2-FR2 / RR3-AC3). M0 advertises this until the RR19-FR4b spike proves the
          * fast path, at which point the adapter can advertise the fuller profile.
          */
+        /**
+         * An ordinary backlit display — no e-ink anywhere (#220).
+         *
+         * `eink = false` is the whole point: the core's refresh policy exists to hide EPD ghosting
+         * and flash cost, and applying it to an LCD produces full-screen refreshes and a
+         * refresh-after-resume that a panel redrawing at 60Hz has no use for. `colorScreen` is the
+         * other honest difference; the rest of the flags describe e-ink hardware features and are
+         * meaningless without a panel to apply them to.
+         */
+        fun genericDisplay(): DeviceCapabilities = DeviceCapabilities(
+            eink = false,
+            einkFull = false,
+            regal = false,
+            fastMode = false,
+            regionalUpdate = false,
+            hwInvert = false,
+            hwDither = false,
+            kaleidoWfm = false,
+            colorScreen = true,
+            swipeAnimation = true,
+            penLowLatency = false,
+            needsRefreshAfterResume = false,
+        )
+
         fun supernoteBaseline(): DeviceCapabilities = DeviceCapabilities(
             eink = true,
             einkFull = false,

@@ -33,7 +33,7 @@ import dev.jraghavan.inkread.eink.EinkAdapter
 import java.net.HttpURLConnection
 import java.net.URL
 import org.json.JSONObject
-import dev.jraghavan.inkread.eink.SupernoteEinkAdapter
+import dev.jraghavan.inkread.eink.DisplayAdapters
 import dev.jraghavan.inkread.eink.SupernoteInk
 import java.io.File
 import java.nio.ByteBuffer
@@ -59,7 +59,9 @@ import java.util.concurrent.Executors
 class ReaderActivity : Activity(), SurfaceHolder.Callback {
 
     private lateinit var surfaceView: SurfaceView
-    private val adapter: EinkAdapter = SupernoteEinkAdapter()
+    // Chosen by capability probe, not hardcoded (#220): a device with no e-ink service is told it
+    // has no e-ink panel, rather than being given the Supernote's refresh policy by default.
+    private val adapter: EinkAdapter by lazy { DisplayAdapters.forDevice(this) }
 
     /** Periodic full-refresh cadence (#99): fires a full EPD flash every Nth page-turn to clear
      *  ghosting. Interval comes from [DisplayPrefs.fullRefreshEvery] (set in onCreate + on change);
