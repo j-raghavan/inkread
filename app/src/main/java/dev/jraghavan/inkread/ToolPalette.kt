@@ -278,14 +278,27 @@ class ToolPalette(
         val heightBefore = container.height
         expanded = !expanded
         render()
-        onNextLayout { width, height ->
-            container.translationY =
-                clampY(anchorY(container.translationY, heightBefore, height), host.height, height)
-            container.translationX = clampX(container.translationX, host.width, width)
+        reanchor(heightBefore) {
             reattach()
             persist() // the clamp may have nudged the pill; remember where it actually landed
             onChrome()
         }
+    }
+
+    /**
+     * After the pill changes size, put its **top-left corner** back where it was and pull it inside
+     * the host, then run [onSettled].
+     *
+     * Every size change needs this, not just the deliberate ones: the pill is anchored
+     * `CENTER_VERTICAL`, so growing or shrinking it moves the corner by half the difference unless
+     * the offset compensates. The corner is where the grip is — the thing the finger just tapped,
+     * and the only way to collapse the pill again.
+     */
+    private fun reanchor(heightBefore: Int, onSettled: () -> Unit) = onNextLayout { width, height ->
+        container.translationY =
+            clampY(anchorY(container.translationY, heightBefore, height), host.height, height)
+        container.translationX = clampX(container.translationX, host.width, width)
+        onSettled()
     }
 
     private fun iconButton(tool: Tool): ImageView = ImageView(activity).apply {
@@ -329,9 +342,20 @@ class ToolPalette(
         android.util.Log.i("ToolPalette", "reattach: expanded=$expanded tx=$tx ty=$ty")
     }
 
-    /** Collapse the pill (call from the host's onPause) — it stays docked, never removed. */
+    /**
+     * Collapse the pill (call from the host's onPause) — it stays docked, never removed.
+     *
+     * Re-anchored like any other collapse: this used to shrink the pill without compensating, so
+     * backgrounding the app and returning to it left the puck half the pill's height further down
+     * the screen than the reader had put it. Nothing is persisted or repainted here — the panel is
+     * going away, and the corner the reader chose was already recorded when they chose it.
+     */
     fun dismiss() {
-        if (expanded) { expanded = false; render() }
+        if (!expanded) return
+        val heightBefore = container.height
+        expanded = false
+        render()
+        reanchor(heightBefore) {}
     }
 
     /**
