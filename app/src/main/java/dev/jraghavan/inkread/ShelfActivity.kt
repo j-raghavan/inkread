@@ -55,16 +55,9 @@ class ShelfActivity : Activity() {
 
     private fun render() {
         Books.sweepPartialDownloads(this)
-        val books = ordered(Books.list(this))
-        // Report what was decided, not merely that we ran: the shelf's three visible judgements
-        // (order, notes flag, file-name disclosure) are all invisible to a log otherwise, and a
-        // wrong one looks exactly like a right one on a panel that cannot be screenshotted.
-        Log.i(
-            TAG,
-            "shelf: ${books.size} books, sort=$sort, withNotes=${books.count { Books.hasNotes(it) }}, " +
-                "named=${books.count { Books.disambiguatingFileName(titleOf(it), it.name) != null }} — " +
-                books.take(4).joinToString(", ") { it.name },
-        )
+        val entries = ordered(Books.list(this))
+        val books = entries.map { it.file }
+        logShelf(entries)
         column.removeAllViews()
         column.addView(header(books))
 
@@ -108,7 +101,7 @@ class ShelfActivity : Activity() {
      * times: reading a book's size walks its sidecar, so doing it per comparison would turn opening
      * the shelf into a directory crawl proportional to the sort, not the library.
      */
-    private fun ordered(books: List<File>): List<File> =
+    private fun ordered(books: List<File>): List<Books.ShelfEntry> =
         Books.sortEntries(
             books.map {
                 Books.ShelfEntry(
@@ -119,7 +112,22 @@ class ShelfActivity : Activity() {
                 )
             },
             sort,
-        ).map { it.file }
+        )
+
+    /**
+     * Report the order **with the keys it was ordered on**.
+     *
+     * Logging the resulting sequence alone was useless: on a small shelf the three orders can
+     * coincide, so a list that was never sorted is indistinguishable from one that was. The keys
+     * are the evidence — with them, a wrong order is visible from the log alone.
+     */
+    private fun logShelf(entries: List<Books.ShelfEntry>) {
+        val rows = entries.take(5).joinToString(" | ") {
+            "${it.file.name} sz=${Books.humanSize(it.size)} opened=${it.opened} " +
+                "notes=${Books.hasNotes(it.file)} named=${Books.disambiguatingFileName(it.title, it.file.name) != null}"
+        }
+        Log.i(TAG, "shelf: ${entries.size} books, sort=$sort — $rows")
+    }
 
     /** Pick an order. Three plain words; the active one is inked, the rest recede. */
     private fun sortRow(): View = LinearLayout(this).apply {
