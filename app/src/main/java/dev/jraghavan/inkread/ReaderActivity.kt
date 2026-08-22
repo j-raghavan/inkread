@@ -560,6 +560,10 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             // opens it collapsed there. It can still be dragged aside mid-read, but that is a
             // this-book-only move and is deliberately not carried into the next one.
             savedPosition = if (paletteHorizontal) null else parkedPalettePosition(),
+            startExpanded = prefs.getBoolean(KEY_PALETTE_EXPANDED, false),
+            onExpandedChanged = { open ->
+                prefs.edit().putBoolean(KEY_PALETTE_EXPANDED, open).apply()
+            },
             onMoved = { at ->
                 if (!paletteHorizontal) {
                     prefs.edit()
@@ -661,7 +665,8 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             ReadingStats.record(this, minutes, (currentPage - sessionStartPage).coerceAtLeast(0))
         }
         sessionStartMs = 0L
-        if (::toolPalette.isInitialized) toolPalette.dismiss() // close any open palette popup
+        // The tool palette is deliberately NOT collapsed here. Whether the tools are out is the
+        // reader's working posture and survives leaving the app, the way the chosen tool does.
         if (::selectionToolbar.isInitialized) selectionToolbar.dismiss()
         if (::toolOptions.isInitialized) toolOptions.dismiss()
         mainHandler.removeCallbacks(fingerLongPress) // drop any pending finger gesture on leaving
@@ -2013,6 +2018,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         const val BOOKMARK_ZONE_W = 0.14f
         const val BOOKMARK_ZONE_H = 0.08f
 
+        const val KEY_PALETTE_EXPANDED = "palette_expanded" // tools out or put away (#200).
         const val KEY_PALETTE_X = "palette_x" // parked tool-palette corner, host fractions (#200).
         const val KEY_PALETTE_Y = "palette_y"
         const val PALM_REJECT_MS = 1000L // a finger tap within this long of a stylus event = palm.

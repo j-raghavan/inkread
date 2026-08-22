@@ -78,6 +78,10 @@ class ToolPalette(
     private val savedPosition: Position? = null,
     /** The pill came to rest somewhere new — persist it so the next document opens there (#200). */
     private val onMoved: (Position) -> Unit = {},
+    /** Whether to open already expanded — the state the reader last left it in (#200). */
+    private val startExpanded: Boolean = false,
+    /** The reader opened or closed the strip; remember it for the next book (#200). */
+    private val onExpandedChanged: (Boolean) -> Unit = {},
 ) {
     var current: Tool = Tool.PEN
         private set
@@ -86,9 +90,15 @@ class ToolPalette(
     private fun dp(v: Int) = (v * density).toInt()
     private val touchSlop = ViewConfiguration.get(activity).scaledTouchSlop
 
-    // Opens collapsed (a small circular inkwell puck) so it never covers the text on document open;
-    // tap to expand into the tool strip.
-    private var expanded = false
+    /**
+     * Open or shut, carried over from the last book (#200).
+     *
+     * Not reset on open. Whether the tools are out is a working posture, not a per-document
+     * property: a reader who is annotating opens the next book to annotate it too, and having to
+     * reach for the strip again each time is friction in exactly the place they were trying to
+     * avoid it.
+     */
+    private var expanded = startExpanded
     private val horizontal get() = orientation == Orientation.HORIZONTAL
 
     /**
@@ -340,6 +350,7 @@ class ToolPalette(
     private fun toggleExpanded() {
         val sizeBefore = if (horizontal) container.width else container.height
         expanded = !expanded
+        onExpandedChanged(expanded)
         render()
         reanchor(sizeBefore) {
             reattach()
@@ -418,22 +429,6 @@ class ToolPalette(
         container.translationX = tx
         container.translationY = ty
         android.util.Log.i("ToolPalette", "reattach: expanded=$expanded tx=$tx ty=$ty")
-    }
-
-    /**
-     * Collapse the pill (call from the host's onPause) — it stays docked, never removed.
-     *
-     * Re-anchored like any other collapse: this used to shrink the pill without compensating, so
-     * backgrounding the app and returning to it left the puck half the pill's height further down
-     * the screen than the reader had put it. Nothing is persisted or repainted here — the panel is
-     * going away, and the corner the reader chose was already recorded when they chose it.
-     */
-    fun dismiss() {
-        if (!expanded) return
-        val sizeBefore = if (horizontal) container.width else container.height
-        expanded = false
-        render()
-        reanchor(sizeBefore) {}
     }
 
     /**
