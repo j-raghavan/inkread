@@ -139,8 +139,15 @@ class ToolPalette(
         )
     }
 
-    /** Hand the pill's resting place to the host to remember (#200). */
+    /**
+     * Hand the pill's resting place to the host to remember (#200).
+     *
+     * Never from a degenerate layout. A zero-sized host reads as the default dock, and writing that
+     * would quietly discard the corner the reader had chosen — losing the parked position is the
+     * one failure this whole change exists to prevent, so an unmeasured pill records nothing.
+     */
     private fun persist() {
+        if (host.width <= 0 || host.height <= 0 || container.width <= 0 || container.height <= 0) return
         onMoved(
             Position(
                 fractionX(container.translationX, host.width, container.width),
