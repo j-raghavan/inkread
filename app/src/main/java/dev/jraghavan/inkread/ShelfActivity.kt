@@ -4,6 +4,7 @@ import android.app.Activity
 import android.app.AlertDialog
 import android.content.Intent
 import android.os.Bundle
+import android.util.Log
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
@@ -37,9 +38,13 @@ class ShelfActivity : Activity() {
 
     private lateinit var column: LinearLayout
 
+    private val prefs by lazy { getSharedPreferences(PREFS, MODE_PRIVATE) }
+    private var sort = Books.ShelfSort.TITLE
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         Ink.uiScale = DisplayPrefs(this).uiScale
+        sort = Books.ShelfSort.of(prefs.getString(KEY_SORT, null))
         column = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(22), dp(20), dp(22), dp(28))
@@ -50,7 +55,9 @@ class ShelfActivity : Activity() {
 
     private fun render() {
         Books.sweepPartialDownloads(this)
-        val books = Books.list(this)
+        val entries = ordered(Books.list(this))
+        val books = entries.map { it.file }
+        logShelf(entries)
         column.removeAllViews()
         column.addView(header(books))
 
@@ -67,6 +74,7 @@ class ShelfActivity : Activity() {
 
     private fun header(books: List<File>): View = LinearLayout(this).apply {
         orientation = LinearLayout.VERTICAL
+        addView(backLink())
         addView(Ink.eyebrow(this@ShelfActivity, "Your shelf"))
         addView(TextView(this@ShelfActivity).apply {
             text = if (books.size == 1) "1 book" else "${books.size} books"
@@ -82,7 +90,95 @@ class ShelfActivity : Activity() {
             })
         }
         addView(Ink.rule(this@ShelfActivity))
+        if (books.isNotEmpty()) addView(sortRow())
         addView(spacer(dp(6)))
+    }
+
+    /**
+     * Resolve each book's sort keys once, then order them (#227).
+     *
+     * The keys are read here rather than inside the comparator because a comparator runs O(n log n)
+     * times: reading a book's size walks its sidecar, so doing it per comparison would turn opening
+     * the shelf into a directory crawl proportional to the sort, not the library.
+     */
+    private fun ordered(books: List<File>): List<Books.ShelfEntry> =
+        Books.sortEntries(
+            books.map {
+                Books.ShelfEntry(
+                    file = it,
+                    title = titleOf(it),
+                    opened = Books.lastOpened(this, it.name).takeIf { t -> t > 0L } ?: it.lastModified(),
+                    size = Books.sizeOnDisk(it),
+                )
+            },
+            sort,
+        )
+
+    /**
+     * Report the order **with the keys it was ordered on**.
+     *
+     * Logging the resulting sequence alone was useless: on a small shelf the three orders can
+     * coincide, so a list that was never sorted is indistinguishable from one that was. The keys
+     * are the evidence — with them, a wrong order is visible from the log alone.
+     */
+    private fun logShelf(entries: List<Books.ShelfEntry>) {
+        val rows = entries.take(5).joinToString(" | ") {
+            "${it.file.name} sz=${Books.humanSize(it.size)} opened=${it.opened} " +
+                "notes=${Books.hasNotes(it.file)} named=${Books.disambiguatingFileName(it.title, it.file.name) != null}"
+        }
+        Log.i(TAG, "shelf: ${entries.size} books, sort=$sort — $rows")
+    }
+
+    /** Pick an order. Three plain words; the active one is inked, the rest recede. */
+    private fun sortRow(): View = LinearLayout(this).apply {
+        orientation = LinearLayout.HORIZONTAL
+        gravity = Gravity.CENTER_VERTICAL
+        setPadding(0, dp(10), 0, dp(2))
+        addView(TextView(this@ShelfActivity).apply {
+            text = "SORT"
+            setTextColor(Ink.muted); textSize = Ink.sp(10f); typeface = mono; letterSpacing = 0.14f
+            setPadding(0, 0, dp(14), 0)
+        })
+        for (option in Books.ShelfSort.entries) addView(sortOption(option))
+    }
+
+    private fun sortOption(option: Books.ShelfSort): View = TextView(this).apply {
+        val active = option == sort
+        text = option.label
+        setTextColor(if (active) ink else Ink.muted)
+        textSize = Ink.sp(12f)
+        typeface = if (active) Ink.serifBold else serif
+        setPadding(0, dp(4), dp(18), dp(4))
+        isClickable = true
+        contentDescription = "Sort by ${option.label}"
+        setOnClickListener {
+            if (option != sort) {
+                Log.i(TAG, "sort: $sort -> $option")
+                sort = option
+                prefs.edit().putString(KEY_SORT, option.name).apply()
+                render()
+            }
+        }
+    }
+
+    /**
+     * The way back to Home.
+     *
+     * This screen had none. Every other secondary screen finishes itself from somewhere, but the
+     * shelf could only be entered — and the device's own UI offers no system Back, so a reader who
+     * opened it was stranded until they left the app (#227). The label names the destination rather
+     * than showing a bare arrow, and the padding is a finger's worth: this is the only exit.
+     */
+    private fun backLink(): View = TextView(this).apply {
+        text = "‹ Home"
+        setTextColor(Ink.muted)
+        textSize = Ink.sp(12f)
+        typeface = mono
+        letterSpacing = 0.12f
+        setPadding(0, dp(6), dp(24), dp(16))
+        isClickable = true
+        contentDescription = "Back to Home"
+        setOnClickListener { finish() }
     }
 
     /** One book: tap the title to read it, tap Remove to take it off the device. */
@@ -96,7 +192,7 @@ class ShelfActivity : Activity() {
             isClickable = true
             setOnClickListener { open(book) }
             addView(TextView(this@ShelfActivity).apply {
-                text = Books.metaTitle(this@ShelfActivity, book.name) ?: Books.title(book)
+                text = titleOf(book)
                 setTextColor(ink); textSize = Ink.sp(18f); typeface = serif
                 maxLines = 2; setLineSpacing(0f, 1.1f)
             })
@@ -112,35 +208,55 @@ class ShelfActivity : Activity() {
                 setTextColor(Ink.muted); textSize = Ink.sp(11f); typeface = mono; letterSpacing = 0.08f
                 setPadding(0, dp(5), 0, 0)
             })
+            Books.disambiguatingFileName(titleOf(book), book.name)?.let { name ->
+                addView(TextView(this@ShelfActivity).apply {
+                    text = name
+                    setTextColor(Ink.muted); textSize = Ink.sp(10f); typeface = mono
+                    setPadding(0, dp(3), 0, 0); maxLines = 1
+                    ellipsize = android.text.TextUtils.TruncateAt.MIDDLE // keep the tail: v2, (1)…
+                })
+            }
         }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
 
         addView(Ink.pillButton(this@ShelfActivity, "Remove", primary = false) { confirmRemove(book) })
     }
+
+    /** The name this book is listed under: its metadata title, else the file name. */
+    private fun titleOf(book: File): String =
+        Books.metaTitle(this, book.name) ?: Books.title(book)
 
     /** Format · size · how far in you are — enough to decide whether it can go. */
     private fun subtitleFor(book: File): String {
         val bits = mutableListOf(book.extension.uppercase(), Books.humanSize(Books.sizeOnDisk(book)))
         val percent = Books.progress(this, book.name)
         if (percent > 0) bits += "$percent% read"
-        if (Books.sidecarDir(book).exists()) bits += "HAS NOTES"
+        if (Books.hasNotes(book)) bits += "HAS NOTES"
         return bits.joinToString(" · ")
     }
 
     /**
      * Confirm before deleting, and make the annotations an explicit, separate decision — a reader who
      * is clearing space must not lose handwriting they did not think they were discarding.
+     *
+     * The wording says *inkread's own copy* rather than "from this device", which read as though the
+     * source document were being deleted (#227). Books live in the app's private storage: an import
+     * copies the file in, so removing one never touches the original the reader picked.
      */
     private fun confirmRemove(book: File) {
-        val title = Books.metaTitle(this, book.name) ?: Books.title(book)
-        val hasNotes = Books.sidecarDir(book).exists()
+        val title = titleOf(book)
+        val hasNotes = Books.hasNotes(book)
+        val freed = Books.humanSize(Books.sizeOnDisk(book))
         val message = if (hasNotes) {
-            "Remove “$title” from this device? Your handwritten notes stay, and come back if you " +
-                "add the book again."
+            "Remove “$title” from inkread? This deletes inkread’s own copy and frees $freed. " +
+                "A file you imported stays where it is. Your handwritten notes are kept, and come " +
+                "back if you add the book again."
         } else {
-            "Remove “$title” from this device? It frees ${Books.humanSize(Books.sizeOnDisk(book))}."
+            "Remove “$title” from inkread? This deletes inkread’s own copy and frees $freed. " +
+                "A file you imported stays where it is."
         }
-        val dialog = AlertDialog.Builder(this)
-            .setTitle("Remove from device")
+        Log.i(TAG, "remove dialog: ${book.name} hasNotes=$hasNotes (offers 'Remove with notes'=$hasNotes)")
+        val dialog = AlertDialog.Builder(this, R.style.InkDialog)
+            .setTitle("Remove from inkread")
             .setMessage(message)
             .setPositiveButton("Remove") { _, _ -> doRemove(book, alsoNotes = false) }
             .setNegativeButton("Cancel", null)
@@ -150,7 +266,7 @@ class ShelfActivity : Activity() {
 
     /** Discarding handwriting is irreversible, so it gets its own confirmation. */
     private fun confirmNotesToo(book: File, title: String) {
-        AlertDialog.Builder(this)
+        AlertDialog.Builder(this, R.style.InkDialog)
             .setTitle("Delete the notes too?")
             .setMessage("Your handwriting on “$title” will be deleted. This can't be undone.")
             .setPositiveButton("Delete notes") { _, _ -> doRemove(book, alsoNotes = true) }
@@ -180,4 +296,9 @@ class ShelfActivity : Activity() {
         layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, h)
     }
 
+    private companion object {
+        const val TAG = "ShelfActivity"
+        const val PREFS = "shelf"
+        const val KEY_SORT = "sort" // the reader's chosen order, kept between visits (#227).
+    }
 }

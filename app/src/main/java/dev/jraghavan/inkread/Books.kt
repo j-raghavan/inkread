@@ -121,6 +121,70 @@ object Books {
     fun sidecarDir(file: File): File =
         File(file.parentFile, "${file.nameWithoutExtension}.inkread")
 
+    /**
+     * Whether this book actually carries handwriting.
+     *
+     * Deliberately **not** "does the sidecar exist". The core stamps a `metadata.json` into the
+     * sidecar the first time a document is opened, to bind it to that document's identity
+     * (RR10-FR6) — so the directory is present for every book that has ever been opened, ink or
+     * no ink, and testing for it marked the whole shelf as annotated (#227).
+     *
+     * Ink lives in `annotations/page-NNNN.inkbin`, written only when a stroke is committed and
+     * *removed* again when a page's last stroke is erased, so one of those files is the question
+     * actually being asked. A quarantined `.inkbin.corrupt` page does not match, and should not:
+     * it is ink the reader can no longer see.
+     */
+    fun hasNotes(file: File): Boolean =
+        File(sidecarDir(file), "annotations").list()?.any(INK_PAGE_FILE::matches) == true
+
+    /** `page-NNNN.inkbin` — the core's committed-ink page files (`SidecarPaths::page_file`). */
+    private val INK_PAGE_FILE = Regex("^page-\\d+\\.inkbin$")
+
+    /**
+     * The file name to show beside [displayTitle], or null when it would merely repeat it.
+     *
+     * Books are listed by their metadata title, which is the right name to read by but a poor way
+     * to tell two files apart: a reader holding three copies of the same work sees the same line
+     * three times with no way to reach the file name (#227). Showing it always would be noise on
+     * the common shelf, where the title *is* the file name, so it appears only when it adds
+     * something — which is exactly the ambiguous case.
+     */
+    fun disambiguatingFileName(displayTitle: String, fileName: String): String? =
+        fileName.takeIf { !it.substringBeforeLast('.').equals(displayTitle.trim(), ignoreCase = true) }
+
+    /** How the shelf is ordered (#227). */
+    enum class ShelfSort(val label: String) {
+        TITLE("Title"),
+        RECENT("Recent"),
+        SIZE("Size"),
+        ;
+
+        companion object {
+            /** Decode a stored name, falling back to [TITLE] for anything unrecognised. */
+            fun of(name: String?): ShelfSort =
+                entries.firstOrNull { it.name == name } ?: TITLE
+        }
+    }
+
+    /** One shelf row's sort keys, resolved once so ordering never re-reads the filesystem. */
+    data class ShelfEntry(val file: File, val title: String, val opened: Long, val size: Long)
+
+    /**
+     * Order the shelf.
+     *
+     * Ties break on title in every mode, so the list is stable and a reader scanning it twice sees
+     * the same order both times — on a panel that repaints in whole frames, a list that reshuffles
+     * between visits is worse than one ordered imperfectly.
+     */
+    fun sortEntries(entries: List<ShelfEntry>, sort: ShelfSort): List<ShelfEntry> {
+        val byTitle = compareBy<ShelfEntry> { it.title.lowercase() }
+        return when (sort) {
+            ShelfSort.TITLE -> entries.sortedWith(byTitle)
+            ShelfSort.RECENT -> entries.sortedWith(compareByDescending<ShelfEntry> { it.opened }.then(byTitle))
+            ShelfSort.SIZE -> entries.sortedWith(compareByDescending<ShelfEntry> { it.size }.then(byTitle))
+        }
+    }
+
     /** Bytes this book occupies, its annotations included — what removing it actually frees. */
     fun sizeOnDisk(file: File): Long =
         file.length() + sidecarDir(file).walkBottomUp().filter { it.isFile }.sumOf { it.length() }
@@ -269,6 +333,21 @@ object Books {
             // a lost recents entry is cosmetic.
         }
     }
+
+    /**
+     * Stamp this book as opened now. Paired with [pushRecent], which records the same event but
+     * keeps only the newest handful — this survives past the recents cut, which is what the shelf
+     * needs to order a library larger than that.
+     */
+    fun setLastOpened(context: Context, id: String, now: Long = System.currentTimeMillis()) =
+        meta(context).edit().putLong("$id.opened", now).apply()
+
+    /**
+     * When this book was last opened, or 0 if never — including every book that was already on the
+     * shelf before the stamp existed. The shelf falls back to the file's own timestamp for those,
+     * so they order by when they arrived rather than collapsing into one undifferentiated block.
+     */
+    fun lastOpened(context: Context, id: String): Long = meta(context).getLong("$id.opened", 0L)
 
     /** Per-book read progress (0–100), written by the reader on save; shown on the home shelf. */
     fun setProgress(context: Context, id: String, percent: Int) {

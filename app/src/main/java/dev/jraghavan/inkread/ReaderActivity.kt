@@ -863,6 +863,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             // (line spacing + alignment were restored above, in the same nativeSetTypography call)
             pageCount = NativeBridge.nativePageCount(docHandle)
             Books.pushRecent(this, bookId, path)
+            Books.setLastOpened(this, bookId) // orders the shelf past the recents cut (#227)
             // Capture the real document metadata so the library shows the actual title/author + page
             // position instead of the filename (the home redesign's real-data path).
             try {

@@ -484,8 +484,14 @@ class HomeActivity : Activity() {
         }
     }
 
-    /** The design's stat chips — outlined pills of REAL reading stats (streak · this week · pages).
-     *  Each chip appears only when it has data, so nothing is faked; null when there's nothing yet. */
+    /**
+     * REAL reading stats (streak · this week · pages), as a plain line.
+     *
+     * These used to be outlined pills, which on this screen is the shape of a button — so the one
+     * thing on Home that *was* tappable looked like a label while three things that do nothing
+     * looked pressable (#227). Each part still appears only when it has data, so nothing is faked;
+     * null when there is nothing to report yet.
+     */
     private fun statChips(): View? {
         val chips = buildList {
             val streak = ReadingStats.streakDays(this@HomeActivity)
@@ -496,21 +502,11 @@ class HomeActivity : Activity() {
             if (pages > 0) add(if (pages == 1) "1 page" else "$pages pages")
         }
         if (chips.isEmpty()) return null
-        return LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
+        return TextView(this).apply {
+            text = chips.joinToString("   ·   ")
+            setTextColor(inkSoft); textSize = fs(13f); typeface = serif
             gravity = Gravity.CENTER
-            chips.forEachIndexed { i, c ->
-                addView(chip(c), LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT)
-                    .apply { marginStart = if (i == 0) 0 else dim(10) })
-            }
-        }
-    }
-
-    private fun chip(text: String): View = TextView(this).apply {
-        this.text = text; setTextColor(ink); textSize = fs(13f); typeface = serif
-        gravity = Gravity.CENTER; setPadding(dim(16), dim(6), dim(16), dim(6))
-        background = GradientDrawable().apply {
-            setColor(Color.WHITE); setStroke(maxOf(1, dp(1)), ink); cornerRadius = dim(40).toFloat()
+            setPadding(dim(12), dim(6), dim(12), dim(6))
         }
     }
 
@@ -525,15 +521,24 @@ class HomeActivity : Activity() {
         layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT)
     }
 
-    /** "Your shelf · N books" → [ShelfActivity]; `null` when the device holds nothing yet. */
+    /**
+     * "Your shelf · N books" → [ShelfActivity]; `null` when the device holds nothing yet.
+     *
+     * Carries the same outlined-pill shape as [openButton], because it does the same kind of thing:
+     * both take you somewhere. It used to be set as plain mono text and read as a caption, which is
+     * how the shelf stayed hard to find (#227).
+     */
     private fun allBooksLink(): View? {
         val count = Books.list(this).size
         if (count == 0) return null
         return TextView(this).apply {
             text = "Your shelf · $count ${if (count == 1) "book" else "books"}"
-            setTextColor(inkSoft); textSize = fs(13f); typeface = mono; letterSpacing = 0.08f
+            setTextColor(ink); textSize = fs(16f); typeface = serif
             gravity = Gravity.CENTER
-            setPadding(dim(12), dim(8), dim(12), dim(8))
+            setPadding(dim(30), dim(13), dim(30), dim(13))
+            background = GradientDrawable().apply {
+                setColor(Color.WHITE); setStroke(maxOf(1, dp(1)), ink); cornerRadius = dim(40).toFloat()
+            }
             isClickable = true
             setOnClickListener { startActivity(Intent(this@HomeActivity, ShelfActivity::class.java)) }
         }
