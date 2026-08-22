@@ -60,13 +60,19 @@ object AppSettings {
         prefs(c).edit().putBoolean(KEY_TOOLBAR_HORIZONTAL, value).apply()
 
     /**
-     * Which side the tool palette docks to — left when true, right by default (#200).
+     * Which side the tool palette docks to (#200).
      *
      * Applies to both forms: the vertical pill hangs off that edge, and the horizontal bar lands in
-     * that top corner and grows inward from it. Right by default because that is where the palette
-     * has always been, and because it is the far edge from most readers' holding hand.
+     * that top corner and grows inward from it.
+     *
+     * The default depends on the form, which is why this reads the orientation. The vertical pill
+     * has always hung off the right and stays there. The horizontal bar defaults **left**, because
+     * the top-right corner already holds the bookmark ribbon: docking there means standing off it by
+     * 14% of the page width, which leaves the strip floating oddly inboard of a corner it is
+     * supposed to be tucked into. Top-left has nothing to avoid, so it can sit flush.
      */
-    fun toolbarOnLeft(c: Context): Boolean = prefs(c).getBoolean(KEY_TOOLBAR_ON_LEFT, false)
+    fun toolbarOnLeft(c: Context): Boolean =
+        prefs(c).getBoolean(KEY_TOOLBAR_ON_LEFT, toolbarHorizontal(c))
 
     fun setToolbarOnLeft(c: Context, value: Boolean) =
         prefs(c).edit().putBoolean(KEY_TOOLBAR_ON_LEFT, value).apply()
