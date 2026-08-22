@@ -152,6 +152,39 @@ object Books {
     fun disambiguatingFileName(displayTitle: String, fileName: String): String? =
         fileName.takeIf { !it.substringBeforeLast('.').equals(displayTitle.trim(), ignoreCase = true) }
 
+    /** How the shelf is ordered (#227). */
+    enum class ShelfSort(val label: String) {
+        TITLE("Title"),
+        RECENT("Recent"),
+        SIZE("Size"),
+        ;
+
+        companion object {
+            /** Decode a stored name, falling back to [TITLE] for anything unrecognised. */
+            fun of(name: String?): ShelfSort =
+                entries.firstOrNull { it.name == name } ?: TITLE
+        }
+    }
+
+    /** One shelf row's sort keys, resolved once so ordering never re-reads the filesystem. */
+    data class ShelfEntry(val file: File, val title: String, val opened: Long, val size: Long)
+
+    /**
+     * Order the shelf.
+     *
+     * Ties break on title in every mode, so the list is stable and a reader scanning it twice sees
+     * the same order both times — on a panel that repaints in whole frames, a list that reshuffles
+     * between visits is worse than one ordered imperfectly.
+     */
+    fun sortEntries(entries: List<ShelfEntry>, sort: ShelfSort): List<ShelfEntry> {
+        val byTitle = compareBy<ShelfEntry> { it.title.lowercase() }
+        return when (sort) {
+            ShelfSort.TITLE -> entries.sortedWith(byTitle)
+            ShelfSort.RECENT -> entries.sortedWith(compareByDescending<ShelfEntry> { it.opened }.then(byTitle))
+            ShelfSort.SIZE -> entries.sortedWith(compareByDescending<ShelfEntry> { it.size }.then(byTitle))
+        }
+    }
+
     /** Bytes this book occupies, its annotations included — what removing it actually frees. */
     fun sizeOnDisk(file: File): Long =
         file.length() + sidecarDir(file).walkBottomUp().filter { it.isFile }.sumOf { it.length() }
@@ -300,6 +333,21 @@ object Books {
             // a lost recents entry is cosmetic.
         }
     }
+
+    /**
+     * Stamp this book as opened now. Paired with [pushRecent], which records the same event but
+     * keeps only the newest handful — this survives past the recents cut, which is what the shelf
+     * needs to order a library larger than that.
+     */
+    fun setLastOpened(context: Context, id: String, now: Long = System.currentTimeMillis()) =
+        meta(context).edit().putLong("$id.opened", now).apply()
+
+    /**
+     * When this book was last opened, or 0 if never — including every book that was already on the
+     * shelf before the stamp existed. The shelf falls back to the file's own timestamp for those,
+     * so they order by when they arrived rather than collapsing into one undifferentiated block.
+     */
+    fun lastOpened(context: Context, id: String): Long = meta(context).getLong("$id.opened", 0L)
 
     /** Per-book read progress (0–100), written by the reader on save; shown on the home shelf. */
     fun setProgress(context: Context, id: String, percent: Int) {

@@ -37,9 +37,13 @@ class ShelfActivity : Activity() {
 
     private lateinit var column: LinearLayout
 
+    private val prefs by lazy { getSharedPreferences(PREFS, MODE_PRIVATE) }
+    private var sort = Books.ShelfSort.TITLE
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         Ink.uiScale = DisplayPrefs(this).uiScale
+        sort = Books.ShelfSort.of(prefs.getString(KEY_SORT, null))
         column = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(22), dp(20), dp(22), dp(28))
@@ -50,7 +54,7 @@ class ShelfActivity : Activity() {
 
     private fun render() {
         Books.sweepPartialDownloads(this)
-        val books = Books.list(this)
+        val books = ordered(Books.list(this))
         column.removeAllViews()
         column.addView(header(books))
 
@@ -83,7 +87,59 @@ class ShelfActivity : Activity() {
             })
         }
         addView(Ink.rule(this@ShelfActivity))
+        if (books.isNotEmpty()) addView(sortRow())
         addView(spacer(dp(6)))
+    }
+
+    /**
+     * Resolve each book's sort keys once, then order them (#227).
+     *
+     * The keys are read here rather than inside the comparator because a comparator runs O(n log n)
+     * times: reading a book's size walks its sidecar, so doing it per comparison would turn opening
+     * the shelf into a directory crawl proportional to the sort, not the library.
+     */
+    private fun ordered(books: List<File>): List<File> =
+        Books.sortEntries(
+            books.map {
+                Books.ShelfEntry(
+                    file = it,
+                    title = titleOf(it),
+                    opened = Books.lastOpened(this, it.name).takeIf { t -> t > 0L } ?: it.lastModified(),
+                    size = Books.sizeOnDisk(it),
+                )
+            },
+            sort,
+        ).map { it.file }
+
+    /** Pick an order. Three plain words; the active one is inked, the rest recede. */
+    private fun sortRow(): View = LinearLayout(this).apply {
+        orientation = LinearLayout.HORIZONTAL
+        gravity = Gravity.CENTER_VERTICAL
+        setPadding(0, dp(10), 0, dp(2))
+        addView(TextView(this@ShelfActivity).apply {
+            text = "SORT"
+            setTextColor(Ink.muted); textSize = Ink.sp(10f); typeface = mono; letterSpacing = 0.14f
+            setPadding(0, 0, dp(14), 0)
+        })
+        for (option in Books.ShelfSort.entries) addView(sortOption(option))
+    }
+
+    private fun sortOption(option: Books.ShelfSort): View = TextView(this).apply {
+        val active = option == sort
+        text = option.label
+        setTextColor(if (active) ink else Ink.muted)
+        textSize = Ink.sp(12f)
+        typeface = if (active) Ink.serifBold else serif
+        setPadding(0, dp(4), dp(18), dp(4))
+        isClickable = true
+        contentDescription = "Sort by ${option.label}"
+        setOnClickListener {
+            if (option != sort) {
+                sort = option
+                prefs.edit().putString(KEY_SORT, option.name).apply()
+                render()
+            }
+        }
     }
 
     /**
@@ -220,4 +276,8 @@ class ShelfActivity : Activity() {
         layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, h)
     }
 
+    private companion object {
+        const val PREFS = "shelf"
+        const val KEY_SORT = "sort" // the reader's chosen order, kept between visits (#227).
+    }
 }
