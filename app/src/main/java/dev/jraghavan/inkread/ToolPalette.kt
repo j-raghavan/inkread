@@ -298,6 +298,12 @@ class ToolPalette(
         if (expanded) { expanded = false; render() }
     }
 
+    /**
+     * A parked position for the pill, held as host-relative fractions (#200). Persisted by the
+     * host so the toolbar reopens where the reader left it instead of back at the default dock.
+     */
+    data class Position(val x: Float, val y: Float)
+
     internal companion object {
         /** Resting opacity of the docked puck — translucent so the text behind it stays readable. */
         const val IDLE_ALPHA = 0.55f
@@ -333,5 +339,42 @@ class ToolPalette(
          */
         fun anchorY(ty: Float, oldHeight: Int, newHeight: Int): Float =
             ty + (newHeight - oldHeight) / 2f
+
+        /**
+         * Where the pill's **top-left corner** sits, as a fraction of the host's width and height.
+         *
+         * Fractions rather than raw pixels because a remembered position has to survive things the
+         * pixels do not: a rotation, a different panel (a Nomad is not a Manta), and the pill's own
+         * size changing between its collapsed and expanded forms. The corner is where the grip is,
+         * which is the part the reader actually aims at.
+         */
+        fun fractionX(tx: Float, hostWidth: Int, viewWidth: Int): Float =
+            if (hostWidth <= 0) 0f else ((hostWidth - viewWidth) + tx) / hostWidth
+
+        fun fractionY(ty: Float, hostHeight: Int, viewHeight: Int): Float =
+            if (hostHeight <= 0) 0f else ((hostHeight - viewHeight) / 2f + ty) / hostHeight
+
+        /**
+         * Turn a remembered [fractionX] back into a horizontal offset for the *current* geometry,
+         * clamped so it lands on screen.
+         *
+         * The clamp is the point, not a formality: the fraction may have been saved on the other
+         * rotation, on another device, or against a pill that a later build sized differently, and
+         * a position that was legal then can be off screen now. Restoring the pill out of reach
+         * would recreate the very trap #200 was opened about.
+         */
+        fun translationXFor(fraction: Float, hostWidth: Int, viewWidth: Int): Float =
+            if (hostWidth <= 0 || !fraction.isFinite()) {
+                0f
+            } else {
+                clampX(fraction * hostWidth - (hostWidth - viewWidth), hostWidth, viewWidth)
+            }
+
+        fun translationYFor(fraction: Float, hostHeight: Int, viewHeight: Int): Float =
+            if (hostHeight <= 0 || !fraction.isFinite()) {
+                0f
+            } else {
+                clampY(fraction * hostHeight - (hostHeight - viewHeight) / 2f, hostHeight, viewHeight)
+            }
     }
 }

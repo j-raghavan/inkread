@@ -99,4 +99,105 @@ class ToolPalettePlacementTest {
         assertEquals(0f, ToolPalette.clampY(10f, 0, 0), 0.01f)
         assertEquals(0f, ToolPalette.clampX(-10f, 0, 0), 0.01f)
     }
+
+    // ── Remembering where the pill was parked (#200) ──────────────────────────────────────────────
+
+    /** The pill's top edge in host coordinates, for an arbitrary host — the placement that matters. */
+    private fun topIn(ty: Float, hostHeight: Int, viewHeight: Int): Float =
+        (hostHeight - viewHeight) / 2f + ty
+
+    /** The pill's left edge in host coordinates (the base anchor is END, so the offset is negative). */
+    private fun leftIn(tx: Float, hostWidth: Int, viewWidth: Int): Float =
+        (hostWidth - viewWidth) + tx
+
+    /**
+     * The everyday case: park the puck, close the document, reopen it on the same panel. The pill
+     * must come back to the same pixel, or "remembering" is worse than not remembering.
+     */
+    @Test
+    fun aParkedPositionComesBackToTheSamePlaceOnTheSamePanel() {
+        val tx = -300f
+        val ty = 200f
+
+        val restoredX = ToolPalette.translationXFor(ToolPalette.fractionX(tx, hostW, puck), hostW, puck)
+        val restoredY = ToolPalette.translationYFor(ToolPalette.fractionY(ty, hostH, puck), hostH, puck)
+
+        assertEquals(tx, restoredX, 0.5f)
+        assertEquals(ty, restoredY, 0.5f)
+    }
+
+    /**
+     * The correction the reporter asked for in the same breath as the feature: "It should account
+     * for wrong positions (keep into the limit of the screen)."
+     *
+     * A puck parked flush with the bottom in portrait describes a point that is *past* the bottom
+     * of a landscape panel. Restoring the raw position would hang the grip off the edge — exactly
+     * the unreachable-grip trap this issue was opened about, only now it would survive a restart.
+     */
+    @Test
+    fun aPositionSavedInPortraitIsPulledBackOntoALandscapeScreen() {
+        val parked = ToolPalette.clampY(99_999f, hostH, puck) // flush with the portrait bottom
+        val fraction = ToolPalette.fractionY(parked, hostH, puck)
+
+        val landscapeH = hostW // the panel turned on its side
+        val naive = fraction * landscapeH - (landscapeH - puck) / 2f
+        assertTrue(
+            "fixture must describe an off-screen point: bottom was ${topIn(naive, landscapeH, puck) + puck}",
+            topIn(naive, landscapeH, puck) + puck > landscapeH,
+        )
+
+        val restored = ToolPalette.translationYFor(fraction, landscapeH, puck)
+        assertTrue("ran off the top: ${topIn(restored, landscapeH, puck)}", topIn(restored, landscapeH, puck) >= -0.5f)
+        assertTrue(
+            "ran off the bottom: ${topIn(restored, landscapeH, puck) + puck}",
+            topIn(restored, landscapeH, puck) + puck <= landscapeH + 0.5f,
+        )
+    }
+
+    /** The same story sideways: a left-flush park stays left-flush on a wider panel. */
+    @Test
+    fun aHorizontalParkIsRestoredAgainstTheNewWidth() {
+        val parked = ToolPalette.clampX(-99_999f, hostW, puck) // flush with the left edge
+        val fraction = ToolPalette.fractionX(parked, hostW, puck)
+
+        val widerW = hostH
+        val restored = ToolPalette.translationXFor(fraction, widerW, puck)
+        assertEquals("should still sit flush left", 0f, leftIn(restored, widerW, puck), 0.5f)
+    }
+
+    /**
+     * The pill is saved at whatever size it happened to be and restored collapsed, because it always
+     * opens collapsed. Anchoring on the top-left corner is what makes that a no-op rather than a
+     * drift of half the height difference.
+     */
+    @Test
+    fun aPositionSavedWhileExpandedRestoresTheCollapsedPuckToTheSameCorner() {
+        val parked = ToolPalette.clampY(-99_999f, hostH, pill) // expanded, flush with the top
+        val cornerBefore = topIn(parked, hostH, pill)
+
+        val restored = ToolPalette.translationYFor(ToolPalette.fractionY(parked, hostH, pill), hostH, puck)
+
+        assertEquals("the corner the grip sits in must not move", cornerBefore, topIn(restored, hostH, puck), 0.5f)
+    }
+
+    /**
+     * Never parked, or a preference file that predates this feature: both arrive as NaN and must
+     * open at the default dock rather than propagating a NaN into a layout pass.
+     */
+    @Test
+    fun anUnsetPositionOpensAtTheDefaultDock() {
+        assertEquals(0f, ToolPalette.translationXFor(Float.NaN, hostW, puck), 0.01f)
+        assertEquals(0f, ToolPalette.translationYFor(Float.NaN, hostH, puck), 0.01f)
+        assertEquals(0f, ToolPalette.translationXFor(Float.POSITIVE_INFINITY, hostW, puck), 0.01f)
+        assertEquals(0f, ToolPalette.translationYFor(Float.NEGATIVE_INFINITY, hostH, puck), 0.01f)
+    }
+
+    /** Before the first layout pass the host has no size; reading or restoring must stay finite. */
+    @Test
+    fun aZeroSizedHostNeitherDividesByZeroNorMoves() {
+        assertEquals(0f, ToolPalette.fractionX(10f, 0, 0), 0.01f)
+        assertEquals(0f, ToolPalette.fractionY(10f, 0, 0), 0.01f)
+        assertEquals(0f, ToolPalette.translationXFor(0.5f, 0, 0), 0.01f)
+        assertEquals(0f, ToolPalette.translationYFor(0.5f, 0, 0), 0.01f)
+    }
 }
