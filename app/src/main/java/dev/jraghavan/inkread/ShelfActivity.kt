@@ -139,7 +139,7 @@ class ShelfActivity : Activity() {
         } else {
             "Remove “$title” from this device? It frees ${Books.humanSize(Books.sizeOnDisk(book))}."
         }
-        val dialog = AlertDialog.Builder(this)
+        val dialog = AlertDialog.Builder(this, R.style.InkDialog)
             .setTitle("Remove from device")
             .setMessage(message)
             .setPositiveButton("Remove") { _, _ -> doRemove(book, alsoNotes = false) }
@@ -150,7 +150,7 @@ class ShelfActivity : Activity() {
 
     /** Discarding handwriting is irreversible, so it gets its own confirmation. */
     private fun confirmNotesToo(book: File, title: String) {
-        AlertDialog.Builder(this)
+        AlertDialog.Builder(this, R.style.InkDialog)
             .setTitle("Delete the notes too?")
             .setMessage("Your handwriting on “$title” will be deleted. This can't be undone.")
             .setPositiveButton("Delete notes") { _, _ -> doRemove(book, alsoNotes = true) }

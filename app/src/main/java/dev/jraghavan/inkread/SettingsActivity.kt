@@ -229,7 +229,7 @@ class SettingsActivity : Activity() {
                 setPadding(0, dp(12), 0, 0); setLineSpacing(0f, 1.25f)
             })
         }
-        AlertDialog.Builder(this)
+        AlertDialog.Builder(this, R.style.InkDialog)
             .setTitle("Your library")
             .setView(body)
             .setPositiveButton("Save") { _, _ ->

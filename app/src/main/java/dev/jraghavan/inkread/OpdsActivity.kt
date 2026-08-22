@@ -254,7 +254,7 @@ class OpdsActivity : Activity() {
 
     /** A downloaded book is on the shelf either way; this just saves a trip back to Home to open it. */
     private fun offerToRead(title: String, path: String, id: String) {
-        AlertDialog.Builder(this)
+        AlertDialog.Builder(this, R.style.InkDialog)
             .setTitle("Added to your shelf")
             .setMessage("$title is now on your shelf.")
             .setPositiveButton("Read now") { _, _ ->
