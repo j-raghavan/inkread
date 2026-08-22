@@ -66,6 +66,14 @@ class ToolPalette(
     private val orientation: Orientation = Orientation.VERTICAL,
     /** Which side it docks to: [Anchor.END] is the right edge, [Anchor.START] the left. */
     private val side: Anchor = Anchor.END,
+    /**
+     * Extra clearance along the docked side, in pixels, for chrome the strip must not cover (#200).
+     *
+     * The host owns this because the host owns the chrome. A strip docked into a corner that already
+     * holds something does not merely look wrong — it eats the touches meant for it, since the strip
+     * consumes every event inside its bounds.
+     */
+    private val dockClearance: Int = 0,
     /** Where the reader last parked the pill (#200); null opens it at the default dock. */
     private val savedPosition: Position? = null,
     /** The pill came to rest somewhere new — persist it so the next document opens there (#200). */
@@ -113,8 +121,11 @@ class ToolPalette(
                 val sideGravity = if (side == Anchor.START) Gravity.START else Gravity.END
                 gravity = sideGravity or if (horizontal) Gravity.TOP else Gravity.CENTER_VERTICAL
                 val inset = dp(6)
+                // Clearance applies along the docked side, and only to the horizontal form: the
+                // vertical pill rides the middle of its edge and never reaches the corner.
+                val docked = inset + if (horizontal) dockClearance else 0
                 if (horizontal) topMargin = inset
-                if (side == Anchor.START) marginStart = inset else marginEnd = inset
+                if (side == Anchor.START) marginStart = docked else marginEnd = docked
             },
         )
         container.alpha = IDLE_ALPHA // see-through while reading so it doesn't cover the text

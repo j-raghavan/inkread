@@ -330,4 +330,22 @@ class ToolPalettePlacementTest {
             assertEquals("$anchor", 0f, ToolPalette.clamp(anchor, -500f, 0, 0), 0.01f)
         }
     }
+
+    /**
+     * The strip must not sit in the bookmark dog-ear's corner (#200).
+     *
+     * Not a cosmetic clash: the palette consumes every touch inside its bounds, so a puck parked in
+     * that corner silently eats the tap that toggles a bookmark. Measured on a 1920px panel the puck
+     * landed at x 1789..1909 — wholly inside the zone, which starts at 1651.
+     */
+    @Test
+    fun aTopRightStripClearsTheBookmarkTapZone() {
+        val clearance = kotlin.math.ceil(hostW * ReaderActivity.BOOKMARK_ZONE_W).toInt()
+        val zoneStartsAt = hostW * (1f - ReaderActivity.BOOKMARK_ZONE_W)
+        val stripRightEdge = hostW - clearance
+        assertTrue(
+            "the strip's right edge ($stripRightEdge) must not enter the zone (from $zoneStartsAt)",
+            stripRightEdge <= zoneStartsAt + 0.5f,
+        )
+    }
 }
