@@ -78,6 +78,9 @@ object NativeBridge {
     /** Page count of the open document. */
     external fun nativePageCount(handle: Long): Int
 
+    /** Estimate for the open document. */
+    external fun nativeEstimate(handle: Long): Int
+
     /** The document's title from its metadata, or "" if none — stored so the library shows the real
      *  title instead of the filename. */
     external fun nativeDocTitle(handle: Long): String
