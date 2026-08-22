@@ -121,6 +121,25 @@ object Books {
     fun sidecarDir(file: File): File =
         File(file.parentFile, "${file.nameWithoutExtension}.inkread")
 
+    /**
+     * Whether this book actually carries handwriting.
+     *
+     * Deliberately **not** "does the sidecar exist". The core stamps a `metadata.json` into the
+     * sidecar the first time a document is opened, to bind it to that document's identity
+     * (RR10-FR6) — so the directory is present for every book that has ever been opened, ink or
+     * no ink, and testing for it marked the whole shelf as annotated (#227).
+     *
+     * Ink lives in `annotations/page-NNNN.inkbin`, written only when a stroke is committed and
+     * *removed* again when a page's last stroke is erased, so one of those files is the question
+     * actually being asked. A quarantined `.inkbin.corrupt` page does not match, and should not:
+     * it is ink the reader can no longer see.
+     */
+    fun hasNotes(file: File): Boolean =
+        File(sidecarDir(file), "annotations").list()?.any(INK_PAGE_FILE::matches) == true
+
+    /** `page-NNNN.inkbin` — the core's committed-ink page files (`SidecarPaths::page_file`). */
+    private val INK_PAGE_FILE = Regex("^page-\\d+\\.inkbin$")
+
     /** Bytes this book occupies, its annotations included — what removing it actually frees. */
     fun sizeOnDisk(file: File): Long =
         file.length() + sidecarDir(file).walkBottomUp().filter { it.isFile }.sumOf { it.length() }

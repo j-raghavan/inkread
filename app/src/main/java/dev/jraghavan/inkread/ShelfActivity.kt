@@ -122,7 +122,7 @@ class ShelfActivity : Activity() {
         val bits = mutableListOf(book.extension.uppercase(), Books.humanSize(Books.sizeOnDisk(book)))
         val percent = Books.progress(this, book.name)
         if (percent > 0) bits += "$percent% read"
-        if (Books.sidecarDir(book).exists()) bits += "HAS NOTES"
+        if (Books.hasNotes(book)) bits += "HAS NOTES"
         return bits.joinToString(" · ")
     }
 
@@ -132,7 +132,7 @@ class ShelfActivity : Activity() {
      */
     private fun confirmRemove(book: File) {
         val title = Books.metaTitle(this, book.name) ?: Books.title(book)
-        val hasNotes = Books.sidecarDir(book).exists()
+        val hasNotes = Books.hasNotes(book)
         val message = if (hasNotes) {
             "Remove “$title” from this device? Your handwritten notes stay, and come back if you " +
                 "add the book again."
