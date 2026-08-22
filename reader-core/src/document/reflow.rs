@@ -539,13 +539,14 @@ impl EpubBackend {
 
     /// Repaginate at the current viewport/scale, anchoring the reading position to the chapter
     /// `current_page` is in, and return that chapter's new start page (RR4 line-spacing/alignment).
-    fn repaginate_keeping_chapter(&self, current_page: usize) -> Option<usize> {
-        // Resolve the chapter against the pagination *as it stands* — the caller has already
-        // applied the new setting, so going through `laid()` here would rebuild first and then
-        // map `current_page` through the new pagination, landing in the wrong chapter.
+    fn repaginate_keeping_chapter(
+        &self,
+        current_page: usize,
+        pin: Option<PinPosition>,
+    ) -> Option<usize> {
+        // Nothing paginated yet (the open path applying saved typography): there is no reading
+        // position to preserve, and returning without laying out keeps a cold open to one pass.
         let chapter = match self.laid.borrow().as_ref() {
-            // Nothing paginated yet (the open path applying saved typography): there is no reading
-            // position to preserve, and returning without laying out keeps a cold open to one pass.
             None => return Some(0),
             Some(laid) => laid
                 .chapter_start
@@ -555,7 +556,17 @@ impl EpubBackend {
         };
         // Rebuilds only if something really changed — re-picking the value already in effect in
         // the Adjust sheet costs nothing.
-        Some(self.laid().chapter_start.get(chapter).copied().unwrap_or(0))
+        let chapter_start = self.laid().chapter_start.get(chapter).copied().unwrap_or(0);
+
+        // Re-anchor to where the reader actually was. Falling back to the chapter's first page is
+        // what this used to do unconditionally, and it is why changing line spacing threw away
+        // progress within a chapter — five pages into a chapter put you five pages back (#160). It
+        // remains the fallback for a page with no anchored glyph to pin to (a rule-only or empty
+        // page), where there is nothing better to aim at.
+        match pin {
+            Some(pin) => Some(self.pin_to_page(&pin)),
+            None => Some(chapter_start),
+        }
     }
 
     /// The page's glyphs as normalized [`CharBox`]es — the input to the pure selection + search
@@ -719,28 +730,68 @@ impl Document for EpubBackend {
     }
 
     fn set_text_scale(&self, scale: f32, current_page: usize) -> Option<usize> {
+        // Captured before the setting changes: reading it afterwards would go through `laid()`,
+        // which rebuilds, and pin the position against the pagination we are about to replace
+        // (#160). Skipped entirely when nothing is laid out yet — that is the open path restoring
+        // saved typography, where there is no reading position to preserve and asking for one would
+        // force the very pagination the lazy open exists to avoid (#161/#162/#186).
+        let pin = if self.laid.borrow().is_some() {
+            self.page_pin(current_page)
+        } else {
+            None
+        };
         // Anchor the reading position to the current chapter, repaginate at the new size, then
         // return that chapter's new start page so the reader stays put across the reflow.
         self.scale.set(clamp_scale(scale));
-        self.repaginate_keeping_chapter(current_page)
+        self.repaginate_keeping_chapter(current_page, pin)
     }
 
     fn set_line_spacing(&self, mult: f32, current_page: usize) -> Option<usize> {
+        // Captured before the setting changes: reading it afterwards would go through `laid()`,
+        // which rebuilds, and pin the position against the pagination we are about to replace
+        // (#160). Skipped entirely when nothing is laid out yet — that is the open path restoring
+        // saved typography, where there is no reading position to preserve and asking for one would
+        // force the very pagination the lazy open exists to avoid (#161/#162/#186).
+        let pin = if self.laid.borrow().is_some() {
+            self.page_pin(current_page)
+        } else {
+            None
+        };
         self.line_spacing.set(clamp_line_spacing(mult));
-        self.repaginate_keeping_chapter(current_page)
+        self.repaginate_keeping_chapter(current_page, pin)
     }
 
     fn set_alignment(&self, align_code: i32, current_page: usize) -> Option<usize> {
+        // Captured before the setting changes: reading it afterwards would go through `laid()`,
+        // which rebuilds, and pin the position against the pagination we are about to replace
+        // (#160). Skipped entirely when nothing is laid out yet — that is the open path restoring
+        // saved typography, where there is no reading position to preserve and asking for one would
+        // force the very pagination the lazy open exists to avoid (#161/#162/#186).
+        let pin = if self.laid.borrow().is_some() {
+            self.page_pin(current_page)
+        } else {
+            None
+        };
         self.align.set(Align::from_code(align_code));
-        self.repaginate_keeping_chapter(current_page)
+        self.repaginate_keeping_chapter(current_page, pin)
     }
 
     fn set_columns(&self, columns: i32, current_page: usize) -> Option<usize> {
+        // Captured before the setting changes: reading it afterwards would go through `laid()`,
+        // which rebuilds, and pin the position against the pagination we are about to replace
+        // (#160). Skipped entirely when nothing is laid out yet — that is the open path restoring
+        // saved typography, where there is no reading position to preserve and asking for one would
+        // force the very pagination the lazy open exists to avoid (#161/#162/#186).
+        let pin = if self.laid.borrow().is_some() {
+            self.page_pin(current_page)
+        } else {
+            None
+        };
         // Stored as asked, clamped to what the engine models. Whether two columns are actually used
         // is the layout's call — a page too narrow for a readable measure declines them — so the
         // request survives a font-size change that later makes them viable.
         self.columns.set(columns.clamp(1, 2) as u8);
-        self.repaginate_keeping_chapter(current_page)
+        self.repaginate_keeping_chapter(current_page, pin)
     }
 
     fn effective_columns(&self) -> i32 {
@@ -748,9 +799,19 @@ impl Document for EpubBackend {
     }
 
     fn set_font(&self, font_id: i32, current_page: usize) -> Option<usize> {
+        // Captured before the setting changes: reading it afterwards would go through `laid()`,
+        // which rebuilds, and pin the position against the pagination we are about to replace
+        // (#160). Skipped entirely when nothing is laid out yet — that is the open path restoring
+        // saved typography, where there is no reading position to preserve and asking for one would
+        // force the very pagination the lazy open exists to avoid (#161/#162/#186).
+        let pin = if self.laid.borrow().is_some() {
+            self.page_pin(current_page)
+        } else {
+            None
+        };
         // Swap the reading face, then repaginate (new metrics → new line breaks), keeping the chapter.
         self.apply_font(font_id);
-        self.repaginate_keeping_chapter(current_page)
+        self.repaginate_keeping_chapter(current_page, pin)
     }
 
     fn set_pagination_cache(&self, cache: Box<dyn PaginationCache>) {
@@ -770,12 +831,22 @@ impl Document for EpubBackend {
         columns: i32,
         current_page: usize,
     ) -> Option<usize> {
+        // Captured before the setting changes: reading it afterwards would go through `laid()`,
+        // which rebuilds, and pin the position against the pagination we are about to replace
+        // (#160). Skipped entirely when nothing is laid out yet — that is the open path restoring
+        // saved typography, where there is no reading position to preserve and asking for one would
+        // force the very pagination the lazy open exists to avoid (#161/#162/#186).
+        let pin = if self.laid.borrow().is_some() {
+            self.page_pin(current_page)
+        } else {
+            None
+        };
         self.scale.set(clamp_scale(scale));
         self.apply_font(font_id);
         self.line_spacing.set(clamp_line_spacing(line_spacing));
         self.align.set(Align::from_code(align_code));
         self.columns.set(columns.clamp(1, 2) as u8);
-        self.repaginate_keeping_chapter(current_page)
+        self.repaginate_keeping_chapter(current_page, pin)
     }
 
     // Reflow-stable anchors (RR8/RR12, ADR-0012): expose the inherent pin machinery through the

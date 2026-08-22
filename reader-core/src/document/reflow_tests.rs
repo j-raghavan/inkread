@@ -489,14 +489,14 @@ fn a_relayout_drops_pages_cached_under_the_old_settings() {
     assert!(!b.chapter_pages.borrow().is_empty(), "page 0 was cached");
 
     let _ = b.set_text_scale(2.0, 0);
-    assert!(
-        b.chapter_pages.borrow().is_empty(),
-        "a repagination invalidates every cached page"
-    );
+    // Emptiness is no longer the right proxy: re-anchoring the reading position (#160) reads a page
+    // straight after the rebuild, so the cache legitimately holds an entry again — laid out under
+    // the NEW settings. What must hold is that nothing from the old layout survives, which the
+    // re-render below is the direct test of.
     assert_ne!(
         render(&b, 0, 400, 600),
         before,
-        "and the page re-renders at the new size rather than serving a stale one"
+        "the page re-renders at the new size rather than serving a stale one"
     );
 }
 
@@ -702,11 +702,10 @@ fn a_cancelled_relayout_leaves_the_reader_on_the_pagination_they_had() {
         before_render,
         "and pages still render as they did"
     );
-    assert_eq!(
-        page,
-        Some(0),
-        "the reader is left in the chapter they were in"
-    );
+    // Page 1 is where the reader actually was. This asserted `Some(0)` — the chapter's first page
+    // — which was the old behaviour of dumping the reader to the chapter start on any repagination,
+    // cancelled or not (#160). Staying put is the behaviour the test's own name describes.
+    assert_eq!(page, Some(1), "the reader is left on the page they were on");
 }
 
 #[test]
@@ -1418,4 +1417,72 @@ fn an_out_of_range_column_count_is_clamped() {
         doc.set_columns(absurd, 0);
         assert_eq!(doc.page_count(), one, "clamped to single column ({absurd})");
     }
+}
+
+/// A faithful multi-book omnibus: 5 books x 6 long chapters, one spine item each (#160).
+const OMNIBUS: &[u8] = include_bytes!("../../tests/fixtures/omnibus.epub");
+
+/// #160: changing a layout setting used to drop the reader at the first page of their chapter,
+/// throwing away progress within it. On a book with long chapters that is a lot of pages.
+///
+/// Asserts on the *text*, not the page number: the page number is expected to move (that is what
+/// repagination does), and what must survive is the reader's place in the words.
+#[test]
+fn a_layout_change_keeps_the_reading_position_within_the_chapter() {
+    for offset_into_chapter in [0usize, 1, 3, 5] {
+        let doc = EpubBackend::open(OMNIBUS.to_vec(), vp(1404, 1872)).expect("omnibus opens");
+        let chapter = 21; // deep into the book, as the report describes
+        let start = doc.laid().chapter_start[chapter];
+        let end = doc
+            .laid()
+            .chapter_start
+            .get(chapter + 1)
+            .copied()
+            .unwrap_or(doc.page_count());
+        let page = (start + offset_into_chapter).min(end - 1);
+
+        let before = doc.page_pin(page).expect("the page has anchored text");
+        let landed = doc.set_line_spacing(1.8, page).expect("reflowable");
+        let after = doc
+            .page_pin(landed)
+            .expect("the landed page has anchored text");
+
+        assert_eq!(
+            after.chapter_index, before.chapter_index,
+            "landed in a different chapter ({offset_into_chapter} pages in)"
+        );
+        // The landed page is the last one starting at or before the saved offset, so it may begin
+        // slightly earlier in the text — never after it, which would skip content the reader had
+        // not read.
+        assert!(
+            after.text_offset <= before.text_offset,
+            "landed past the reading position: {} > {} ({offset_into_chapter} pages in)",
+            after.text_offset,
+            before.text_offset
+        );
+        // …and not arbitrarily far back: one page of text at most.
+        let page_chars = doc.page_chars(landed).len() as i32;
+        assert!(
+            before.text_offset - after.text_offset <= page_chars.max(1),
+            "landed {} chars back, more than the {page_chars}-char page ({offset_into_chapter} in)",
+            before.text_offset - after.text_offset
+        );
+    }
+}
+
+/// The old behaviour, pinned so it cannot come back: being several pages into a chapter must not
+/// land on that chapter's first page.
+#[test]
+fn a_layout_change_does_not_dump_the_reader_at_the_chapter_start() {
+    let doc = EpubBackend::open(OMNIBUS.to_vec(), vp(1404, 1872)).expect("omnibus opens");
+    let chapter = 21;
+    let start = doc.laid().chapter_start[chapter];
+    let page = start + 5;
+
+    let landed = doc.set_line_spacing(1.8, page).expect("reflowable");
+    let new_start = doc.laid().chapter_start[chapter];
+    assert!(
+        landed > new_start,
+        "landed on the chapter's first page ({landed}), losing progress within it"
+    );
 }
