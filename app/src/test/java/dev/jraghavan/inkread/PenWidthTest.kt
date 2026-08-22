@@ -29,12 +29,17 @@ class PenWidthTest {
      * The reporter's actual ask: something thinner than what the pen wrote before. If the default
      * were the thinnest option there would be nothing finer to choose.
      */
+    /**
+     * The default must match the firmware nib, measured on a Nomad at a 1920px viewport (#126):
+     * a stroke baked at 9px is indistinguishable from the live stroke, while the previous 6px
+     * default was visibly thinner and produced the "renders fat, then refreshes thinner" report.
+     */
     @Test
-    fun theDefaultIsUnchangedFromBeforeAndHasThinnerOptionsBelowIt() {
+    fun theDefaultMatchesTheFirmwareNibAndHasChoicesEitherSide() {
         val i = StylusInkController.DEFAULT_PEN_WIDTH_INDEX
         val widths = StylusInkController.PEN_WIDTHS
         assertTrue("default index out of range", i in widths.indices)
-        assertEquals("the default must stay the width strokes already used", 6f, widths[i], 0.001f)
+        assertEquals("the default must match the measured firmware nib", 9f, widths[i], 0.001f)
         assertTrue("nothing thinner to choose", i > 0)
         assertTrue("nothing thicker to choose", i < widths.size - 1)
     }
@@ -66,5 +71,23 @@ class PenWidthTest {
                 w < StylusInkController.HIGHLIGHT_WIDTH_PX,
             )
         }
+    }
+
+    /**
+     * The reason the default matters: a stroke is painted live by the firmware at its own nib width
+     * and re-drawn by inkread when it bakes. Any width other than the nib visibly changes thickness
+     * at that moment — an inherent trade, but the *default* must not make it.
+     */
+    @Test
+    fun exactlyOneWidthMatchesTheNibAndItIsTheDefault() {
+        val widths = StylusInkController.PEN_WIDTHS
+        val nib = widths[StylusInkController.DEFAULT_PEN_WIDTH_INDEX]
+        assertEquals(
+            "the nib width must appear exactly once, or the default is ambiguous",
+            1,
+            widths.count { it == nib },
+        )
+        assertTrue("a thinner choice must exist (#199 asked for one)", widths.any { it < nib })
+        assertTrue("a thicker choice must exist", widths.any { it > nib })
     }
 }
