@@ -67,6 +67,7 @@ class ShelfActivity : Activity() {
 
     private fun header(books: List<File>): View = LinearLayout(this).apply {
         orientation = LinearLayout.VERTICAL
+        addView(backLink())
         addView(Ink.eyebrow(this@ShelfActivity, "Your shelf"))
         addView(TextView(this@ShelfActivity).apply {
             text = if (books.size == 1) "1 book" else "${books.size} books"
@@ -83,6 +84,26 @@ class ShelfActivity : Activity() {
         }
         addView(Ink.rule(this@ShelfActivity))
         addView(spacer(dp(6)))
+    }
+
+    /**
+     * The way back to Home.
+     *
+     * This screen had none. Every other secondary screen finishes itself from somewhere, but the
+     * shelf could only be entered — and the device's own UI offers no system Back, so a reader who
+     * opened it was stranded until they left the app (#227). The label names the destination rather
+     * than showing a bare arrow, and the padding is a finger's worth: this is the only exit.
+     */
+    private fun backLink(): View = TextView(this).apply {
+        text = "‹ Home"
+        setTextColor(Ink.muted)
+        textSize = Ink.sp(12f)
+        typeface = mono
+        letterSpacing = 0.12f
+        setPadding(0, dp(6), dp(24), dp(16))
+        isClickable = true
+        contentDescription = "Back to Home"
+        setOnClickListener { finish() }
     }
 
     /** One book: tap the title to read it, tap Remove to take it off the device. */
