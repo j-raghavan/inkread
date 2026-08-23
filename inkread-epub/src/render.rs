@@ -981,22 +981,36 @@ mod tests {
         assert!(ink_count(&italic) > 0);
     }
 
+    /// Width spanned by the boxes `page_glyphs` reports for one styled word in `font`.
+    fn glyph_span(font: &AbFont, bold: bool) -> f32 {
+        let opts = LayoutOpts::new(400.0, 200.0, 18.0);
+        let pages = paginate(&[styled_para("Title", bold, false)], &opts, font);
+        let g = page_glyphs(&pages[0], &opts, font);
+        g.last().expect("a glyph").x1 - g.first().expect("a glyph").x0
+    }
+
     #[test]
-    fn page_glyph_boxes_follow_the_bold_advance() {
+    fn page_glyph_boxes_follow_a_real_bold_face() {
         // `page_glyphs` and `render_page` must walk a run identically, or a selection box lands
         // beside the ink it belongs to.
         let font = AbFont::default_font();
-        let opts = LayoutOpts::new(400.0, 200.0, 18.0);
-        let width = |bold| {
-            let pages = paginate(&[styled_para("Title", bold, false)], &opts, &font);
-            let g = page_glyphs(&pages[0], &opts, &font);
-            let first = g.first().expect("a glyph");
-            let last = g.last().expect("a glyph");
-            last.x1 - first.x0
-        };
         assert!(
-            width(true) > width(false),
-            "bold boxes must span the smeared ink"
+            glyph_span(&font, true) > glyph_span(&font, false),
+            "a real bold face is wider than its regular"
+        );
+    }
+
+    #[test]
+    fn page_glyph_boxes_cover_a_synthesized_bold_smear() {
+        // The riskier half: with no bold face the ink is smeared sideways, and the box has to grow
+        // by exactly that much or the highlight stops short of the stem it thickened. Five glyphs,
+        // one smear each — the same arithmetic `advance` and `render_page` do.
+        let font = synth_only_family();
+        let grew = glyph_span(&font, true) - glyph_span(&font, false);
+        let expected = 5.0 * embolden_px(18.0) as f32;
+        assert!(
+            (grew - expected).abs() < 0.01,
+            "box grew by {grew}, ink by {expected}"
         );
     }
 
