@@ -9,10 +9,11 @@
 //!    `0` = ink) — the grayscale surface the `reader-core` adapter (Phase 5) converts into the
 //!    RGBA `PixelBuffer` the shell blits.
 //!
-//! A readable book serif (**Spectral**, OFL) is embedded as the default face. Bold is synthesized by
-//! a 1px horizontal smear (so headings read heavier without bundling a second face); true bold/italic
-//! faces and full shaping (ligatures, complex scripts) are later refinements — see the module's
-//! divergence note in [`layout`](crate::layout).
+//! A readable book serif (**Spectral**, OFL) is embedded as the default family. Spectral, Noto Serif
+//! and Noto Sans bundle real Bold/Italic/BoldItalic faces; the remaining families ship Regular only
+//! and have their styles synthesized (a stem smear for weight, a shear for slant). Full shaping
+//! (ligatures, complex scripts) is a later refinement — see the module's divergence note in
+//! [`layout`](crate::layout).
 
 use std::sync::{Arc, OnceLock, RwLock};
 
@@ -42,25 +43,25 @@ const READING_FONTS: &[Family] = &[
     Family {
         name: "Spectral",
         regular: DEFAULT_FONT,
-        bold: None,
-        italic: None,
-        bold_italic: None,
+        bold: Some(include_bytes!("../fonts/Spectral-Bold.ttf")),
+        italic: Some(include_bytes!("../fonts/Spectral-Italic.ttf")),
+        bold_italic: Some(include_bytes!("../fonts/Spectral-BoldItalic.ttf")),
     },
     // OFL 1.1
     Family {
         name: "Noto Serif",
         regular: include_bytes!("../fonts/NotoSerif-Regular.ttf"),
-        bold: None,
-        italic: None,
-        bold_italic: None,
+        bold: Some(include_bytes!("../fonts/NotoSerif-Bold.ttf")),
+        italic: Some(include_bytes!("../fonts/NotoSerif-Italic.ttf")),
+        bold_italic: Some(include_bytes!("../fonts/NotoSerif-BoldItalic.ttf")),
     },
     // OFL 1.1
     Family {
         name: "Noto Sans",
         regular: include_bytes!("../fonts/NotoSans-Regular.ttf"),
-        bold: None,
-        italic: None,
-        bold_italic: None,
+        bold: Some(include_bytes!("../fonts/NotoSans-Bold.ttf")),
+        italic: Some(include_bytes!("../fonts/NotoSans-Italic.ttf")),
+        bold_italic: Some(include_bytes!("../fonts/NotoSans-BoldItalic.ttf")),
     },
     // GPL-3.0 + font exception
     Family {
@@ -866,11 +867,16 @@ mod tests {
         canvas
     }
 
+    /// A family that bundles Regular only, so every style is synthesized (Droid Mono, id 5).
+    fn synth_only_family() -> AbFont {
+        AbFont::for_face(5)
+    }
+
     #[test]
     fn measured_width_accounts_for_a_synthesized_bold() {
         // The smear widens the drawn glyph, so the measured advance has to pay for it — otherwise
         // the line is laid out narrower than it is inked and justified text drifts.
-        let font = AbFont::default_font();
+        let font = synth_only_family();
         let plain = font.advance("Title", 18.0, false, false);
         let bold = font.advance("Title", 18.0, true, false);
         assert!(
@@ -884,8 +890,9 @@ mod tests {
 
     #[test]
     fn an_oblique_slant_does_not_change_the_advance() {
-        // Faux italic leans the glyph inside its box; the pen does not move further.
-        let font = AbFont::default_font();
+        // Faux italic leans the glyph inside its box; the pen does not move further. (A *real*
+        // italic face has its own advances and is expected to differ — see the test below.)
+        let font = synth_only_family();
         assert_eq!(
             font.advance("Title", 18.0, false, false),
             font.advance("Title", 18.0, false, true)
@@ -926,14 +933,42 @@ mod tests {
 
     #[test]
     fn a_family_without_variants_synthesizes_both_styles() {
-        // Every bundled family currently ships Regular only, so each style is faked — and the
-        // bold-italic case must fake both rather than dropping one.
-        let font = AbFont::default_font();
+        // Droid Mono ships Regular only, so each style is faked — and the bold-italic case must
+        // fake both rather than dropping one.
+        let font = synth_only_family();
         assert_eq!(font.styled(false, false).1, Synth::default());
         assert!(font.styled(true, false).1.embolden);
         assert!(font.styled(false, true).1.oblique);
         let both = font.styled(true, true).1;
         assert!(both.embolden && both.oblique);
+    }
+
+    #[test]
+    fn the_main_families_use_real_faces_and_fake_nothing() {
+        // Spectral (the default), Noto Serif and Noto Sans bundle all four styles.
+        for id in 0..3 {
+            let font = AbFont::for_face(id);
+            for (bold, italic) in [(false, false), (true, false), (false, true), (true, true)] {
+                assert_eq!(
+                    font.styled(bold, italic).1,
+                    Synth::default(),
+                    "face {id} bold={bold} italic={italic} should be a real face"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_real_italic_is_a_different_face_not_a_slanted_regular() {
+        // The point of bundling the files: Spectral Italic redraws the letterforms, so its glyph
+        // outlines and advances differ from the regular's — a shear could not produce this.
+        let font = AbFont::default_font();
+        let plain = font.advance("handwriting", 18.0, false, false);
+        let italic = font.advance("handwriting", 18.0, false, true);
+        assert!(
+            (plain - italic).abs() > 0.01,
+            "a real italic face has its own metrics: {plain} vs {italic}"
+        );
     }
 
     #[test]
