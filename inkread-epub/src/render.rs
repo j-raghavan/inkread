@@ -24,27 +24,95 @@ use crate::layout::{Hyphenator, LayoutOpts, Metrics, Page, SourceAnchor, Wrap};
 /// The bundled default reading face — Spectral Regular (SIL OFL 1.1; see `fonts/OFL.txt`).
 const DEFAULT_FONT: &[u8] = include_bytes!("../fonts/Spectral-Regular.ttf");
 
-/// The selectable reading faces (the open-source set KOReader ships, Latin Regular weights — bold is
-/// synthesized). `id` is the index; id 0 = the default. Licenses are noted in LICENSES-3RDPARTY.md.
-const READING_FONTS: &[(&str, &[u8])] = &[
-    ("Spectral", DEFAULT_FONT), // OFL 1.1 (serif, default)
-    (
-        "Noto Serif",
-        include_bytes!("../fonts/NotoSerif-Regular.ttf"),
-    ), // OFL 1.1
-    ("Noto Sans", include_bytes!("../fonts/NotoSans-Regular.ttf")), // OFL 1.1
-    ("Free Serif", include_bytes!("../fonts/FreeSerif.ttf")), // GPL-3.0 + font exception
-    ("Free Sans", include_bytes!("../fonts/FreeSans.ttf")), // GPL-3.0 + font exception
-    ("Droid Mono", include_bytes!("../fonts/DroidSansMono.ttf")), // Apache-2.0
+/// One selectable reading family. Only `regular` is required; a style the family does not bundle is
+/// synthesized from the nearest face it does (see [`Synth`]), so a family may ship as little as one
+/// file and still render bold and italic text distinguishably.
+struct Family {
+    name: &'static str,
+    regular: &'static [u8],
+    bold: Option<&'static [u8]>,
+    italic: Option<&'static [u8]>,
+    bold_italic: Option<&'static [u8]>,
+}
+
+/// The selectable reading families (the open-source set KOReader ships). `id` is the index; id 0 =
+/// the default. Licenses are noted in LICENSES-3RDPARTY.md.
+const READING_FONTS: &[Family] = &[
+    // OFL 1.1 (serif, default)
+    Family {
+        name: "Spectral",
+        regular: DEFAULT_FONT,
+        bold: None,
+        italic: None,
+        bold_italic: None,
+    },
+    // OFL 1.1
+    Family {
+        name: "Noto Serif",
+        regular: include_bytes!("../fonts/NotoSerif-Regular.ttf"),
+        bold: None,
+        italic: None,
+        bold_italic: None,
+    },
+    // OFL 1.1
+    Family {
+        name: "Noto Sans",
+        regular: include_bytes!("../fonts/NotoSans-Regular.ttf"),
+        bold: None,
+        italic: None,
+        bold_italic: None,
+    },
+    // GPL-3.0 + font exception
+    Family {
+        name: "Free Serif",
+        regular: include_bytes!("../fonts/FreeSerif.ttf"),
+        bold: None,
+        italic: None,
+        bold_italic: None,
+    },
+    // GPL-3.0 + font exception
+    Family {
+        name: "Free Sans",
+        regular: include_bytes!("../fonts/FreeSans.ttf"),
+        bold: None,
+        italic: None,
+        bold_italic: None,
+    },
+    // Apache-2.0
+    Family {
+        name: "Droid Mono",
+        regular: include_bytes!("../fonts/DroidSansMono.ttf"),
+        bold: None,
+        italic: None,
+        bold_italic: None,
+    },
 ];
+
+/// What a family cannot supply for a requested style, and the rasterizer must therefore fake. Both
+/// `false` — a real face exists — is the good case and the one that looks right.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct Synth {
+    /// Thicken the stems: the family has no bold face.
+    embolden: bool,
+    /// Slant the glyph: the family has no italic face.
+    oblique: bool,
+}
+
+/// Faux-italic slant as x per y — about 12 degrees, the conventional oblique. A sheared serif is not
+/// a real italic (which redraws the letterforms), but it is unmistakably not upright.
+const OBLIQUE_SLANT: f32 = 0.21;
+
+/// Extra ink a synthesized bold adds per glyph, in pixels — and therefore extra *advance*, since the
+/// smear widens the drawn glyph and the measured line has to pay for it. Scales with the font size:
+/// a fixed 1px is invisible on a 68px title, while inline body bold wants to stay subtle.
+fn embolden_px(size_px: f32) -> i32 {
+    ((size_px / 26.0).round() as i32).clamp(1, 3)
+}
 
 /// Display names of the selectable reading faces, in `id` order (for the shell's font picker).
 #[must_use]
 pub fn reading_font_names() -> Vec<String> {
-    READING_FONTS
-        .iter()
-        .map(|(n, _)| (*n).to_string())
-        .collect()
+    READING_FONTS.iter().map(|f| f.name.to_string()).collect()
 }
 
 /// Fallback face for glyphs the reading face lacks — e.g. musical symbols (𝄞) in books like
@@ -106,58 +174,107 @@ fn fallback_chain() -> Vec<Arc<FontVec>> {
         .collect()
 }
 
+/// Parse a bundled face; `None` if the bytes aren't a usable TTF/OTF.
+fn parse_face(bytes: &'static [u8]) -> Option<FontVec> {
+    FontVec::try_from_vec(bytes.to_vec()).ok()
+}
+
 /// A font for measuring + rasterizing reflow text. Owns its bytes (so it is `Send + Sync`, usable
-/// from the `reader-core` document handle across the JNI thread). A primary reading face plus
-/// fallback faces consulted, in order, for any character the primary doesn't cover.
+/// from the `reader-core` document handle across the JNI thread). One reading *family* — a regular
+/// face plus whichever of bold/italic/bold-italic it bundles — over the shared fallback chain,
+/// consulted in order for any character the family doesn't cover.
 pub struct AbFont {
-    font: FontVec,
+    /// Always present, and the metric reference: line baselines come from this face so every run on
+    /// a line sits on the same one, whatever style or fallback supplies the glyph.
+    regular: FontVec,
+    bold: Option<FontVec>,
+    italic: Option<FontVec>,
+    bold_italic: Option<FontVec>,
     fallbacks: Vec<Arc<FontVec>>,
 }
 
 impl AbFont {
-    /// The embedded default reading face (Spectral), with the bundled symbol fallback.
+    /// The embedded default reading family (Spectral), with the bundled symbol fallback.
     #[must_use]
     pub fn default_font() -> Self {
         Self::for_face(0)
     }
 
-    /// The reading face for `id` (index into the bundled set; out-of-range → the default), each with
-    /// the shared fallback chain (bundled Noto Music + any runtime-registered faces) so missing
+    /// The reading family for `id` (index into the bundled set; out-of-range → the default), each
+    /// with the shared fallback chain (bundled Noto Music + any runtime-registered faces) so missing
     /// glyphs — musical symbols, scripts the bundled set lacks — still render.
     #[must_use]
     pub fn for_face(id: usize) -> Self {
-        let bytes = READING_FONTS.get(id).map_or(DEFAULT_FONT, |&(_, b)| b);
-        let font = FontVec::try_from_vec(bytes.to_vec())
-            .or_else(|_| FontVec::try_from_vec(DEFAULT_FONT.to_vec()))
+        let family = READING_FONTS.get(id).unwrap_or(&READING_FONTS[0]);
+        let regular = parse_face(family.regular)
+            .or_else(|| parse_face(DEFAULT_FONT))
             .expect("a bundled reading face is valid");
         Self {
-            font,
+            regular,
+            bold: family.bold.and_then(parse_face),
+            italic: family.italic.and_then(parse_face),
+            bold_italic: family.bold_italic.and_then(parse_face),
             fallbacks: fallback_chain(),
         }
     }
 
-    /// Load a face from owned TTF/OTF bytes (e.g. a user-chosen font); `None` if unparseable. Gets
-    /// the same shared fallback chain as the bundled faces — a custom primary shouldn't lose
-    /// symbol/script coverage.
+    /// Load a face from owned TTF/OTF bytes (e.g. a user-chosen font); `None` if unparseable. One
+    /// file is one style, so bold and italic are synthesized from it. Gets the same shared fallback
+    /// chain as the bundled families — a custom primary shouldn't lose symbol/script coverage.
     #[must_use]
     pub fn from_bytes(bytes: Vec<u8>) -> Option<Self> {
-        FontVec::try_from_vec(bytes).ok().map(|font| Self {
-            font,
+        FontVec::try_from_vec(bytes).ok().map(|regular| Self {
+            regular,
+            bold: None,
+            italic: None,
+            bold_italic: None,
             fallbacks: fallback_chain(),
         })
     }
 
-    /// The face to render `ch` with: the primary if it has the glyph, else the first fallback that
-    /// does, else the primary (so an unknown glyph still renders the primary's `.notdef`).
-    fn face_for(&self, ch: char) -> &FontVec {
-        if self.font.glyph_id(ch).0 != 0 {
-            return &self.font;
+    /// The family's face for a style, and whatever it cannot supply. Bold-italic degrades through
+    /// the nearest real face — a bold one slanted, else an italic one thickened — before falling
+    /// back to faking both on the regular.
+    fn styled(&self, bold: bool, italic: bool) -> (&FontVec, Synth) {
+        let fake = |embolden, oblique| Synth { embolden, oblique };
+        match (bold, italic) {
+            (false, false) => (&self.regular, Synth::default()),
+            (true, false) => match &self.bold {
+                Some(f) => (f, Synth::default()),
+                None => (&self.regular, fake(true, false)),
+            },
+            (false, true) => match &self.italic {
+                Some(f) => (f, Synth::default()),
+                None => (&self.regular, fake(false, true)),
+            },
+            (true, true) => match (&self.bold_italic, &self.bold, &self.italic) {
+                (Some(f), _, _) => (f, Synth::default()),
+                (None, Some(f), _) => (f, fake(false, true)),
+                (None, None, Some(f)) => (f, fake(true, false)),
+                (None, None, None) => (&self.regular, fake(true, true)),
+            },
         }
-        self.fallbacks
-            .iter()
-            .find(|f| f.glyph_id(ch).0 != 0)
-            .map(|f| f.as_ref())
-            .unwrap_or(&self.font)
+    }
+
+    /// The face to render `ch` with for a style, plus what to synthesize onto it: the styled face if
+    /// it has the glyph, else the first fallback that does, else the styled face (so an unknown
+    /// glyph still renders its `.notdef`). Fallbacks are regular-weight only, so a styled run that
+    /// lands on one has its style synthesized.
+    fn face_for(&self, ch: char, bold: bool, italic: bool) -> (&FontVec, Synth) {
+        let (face, synth) = self.styled(bold, italic);
+        if face.glyph_id(ch).0 != 0 {
+            return (face, synth);
+        }
+        match self.fallbacks.iter().find(|f| f.glyph_id(ch).0 != 0) {
+            Some(f) => (
+                f.as_ref(),
+                Synth {
+                    embolden: bold,
+                    oblique: italic,
+                },
+            ),
+            None => (face, synth),
+        }
     }
 }
 
@@ -194,13 +311,13 @@ impl Hyphenator for EnHyphenator {
 }
 
 impl Metrics for AbFont {
-    fn advance(&self, text: &str, size_px: f32, _bold: bool, _italic: bool) -> f32 {
+    fn advance(&self, text: &str, size_px: f32, bold: bool, italic: bool) -> f32 {
         let scale = PxScale::from(size_px);
         let mut width = 0.0;
         // Track the previous glyph's face so kerning is only applied within the same face.
         let mut prev: Option<(&FontVec, GlyphId)> = None;
         for ch in text.chars() {
-            let face = self.face_for(ch);
+            let (face, synth) = self.face_for(ch, bold, italic);
             let sf = face.as_scaled(scale);
             let id = face.glyph_id(ch);
             if let Some((pf, pid)) = prev {
@@ -209,6 +326,9 @@ impl Metrics for AbFont {
                 }
             }
             width += sf.h_advance(id);
+            if synth.embolden {
+                width += embolden_px(size_px) as f32;
+            }
             prev = Some((face, id));
         }
         width
@@ -343,12 +463,13 @@ pub fn render_page_with_images(
         }
         for run in &line.runs {
             let scale = PxScale::from(run.size_px);
-            // Baseline from the primary face so fallback glyphs sit on the same line as the text.
-            let baseline = margin + line.top + font.font.as_scaled(scale).ascent();
+            // Baseline from the regular face so every run on the line — styled, or supplied by a
+            // fallback — sits on the same one.
+            let baseline = margin + line.top + font.regular.as_scaled(scale).ascent();
             let mut pen_x = margin + run.x;
             let mut prev: Option<(&FontVec, GlyphId)> = None;
             for ch in run.text.chars() {
-                let face = font.face_for(ch);
+                let (face, synth) = font.face_for(ch, run.bold, run.italic);
                 let sf = face.as_scaled(scale);
                 let id = face.glyph_id(ch);
                 if let Some((pf, pid)) = prev {
@@ -356,26 +477,35 @@ pub fn render_page_with_images(
                         pen_x += sf.kern(pid, id);
                     }
                 }
+                // Kept in step with `page_glyphs` and `AbFont::advance`: all three walk a run the
+                // same way, so a selection box lands on the ink it belongs to.
+                let smear = if synth.embolden {
+                    embolden_px(run.size_px)
+                } else {
+                    0
+                };
                 let glyph = id.with_scale_and_position(scale, point(pen_x, baseline));
                 if let Some(outlined) = face.outline_glyph(glyph) {
                     let bb = outlined.px_bounds();
                     let (ox, oy) = (bb.min.x as i32, bb.min.y as i32);
                     outlined.draw(|gx, gy, c| {
-                        let px = ox + gx as i32;
                         let py = oy + gy as i32;
+                        // Faux italic: shift each row sideways in proportion to its height above the
+                        // baseline, which leans the glyph without touching its outline.
+                        let slant = if synth.oblique {
+                            ((baseline - py as f32) * OBLIQUE_SLANT).round() as i32
+                        } else {
+                            0
+                        };
+                        let px = ox + gx as i32 + slant;
                         canvas.blend(px, py, c);
-                        if run.bold {
-                            // Synthesized bold: a horizontal smear thickens the stem. Scale the smear
-                            // with the font size so large headings read clearly bold (a fixed 1px is
-                            // invisible on a 68px title); inline body bold stays a subtle 1px.
-                            let weight = ((run.size_px / 26.0).round() as i32).clamp(1, 3);
-                            for dx in 1..=weight {
-                                canvas.blend(px + dx, py, c);
-                            }
+                        // Faux bold: a horizontal smear thickens the stem.
+                        for dx in 1..=smear {
+                            canvas.blend(px + dx, py, c);
                         }
                     });
                 }
-                pen_x += sf.h_advance(id);
+                pen_x += sf.h_advance(id) + smear as f32;
                 prev = Some((face, id));
             }
         }
@@ -440,7 +570,7 @@ pub fn page_glyphs(page: &Page, opts: &LayoutOpts, font: &AbFont) -> Vec<PlacedG
             let run_first = out.len();
             // The glyph's chapter-relative offset = the run's first-char offset + its index in the run.
             for (i, ch) in run.text.chars().enumerate() {
-                let face = font.face_for(ch);
+                let (face, synth) = font.face_for(ch, run.bold, run.italic);
                 let sf = face.as_scaled(scale);
                 let id = face.glyph_id(ch);
                 if let Some((pf, pid)) = prev {
@@ -448,7 +578,14 @@ pub fn page_glyphs(page: &Page, opts: &LayoutOpts, font: &AbFont) -> Vec<PlacedG
                         pen_x += sf.kern(pid, id);
                     }
                 }
-                let adv = sf.h_advance(id);
+                // Same advance `render_page` uses, synthesized bold included, so the boxes track the
+                // ink. A synthesized oblique leans the glyph within its box and doesn't move the pen.
+                let adv = sf.h_advance(id)
+                    + if synth.embolden {
+                        embolden_px(run.size_px) as f32
+                    } else {
+                        0.0
+                    };
                 out.push(PlacedGlyph {
                     ch,
                     x0: pen_x,
@@ -511,12 +648,12 @@ mod tests {
         // fallback chain, face_for must resolve to a face that has it, and it must advance + render.
         let clef = '\u{1D11E}';
         assert_eq!(
-            f.font.glyph_id(clef).0,
+            f.regular.glyph_id(clef).0,
             0,
             "Spectral has no clef glyph (would box)"
         );
         assert_ne!(
-            f.face_for(clef).glyph_id(clef).0,
+            f.face_for(clef, false, false).0.glyph_id(clef).0,
             0,
             "the fallback supplies a real clef glyph"
         );
@@ -556,9 +693,9 @@ mod tests {
         let han = '\u{4F60}'; // 你
         assert!(register_fallback_font(CJK_SUBSET.to_vec(), 0));
         let f = AbFont::default_font();
-        assert_eq!(f.font.glyph_id(han).0, 0, "Spectral has no Han glyph");
+        assert_eq!(f.regular.glyph_id(han).0, 0, "Spectral has no Han glyph");
         assert_ne!(
-            f.face_for(han).glyph_id(han).0,
+            f.face_for(han, false, false).0.glyph_id(han).0,
             0,
             "the registered fallback supplies 你"
         );
@@ -570,7 +707,7 @@ mod tests {
         assert!(ink_count(&canvas) > 0, "Han glyphs render actual ink");
         // from_bytes primaries share the chain too (a custom face keeps script coverage).
         let custom = AbFont::from_bytes(DEFAULT_FONT.to_vec()).unwrap();
-        assert_ne!(custom.face_for(han).glyph_id(han).0, 0);
+        assert_ne!(custom.face_for(han, false, false).0.glyph_id(han).0, 0);
     }
 
     #[test]
@@ -588,7 +725,11 @@ mod tests {
         assert!(register_fallback_font(CJK_TTC.to_vec(), 0));
         assert!(register_fallback_font(CJK_TTC.to_vec(), 1));
         let f = AbFont::default_font();
-        assert_ne!(f.face_for(han).glyph_id(han).0, 0, "TTC face 1 supplies 世");
+        assert_ne!(
+            f.face_for(han, false, false).0.glyph_id(han).0,
+            0,
+            "TTC face 1 supplies 世"
+        );
         // An out-of-range collection index and garbage bytes are rejected, not panics (RR21-FR3).
         assert!(!register_fallback_font(CJK_TTC.to_vec(), 99));
         assert!(!register_fallback_font(vec![0u8; 64], 0));
@@ -700,6 +841,99 @@ mod tests {
         let mut canvas = GrayCanvas::new(200, 200);
         render_page(&Page::default(), &opts, &font, &mut canvas);
         assert_eq!(ink_count(&canvas), 0);
+    }
+
+    /// One paragraph whose single run carries `bold`/`italic`, for the style tests below.
+    fn styled_para(text: &str, bold: bool, italic: bool) -> Block {
+        Block::Paragraph {
+            content: vec![Inline::Run(TextRun {
+                text: text.into(),
+                bold,
+                italic,
+                href: None,
+            })],
+            style: BlockStyle::default(),
+        }
+    }
+
+    /// Rasterize one styled paragraph and hand back the canvas.
+    fn render_styled(text: &str, bold: bool, italic: bool) -> GrayCanvas {
+        let font = AbFont::default_font();
+        let opts = LayoutOpts::new(400.0, 200.0, 18.0);
+        let pages = paginate(&[styled_para(text, bold, italic)], &opts, &font);
+        let mut canvas = GrayCanvas::new(400, 200);
+        render_page(&pages[0], &opts, &font, &mut canvas);
+        canvas
+    }
+
+    #[test]
+    fn measured_width_accounts_for_a_synthesized_bold() {
+        // The smear widens the drawn glyph, so the measured advance has to pay for it — otherwise
+        // the line is laid out narrower than it is inked and justified text drifts.
+        let font = AbFont::default_font();
+        let plain = font.advance("Title", 18.0, false, false);
+        let bold = font.advance("Title", 18.0, true, false);
+        assert!(
+            bold > plain,
+            "bold must measure wider than regular: {bold} vs {plain}"
+        );
+        // Five glyphs, each smeared by `embolden_px`.
+        let expected = plain + 5.0 * embolden_px(18.0) as f32;
+        assert!((bold - expected).abs() < 0.01, "{bold} vs {expected}");
+    }
+
+    #[test]
+    fn an_oblique_slant_does_not_change_the_advance() {
+        // Faux italic leans the glyph inside its box; the pen does not move further.
+        let font = AbFont::default_font();
+        assert_eq!(
+            font.advance("Title", 18.0, false, false),
+            font.advance("Title", 18.0, false, true)
+        );
+    }
+
+    #[test]
+    fn italic_text_is_not_drawn_upright() {
+        // Italic used to be parsed, carried through layout, and then ignored by the renderer, so it
+        // rendered identically to regular. It must not.
+        let plain = render_styled("handwriting", false, false);
+        let italic = render_styled("handwriting", false, true);
+        assert_ne!(
+            plain.pixels, italic.pixels,
+            "an italic run must not rasterize identically to a regular one"
+        );
+        assert!(ink_count(&italic) > 0);
+    }
+
+    #[test]
+    fn page_glyph_boxes_follow_the_bold_advance() {
+        // `page_glyphs` and `render_page` must walk a run identically, or a selection box lands
+        // beside the ink it belongs to.
+        let font = AbFont::default_font();
+        let opts = LayoutOpts::new(400.0, 200.0, 18.0);
+        let width = |bold| {
+            let pages = paginate(&[styled_para("Title", bold, false)], &opts, &font);
+            let g = page_glyphs(&pages[0], &opts, &font);
+            let first = g.first().expect("a glyph");
+            let last = g.last().expect("a glyph");
+            last.x1 - first.x0
+        };
+        assert!(
+            width(true) > width(false),
+            "bold boxes must span the smeared ink"
+        );
+    }
+
+    #[test]
+    fn a_family_without_variants_synthesizes_both_styles() {
+        // Every bundled family currently ships Regular only, so each style is faked — and the
+        // bold-italic case must fake both rather than dropping one.
+        let font = AbFont::default_font();
+        assert_eq!(font.styled(false, false).1, Synth::default());
+        assert!(font.styled(true, false).1.embolden);
+        assert!(font.styled(false, true).1.oblique);
+        let both = font.styled(true, true).1;
+        assert!(both.embolden && both.oblique);
     }
 
     #[test]
