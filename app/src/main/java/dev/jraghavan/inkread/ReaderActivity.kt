@@ -215,6 +215,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         override fun zoomIn() = zoomBy(ZOOM_STEP)
         override fun zoomOut() = zoomBy(1f / ZOOM_STEP)
         override fun openPicker() = this@ReaderActivity.openPicker()
+        override fun openFontPicker() = this@ReaderActivity.openFontPicker()
         override fun palmGuard(content: View) = this@ReaderActivity.palmGuard(content)
         override fun diag(msg: () -> String) = this@ReaderActivity.diag(msg)
     })
@@ -731,9 +732,45 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         }
     }
 
+    /** Launch the system file picker for a font file to import (RR28-FR3). */
+    fun openFontPicker() {
+        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            // Pickers tag fonts inconsistently (font/ttf, application/x-font-ttf, octet-stream), so
+            // accept anything and let the core reject what it cannot parse.
+            type = "*/*"
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        try {
+            startActivityForResult(intent, REQ_OPEN_FONT)
+        } catch (e: android.content.ActivityNotFoundException) {
+            Toast.makeText(this, "No file picker available", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    /** Copy a picked font into `fonts/` and re-register, then report what happened. */
+    private fun importFont(uri: Uri) {
+        val stored = UserFonts.import(this, uri, suggestedName = null)
+        runOnUiThread {
+            val message = if (stored == null) {
+                "That file isn't a font inkread can use"
+            } else {
+                "Added ${UserFonts.displayName(stored)} — pick it under Typeface"
+            }
+            Toast.makeText(this, message, Toast.LENGTH_SHORT).show()
+        }
+    }
+
     @Deprecated("startActivityForResult is fine for this single-Activity shell (no AndroidX).")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == REQ_OPEN_FONT) {
+            val uri = data?.data
+            if (resultCode == RESULT_OK && uri != null) {
+                engine.execute { importFont(uri) }
+            }
+            return
+        }
         if (requestCode != REQ_OPEN_DOC) return
         if (resultCode != RESULT_OK) {
             // Picker cancelled. With no document open (e.g. launched straight into the picker from
@@ -853,6 +890,9 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         // System fallback faces (CJK etc.) must be in the core's chain before the document builds
         // its reflow view — fonts registered later only affect documents opened after them.
         FallbackFonts.ensureRegistered()
+        // The reader's own imported faces, registered in the same breath so the picker lists them
+        // from the first document open (RR28-FR3).
+        UserFonts.register(this)
         val capsBytes = WireCodec.encodeCapabilities(adapter.capabilities())
         NativeBridge.nativeInit(capsBytes)
         val dbPath = File(filesDir, "reader.db").absolutePath
@@ -2004,6 +2044,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         const val DIAG = false
         const val DPI = 226 // Supernote-class panel density (approx); refined per device.
         const val REQ_OPEN_DOC = 1 // startActivityForResult request code for the PDF picker.
+        const val REQ_OPEN_FONT = 2 // ...and for the font-import picker (RR28-FR3).
         const val PREFS = "inkread"
         const val KEY_BOOK_PATH = "book_path" // stored PDF under app storage (RR27).
         const val KEY_BOOK_ID = "book_id" // stable per-book id (the stored file name).

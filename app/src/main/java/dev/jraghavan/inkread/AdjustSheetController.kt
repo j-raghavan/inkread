@@ -1,6 +1,7 @@
 package dev.jraghavan.inkread
 
 import android.app.Activity
+import android.app.AlertDialog
 import android.app.Dialog
 import android.content.pm.ActivityInfo
 import android.graphics.Color
@@ -10,6 +11,7 @@ import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
 import android.view.Window
+import android.widget.HorizontalScrollView
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
@@ -66,6 +68,9 @@ class AdjustSheetController(private val host: Host) {
 
         /** No document open: fall back to the system file picker. */
         fun openPicker()
+
+        /** Pick a font file to add to the reader's own faces (RR28-FR3). */
+        fun openFontPicker()
 
         /** Wrap dialog content so a resting palm can't tap through it (mirrors the bottom bar). */
         fun palmGuard(content: View): View
@@ -236,6 +241,63 @@ class AdjustSheetController(private val host: Host) {
     }
 
     /** A KOReader-style settings row: a right-aligned [label] on the left, the [control] on the right. */
+    /** Let a control that can outgrow the sheet scroll sideways instead of running off the edge.
+     *  The typeface picker is the one that can: six bundled families already fill the row, and every
+     *  imported font (RR28-FR3) adds a segment, which would otherwise put the last faces out of
+     *  reach. Scrollbar suppressed — it would draw over the pill's rounded edge. */
+    private fun scrollable(content: View): View =
+        HorizontalScrollView(activity).apply {
+            isHorizontalScrollBarEnabled = false
+            addView(content)
+        }
+
+    /** "Add…" / "Remove…" for the reader's imported faces (RR28-FR3). */
+    private fun fontLibraryControls(): View {
+        val d = activity.resources.displayMetrics.density
+        fun dp(v: Int) = (v * d).toInt()
+        return LinearLayout(activity).apply {
+            orientation = LinearLayout.HORIZONTAL
+            addView(pill("Add…") { host.openFontPicker() })
+            if (UserFonts.files(activity).isNotEmpty()) {
+                addView(
+                    pill("Remove…") { showRemoveFontDialog() },
+                    LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ).apply { leftMargin = dp(8) },
+                )
+            }
+        }
+    }
+
+    /** Pick one imported font to delete. Removing shifts the remaining ids, so the picker is
+     *  rebuilt from the core's list afterwards rather than patched. */
+    private fun showRemoveFontDialog() {
+        val fonts = UserFonts.files(activity)
+        if (fonts.isEmpty()) return
+        val names = fonts.map(UserFonts::displayName).toTypedArray()
+        AlertDialog.Builder(activity)
+            .setTitle("Remove a font")
+            .setItems(names) { _, which ->
+                val font = fonts[which]
+                UserFonts.remove(activity, font)
+                // The removed face may have been the one in use; re-apply the (clamped) choice so
+                // the open book is never left rendering with an id that now means something else.
+                val faces = try {
+                    NativeBridge.nativeFontNames().split("\n").filter { it.isNotBlank() }
+                } catch (e: RuntimeException) { emptyList() }
+                val id = prefs.font.coerceIn(0, (faces.size - 1).coerceAtLeast(0))
+                prefs.font = id
+                host.engineExecute {
+                    try { NativeBridge.nativeSetFont(host.docHandle, id) } catch (e: RuntimeException) { -1 }
+                    host.refreshPageCount()
+                    host.repaintPanel()
+                }
+                Toast.makeText(activity, "Removed ${UserFonts.displayName(font)}", Toast.LENGTH_SHORT).show()
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
     private fun settingRow(label: String, control: View): View {
         val d = activity.resources.displayMetrics.density
         fun dp(v: Int) = (v * d).toInt()
@@ -511,7 +573,7 @@ class AdjustSheetController(private val host: Host) {
             NativeBridge.nativeFontNames().split("\n").filter { it.isNotBlank() }
         } catch (e: RuntimeException) { emptyList() }
         if (faces.isNotEmpty()) {
-            container.addView(settingRow("Typeface", segmented(faces, prefs.font.coerceIn(0, faces.size - 1)) { which ->
+            container.addView(settingRow("Typeface", scrollable(segmented(faces, prefs.font.coerceIn(0, faces.size - 1)) { which ->
                 prefs.font = which
                 host.engineExecute {
                     val np = try { NativeBridge.nativeSetFont(host.docHandle, which) } catch (e: RuntimeException) { -1 }
@@ -520,7 +582,8 @@ class AdjustSheetController(private val host: Host) {
                         Toast.makeText(activity, "Typeface adjusts reflowable books (EPUB)", Toast.LENGTH_SHORT).show()
                     }
                 }
-            }))
+            })))
+            container.addView(settingRow("Your fonts", fontLibraryControls()))
         }
         container.addView(settingRow("Font Size", control))
         return container

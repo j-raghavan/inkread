@@ -184,17 +184,17 @@ the dependency set changes.
 
 ## Bundled fonts
 
-| Font | Source | License |
-|------|--------|---------|
-| Pinyon Script | github.com/SorkinType/Pinyon (Google Fonts) | SIL Open Font License 1.1 |
-| Spectral | github.com/productiontype/Spectral (Google Fonts) | SIL Open Font License 1.1 |
-| Noto Music | github.com/notofonts/music | SIL Open Font License 1.1 |
-| Noto Serif | github.com/koreader/koreader-fonts (notofonts) | SIL Open Font License 1.1 |
-| Noto Sans | github.com/koreader/koreader-fonts (notofonts) | SIL Open Font License 1.1 |
-| Droid Sans Mono | github.com/koreader/koreader-fonts | Apache License 2.0 |
-| FreeSerif | github.com/koreader/koreader-fonts (GNU FreeFont) | GPL-3.0 with font exception |
-| FreeSans | github.com/koreader/koreader-fonts (GNU FreeFont) | GPL-3.0 with font exception |
-| Noto Sans SC (test subset) | github.com/google/fonts (notofonts) | SIL Open Font License 1.1 |
+| Font | Source | License | Styles |
+|------|--------|---------|--------|
+| Pinyon Script | github.com/SorkinType/Pinyon (Google Fonts) | SIL Open Font License 1.1 | Regular |
+| Spectral | github.com/productiontype/Spectral (Google Fonts) | SIL Open Font License 1.1 (`fonts/OFL.txt`) | Regular, Bold, Italic, BoldItalic |
+| Noto Music | github.com/notofonts/music | SIL Open Font License 1.1 | Regular (glyph fallback) |
+| Noto Serif | github.com/koreader/koreader-fonts (notofonts) | SIL Open Font License 1.1 (`fonts/Noto-OFL.txt`) | Regular, Bold, Italic, BoldItalic |
+| Noto Sans | github.com/koreader/koreader-fonts (notofonts) | SIL Open Font License 1.1 (`fonts/Noto-OFL.txt`) | Regular, Bold, Italic, BoldItalic |
+| Droid Sans Mono | github.com/koreader/koreader-fonts | Apache License 2.0 | Regular |
+| FreeSerif | github.com/koreader/koreader-fonts (GNU FreeFont) | GPL-3.0 with font exception | Regular |
+| FreeSans | github.com/koreader/koreader-fonts (GNU FreeFont) | GPL-3.0 with font exception | Regular |
+| Noto Sans SC (test subset) | github.com/google/fonts (notofonts) | SIL Open Font License 1.1 | Regular (host test fixture) |
 
 Pinyon Script is bundled at `app/src/main/assets/fonts/pinyon_script.ttf` for the home-screen
 "Library" heading (Spencerian-inspired). © The Pinyon Script Project Authors; SIL OFL 1.1
