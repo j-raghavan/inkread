@@ -750,8 +750,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
 
     /** Copy a picked font into `fonts/` and re-register, then report what happened. */
     private fun importFont(uri: Uri) {
-        val name = displayNameOf(uri)
-        val stored = UserFonts.import(this, uri, name)
+        val stored = UserFonts.import(this, uri, suggestedName = null)
         runOnUiThread {
             val message = if (stored == null) {
                 "That file isn't a font inkread can use"
@@ -761,18 +760,6 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             Toast.makeText(this, message, Toast.LENGTH_SHORT).show()
         }
     }
-
-    /** The picker's display name for [uri], for naming the stored file. */
-    private fun displayNameOf(uri: Uri): String? =
-        try {
-            contentResolver.query(uri, null, null, null, null)?.use { c ->
-                val i = c.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
-                if (i >= 0 && c.moveToFirst()) c.getString(i) else null
-            }
-        } catch (e: Exception) {
-            Log.w(TAG, "no display name for $uri: ${e.message}")
-            null
-        }
 
     @Deprecated("startActivityForResult is fine for this single-Activity shell (no AndroidX).")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {

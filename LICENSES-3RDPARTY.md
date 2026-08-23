@@ -187,10 +187,10 @@ the dependency set changes.
 | Font | Source | License | Styles |
 |------|--------|---------|--------|
 | Pinyon Script | github.com/SorkinType/Pinyon (Google Fonts) | SIL Open Font License 1.1 | Regular |
-| Spectral | github.com/productiontype/Spectral (Google Fonts) | SIL Open Font License 1.1 | Regular, Bold, Italic, BoldItalic |
+| Spectral | github.com/productiontype/Spectral (Google Fonts) | SIL Open Font License 1.1 (`fonts/OFL.txt`) | Regular, Bold, Italic, BoldItalic |
 | Noto Music | github.com/notofonts/music | SIL Open Font License 1.1 | Regular (glyph fallback) |
-| Noto Serif | github.com/koreader/koreader-fonts (notofonts) | SIL Open Font License 1.1 | Regular, Bold, Italic, BoldItalic |
-| Noto Sans | github.com/koreader/koreader-fonts (notofonts) | SIL Open Font License 1.1 | Regular, Bold, Italic, BoldItalic |
+| Noto Serif | github.com/koreader/koreader-fonts (notofonts) | SIL Open Font License 1.1 (`fonts/Noto-OFL.txt`) | Regular, Bold, Italic, BoldItalic |
+| Noto Sans | github.com/koreader/koreader-fonts (notofonts) | SIL Open Font License 1.1 (`fonts/Noto-OFL.txt`) | Regular, Bold, Italic, BoldItalic |
 | Droid Sans Mono | github.com/koreader/koreader-fonts | Apache License 2.0 | Regular |
 | FreeSerif | github.com/koreader/koreader-fonts (GNU FreeFont) | GPL-3.0 with font exception | Regular |
 | FreeSans | github.com/koreader/koreader-fonts (GNU FreeFont) | GPL-3.0 with font exception | Regular |

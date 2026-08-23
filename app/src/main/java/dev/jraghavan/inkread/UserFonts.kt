@@ -21,7 +21,8 @@ object UserFonts {
     /** What the core's parser accepts. A TrueType collection needs a face index, so it is not here. */
     private val SUPPORTED = setOf("ttf", "otf")
 
-    /** Largest font we will copy in — a guard against a mis-picked file, not a format limit. */
+    /** Largest font we will copy in — a guard against a mis-picked file, not a format limit. Well
+     *  under [Books]' document cap: no real typeface is anywhere near this. */
     private const val MAX_BYTES = 32L * 1024 * 1024
 
     /** The import directory, created on demand. */
@@ -68,19 +69,22 @@ object UserFonts {
      * absurdly large — in which case nothing is left behind.
      */
     fun import(context: Context, uri: Uri, suggestedName: String?): File? {
-        val stem = sanitize(suggestedName?.substringBeforeLast('.') ?: "font")
-        val ext = suggestedName?.substringAfterLast('.', "")?.lowercase()
+        val name = suggestedName ?: Books.queryName(context, uri)
+        val stem = Books.sanitizeStem(name?.substringBeforeLast('.').orEmpty().ifBlank { "font" })
+        val ext = name?.substringAfterLast('.', "")?.lowercase()
             ?.takeIf { it in SUPPORTED } ?: "ttf"
         val dest = uniqueFile(context, stem, ext)
+        // Books' capped copy, not a plain copyTo: it aborts mid-write once the source runs past the
+        // cap, rather than filling storage with a file we would only then delete.
         val copied = try {
             context.contentResolver.openInputStream(uri)?.use { input ->
-                dest.outputStream().use { out -> input.copyTo(out) }
-            } != null
+                dest.outputStream().use { out -> Books.copyCapped(input, out, MAX_BYTES) }
+            } ?: false
         } catch (e: Exception) {
             Log.e(TAG, "import failed: ${e.message}")
             false
         }
-        if (!copied || dest.length() == 0L || dest.length() > MAX_BYTES) {
+        if (!copied || dest.length() == 0L) {
             dest.delete()
             return null
         }
@@ -119,7 +123,4 @@ object UserFonts {
         }
         return candidate
     }
-
-    private fun sanitize(stem: String): String =
-        stem.replace(Regex("[^A-Za-z0-9 ._-]"), "_").trim().take(60).ifBlank { "font" }
 }
