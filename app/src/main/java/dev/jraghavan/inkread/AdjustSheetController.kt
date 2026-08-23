@@ -11,6 +11,7 @@ import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
 import android.view.Window
+import android.widget.HorizontalScrollView
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
@@ -240,6 +241,16 @@ class AdjustSheetController(private val host: Host) {
     }
 
     /** A KOReader-style settings row: a right-aligned [label] on the left, the [control] on the right. */
+    /** Let a control that can outgrow the sheet scroll sideways instead of running off the edge.
+     *  The typeface picker is the one that can: six bundled families already fill the row, and every
+     *  imported font (RR28-FR3) adds a segment, which would otherwise put the last faces out of
+     *  reach. Scrollbar suppressed — it would draw over the pill's rounded edge. */
+    private fun scrollable(content: View): View =
+        HorizontalScrollView(activity).apply {
+            isHorizontalScrollBarEnabled = false
+            addView(content)
+        }
+
     /** "Add…" / "Remove…" for the reader's imported faces (RR28-FR3). */
     private fun fontLibraryControls(): View {
         val d = activity.resources.displayMetrics.density
@@ -562,7 +573,7 @@ class AdjustSheetController(private val host: Host) {
             NativeBridge.nativeFontNames().split("\n").filter { it.isNotBlank() }
         } catch (e: RuntimeException) { emptyList() }
         if (faces.isNotEmpty()) {
-            container.addView(settingRow("Typeface", segmented(faces, prefs.font.coerceIn(0, faces.size - 1)) { which ->
+            container.addView(settingRow("Typeface", scrollable(segmented(faces, prefs.font.coerceIn(0, faces.size - 1)) { which ->
                 prefs.font = which
                 host.engineExecute {
                     val np = try { NativeBridge.nativeSetFont(host.docHandle, which) } catch (e: RuntimeException) { -1 }
@@ -571,7 +582,7 @@ class AdjustSheetController(private val host: Host) {
                         Toast.makeText(activity, "Typeface adjusts reflowable books (EPUB)", Toast.LENGTH_SHORT).show()
                     }
                 }
-            }))
+            })))
             container.addView(settingRow("Your fonts", fontLibraryControls()))
         }
         container.addView(settingRow("Font Size", control))
