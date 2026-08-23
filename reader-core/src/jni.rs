@@ -863,6 +863,43 @@ pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeFontNames<'
     .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
 }
 
+// nativeRegisterReadingFont(name, fontBytes) : int — register a user reading face (RR28-FR3) so it
+// appears in the picker after the bundled families; returns its font_id for nativeSetFont, or -1 if
+// the bytes don't parse. Static; no handle — the registry is process-wide, so the shell registers
+// its `fonts/` directory once at startup, in a stable (sorted) order, because ids are positional.
+// Never throws (RR21-FR3).
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeRegisterReadingFont<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    name: JString<'local>,
+    font_bytes: JByteArray<'local>,
+) -> jint {
+    env.with_env(|env| -> jni::errors::Result<jint> {
+        let id = match (name.try_to_string(env), env.convert_byte_array(&font_bytes)) {
+            (Ok(name), Ok(bytes)) => inkread_epub::register_reading_font(name, bytes)
+                .and_then(|id| i32::try_from(id).ok()),
+            _ => None, // an unreadable name or bytes is invalid input, not an error
+        };
+        Ok(id.unwrap_or(-1))
+    })
+    .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
+}
+
+// nativeClearReadingFonts() : void — forget every registered user reading face, so the shell can
+// re-register its `fonts/` directory after an import or a removal. Static; no handle.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeClearReadingFonts<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+) {
+    env.with_env(|_env| -> jni::errors::Result<()> {
+        inkread_epub::clear_reading_fonts();
+        Ok(())
+    })
+    .resolve::<jni::errors::ThrowRuntimeExAndDefault>();
+}
+
 // nativeRegisterFallbackFont(fontBytes, ttcIndex) : boolean — register a runtime fallback face
 // (raw TTF/OTF/TTC bytes, e.g. a device CJK font) consulted for glyphs the reading faces lack, for
 // documents opened after the call. `ttcIndex` selects the face inside a TrueType collection (0 for

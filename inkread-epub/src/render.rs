@@ -113,7 +113,11 @@ fn embolden_px(size_px: f32) -> i32 {
 /// Display names of the selectable reading faces, in `id` order (for the shell's font picker).
 #[must_use]
 pub fn reading_font_names() -> Vec<String> {
-    READING_FONTS.iter().map(|f| f.name.to_string()).collect()
+    READING_FONTS
+        .iter()
+        .map(|f| f.name.to_string())
+        .chain(read_user_fonts().iter().map(|f| f.name.clone()))
+        .collect()
 }
 
 /// Fallback face for glyphs the reading face lacks — e.g. musical symbols (𝄞) in books like
@@ -162,6 +166,60 @@ pub fn register_fallback_font(bytes: Vec<u8>, collection_index: u32) -> bool {
     true
 }
 
+/// A reading face the user supplied, kept as raw bytes rather than a parsed `FontVec` because
+/// [`AbFont`] owns its primary by value and is rebuilt on every face switch. Parsing costs a few ms
+/// and only happens when the reader actually changes font.
+struct UserFont {
+    name: String,
+    bytes: Arc<Vec<u8>>,
+}
+
+/// User reading faces registered at runtime, in registration order — the picker lists them after the
+/// bundled families, and their `id` continues that numbering. Process-wide for the same reason as
+/// [`extra_fallbacks`]. The shell owns the files (RR22-FR1 `fonts/`) and hands over bytes, so the
+/// core never learns a filesystem path (IR-7).
+fn user_fonts() -> &'static RwLock<Vec<UserFont>> {
+    static USER: OnceLock<RwLock<Vec<UserFont>>> = OnceLock::new();
+    USER.get_or_init(|| RwLock::new(Vec::new()))
+}
+
+/// Read the user font registry, surviving a poisoned lock (a font list cannot be half-written).
+fn read_user_fonts() -> std::sync::RwLockReadGuard<'static, Vec<UserFont>> {
+    match user_fonts().read() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
+/// Register a user reading face from raw TTF/OTF bytes, selectable alongside the bundled families
+/// (RR28-FR3). `name` is what the picker shows. Returns its `id` for [`AbFont::for_face`] /
+/// `set_font`, or `None` — never a panic — if the bytes don't parse (RR21-FR3).
+///
+/// Ids are positional, so the shell must register in a stable order (it registers the `fonts/`
+/// directory sorted, once at startup) for a remembered choice to survive a restart.
+pub fn register_reading_font(name: String, bytes: Vec<u8>) -> Option<usize> {
+    // Parse once here purely to reject junk at the boundary; the bytes are what we keep.
+    FontVec::try_from_vec(bytes.clone()).ok()?;
+    let mut fonts = match user_fonts().write() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    fonts.push(UserFont {
+        name,
+        bytes: Arc::new(bytes),
+    });
+    Some(READING_FONTS.len() + fonts.len() - 1)
+}
+
+/// Forget every registered user reading face — the shell calls this before re-registering the
+/// `fonts/` directory, so an import or a removal is reflected without restarting the process.
+pub fn clear_reading_fonts() {
+    match user_fonts().write() {
+        Ok(mut guard) => guard.clear(),
+        Err(poisoned) => poisoned.into_inner().clear(),
+    }
+}
+
 /// The full fallback chain for a new [`AbFont`]: the bundled symbol face first (stable ordering —
 /// runtime registrations can extend but never pre-empt bundled coverage), then runtime faces in
 /// registration order.
@@ -206,6 +264,17 @@ impl AbFont {
     /// glyphs — musical symbols, scripts the bundled set lacks — still render.
     #[must_use]
     pub fn for_face(id: usize) -> Self {
+        // Ids past the bundled families address the user's own (RR28-FR3); an id past those — a
+        // font removed since the choice was made — falls back to the default rather than failing.
+        if id >= READING_FONTS.len() {
+            let bytes = read_user_fonts()
+                .get(id - READING_FONTS.len())
+                .map(|f| Arc::clone(&f.bytes));
+            if let Some(font) = bytes.and_then(|b| Self::from_bytes(b.as_ref().clone())) {
+                return font;
+            }
+            return Self::for_face(0);
+        }
         let family = READING_FONTS.get(id).unwrap_or(&READING_FONTS[0]);
         let regular = parse_face(family.regular)
             .or_else(|| parse_face(DEFAULT_FONT))
@@ -968,6 +1037,54 @@ mod tests {
         assert!(
             (plain - italic).abs() > 0.01,
             "a real italic face has its own metrics: {plain} vs {italic}"
+        );
+    }
+
+    #[test]
+    fn a_user_font_joins_the_picker_and_loads_by_id() {
+        // Registering, listing and clearing in one test: the registry is process-wide, so splitting
+        // these would let them observe each other's state.
+        let bundled = READING_FONTS.len();
+        let before = reading_font_names().len();
+        assert_eq!(before, bundled, "no user fonts registered yet");
+
+        // Any valid face stands in for a user's file; reuse a bundled one rather than a fixture.
+        let bytes = include_bytes!("../fonts/DroidSansMono.ttf").to_vec();
+        let id = register_reading_font("My Font".into(), bytes).expect("valid TTF registers");
+        assert_eq!(id, bundled, "user ids continue the bundled numbering");
+
+        let names = reading_font_names();
+        assert_eq!(names.len(), bundled + 1);
+        assert_eq!(names[id], "My Font", "the picker shows the given name");
+
+        // The id resolves to that face, not to the default (RR28-AC2).
+        let user = AbFont::for_face(id);
+        let default = AbFont::for_face(0);
+        let w = |f: &AbFont| f.advance("handwriting", 18.0, false, false);
+        assert!(
+            (w(&user) - w(&default)).abs() > 0.01,
+            "a user font must render as itself, not the default"
+        );
+
+        clear_reading_fonts();
+        assert_eq!(reading_font_names().len(), bundled, "cleared");
+    }
+
+    #[test]
+    fn junk_bytes_are_refused_rather_than_registered() {
+        // RR21-FR3: invalid input at the boundary is a `None`, never a panic.
+        assert!(register_reading_font("Not a font".into(), b"nope".to_vec()).is_none());
+        assert!(register_reading_font("Empty".into(), Vec::new()).is_none());
+    }
+
+    #[test]
+    fn an_id_past_every_font_falls_back_to_the_default() {
+        // A choice remembered against a font the user has since deleted must still open the book.
+        let far = AbFont::for_face(READING_FONTS.len() + 9_999);
+        let default = AbFont::for_face(0);
+        assert_eq!(
+            far.advance("handwriting", 18.0, false, false),
+            default.advance("handwriting", 18.0, false, false)
         );
     }
 
