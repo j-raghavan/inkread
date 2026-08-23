@@ -584,6 +584,9 @@ impl PdfBackend {
                 },
                 // Fixed-layout PDF: the page index is the anchor; no reflow anchor (ADR-0012).
                 anchor: None,
+                // Nor any line-break knowledge — the page was broken by whoever typeset it, so a
+                // split word is read off the printed hyphen instead (`text_select::wrap_of`).
+                wrap: None,
             });
         }
         out

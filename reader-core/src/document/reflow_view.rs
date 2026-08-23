@@ -13,12 +13,12 @@
 
 use std::cell::{Cell, RefCell};
 
-use inkread_epub::layout::{paginate, Align, LayoutOpts, Page};
+use inkread_epub::layout::{paginate, Align, LayoutOpts, Page, Wrap as LayoutWrap};
 use inkread_epub::measure::CachedMetrics;
 use inkread_epub::render::{page_glyphs, render_page as raster_page, AbFont, GrayCanvas};
 use inkread_epub::Block;
 
-use crate::document::text_select::{CharBox, NormRect, TextAnchor};
+use crate::document::text_select::{CharBox, NormRect, TextAnchor, Wrap};
 use crate::error::{CoreError, CoreResult};
 use crate::render::PixelBuffer;
 
@@ -42,6 +42,10 @@ pub(crate) fn page_charboxes(page: &Page, opts: &LayoutOpts, font: &AbFont) -> V
             anchor: Some(TextAnchor {
                 block: g.anchor.block,
                 char_offset: g.anchor.char_offset,
+            }),
+            wrap: g.wrap.map(|w| match w {
+                LayoutWrap::SoftHyphen => Wrap::SoftHyphen,
+                LayoutWrap::Kept => Wrap::Kept,
             }),
         })
         .collect()
@@ -285,7 +289,88 @@ fn layout_all(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::document::text_select::{word_at, Wrap};
+    use inkread_epub::layout::paginate_with;
+    use inkread_epub::render::EnHyphenator;
     use inkread_epub::{BlockStyle, Inline, TextRun};
+
+    /// One paragraph of `text`, laid out with soft hyphenation into a measure `page_w` wide, as the
+    /// EPUB backend does — the only path that hyphenates.
+    fn hyphenated(text: &str, page_w: f32) -> Vec<CharBox> {
+        let blocks = vec![Block::Paragraph {
+            content: vec![Inline::Run(TextRun {
+                text: text.to_string(),
+                bold: false,
+                italic: false,
+                href: None,
+            })],
+            style: BlockStyle::default(),
+        }];
+        let opts = LayoutOpts::new(page_w, 800.0, 38.0);
+        let font = AbFont::default_font();
+        let pages = paginate_with(&blocks, &opts, &font, &EnHyphenator::new());
+        page_charboxes(&pages[0], &opts, &font)
+    }
+
+    /// The whole chain the flag travels: `layout` splits the word and records how, `page_glyphs`
+    /// moves that onto the glyph at the break, `page_charboxes` converts it, and `word_at` rejoins
+    /// the halves — from either side, without the hyphen we inserted.
+    #[test]
+    fn a_soft_hyphenated_word_is_read_back_whole() {
+        let chars = hyphenated("pontificate", 150.0);
+        let line1: String = chars
+            .iter()
+            .take_while(|c| c.wrap.is_none())
+            .map(|c| c.ch)
+            .collect();
+        assert!(
+            !line1.is_empty() && line1.len() < "pontificate".len(),
+            "the measure must actually split the word, got {line1:?}"
+        );
+        let brk = chars
+            .iter()
+            .position(|c| c.wrap.is_some())
+            .expect("a break");
+        assert_eq!(chars[brk].ch, '-', "the break shows a hyphen");
+        assert_eq!(chars[brk].wrap, Some(Wrap::SoftHyphen), "which we inserted");
+
+        let mid = |c: &CharBox| ((c.rect.x0 + c.rect.x1) * 0.5, (c.rect.y0 + c.rect.y1) * 0.5);
+        let (hx, hy) = mid(&chars[brk - 1]);
+        let (tx, ty) = mid(&chars[brk + 1]);
+        let head = word_at(&chars, hx, hy).expect("a word at the first half");
+        let tail = word_at(&chars, tx, ty).expect("a word at the continuation");
+        assert_eq!(head.text, "pontificate");
+        assert_eq!(tail.text, "pontificate");
+        assert_eq!(head.boxes.len(), 2, "highlighted on both lines");
+    }
+
+    /// The mirror: a compound broken at the hyphen it already had prints one hyphen, not two, and
+    /// reads back with it — the "well--" defect and the lookup that depended on it.
+    #[test]
+    fn a_compound_broken_at_its_own_hyphen_reads_back_with_it() {
+        let chars = hyphenated("well-known", 150.0);
+        let text: String = chars.iter().map(|c| c.ch).collect();
+        assert!(
+            !text.contains("--"),
+            "no doubled hyphen on the page: {text:?}"
+        );
+        let brk = chars
+            .iter()
+            .position(|c| c.wrap.is_some())
+            .expect("a break");
+        assert_eq!(
+            chars[brk].wrap,
+            Some(Wrap::Kept),
+            "that hyphen is the book's"
+        );
+        let c = &chars[brk - 1];
+        let sel = word_at(
+            &chars,
+            (c.rect.x0 + c.rect.x1) * 0.5,
+            (c.rect.y0 + c.rect.y1) * 0.5,
+        );
+        assert_eq!(sel.expect("a word").text, "well-known");
+    }
 
     // A heading flowed through the whole reflow pipeline (layout → render → page_chars) keeps its
     // words intact across font sizes — guards the device "regressio n" / "valu e" regression at the

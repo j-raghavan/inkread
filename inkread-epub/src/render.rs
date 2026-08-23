@@ -19,7 +19,7 @@ use std::sync::{Arc, OnceLock, RwLock};
 use ab_glyph::{point, Font, FontVec, GlyphId, PxScale, ScaleFont};
 use hyphenation::{Hyphenator as _, Language, Load, Standard};
 
-use crate::layout::{Hyphenator, LayoutOpts, Metrics, Page, SourceAnchor};
+use crate::layout::{Hyphenator, LayoutOpts, Metrics, Page, SourceAnchor, Wrap};
 
 /// The bundled default reading face — Spectral Regular (SIL OFL 1.1; see `fonts/OFL.txt`).
 const DEFAULT_FONT: &[u8] = include_bytes!("../fonts/Spectral-Regular.ttf");
@@ -397,6 +397,9 @@ pub struct PlacedGlyph {
     /// glyph's chapter-relative `char_offset`. Lets `reader-core` mint a `PinPosition` from a
     /// selection or a page's first glyph.
     pub anchor: SourceAnchor,
+    /// Set on the **last** glyph of a line the layout broke mid-word ([`Wrap`]) — the flag its run
+    /// carries, moved onto the glyph selection actually reaches. `None` on every other glyph.
+    pub wrap: Option<Wrap>,
 }
 
 /// Extract a laid-out [`Page`]'s glyphs as positioned boxes (pixel space), walking runs **exactly**
@@ -428,11 +431,13 @@ pub fn page_glyphs(page: &Page, opts: &LayoutOpts, font: &AbFont) -> Vec<PlacedG
                         x1: run_start,
                         y1,
                         anchor: prev_anchor,
+                        wrap: None,
                     });
                 }
             }
             let mut pen_x = run_start;
             let mut prev: Option<(&FontVec, GlyphId)> = None;
+            let run_first = out.len();
             // The glyph's chapter-relative offset = the run's first-char offset + its index in the run.
             for (i, ch) in run.text.chars().enumerate() {
                 let face = font.face_for(ch);
@@ -454,9 +459,17 @@ pub fn page_glyphs(page: &Page, opts: &LayoutOpts, font: &AbFont) -> Vec<PlacedG
                         block: run.anchor.block,
                         char_offset: run.anchor.char_offset + i,
                     },
+                    wrap: None,
                 });
                 pen_x += adv;
                 prev = Some((face, id));
+            }
+            // A run that ends its line mid-word hands the fact to its last glyph, which is the one
+            // selection meets at the break.
+            if run.wrap.is_some() && out.len() > run_first {
+                if let Some(last) = out.last_mut() {
+                    last.wrap = run.wrap;
+                }
             }
             let run_end_anchor = SourceAnchor {
                 block: run.anchor.block,
