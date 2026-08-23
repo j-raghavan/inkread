@@ -677,6 +677,55 @@ fn long_word_hyphenates_and_suffix_keeps_its_anchor() {
 }
 
 #[test]
+fn soft_hyphenated_break_is_flagged_as_inserted() {
+    let pages = paginate_with(
+        &[para("hyphenation")],
+        &narrow_para(),
+        &Mono,
+        &HyphenAt(vec![5]),
+    );
+    let runs: Vec<_> = pages[0].lines.iter().flat_map(|l| l.runs.iter()).collect();
+    assert_eq!(runs[0].wrap, Some(Wrap::SoftHyphen), "we added that hyphen");
+    assert_eq!(runs[1].wrap, None, "the last line of the word ends it");
+}
+
+#[test]
+fn compound_broken_at_its_own_hyphen_gets_no_second_one() {
+    // en-US patterns offer "well-known" exactly one break, at byte 5 — right after the hyphen it
+    // already has. Printing "well--" there is wrong, and the hyphen shown is the source's own.
+    let pages = paginate_with(
+        &[para("well-known")],
+        &narrow_para(),
+        &Mono,
+        &HyphenAt(vec![5]),
+    );
+    let runs: Vec<_> = pages[0].lines.iter().flat_map(|l| l.runs.iter()).collect();
+    assert_eq!(runs[0].text, "well-", "no doubled hyphen");
+    assert_eq!(runs[1].text, "known");
+    assert_eq!(
+        runs[0].wrap,
+        Some(Wrap::Kept),
+        "every character is the source's, so rejoining keeps the hyphen"
+    );
+}
+
+#[test]
+fn compound_broken_before_its_own_hyphen_keeps_it_on_the_next_line() {
+    // The mirror: "self-evident" broken at byte 4 prints "self-" too, but that hyphen IS ours and
+    // the source's own opens the continuation. Identical on the page, opposite in meaning.
+    let pages = paginate_with(
+        &[para("self-evident")],
+        &narrow_para(),
+        &Mono,
+        &HyphenAt(vec![4]),
+    );
+    let runs: Vec<_> = pages[0].lines.iter().flat_map(|l| l.runs.iter()).collect();
+    assert_eq!(runs[0].text, "self-");
+    assert_eq!(runs[1].text, "-evident");
+    assert_eq!(runs[0].wrap, Some(Wrap::SoftHyphen), "that hyphen is ours");
+}
+
+#[test]
 fn default_paginate_never_hyphenates() {
     // The default ([`NoHyphen`]) places an overflowing word whole, on its own line.
     let pages = paginate(&[para("hyphenation")], &narrow_para(), &Mono);

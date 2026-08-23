@@ -274,6 +274,25 @@ pub struct PlacedRun {
     pub href: Option<String>,
     /// Source anchor of this run's first character (ADR-INKREAD-0012).
     pub anchor: SourceAnchor,
+    /// Set when this run ends its line **mid-word** — the word continues on the next line, and this
+    /// says whether the hyphen shown at the break is one of ours. `None` on every other run, which
+    /// is nearly all of them: a line normally ends at a word boundary.
+    pub wrap: Option<Wrap>,
+}
+
+/// How a line break split the word that ends a line. Only the layout knows this — the two cases
+/// print identically ("self-evident" broken before its hyphen and "well-known" broken at its own
+/// both show a line ending "self-"/"well-") — so it records the fact for selection, search and copy
+/// to rejoin the halves faithfully (RR11).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Wrap {
+    /// The break needed a hyphen and the layout **inserted** one. It is not in the source text, so
+    /// rejoining the halves drops it: "pontifi-" + "cate" = "pontificate".
+    SoftHyphen,
+    /// The break needed no hyphen — the word already had one there, or it is unspaced script (CJK).
+    /// Every character on the line is the source's, so rejoining keeps them all: "well-" + "known"
+    /// = "well-known".
+    Kept,
 }
 
 /// One laid-out line: its `top` (content-relative), `height` (the line box), and positioned runs.
@@ -852,6 +871,7 @@ impl<'o> Pager<'o> {
                     italic: false,
                     href: None,
                     anchor: marker_anchor,
+                    wrap: None,
                 },
             );
         } else {
@@ -863,6 +883,7 @@ impl<'o> Pager<'o> {
                 italic: false,
                 href: None,
                 anchor: marker_anchor,
+                wrap: None,
             }]);
         }
         let line_h = size * self.opts.line_spacing;
@@ -1076,7 +1097,7 @@ fn break_lines(
                         block: anchor.block,
                         char_offset: anchor.char_offset + off,
                     };
-                    let push = |cur: &mut Vec<PlacedRun>, txt: String, px: f32| {
+                    let push = |cur: &mut Vec<PlacedRun>, txt: String, px: f32, wrap| {
                         cur.push(PlacedRun {
                             x: indent + px,
                             text: txt,
@@ -1085,24 +1106,35 @@ fn break_lines(
                             italic,
                             href: href.map(str::to_string),
                             anchor,
+                            wrap,
                         });
                     };
                     if rest_w <= room {
-                        push(&mut cur, rest.to_string(), start);
+                        push(&mut cur, rest.to_string(), start, None);
                         x = start + rest_w;
                         break;
                     }
                     // Two ways to split the token mid-word: an unspaced-script (CJK) break at a
                     // UAX #14 opportunity (no hyphen — for a spaceless paragraph this is the only
                     // way it wraps), else a soft-hyphenated Latin break. Same head-and-wrap tail.
+                    // Each records which it was, so selection can rejoin the halves (see [`Wrap`]).
                     let split = unspaced_break_fit(rest, room, m, size, bold, italic)
-                        .map(|(head, chars)| (head.to_string(), head.len(), chars))
+                        .map(|(head, chars)| (head.to_string(), head.len(), chars, Wrap::Kept))
                         .or_else(|| {
-                            hyphenate_fit(rest, room, hyph, m, size, bold, italic)
-                                .map(|(head, chars)| (format!("{head}-"), head.len(), chars))
+                            hyphenate_fit(rest, room, hyph, m, size, bold, italic).map(
+                                |(head, chars)| {
+                                    // A compound broken at the hyphen it already has needs no
+                                    // second one — "well-known" must not print as "well--".
+                                    if ends_with_hyphen(head) {
+                                        (head.to_string(), head.len(), chars, Wrap::Kept)
+                                    } else {
+                                        (format!("{head}-"), head.len(), chars, Wrap::SoftHyphen)
+                                    }
+                                },
+                            )
                         });
-                    if let Some((fragment, head_len, head_chars)) = split {
-                        push(&mut cur, fragment, start);
+                    if let Some((fragment, head_len, head_chars, wrap)) = split {
+                        push(&mut cur, fragment, start, Some(wrap));
                         lines.push(std::mem::take(&mut cur));
                         rest = &rest[head_len..];
                         off += head_chars;
@@ -1118,7 +1150,7 @@ fn break_lines(
                         continue;
                     }
                     // Fresh line, no break point, still too wide → place it overflowing.
-                    push(&mut cur, rest.to_string(), 0.0);
+                    push(&mut cur, rest.to_string(), 0.0, None);
                     x = rest_w;
                     break;
                 }
@@ -1206,8 +1238,16 @@ fn unspaced_break_fit<'w>(
     best
 }
 
+/// Whether `s` already ends in a hyphen, so a break after it needs no second one. ASCII and the
+/// Unicode hyphen; the soft hyphen never survives into a laid-out fragment.
+fn ends_with_hyphen(s: &str) -> bool {
+    s.ends_with(['-', '\u{2010}'])
+}
+
 /// The longest prefix of `word` ending at a hyphenation opportunity whose text plus a trailing
-/// hyphen fits within `room` px; returns `(head, head_char_count)`, or `None` if none fits.
+/// hyphen fits within `room` px; returns `(head, head_char_count)`, or `None` if none fits. The
+/// hyphen is measured even for a prefix that already ends in one (which is placed without a second)
+/// — conservative by one hyphen's width, and it keeps every existing pagination unchanged.
 fn hyphenate_fit<'w>(
     word: &'w str,
     room: f32,

@@ -60,6 +60,28 @@ pub struct CharBox {
     /// fixed-layout PDF (its position *is* the page). Reflow backends fill it so a selection or a
     /// page's first glyph can be turned into a `PinPosition` that survives a font-size change.
     pub anchor: Option<TextAnchor>,
+    /// Set on the last glyph of a line the layout broke **mid-word** — see [`Wrap`]. `None` on
+    /// every other glyph, and on every glyph of a fixed-layout backend, which lays nothing out and
+    /// therefore knows nothing (there, selection reads the break off the page; see [`wrap_of`]).
+    pub wrap: Option<Wrap>,
+}
+
+/// What a line break did to the word it split. Only a backend that performed the layout can say:
+/// the two cases print identically — "self-evident" broken before its hyphen and "well-known"
+/// broken at its own both end a line "self-"/"well-" — so the fact travels with the glyph instead
+/// of being guessed from it.
+///
+/// Field-identical to `inkread_epub::layout::Wrap` but kept as the core's own selection-domain type
+/// so the selection model isn't coupled to the renderer's glyph type, exactly like [`TextAnchor`]
+/// (the backends convert at the boundary).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Wrap {
+    /// The layout **inserted** the hyphen shown at the break. It is not in the source text, so
+    /// rejoining the halves drops it: "pontifi-" + "cate" = "pontificate".
+    SoftHyphen,
+    /// The break needed no hyphen — the word already had one there, or it is unspaced script (CJK).
+    /// Every character is the source's, so rejoining keeps them all: "well-" + "known".
+    Kept,
 }
 
 /// A reflow-stable text anchor: the source block (reading-order index in the chapter) and the
@@ -121,7 +143,7 @@ pub fn find_matches(chars: &[CharBox], query: &str) -> Vec<SearchMatch> {
     let mut hay: Vec<char> = Vec::with_capacity(chars.len());
     let mut src: Vec<usize> = Vec::with_capacity(chars.len());
     let mut prev_space = false;
-    let mut prev_rect: Option<NormRect> = None;
+    let mut prev: Option<usize> = None;
     for (i, c) in chars.iter().enumerate() {
         if c.ch.is_whitespace() {
             if !prev_space && !hay.is_empty() {
@@ -131,13 +153,26 @@ pub fn find_matches(chars: &[CharBox], query: &str) -> Vec<SearchMatch> {
             }
         } else {
             // A line break with no explicit space glyph (text wrap) still separates words, so the
-            // query "foo bar" matches across the wrap.
-            if !prev_space {
-                if let Some(pr) = prev_rect {
-                    if !same_line(&pr, &c.rect) {
+            // query "foo bar" matches across the wrap — unless the break split a word, in which
+            // case the halves are one word and the search reads them as `word_at` defines them
+            // ("pontificate" finds "pontifi-" / "cate", "well-known" finds "well-" / "known").
+            if let Some(p) = prev.filter(|&p| !same_line(&chars[p].rect, &c.rect)) {
+                match wrap_of(chars, p).filter(|_| is_word_char(c.ch) || is_hyphen(c.ch)) {
+                    Some(wrap) => {
+                        while hay.last() == Some(&' ') {
+                            hay.pop();
+                            src.pop();
+                        }
+                        if wrap == Wrap::SoftHyphen {
+                            hay.pop();
+                            src.pop();
+                        }
+                    }
+                    None if !prev_space => {
                         hay.push(' ');
                         src.push(i);
                     }
+                    None => {}
                 }
             }
             for lc in c.ch.to_lowercase() {
@@ -145,7 +180,7 @@ pub fn find_matches(chars: &[CharBox], query: &str) -> Vec<SearchMatch> {
                 src.push(i);
             }
             prev_space = false;
-            prev_rect = Some(c.rect);
+            prev = Some(i);
         }
     }
 
@@ -213,25 +248,38 @@ const HIT_TOLERANCE: f32 = 0.03;
 
 /// The word under `(x, y)` (tap / long-press), or `None` if the point isn't on a word glyph
 /// (whitespace, punctuation, or empty space). Expands across letters/digits and *internal*
-/// apostrophes/hyphens (`don't`, `well-known`).
+/// apostrophes/hyphens (`don't`, `well-known`), and across a line break that split the word
+/// (see [`wrap_before`]) so either half defines the whole word.
 #[must_use]
 pub fn word_at(chars: &[CharBox], x: f32, y: f32) -> Option<TextSelection> {
     let hit = hit_char(chars, x, y)?;
     if !is_word_char(chars[hit].ch) {
         return None;
     }
-    let mut start = hit;
-    while start > 0 && joins(&chars[start - 1], &chars[start]) {
-        start -= 1;
+    let (mut start, mut end) = word_run(chars, hit);
+    // Soft hyphenation splits a word across two lines (or, on a two-column page, two columns). Both
+    // halves are one word; only a hyphen the layout *inserted* is dropped when they rejoin, so
+    // tapping either "pontifi-" or "cate" defines "pontificate" while "well-" / "known" keeps the
+    // hyphen it came with.
+    let mut breaks = Vec::new();
+    if let Some((wrap, brk, head)) = wrap_before(chars, start) {
+        if wrap == Wrap::SoftHyphen {
+            breaks.push(brk);
+        }
+        start = word_run(chars, head).0;
     }
-    let mut end = hit;
-    while end + 1 < chars.len() && joins(&chars[end], &chars[end + 1]) {
-        end += 1;
+    if let Some((wrap, brk, tail)) = wrap_after(chars, end) {
+        if wrap == Wrap::SoftHyphen {
+            breaks.push(brk);
+        }
+        end = word_run(chars, tail).1;
     }
     let run = &chars[start..=end];
     let text = run
         .iter()
-        .map(|c| c.ch)
+        .enumerate()
+        .filter(|(i, c)| !c.ch.is_whitespace() && !breaks.contains(&(start + i)))
+        .map(|(_, c)| c.ch)
         .collect::<String>()
         .trim_matches(is_connector)
         .to_string();
@@ -242,6 +290,121 @@ pub fn word_at(chars: &[CharBox], x: f32, y: f32) -> Option<TextSelection> {
         text,
         boxes: line_boxes(run),
     })
+}
+
+/// The word run around `chars[i]` as `(start, end)`, inclusive — letters/digits and internal
+/// connectors, on one line (a line break ends the run; [`wrap_before`]/[`wrap_after`] cross it).
+fn word_run(chars: &[CharBox], i: usize) -> (usize, usize) {
+    let mut start = i;
+    while start > 0 && joins(&chars[start - 1], &chars[start]) {
+        start -= 1;
+    }
+    let mut end = i;
+    while end + 1 < chars.len() && joins(&chars[end], &chars[end + 1]) {
+        end += 1;
+    }
+    (start, end)
+}
+
+/// What the line break after `chars[i]` did to the word it split, or `None` if it split none.
+///
+/// A backend that laid the text out states it outright ([`CharBox::wrap`]), and is believed
+/// including when it says nothing happened — it knows, and the alternative is guessing wrong on a
+/// line that simply ends in a hyphen ("well- known", two words). A fixed-layout backend fills
+/// neither `wrap` nor `anchor`: there the break is read off the page, where a line-ending hyphen
+/// with a letter in front of it is a split word by printing convention, and goes when they rejoin.
+fn wrap_of(chars: &[CharBox], i: usize) -> Option<Wrap> {
+    if chars[i].anchor.is_some() {
+        return chars[i].wrap;
+    }
+    word_before_hyphen(chars, i).map(|_| Wrap::SoftHyphen)
+}
+
+/// The line break *before* the word run starting at `start`, when it split a word: `(what it did,
+/// the glyph at the break, a glyph of the first half)`. `None` when `start` begins a word of its own.
+fn wrap_before(chars: &[CharBox], start: usize) -> Option<(Wrap, usize, usize)> {
+    let brk = prev_glyph(chars, start)?;
+    if same_line(&chars[brk].rect, &chars[start].rect) {
+        return None;
+    }
+    let wrap = wrap_of(chars, brk)?;
+    // The first half is whatever run that glyph belongs to: itself when the break needed no hyphen
+    // (unspaced script), else the letter in front of the hyphen.
+    let head = if is_word_char(chars[brk].ch) {
+        brk
+    } else {
+        word_before_hyphen(chars, brk)?
+    };
+    Some((wrap, brk, head))
+}
+
+/// The mirror of [`wrap_before`]: the run ending at `end` is the first half of a split word.
+/// `(what the break did, the glyph at the break, the first glyph of the continuation)`, or `None`
+/// when the word really does end there (or the page does).
+fn wrap_after(chars: &[CharBox], end: usize) -> Option<(Wrap, usize, usize)> {
+    // Step over a second hyphen: `joins` won't pair two connectors, so a page that prints a word's
+    // own hyphen *and* a break hyphen ("well--") leaves the run short of the break. Our layout no
+    // longer emits that pair, but a fixed-layout page can still show it.
+    let mut brk = end;
+    while chars
+        .get(brk + 1)
+        .is_some_and(|c| is_hyphen(c.ch) && same_line(&c.rect, &chars[brk].rect))
+    {
+        brk += 1;
+    }
+    let wrap = wrap_of(chars, brk)?;
+    let tail = next_glyph(chars, brk)?;
+    (starts_word(chars, tail) && !same_line(&chars[brk].rect, &chars[tail].rect))
+        .then_some((wrap, brk, tail))
+}
+
+/// The letter or digit that the line-ending hyphen at `i` belongs to, scanning back over any
+/// further hyphens on its line. `None` when `chars[i]` isn't a hyphen that ends a word — a dash
+/// used as punctuation has a space in front of it, and nothing on the line before it counts.
+///
+/// The scan matters because the layout appends *its own* hyphen to whatever fragment it breaks
+/// (`inkread_epub::layout`), so a compound broken at the hyphen it already had ends the line in two
+/// ("well-known" → "well--" / "known"). Exactly one of them — the last — is the join.
+fn word_before_hyphen(chars: &[CharBox], i: usize) -> Option<usize> {
+    if !is_hyphen(chars[i].ch) {
+        return None;
+    }
+    let mut j = i;
+    while j > 0 && same_line(&chars[j - 1].rect, &chars[j].rect) {
+        j -= 1;
+        if is_word_char(chars[j].ch) {
+            return Some(j);
+        }
+        if !is_hyphen(chars[j].ch) {
+            return None;
+        }
+    }
+    None
+}
+
+/// Whether `chars[i]` starts a word: a letter or digit, or the hyphen a compound kept when the
+/// break fell in front of it ("self-evident" → "self-" / "-evident").
+fn starts_word(chars: &[CharBox], i: usize) -> bool {
+    is_word_char(chars[i].ch)
+        || (is_hyphen(chars[i].ch)
+            && chars
+                .get(i + 1)
+                .is_some_and(|c| is_word_char(c.ch) && same_line(&c.rect, &chars[i].rect)))
+}
+
+/// The nearest non-whitespace glyph before `i` (a backend may or may not emit a glyph for the line
+/// break itself, so neither wrap test may assume adjacency across it).
+fn prev_glyph(chars: &[CharBox], i: usize) -> Option<usize> {
+    chars[..i].iter().rposition(|c| !c.ch.is_whitespace())
+}
+
+/// The nearest non-whitespace glyph after `i`.
+fn next_glyph(chars: &[CharBox], i: usize) -> Option<usize> {
+    chars
+        .get(i + 1..)?
+        .iter()
+        .position(|c| !c.ch.is_whitespace())
+        .map(|j| i + 1 + j)
 }
 
 /// A column gutter must be at least this multiple of the median glyph width — an interior vertical
@@ -382,16 +545,17 @@ pub fn text_in_rect(chars: &[CharBox], rect: NormRect) -> TextSelection {
             _ => lines.push(vec![c]),
         }
     }
-    let mut parts = Vec::with_capacity(lines.len());
+    let mut parts: Vec<(String, Option<Wrap>)> = Vec::with_capacity(lines.len());
     let mut boxes = Vec::with_capacity(lines.len());
     for line in &lines {
-        parts.push(
-            line.iter()
-                .map(|c| c.ch)
-                .collect::<String>()
-                .trim()
-                .to_string(),
-        );
+        let text = line
+            .iter()
+            .map(|c| c.ch)
+            .collect::<String>()
+            .trim()
+            .to_string();
+        let wrap = line.last().and_then(|last| wrap_after_part(last, &text));
+        parts.push((text, wrap));
         let mut b = line[0].rect;
         for c in &line[1..] {
             b = b.union(&c.rect);
@@ -399,7 +563,7 @@ pub fn text_in_rect(chars: &[CharBox], rect: NormRect) -> TextSelection {
         boxes.push(b);
     }
     TextSelection {
-        text: parts.join(" ").trim().to_string(),
+        text: join_lines(&parts).trim().to_string(),
         boxes,
     }
 }
@@ -491,7 +655,7 @@ pub fn text_line_span(chars: &[CharBox], start: (f32, f32), end: (f32, f32)) -> 
     let (fy0, fy1) = line_span(&lines[focus]);
     let clip_focus = sel.len() > 1 && end.1 >= fy0 && end.1 <= fy1;
 
-    let mut parts: Vec<String> = Vec::new();
+    let mut parts: Vec<(String, Option<Wrap>)> = Vec::new();
     let mut boxes: Vec<NormRect> = Vec::new();
     for &idx in &sel {
         let line = &lines[idx];
@@ -519,21 +683,22 @@ pub fn text_line_span(chars: &[CharBox], start: (f32, f32), end: (f32, f32)) -> 
         for c in &take[1..] {
             bx = bx.union(&c.rect);
         }
-        parts.push(
-            take.iter()
-                .map(|c| c.ch)
-                .collect::<String>()
-                .trim()
-                .to_string(),
-        );
+        let text = take
+            .iter()
+            .map(|c| c.ch)
+            .collect::<String>()
+            .trim()
+            .to_string();
+        let wrap = take.last().and_then(|last| wrap_after_part(last, &text));
+        parts.push((text, wrap));
         boxes.push(bx);
     }
     // Drop word-less edge lines (a stray blank line clipped at an end).
-    while parts.last().is_some_and(String::is_empty) {
+    while parts.last().is_some_and(|p| p.0.is_empty()) {
         parts.pop();
         boxes.pop();
     }
-    while parts.first().is_some_and(String::is_empty) {
+    while parts.first().is_some_and(|p| p.0.is_empty()) {
         parts.remove(0);
         boxes.remove(0);
     }
@@ -548,7 +713,7 @@ pub fn text_line_span(chars: &[CharBox], start: (f32, f32), end: (f32, f32)) -> 
         }
     }
     TextSelection {
-        text: parts.join(" ").trim().to_string(),
+        text: join_lines(&parts).trim().to_string(),
         boxes,
     }
 }
@@ -575,11 +740,61 @@ fn hit_char(chars: &[CharBox], x: f32, y: f32) -> Option<usize> {
     best.filter(|_| best_d <= HIT_TOLERANCE)
 }
 
-/// Union the boxes of a single-line glyph run into per-line highlight rects (a word is one line,
-/// but guard for a run that wraps).
+/// Join a selection's per-line runs — each its text and what the break after it did ([`Wrap`]) —
+/// into one string. A line that broke mid-word runs straight on into the next with no space, minus
+/// the hyphen if the layout was the one that put it there: "pontifi-" + "cate" = "pontificate",
+/// "well-" + "known" = "well-known". Every other pair of lines is joined by a single space.
+fn join_lines(parts: &[(String, Option<Wrap>)]) -> String {
+    let mut out = String::new();
+    for (i, (text, _)) in parts.iter().enumerate() {
+        if i > 0 {
+            match parts[i - 1].1.filter(|_| starts_mid_word(text)) {
+                Some(Wrap::SoftHyphen) => {
+                    out.pop(); // that hyphen is the join, not a character of the word
+                }
+                Some(Wrap::Kept) => {}
+                None => out.push(' '),
+            }
+        }
+        out.push_str(text);
+    }
+    out
+}
+
+/// What the break after a selected line run did to the word it ends. The glyph carries it when the
+/// backend laid the text out; otherwise it is read off the run's own text, like [`wrap_of`].
+fn wrap_after_part(last: &CharBox, text: &str) -> Option<Wrap> {
+    if last.anchor.is_some() {
+        return last.wrap;
+    }
+    ends_mid_word(text).then_some(Wrap::SoftHyphen)
+}
+
+/// Whether `s` ends a line mid-word: a hyphen — possibly the second of two, see
+/// [`word_before_hyphen`] — with a letter or digit in front of it. A dash used as punctuation
+/// ("a word - ") has a space there, so it never joins.
+fn ends_mid_word(s: &str) -> bool {
+    let mut back = s.chars().rev();
+    back.next().is_some_and(is_hyphen) && back.find(|c| !is_hyphen(*c)).is_some_and(is_word_char)
+}
+
+/// Whether `s` continues a split word: it starts with a letter or digit, or with the hyphen a
+/// compound kept when the break fell in front of it ("self-" / "-evident"). Mirrors [`starts_word`].
+fn starts_mid_word(s: &str) -> bool {
+    let mut fwd = s.chars();
+    match fwd.next() {
+        Some(c) if is_word_char(c) => true,
+        Some(c) if is_hyphen(c) => fwd.next().is_some_and(is_word_char),
+        _ => false,
+    }
+}
+
+/// Union the boxes of a glyph run into per-line highlight rects (a word is one line, but a
+/// hyphenated or searched-across wrap spans two). Whitespace glyphs are skipped: a backend may box
+/// them degenerately (or off the line), which would split a run into spurious rects.
 fn line_boxes(run: &[CharBox]) -> Vec<NormRect> {
     let mut boxes = Vec::new();
-    for c in run {
+    for c in run.iter().filter(|c| !c.ch.is_whitespace()) {
         match boxes.last_mut() {
             Some(b) if same_line(b, &c.rect) => *b = b.union(&c.rect),
             _ => boxes.push(c.rect),
@@ -608,7 +823,12 @@ fn is_word_char(c: char) -> bool {
 }
 
 fn is_connector(c: char) -> bool {
-    matches!(c, '\'' | '\u{2019}' | '-')
+    matches!(c, '\'' | '\u{2019}') || is_hyphen(c)
+}
+
+/// Hyphens a line break can split a word across: ASCII, Unicode, and the soft hyphen.
+fn is_hyphen(c: char) -> bool {
+    matches!(c, '-' | '\u{2010}' | '\u{00ad}')
 }
 
 fn is_word_or_connector(c: char) -> bool {
@@ -634,8 +854,25 @@ mod tests {
                     y1: y + h,
                 },
                 anchor: None,
+                wrap: None,
             })
             .collect()
+    }
+
+    /// The same, but as a **reflow** backend emits it: every glyph anchored (so [`wrap_of`] trusts
+    /// the layout rather than reading the page), with `wrap` on the line's last glyph.
+    fn laid_out(s: &str, x0: f32, x1: f32, y: f32, h: f32, wrap: Option<Wrap>) -> Vec<CharBox> {
+        let mut chars = line(s, x0, x1, y, h);
+        for (i, c) in chars.iter_mut().enumerate() {
+            c.anchor = Some(TextAnchor {
+                block: 0,
+                char_offset: i,
+            });
+        }
+        if let Some(last) = chars.last_mut() {
+            last.wrap = wrap;
+        }
+        chars
     }
 
     fn rect(x0: f32, y0: f32, x1: f32, y1: f32) -> NormRect {
@@ -792,6 +1029,168 @@ mod tests {
         assert_eq!(sel.unwrap().text, "hi");
     }
 
+    /// A word soft-hyphenated across a line break: "pontifi-" then "cate" on the next line.
+    fn split_word() -> Vec<CharBox> {
+        let mut chars = line("the pontifi-", 0.0, 0.6, 0.10, 0.03);
+        chars.extend(line("cate rule", 0.0, 0.45, 0.16, 0.03));
+        chars
+    }
+
+    #[test]
+    fn word_at_joins_a_word_the_line_break_split() {
+        let chars = split_word();
+        // Tapping the first half ("pontifi-", second token on the top line)...
+        let head = word_at(&chars, 0.35, 0.115).expect("a glyph of the first half");
+        assert_eq!(
+            head.text, "pontificate",
+            "the hyphen joins the halves, it isn't a character"
+        );
+        assert_eq!(
+            head.boxes.len(),
+            2,
+            "one highlight box per line the word spans"
+        );
+        // ...and tapping the continuation gives the same word.
+        let tail = word_at(&chars, 0.04, 0.175).expect("a glyph of the second half");
+        assert_eq!(tail.text, "pontificate");
+        assert_eq!(
+            tail.boxes, head.boxes,
+            "either half selects the same two boxes"
+        );
+    }
+
+    #[test]
+    fn word_at_leaves_a_neighbouring_word_of_a_split_alone() {
+        let chars = split_word();
+        assert_eq!(word_at(&chars, 0.08, 0.115).unwrap().text, "the");
+        assert_eq!(word_at(&chars, 0.35, 0.175).unwrap().text, "rule");
+    }
+
+    #[test]
+    fn word_at_drops_only_the_hyphen_the_layout_inserted() {
+        let mut chars = laid_out("the pontifi-", 0.0, 0.6, 0.10, 0.03, Some(Wrap::SoftHyphen));
+        chars.extend(laid_out("cate rule", 0.0, 0.45, 0.16, 0.03, None));
+        assert_eq!(word_at(&chars, 0.35, 0.115).unwrap().text, "pontificate");
+        assert_eq!(word_at(&chars, 0.04, 0.175).unwrap().text, "pontificate");
+    }
+
+    #[test]
+    fn word_at_keeps_a_compounds_own_hyphen_across_the_break() {
+        // The layout broke "well-known" at the hyphen it already had, so it added none: both halves
+        // rejoin with that hyphen intact. Identical on the page to the case above.
+        let mut chars = laid_out("well-", 0.0, 0.25, 0.10, 0.03, Some(Wrap::Kept));
+        chars.extend(laid_out("known", 0.0, 0.25, 0.16, 0.03, None));
+        assert_eq!(word_at(&chars, 0.05, 0.115).unwrap().text, "well-known");
+        assert_eq!(word_at(&chars, 0.10, 0.175).unwrap().text, "well-known");
+    }
+
+    #[test]
+    fn word_at_believes_a_layout_that_reports_no_split() {
+        // The same two lines, but the layout says it split nothing — the source really is "well-"
+        // followed by "known" (two tokens). Guessing from the hyphen would fuse them.
+        let mut chars = laid_out("well-", 0.0, 0.25, 0.10, 0.03, None);
+        chars.extend(laid_out("known", 0.0, 0.25, 0.16, 0.03, None));
+        assert_eq!(word_at(&chars, 0.05, 0.115).unwrap().text, "well");
+        assert_eq!(word_at(&chars, 0.10, 0.175).unwrap().text, "known");
+    }
+
+    #[test]
+    fn word_at_joins_an_unspaced_script_break() {
+        // A CJK line break needs no hyphen at all, so there is nothing to drop.
+        let mut chars = laid_out("\u{6f22}\u{5b57}", 0.0, 0.2, 0.10, 0.03, Some(Wrap::Kept));
+        chars.extend(laid_out("\u{6e2c}\u{8a66}", 0.0, 0.2, 0.16, 0.03, None));
+        let sel = word_at(&chars, 0.05, 0.115).unwrap();
+        assert_eq!(sel.text, "\u{6f22}\u{5b57}\u{6e2c}\u{8a66}");
+        assert_eq!(sel.boxes.len(), 2);
+    }
+
+    #[test]
+    fn selection_and_search_follow_the_layout_across_a_kept_hyphen() {
+        let mut chars = laid_out("a well-", 0.0, 0.35, 0.10, 0.03, Some(Wrap::Kept));
+        chars.extend(laid_out("known fact", 0.0, 0.5, 0.16, 0.03, None));
+        let sel = text_line_span(&chars, (0.02, 0.115), (0.48, 0.175));
+        assert_eq!(
+            sel.text, "a well-known fact",
+            "copied text keeps the hyphen"
+        );
+        assert_eq!(find_matches(&chars, "well-known").len(), 1);
+        assert!(
+            find_matches(&chars, "wellknown").is_empty(),
+            "the hyphen is real, so it is searched for"
+        );
+    }
+
+    #[test]
+    fn word_at_rebuilds_a_compound_broken_at_its_own_hyphen() {
+        // en-US patterns offer "well-known" exactly one break — at byte 5, right after its own
+        // hyphen — so the layout appends a second one and the line ends "well--". Only the appended
+        // hyphen is the join; the word keeps the one it came with.
+        let mut chars = line("well--", 0.0, 0.3, 0.10, 0.03);
+        chars.extend(line("known", 0.0, 0.25, 0.16, 0.03));
+        assert_eq!(word_at(&chars, 0.05, 0.115).unwrap().text, "well-known");
+        assert_eq!(word_at(&chars, 0.10, 0.175).unwrap().text, "well-known");
+    }
+
+    #[test]
+    fn word_at_rebuilds_a_compound_broken_before_its_own_hyphen() {
+        // "self-evident" breaks at byte 4, so the hyphen it keeps opens the continuation.
+        let mut chars = line("self-", 0.0, 0.25, 0.10, 0.03);
+        chars.extend(line("-evident", 0.0, 0.4, 0.16, 0.03));
+        assert_eq!(word_at(&chars, 0.05, 0.115).unwrap().text, "self-evident");
+        assert_eq!(word_at(&chars, 0.2, 0.175).unwrap().text, "self-evident");
+    }
+
+    #[test]
+    fn word_at_does_not_join_across_a_dash_ending_a_line() {
+        // A dash used as punctuation has a space in front of it — not a split word.
+        let mut chars = line("one -", 0.0, 0.25, 0.10, 0.03);
+        chars.extend(line("two", 0.0, 0.15, 0.16, 0.03));
+        assert_eq!(word_at(&chars, 0.05, 0.175).unwrap().text, "two");
+        assert_eq!(word_at(&chars, 0.03, 0.115).unwrap().text, "one");
+    }
+
+    #[test]
+    fn word_at_keeps_a_trailing_hyphen_off_the_word_at_a_page_end() {
+        // Nothing follows the hyphen (the wrap continues on the next page) — unchanged behaviour.
+        let chars = line("pontifi-", 0.0, 0.4, 0.10, 0.03);
+        assert_eq!(word_at(&chars, 0.2, 0.115).unwrap().text, "pontifi");
+    }
+
+    #[test]
+    fn word_at_joins_a_word_split_across_two_columns() {
+        // A two-column page (#194) breaks a word at the foot of column 1 and continues it at the
+        // head of column 2 — the continuation is to the right and *above*, but next in reading
+        // order, which is what the join follows.
+        let mut chars = line("the pontifi-", 0.05, 0.45, 0.90, 0.03);
+        chars.extend(line("cate rule", 0.55, 0.90, 0.05, 0.03));
+        let sel = word_at(&chars, 0.30, 0.915).expect("a glyph of the first half");
+        assert_eq!(sel.text, "pontificate");
+        assert_eq!(sel.boxes.len(), 2, "one box in each column");
+        assert_eq!(word_at(&chars, 0.58, 0.065).unwrap().text, "pontificate");
+    }
+
+    #[test]
+    fn drag_selection_heals_a_word_the_line_break_split() {
+        let chars = split_word();
+        let sel = text_line_span(&chars, (0.02, 0.115), (0.44, 0.175));
+        assert_eq!(
+            sel.text, "the pontificate rule",
+            "copied text reads as the source does"
+        );
+    }
+
+    #[test]
+    fn find_matches_spans_a_word_the_line_break_split() {
+        let chars = split_word();
+        let hits = find_matches(&chars, "pontificate");
+        assert_eq!(hits.len(), 1, "the split word is still findable whole");
+        assert_eq!(hits[0].boxes.len(), 2, "highlighted on both lines");
+        assert!(hits[0].snippet.contains("pontificate rule"));
+        // The wrap still separates two whole words.
+        assert_eq!(find_matches(&chars, "pontificate rule").len(), 1);
+        assert!(find_matches(&chars, "pontifi-cate").is_empty());
+    }
+
     #[test]
     fn text_in_rect_collects_a_span_in_order() {
         let chars = line("hello world", 0.0, 0.55, 0.10, 0.03);
@@ -871,6 +1270,7 @@ mod tests {
                 y1: 0.13,
             },
             anchor: None,
+            wrap: None,
         });
         chars.extend(line("second line two", 0.0, 0.8, 0.16, 0.03));
         let sel = text_line_span(&chars, (0.1, 0.115), (0.9, 0.175));
