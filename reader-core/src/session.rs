@@ -382,7 +382,7 @@ impl ReaderSession {
     /// interval, and avoid-flashing all come from settings (RR23 ↔ RR3-FR3/FR6/FR7). The shell
     /// calls this on open and whenever a relevant setting changes.
     pub fn apply_settings(&mut self, settings: &SettingsSnapshot, book: Option<&BookId>) {
-        self.policy.set_interval(settings.flash_interval(book));
+        self.policy.set_day_interval(settings.flash_interval(book));
         self.policy
             .set_night_interval(settings.night_flash_interval(book));
         self.policy
@@ -478,9 +478,9 @@ impl ReaderSession {
         self.document.metadata()
     }
 
-    /// Update the viewport (e.g. `surfaceChanged`/rotation, RR21-FR4); rebuilds the
-    /// policy's full-screen rect. Returns nothing; the shell re-renders + re-asks for
-    /// a refresh afterward.
+    /// Update the viewport (e.g. `surfaceChanged`/rotation, RR21-FR4); re-points the policy at the
+    /// new panel rect, keeping the reader's refresh configuration. Returns nothing; the shell
+    /// re-renders + re-asks for a refresh afterward.
     pub fn set_viewport(&mut self, viewport: Viewport) {
         // A surface can be handed the same size more than once (Android delivers surfaceChanged
         // repeatedly for one surface). Rebuilding the policy and dropping every cached render for a

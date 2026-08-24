@@ -612,24 +612,13 @@ fn set_screen_moves_the_full_screen_fallback_to_the_new_panel() {
     );
 }
 
-// The setters share the builders' clamp: an interval of 0 means every turn flashes, not never.
+// Tested directly rather than through a page turn: 0 and 1 are behaviourally identical — the
+// counter is incremented before the `>= interval` test, so both promote on every turn — which
+// means any behavioural assertion here would pass with the clamp deleted. What the clamp is
+// actually for is keeping the value the policy stores honest, so that is what is asserted.
 #[test]
-fn interval_setters_clamp_zero_to_one() {
-    let caps = DeviceCapabilities::supernote_full();
-    let mut policy = EinkRefreshPolicy::with_interval(caps, screen(), 6);
-    policy.set_interval(0);
-    policy.set_night_interval(0);
-
-    let day = policy.on_page_turn(page());
-    assert_eq!(
-        day.len(),
-        2,
-        "day interval 0 promotes on the very first turn"
-    );
-    assert_eq!(day[0], RefreshCommand::WaitForLast);
-
-    policy.on_night_mode(true);
-    let night = policy.on_page_turn(page());
-    assert_eq!(night.len(), 2, "and so does night interval 0");
-    assert_eq!(night[0], RefreshCommand::WaitForLast);
+fn an_interval_of_zero_is_normalised_to_one() {
+    assert_eq!(clamp_interval(0), 1);
+    assert_eq!(clamp_interval(1), 1);
+    assert_eq!(clamp_interval(6), 6);
 }

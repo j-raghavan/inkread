@@ -10,7 +10,12 @@ use device_eink::{DeviceCapabilities, Rect, RefreshCommand, RefreshIntent, Refre
 /// Default partial-refreshes-before-flash (RR3-FR3; KOReader `DEFAULT_FULL_REFRESH_COUNT`).
 pub const DEFAULT_GHOST_CLEAR_INTERVAL: u32 = 6;
 
-/// An interval of 0 would mean "promote never"; treat it as 1 (every turn flashes) instead.
+/// Normalise a flash-promotion interval to at least 1.
+///
+/// 0 and 1 already behave identically — `on_page_turn` increments before testing `>= interval`, so
+/// either promotes on every turn — which is why this is normalisation rather than a guard against
+/// some other outcome. Storing 1 keeps the value the policy holds honest about what it does, and
+/// keeps that true if the comparison ever changes.
 fn clamp_interval(interval: u32) -> u32 {
     interval.max(1)
 }
@@ -50,9 +55,10 @@ impl EinkRefreshPolicy {
     }
 
     /// A policy with an explicit ghost-clear interval (RR3-FR3, user-configurable), applied to
-    /// both the day and night cadence; [`Self::with_night_interval`] separates them.
+    /// **both** the day and night cadence; [`Self::with_night_interval`] separates them again.
+    /// Note the asymmetry with [`Self::set_day_interval`], which sets only the day cadence.
     ///
-    /// An interval of 0 is treated as 1 (every turn flashes) to avoid a promote-never.
+    /// An interval of 0 is normalised to 1; both flash on every turn.
     #[must_use]
     pub fn with_interval(
         caps: DeviceCapabilities,
@@ -82,7 +88,7 @@ impl EinkRefreshPolicy {
 
     /// Set the night-mode flash-promotion interval, independent of the day interval (RR3-FR6).
     ///
-    /// An interval of 0 is treated as 1 (every night-mode turn flashes).
+    /// An interval of 0 is normalised to 1; both flash on every night-mode turn.
     #[must_use]
     pub fn with_night_interval(mut self, night_ghost_clear_interval: u32) -> Self {
         self.set_night_interval(night_ghost_clear_interval);
@@ -104,13 +110,14 @@ impl EinkRefreshPolicy {
     // to reset the flash intervals and avoid-flashing (#206). Mutating in place cannot drop a
     // field the caller never mentions, so a setting added here is not silently lost tomorrow.
 
-    /// Set the day flash-promotion interval (RR3-FR3). 0 is treated as 1 (every turn flashes).
-    pub fn set_interval(&mut self, ghost_clear_interval: u32) {
+    /// Set the **day** flash-promotion interval (RR3-FR3). 0 is normalised to 1; both flash on
+    /// every turn. Named for the cadence it touches, because [`Self::with_interval`] seeds both.
+    pub fn set_day_interval(&mut self, ghost_clear_interval: u32) {
         self.ghost_clear_interval = clamp_interval(ghost_clear_interval);
     }
 
-    /// Set the night-mode flash-promotion interval, independent of the day interval (RR3-FR6).
-    /// 0 is treated as 1 (every night-mode turn flashes).
+    /// Set the **night** flash-promotion interval, independent of the day one (RR3-FR6). 0 is
+    /// normalised to 1; both flash on every night-mode turn.
     pub fn set_night_interval(&mut self, night_ghost_clear_interval: u32) {
         self.night_ghost_clear_interval = clamp_interval(night_ghost_clear_interval);
     }
@@ -123,10 +130,12 @@ impl EinkRefreshPolicy {
     /// Re-point the policy at a new panel geometry — rotation, or any `surfaceChanged` that
     /// changes the metrics (RR21-FR4).
     ///
-    /// Only the geometry and the *transient* state move: both flash counters restart and any
-    /// in-progress scroll is forgotten, because the surface that gesture belonged to is gone and a
-    /// metrics change is followed by a fresh full anyway. Everything the reader configured — the
-    /// day and night intervals, avoid-flashing, dithering, and the night flag — is kept.
+    /// Only the geometry and the *transient* state move: both flash counters restart, because a
+    /// metrics change is followed by a fresh full anyway, and the scroll flag is cleared since the
+    /// surface that gesture belonged to is gone. (Clearing it changes no behaviour today — nothing
+    /// reads that flag — but it keeps the field truthful if something ever does.) Everything the
+    /// reader configured — the day and night intervals, avoid-flashing, dithering, and the night
+    /// flag — is kept.
     pub fn set_screen(&mut self, screen: Rect) {
         self.screen = screen;
         self.partial_count = 0;
@@ -150,12 +159,6 @@ impl EinkRefreshPolicy {
     #[must_use]
     pub fn is_night(&self) -> bool {
         self.night_mode
-    }
-
-    /// The capabilities this policy was built with.
-    #[must_use]
-    pub fn capabilities(&self) -> DeviceCapabilities {
-        self.caps
     }
 }
 
