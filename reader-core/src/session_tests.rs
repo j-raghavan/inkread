@@ -1458,6 +1458,31 @@ fn open_sample(store: Arc<dyn ReaderStore>, book: BookId, typography: Typography
     .unwrap()
 }
 
+// #167: the margin reaches the layout through the session the same way every other reflow setting
+// does — it repaginates, and the session's page stays inside the new pagination.
+#[test]
+fn setting_the_margin_repaginates_an_epub_through_the_session() {
+    let store: Arc<dyn ReaderStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+    let mut s = open_sample(store, BookId::new("margins").unwrap(), reading_typography());
+    let before = s.page_count();
+    assert!(before > 0);
+
+    assert!(s.set_margin(1), "an EPUB reflows");
+    assert!(
+        s.page_count() <= before,
+        "a narrower margin cannot add pages"
+    );
+    assert!(s.current_page() < s.page_count());
+}
+
+// A fixed-layout document has margins of its own that reflow does not own, so the call reports that
+// nothing happened rather than pretending it did.
+#[test]
+fn setting_the_margin_reports_no_reflow_on_a_fixed_document() {
+    let mut s = session(3, DeviceCapabilities::supernote_full());
+    assert!(!s.set_margin(2));
+}
+
 #[test]
 fn a_first_open_paginates_once_and_a_re_open_not_at_all() {
     let store: Arc<dyn ReaderStore> = Arc::new(SqliteStore::open_in_memory().unwrap());

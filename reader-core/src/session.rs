@@ -867,6 +867,21 @@ impl ReaderSession {
         }
     }
 
+    /// Set the reflow page margin as a percentage of page width and repaginate, preserving the
+    /// chapter (RR16-FR2 / RR9-FR4 / #167). `true` if the document reflowed; `false` for a
+    /// fixed-layout PDF. Re-render after.
+    pub fn set_margin(&mut self, margin_pct: i32) -> bool {
+        match self.document.set_margin(margin_pct, self.page) {
+            Some(new_page) => {
+                self.page = new_page.min(self.page_count().saturating_sub(1));
+                self.invalidate_render_cache(); // repagination changes what each page index renders
+                self.load_ink_for_current_page();
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Set the reflow alignment (`0=Left,1=Justify,2=Center,3=Right`; RR4); repaginates EPUB
     /// preserving the chapter. `false` for a fixed-layout PDF. Re-render after.
     pub fn set_alignment(&mut self, align_code: i32) -> bool {
