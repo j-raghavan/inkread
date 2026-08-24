@@ -412,6 +412,96 @@ fn settings_drive_the_policy_interval() {
     assert_eq!(second[0], RefreshCommand::WaitForLast);
 }
 
+// #206: rotating the device used to rebuild the policy from scratch, reverting the persisted
+// flash interval, night interval and avoid-flashing to their defaults for the rest of the session.
+// The reader saw the chosen values in the UI while the panel ignored them.
+//
+// Only page turns reach the policy through the session, so these two cover the day interval and
+// avoid-flashing; the night interval and the night flag are covered against `set_screen` directly
+// in the policy's own tests.
+#[test]
+fn a_viewport_change_keeps_the_persisted_flash_interval() {
+    let mut s = session_with_refresh_settings(&[(SettingKey::FlashInterval, SettingValue::Int(2))]);
+
+    s.set_viewport(Viewport::new(120, 100, 226)); // rotate
+
+    assert!(matches!(
+        s.on_gesture(Gesture::NextPage).as_slice(),
+        [RefreshCommand::Update {
+            intent: RefreshIntent::Partial,
+            ..
+        }]
+    ));
+    let second = s.on_gesture(Gesture::NextPage);
+    assert_eq!(
+        second.len(),
+        2,
+        "turn 2 promotes on the persisted interval; on the default 6 it would still be a Partial"
+    );
+    assert_eq!(second[0], RefreshCommand::WaitForLast);
+}
+
+#[test]
+fn a_viewport_change_keeps_avoid_flashing() {
+    let mut s = session_with_refresh_settings(&[
+        (SettingKey::FlashInterval, SettingValue::Int(2)),
+        (SettingKey::AvoidFlashing, SettingValue::Bool(true)),
+    ]);
+
+    s.set_viewport(Viewport::new(120, 100, 226)); // rotate
+
+    // Avoid-flashing downgrades every promotion, so no turn ever flashes. Rebuilt, the policy
+    // would drop back to interval 6 with the downgrade off and flash on the sixth turn.
+    for turn in 1..=6 {
+        assert!(
+            matches!(
+                s.on_gesture(Gesture::NextPage).as_slice(),
+                [RefreshCommand::Update {
+                    intent: RefreshIntent::Partial,
+                    ..
+                }]
+            ),
+            "turn {turn} flashed despite avoid-flashing"
+        );
+    }
+}
+
+// The same viewport change still restarts the flash cadence — the counter is transient, and a
+// metrics change is followed by a fresh full anyway (RR21-FR4).
+#[test]
+fn a_viewport_change_restarts_the_flash_cadence() {
+    let mut s = session_with_refresh_settings(&[(SettingKey::FlashInterval, SettingValue::Int(2))]);
+
+    s.on_gesture(Gesture::NextPage); // one turn into a 2-turn cadence
+    s.set_viewport(Viewport::new(120, 100, 226));
+
+    assert!(
+        matches!(
+            s.on_gesture(Gesture::NextPage).as_slice(),
+            [RefreshCommand::Update {
+                intent: RefreshIntent::Partial,
+                ..
+            }]
+        ),
+        "the first turn after the change starts the cadence over, so it does not promote"
+    );
+    let second = s.on_gesture(Gesture::NextPage);
+    assert_eq!(second.len(), 2);
+    assert_eq!(second[0], RefreshCommand::WaitForLast);
+}
+
+/// A 10-page session over an in-memory store carrying `settings`, opened at 100x120 so a test can
+/// rotate it to 120x100.
+fn session_with_refresh_settings(settings: &[(SettingKey, SettingValue)]) -> ReaderSession {
+    let store: Arc<dyn ReaderStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+    for (key, value) in settings {
+        store
+            .put_setting(Scope::Global, *key, value.clone())
+            .unwrap();
+    }
+    store_session(10, store, BookId::new("b").unwrap())
+}
+
 // RR24-FR3: the session's onTrimMemory hook trims the caches.
 #[test]
 fn on_trim_memory_clears_caches() {

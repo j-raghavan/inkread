@@ -10,6 +10,11 @@ use device_eink::{DeviceCapabilities, Rect, RefreshCommand, RefreshIntent, Refre
 /// Default partial-refreshes-before-flash (RR3-FR3; KOReader `DEFAULT_FULL_REFRESH_COUNT`).
 pub const DEFAULT_GHOST_CLEAR_INTERVAL: u32 = 6;
 
+/// An interval of 0 would mean "promote never"; treat it as 1 (every turn flashes) instead.
+fn clamp_interval(interval: u32) -> u32 {
+    interval.max(1)
+}
+
 /// The reader's refresh policy. Constructed with the device capabilities + the panel size
 /// (used for the full-screen fallback) + the ghost-clear interval.
 #[derive(Debug, Clone)]
@@ -44,9 +49,10 @@ impl EinkRefreshPolicy {
         Self::with_interval(caps, screen, DEFAULT_GHOST_CLEAR_INTERVAL)
     }
 
-    /// A policy with an explicit ghost-clear interval (RR3-FR3, user-configurable).
+    /// A policy with an explicit ghost-clear interval (RR3-FR3, user-configurable), applied to
+    /// both the day and night cadence; [`Self::with_night_interval`] separates them.
     ///
-    /// An interval of 0 is treated as 1 (every page flashes) to avoid a divide-by-never.
+    /// An interval of 0 is treated as 1 (every turn flashes) to avoid a promote-never.
     #[must_use]
     pub fn with_interval(
         caps: DeviceCapabilities,
@@ -57,12 +63,12 @@ impl EinkRefreshPolicy {
             caps,
             screen,
             partial_count: 0,
-            ghost_clear_interval: ghost_clear_interval.max(1),
+            ghost_clear_interval: clamp_interval(ghost_clear_interval),
             dither: false,
             currently_scrolling: false,
             night_mode: false,
             night_partial_count: 0,
-            night_ghost_clear_interval: ghost_clear_interval.max(1),
+            night_ghost_clear_interval: clamp_interval(ghost_clear_interval),
             avoid_flashing: false,
         }
     }
@@ -76,18 +82,56 @@ impl EinkRefreshPolicy {
 
     /// Set the night-mode flash-promotion interval, independent of the day interval (RR3-FR6).
     ///
-    /// An interval of 0 is clamped to 1 (every night-mode turn flashes).
+    /// An interval of 0 is treated as 1 (every night-mode turn flashes).
     #[must_use]
     pub fn with_night_interval(mut self, night_ghost_clear_interval: u32) -> Self {
-        self.night_ghost_clear_interval = night_ghost_clear_interval.max(1);
+        self.set_night_interval(night_ghost_clear_interval);
         self
     }
 
     /// Enable the avoid-flashing downgrade: Full/Flash* promotions become Partial (RR3-FR7).
     #[must_use]
     pub fn with_avoid_flashing(mut self, avoid: bool) -> Self {
-        self.avoid_flashing = avoid;
+        self.set_avoid_flashing(avoid);
         self
+    }
+
+    // ---- In-place configuration ----------------------------------------------------------
+    //
+    // A live policy is re-configured through these rather than rebuilt. A rebuild makes every
+    // configured field the caller's responsibility to re-supply, so the ones it does not know
+    // about revert to defaults behind the user's back — which is precisely how a rotation came
+    // to reset the flash intervals and avoid-flashing (#206). Mutating in place cannot drop a
+    // field the caller never mentions, so a setting added here is not silently lost tomorrow.
+
+    /// Set the day flash-promotion interval (RR3-FR3). 0 is treated as 1 (every turn flashes).
+    pub fn set_interval(&mut self, ghost_clear_interval: u32) {
+        self.ghost_clear_interval = clamp_interval(ghost_clear_interval);
+    }
+
+    /// Set the night-mode flash-promotion interval, independent of the day interval (RR3-FR6).
+    /// 0 is treated as 1 (every night-mode turn flashes).
+    pub fn set_night_interval(&mut self, night_ghost_clear_interval: u32) {
+        self.night_ghost_clear_interval = clamp_interval(night_ghost_clear_interval);
+    }
+
+    /// Enable or disable the avoid-flashing downgrade (RR3-FR7).
+    pub fn set_avoid_flashing(&mut self, avoid: bool) {
+        self.avoid_flashing = avoid;
+    }
+
+    /// Re-point the policy at a new panel geometry — rotation, or any `surfaceChanged` that
+    /// changes the metrics (RR21-FR4).
+    ///
+    /// Only the geometry and the *transient* state move: both flash counters restart and any
+    /// in-progress scroll is forgotten, because the surface that gesture belonged to is gone and a
+    /// metrics change is followed by a fresh full anyway. Everything the reader configured — the
+    /// day and night intervals, avoid-flashing, dithering, and the night flag — is kept.
+    pub fn set_screen(&mut self, screen: Rect) {
+        self.screen = screen;
+        self.partial_count = 0;
+        self.night_partial_count = 0;
+        self.currently_scrolling = false;
     }
 
     /// The current partial-refresh counter (test/diagnostic accessor).
