@@ -93,8 +93,11 @@ fn custom_interval_promotes_on_that_turn() {
     assert_eq!(policy.partial_count(), 0);
 }
 
+// Names the behaviour, not the clamp: interval 0 and interval 1 are indistinguishable here, so
+// this passes with `clamp_interval` removed. `an_interval_of_zero_is_normalised_to_one` is what
+// pins the clamp itself.
 #[test]
-fn interval_zero_is_clamped_to_one() {
+fn an_interval_of_zero_flashes_every_turn() {
     let caps = DeviceCapabilities::supernote_full();
     let mut policy = EinkRefreshPolicy::with_interval(caps, screen(), 0);
     // Every turn flashes.
@@ -453,9 +456,10 @@ fn exiting_night_mode_resets_day_counter() {
     assert!(!policy.is_night());
 }
 
-// RR3-FR6: the night interval is clamped to 1 (every night-mode turn flashes at interval 0).
+// RR3-FR6: at interval 0 every night-mode turn flashes. Like its day counterpart this documents
+// the behaviour rather than pinning the clamp — 0 and 1 are indistinguishable through a page turn.
 #[test]
-fn night_interval_zero_is_clamped_to_one() {
+fn a_night_interval_of_zero_flashes_every_turn() {
     let caps = DeviceCapabilities::supernote_full();
     let mut policy = EinkRefreshPolicy::new(caps, screen()).with_night_interval(0);
     policy.on_night_mode(true);
