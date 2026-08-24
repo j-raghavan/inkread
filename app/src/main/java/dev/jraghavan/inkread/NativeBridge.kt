@@ -57,6 +57,7 @@ object NativeBridge {
         lineSpacing: Float,
         alignCode: Int,
         columns: Int,
+        marginPct: Int,
     ): Long
 
     /** Persist the current reading position (RR12-FR3); store-less session = no-op. */
@@ -256,9 +257,14 @@ object NativeBridge {
      *  for (#194). Lets the shell say a request was declined rather than leave it looking ignored. */
     external fun nativeEffectiveColumns(handle: Long): Int
 
+    /** Reflow page margin as a percentage of page width (RR16-FR2; #167); repaginates EPUB.
+     *  Clamped by the core, so an out-of-range value is a setting rather than an error. Returns the
+     *  new page, or -1 for a fixed-layout PDF. Re-render after. */
+    external fun nativeSetMargin(handle: Long, marginPct: Int): Int
+
     /** Apply ALL reflow typography at once, repaginating ONCE (RR4). Use this on the open path to
-     *  restore persisted settings — the individual setters each repaginate, so applying four of
-     *  them in a row costs four full passes over the book (#161/#162). Returns the new page, or -1
+     *  restore persisted settings — the individual setters each repaginate, so applying them in a
+     *  row costs a full pass over the book each (#161/#162). Returns the new page, or -1
      *  for a fixed-layout PDF. Re-render after. */
     external fun nativeSetTypography(
         handle: Long,
@@ -267,6 +273,7 @@ object NativeBridge {
         lineSpacing: Float,
         alignCode: Int,
         columns: Int,
+        marginPct: Int,
     ): Int
 
     /** Chapters laid out so far, packed as `(done shl 32) or total` (#161). `total == 0` means no

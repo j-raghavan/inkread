@@ -861,6 +861,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
                 path, capsBytes, viewW, viewH, DPI, dbPath, bookId,
                 displayPrefs.textScale, displayPrefs.font,
                 displayPrefs.lineSpacingMult, displayPrefs.alignment, displayPrefs.columns,
+                displayPrefs.marginPct,
             )
         } catch (e: RuntimeException) {
             Log.e(TAG, "open failed: ${e.message}")
@@ -1944,6 +1945,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
                             displayPrefs.lineSpacingMult,
                             displayPrefs.alignment,
                             displayPrefs.columns,
+                            displayPrefs.marginPct,
                         )
                     } catch (e: RuntimeException) {}
                 }

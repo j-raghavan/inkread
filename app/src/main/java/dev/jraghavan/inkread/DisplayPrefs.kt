@@ -94,6 +94,18 @@ class DisplayPrefs(private val context: Context) {
         get() = typography.getInt("columns", 1).coerceIn(1, 2)
         set(i) = typography.edit().putInt("columns", i.coerceIn(1, 2)).apply()
 
+    /** Page margin as a percentage of page width (RR16-FR2; #167). Mirrors the core's
+     *  `DEFAULT_MARGIN_PCT`, so a book that has never been adjusted lays out as it always did.
+     *  Read coerced to a valid [MARGINS] step. */
+    var marginPct: Int
+        get() = typography.getInt("margin_pct", DEFAULT_MARGIN_PCT)
+            .let { if (it in MARGINS) it else DEFAULT_MARGIN_PCT }
+        set(p) = typography.edit().putInt("margin_pct", p).apply()
+
+    /** The segmented index for the saved margin. [marginPct] already coerces to a [MARGINS] step,
+     *  so this always finds one. */
+    fun marginIndex(): Int = MARGINS.indexOf(marginPct)
+
     /** The segmented index for the saved multiplier (nearest [LINE_SPACINGS] entry; default Medium). */
     fun lineSpacingIndex(): Int {
         val m = lineSpacingMult
@@ -123,6 +135,16 @@ class DisplayPrefs(private val context: Context) {
         val UI_SCALE_LABELS = listOf("S", "M", "L", "XL", "2XL")
 
         /** Page-turn intervals for the periodic full refresh (#99); index 0 = Off, the default. */
+        /** Page margin steps offered, as a percentage of page width (#167). The reader asked for
+         *  margins narrower than the default, and the Supernote bezel already eats usable width;
+         *  the top of the range stops where the measure gets too short to read. */
+        val MARGINS = listOf(0, 2, 4, 6, 9, 12)
+        val MARGIN_LABELS = listOf("None", "XS", "S", "M", "L", "XL")
+
+        /** Mirrors `reader-core`'s `DEFAULT_MARGIN_PCT` — the layout engine's own proportional
+         *  default, so an unadjusted book paginates exactly as it did before this was settable. */
+        const val DEFAULT_MARGIN_PCT = 6
+
         val REFRESH_INTERVALS = listOf(0, 1, 3, 5, 10)
         val REFRESH_INTERVAL_LABELS = listOf("Off", "1", "3", "5", "10")
 

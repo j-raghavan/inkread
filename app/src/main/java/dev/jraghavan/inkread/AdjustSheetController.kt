@@ -305,7 +305,7 @@ class AdjustSheetController(private val host: Host) {
         return container
     }
 
-    /** The "Page" tab: reflow Line Spacing + Alignment (EPUB; a toast on fixed-layout PDF). */
+    /** The "Page" tab: reflow Margin + Line Spacing + Alignment (EPUB; a toast on fixed-layout PDF). */
     private fun pagePanel(): View {
         fun applyReflow(call: () -> Int) =
             runReflow(call, whenFixedLayout = "Page layout adjusts reflowable books (EPUB)")
@@ -319,6 +319,13 @@ class AdjustSheetController(private val host: Host) {
                 host.setReflowMode(which == 1)
             }))
         }
+        // #167. The default margin was reported as too wide, and the bezel already eats usable
+        // width, so the range runs down to none rather than only trimming the default a little.
+        container.addView(settingRow("Margin", segmented(DisplayPrefs.MARGIN_LABELS, prefs.marginIndex()) { which ->
+            prefs.marginPct = DisplayPrefs.MARGINS[which]
+            host.diag { "DIAG margin=${DisplayPrefs.MARGINS[which]}%" }
+            applyReflow { NativeBridge.nativeSetMargin(host.docHandle, DisplayPrefs.MARGINS[which]) }
+        }))
         container.addView(settingRow("Line Spacing", segmented(DisplayPrefs.LINE_SPACING_LABELS, prefs.lineSpacingIndex()) { which ->
             prefs.lineSpacingMult = DisplayPrefs.LINE_SPACINGS[which]
             host.diag { "DIAG line spacing=${DisplayPrefs.LINE_SPACINGS[which]}" }
