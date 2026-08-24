@@ -526,3 +526,110 @@ fn builder_order_is_independent() {
     }
     assert_eq!(drive(&mut a), drive(&mut b));
 }
+
+// ---- Rotation / geometry change (RR21-FR4, #206) ----
+
+fn rotated() -> Rect {
+    Rect::full(1872, 1404) // the same panel on its side
+}
+
+// #206: changing the panel geometry must not disturb anything the reader configured. This is the
+// regression the rebuild-on-rotation caused — the intervals and avoid-flashing reverted to their
+// defaults while the UI still showed the reader's choice.
+#[test]
+fn set_screen_keeps_the_configuration_a_rebuild_would_drop() {
+    let caps = DeviceCapabilities::supernote_full();
+    let mut policy = EinkRefreshPolicy::with_interval(caps, screen(), 2)
+        .with_night_interval(3)
+        .with_avoid_flashing(true)
+        .with_dither(true);
+    policy.on_night_mode(true);
+
+    policy.set_screen(rotated());
+
+    assert!(
+        policy.is_night(),
+        "night is the active theme, not a per-gesture flag — a rotation does not leave it"
+    );
+    // Two Partials, then the third night turn hits the night interval (3). It still promotes —
+    // the counter resets — but avoid_flashing downgrades the flash to a Partial, and the dither
+    // request rides along. A rebuilt policy would have flashed on turn 6 with dither off.
+    policy.on_page_turn(page());
+    policy.on_page_turn(page());
+    assert_eq!(
+        policy.on_page_turn(page()),
+        vec![RefreshCommand::Update {
+            rect: page(),
+            intent: RefreshIntent::Partial,
+            dither: true,
+        }]
+    );
+    assert_eq!(
+        policy.night_partial_count(),
+        0,
+        "the promotion still happened; only its flash was downgraded"
+    );
+}
+
+// The flip side: the counters are transient, and a metrics change is followed by a fresh full
+// anyway, so both cadences restart from zero.
+#[test]
+fn set_screen_restarts_both_flash_cadences() {
+    let caps = DeviceCapabilities::supernote_full();
+    let mut policy = EinkRefreshPolicy::with_interval(caps, screen(), 6);
+    for _ in 0..5 {
+        policy.on_page_turn(page());
+    }
+    policy.on_night_mode(true);
+    for _ in 0..4 {
+        policy.on_page_turn(page());
+    }
+    assert_eq!(policy.partial_count(), 5);
+    assert_eq!(policy.night_partial_count(), 4);
+
+    policy.set_screen(rotated());
+
+    assert_eq!(policy.partial_count(), 0);
+    assert_eq!(policy.night_partial_count(), 0);
+}
+
+// The screen rect is the full-screen fallback for a basic panel (RR3-FR10 / RR2-FR4) — after a
+// rotation it has to describe the panel the reader is actually looking at.
+#[test]
+fn set_screen_moves_the_full_screen_fallback_to_the_new_panel() {
+    let caps = DeviceCapabilities::supernote_baseline();
+    let mut policy = EinkRefreshPolicy::new(caps, screen());
+
+    policy.set_screen(rotated());
+
+    assert_eq!(
+        policy.on_page_turn(page()),
+        vec![RefreshCommand::Update {
+            rect: rotated(),
+            intent: RefreshIntent::Full,
+            dither: false,
+        }]
+    );
+}
+
+// The setters share the builders' clamp: an interval of 0 means every turn flashes, not never.
+#[test]
+fn interval_setters_clamp_zero_to_one() {
+    let caps = DeviceCapabilities::supernote_full();
+    let mut policy = EinkRefreshPolicy::with_interval(caps, screen(), 6);
+    policy.set_interval(0);
+    policy.set_night_interval(0);
+
+    let day = policy.on_page_turn(page());
+    assert_eq!(
+        day.len(),
+        2,
+        "day interval 0 promotes on the very first turn"
+    );
+    assert_eq!(day[0], RefreshCommand::WaitForLast);
+
+    policy.on_night_mode(true);
+    let night = policy.on_page_turn(page());
+    assert_eq!(night.len(), 2, "and so does night interval 0");
+    assert_eq!(night[0], RefreshCommand::WaitForLast);
+}
