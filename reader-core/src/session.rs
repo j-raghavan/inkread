@@ -378,15 +378,15 @@ impl ReaderSession {
         Ok(())
     }
 
-    /// Rebuild the refresh policy from a settings snapshot for `book` — flash interval, night
+    /// Apply a settings snapshot for `book` to the refresh policy — flash interval, night
     /// interval, and avoid-flashing all come from settings (RR23 ↔ RR3-FR3/FR6/FR7). The shell
     /// calls this on open and whenever a relevant setting changes.
     pub fn apply_settings(&mut self, settings: &SettingsSnapshot, book: Option<&BookId>) {
-        let caps = self.policy.capabilities();
-        let screen = Rect::full(self.viewport.width, self.viewport.height);
-        self.policy = EinkRefreshPolicy::with_interval(caps, screen, settings.flash_interval(book))
-            .with_night_interval(settings.night_flash_interval(book))
-            .with_avoid_flashing(settings.avoid_flashing(book));
+        self.policy.set_interval(settings.flash_interval(book));
+        self.policy
+            .set_night_interval(settings.night_flash_interval(book));
+        self.policy
+            .set_avoid_flashing(settings.avoid_flashing(book));
     }
 
     /// Persist the current reading position (RR12-FR3). For a reflowable document it also stores the
@@ -490,11 +490,14 @@ impl ReaderSession {
             return;
         }
         self.viewport = viewport;
-        let caps = self.policy.capabilities();
-        let screen = Rect::full(viewport.width, viewport.height);
-        // Preserve nothing of the partial counter on a metrics change — a fresh full is
-        // expected after a viewport change anyway (RR21-FR4).
-        self.policy = EinkRefreshPolicy::new(caps, screen);
+        // Re-point the policy at the new panel rather than rebuilding it. A rebuild reverted the
+        // reader's flash interval, night interval and avoid-flashing to their defaults, silently
+        // and for the rest of the session — the UI and the store still held the chosen values, so
+        // only the policy actually driving the panel had forgotten them (#206). `set_screen` still
+        // restarts the flash counters, which is all the rebuild was wanted for: a fresh full is
+        // expected after a metrics change anyway (RR21-FR4).
+        self.policy
+            .set_screen(Rect::full(viewport.width, viewport.height));
         // Cached renders are sized to the old viewport and laid out for it — drop them.
         self.invalidate_render_cache();
     }
