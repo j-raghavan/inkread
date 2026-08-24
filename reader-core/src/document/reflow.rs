@@ -40,6 +40,24 @@ const MAX_SCALE: f32 = 3.0;
 /// Default line-spacing multiple (RR4). Mirrors the shell's `DisplayPrefs.DEFAULT_LINE_SPACING`.
 const DEFAULT_LINE_SPACING: f32 = 1.4;
 
+/// Default page margin, as a percentage of page width (RR16-FR2 / #167). Matches the proportional
+/// default the layout engine picks for itself, so an unset margin lays out exactly as it always did.
+pub const DEFAULT_MARGIN_PCT: u8 = 6;
+
+/// Widest margin offered. Past this the measure gets too short to read on a portrait panel, which
+/// is the same reason two columns are declined below a minimum measure (#194).
+pub const MAX_MARGIN_PCT: u8 = 15;
+
+/// The narrowest margin the layout is given, whatever the reader asks for. A page with glyphs
+/// running into the panel edge clips their side bearings, so the smallest setting still keeps a
+/// hair — imperceptible at this size, and a fraction of a percent on any panel we ship on.
+const MIN_MARGIN_PX: f32 = 8.0;
+
+/// Resolve a margin percentage against a page width (RR16-FR2 / #167).
+fn margin_px(page_w: f32, pct: u8) -> f32 {
+    (page_w * f32::from(pct.min(MAX_MARGIN_PCT)) / 100.0).max(MIN_MARGIN_PX)
+}
+
 /// How many materialized chapters to keep. Reading walks forward through one chapter at a time, so
 /// a couple of entries covers a page turn across a chapter boundary and a jump back, while keeping
 /// the retained page structures bounded regardless of how long the book is.
@@ -65,6 +83,8 @@ struct LayoutRequest {
     align: Align,
     /// Text columns per page (#194).
     columns: u8,
+    /// Page margin as a percentage of page width (RR16-FR2 / #167).
+    margin_pct: u8,
     /// The bundled reading face. Not part of [`LayoutOpts`], but a different face means different
     /// metrics, so it belongs in the staleness key.
     font_id: usize,
@@ -167,6 +187,8 @@ pub struct EpubBackend {
     align: Cell<Align>,
     /// Text columns per page (#194 — default 1). Drives repagination.
     columns: Cell<u8>,
+    /// Page margin as a percentage of page width (RR16-FR2 / #167).
+    margin_pct: Cell<u8>,
     /// The page size to lay out for; updated by the render path when the buffer changes.
     viewport: Cell<(u32, u32)>,
     /// The current pagination index, or `None` before the first one is needed. Laying out lazily
@@ -239,6 +261,7 @@ impl EpubBackend {
             line_spacing: Cell::new(DEFAULT_LINE_SPACING),
             align: Cell::new(Align::default()),
             columns: Cell::new(1),
+            margin_pct: Cell::new(DEFAULT_MARGIN_PCT),
             viewport: Cell::new((viewport.width, viewport.height)),
             // Deferred: the first read paginates, so the saved typography applied right after open
             // is folded into that single pass rather than triggering one pass per setting.
@@ -276,6 +299,7 @@ impl EpubBackend {
             line_spacing: Cell::new(DEFAULT_LINE_SPACING),
             align: Cell::new(Align::default()),
             columns: Cell::new(1),
+            margin_pct: Cell::new(DEFAULT_MARGIN_PCT),
             viewport: Cell::new((viewport.width, viewport.height)),
             laid: RefCell::new(None),
             chapter_pages: RefCell::new(Vec::new()),
@@ -440,6 +464,7 @@ impl EpubBackend {
             line_spacing: self.line_spacing.get(),
             align: self.align.get(),
             columns: self.columns.get(),
+            margin_pct: self.margin_pct.get(),
             font_id: self.font_id.get(),
         }
     }
@@ -451,6 +476,7 @@ impl EpubBackend {
         opts.line_spacing = request.line_spacing;
         opts.align = request.align;
         opts.columns = request.columns;
+        opts.margin = margin_px(w as f32, request.margin_pct);
         opts
     }
 
@@ -794,6 +820,22 @@ impl Document for EpubBackend {
         self.repaginate_keeping_chapter(current_page, pin)
     }
 
+    fn set_margin(&self, margin_pct: i32, current_page: usize) -> Option<usize> {
+        // Captured before the setting changes, for the same reason as every other reflow setter:
+        // reading it afterwards goes through `laid()`, which rebuilds, and would pin the position
+        // against the pagination we are about to replace (#160). Skipped when nothing is laid out
+        // yet — the open path restoring saved typography, where forcing a pagination is exactly
+        // what the lazy open exists to avoid (#161/#162/#186).
+        let pin = if self.laid.borrow().is_some() {
+            self.page_pin(current_page)
+        } else {
+            None
+        };
+        self.margin_pct
+            .set(margin_pct.clamp(0, i32::from(MAX_MARGIN_PCT)) as u8);
+        self.repaginate_keeping_chapter(current_page, pin)
+    }
+
     fn effective_columns(&self) -> i32 {
         i32::from(Self::opts_for(&self.current_request()).effective_columns())
     }
@@ -829,6 +871,7 @@ impl Document for EpubBackend {
         line_spacing: f32,
         align_code: i32,
         columns: i32,
+        margin_pct: i32,
         current_page: usize,
     ) -> Option<usize> {
         // Captured before the setting changes: reading it afterwards would go through `laid()`,
@@ -846,6 +889,8 @@ impl Document for EpubBackend {
         self.line_spacing.set(clamp_line_spacing(line_spacing));
         self.align.set(Align::from_code(align_code));
         self.columns.set(columns.clamp(1, 2) as u8);
+        self.margin_pct
+            .set(margin_pct.clamp(0, i32::from(MAX_MARGIN_PCT)) as u8);
         self.repaginate_keeping_chapter(current_page, pin)
     }
 

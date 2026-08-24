@@ -899,6 +899,7 @@ impl ReaderSession {
         line_spacing: f32,
         align_code: i32,
         columns: i32,
+        margin_pct: i32,
     ) -> bool {
         match self.document.set_typography(
             scale,
@@ -906,6 +907,7 @@ impl ReaderSession {
             line_spacing,
             align_code,
             columns,
+            margin_pct,
             self.page,
         ) {
             Some(new_page) => {

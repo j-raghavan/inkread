@@ -315,7 +315,7 @@ fn restoring_saved_typography_over_a_cold_open_costs_one_pagination() {
     reset_layout_passes();
     let b = EpubBackend::open(SAMPLE.to_vec(), vp(400, 600)).unwrap();
     // Exactly what the shell does on open: restore four persisted settings, then read the count.
-    let page = b.set_typography(1.25, 1, 1.7, 2, 1, 0);
+    let page = b.set_typography(1.25, 1, 1.7, 2, 1, i32::from(DEFAULT_MARGIN_PCT), 0);
     let count = b.page_count();
     assert_eq!(
         layout_passes(),
@@ -357,17 +357,18 @@ fn an_out_of_range_font_id_resolves_to_the_default_face_without_repaginating() {
 }
 
 #[test]
-fn set_typography_lays_out_the_same_book_as_the_four_setters_do() {
+fn set_typography_lays_out_the_same_book_as_the_individual_setters_do() {
     // The batched path is an optimization, so it must be indistinguishable from the individual
     // setters it replaces — same page count, same page content.
     let batched = EpubBackend::open(SAMPLE.to_vec(), vp(400, 600)).unwrap();
-    assert_eq!(batched.set_typography(1.5, 2, 1.2, 3, 1, 0), Some(0));
+    assert_eq!(batched.set_typography(1.5, 2, 1.2, 3, 1, 3, 0), Some(0));
 
     let stepwise = EpubBackend::open(SAMPLE.to_vec(), vp(400, 600)).unwrap();
     let _ = stepwise.set_font(2, 0);
     let _ = stepwise.set_text_scale(1.5, 0);
     let _ = stepwise.set_line_spacing(1.2, 0);
     let _ = stepwise.set_alignment(3, 0);
+    let _ = stepwise.set_margin(3, 0);
 
     assert_eq!(batched.page_count(), stepwise.page_count());
     assert!(batched.page_count() > 0);
@@ -748,7 +749,15 @@ fn a_cancel_restores_the_request_exactly_across_the_whole_settings_range() {
             for align_code in 0..4 {
                 let (w, _) = watcher(Some(1));
                 b.set_pagination_progress(w);
-                let _ = b.set_typography(scale, 1, spacing, align_code, 1, 0);
+                let _ = b.set_typography(
+                    scale,
+                    1,
+                    spacing,
+                    align_code,
+                    1,
+                    i32::from(DEFAULT_MARGIN_PCT),
+                    0,
+                );
 
                 assert_eq!(
                     b.current_request(),
@@ -1367,6 +1376,91 @@ fn selecting_two_columns_repaginates_and_keeps_the_chapter() {
         before,
         "single column should be as it was"
     );
+}
+
+/// #167 (RR16-FR2 / RR9-FR4): the page margin is a reflow setting like any other — it changes the
+/// measure, so it repaginates and keeps the reader where they were.
+#[test]
+fn narrowing_the_margin_repaginates_and_keeps_the_chapter() {
+    let doc = EpubBackend::open(SAMPLE.to_vec(), vp(1200, 1600)).expect("sample opens");
+    let default_pages = doc.page_count();
+    assert!(default_pages > 0);
+
+    let moved = doc
+        .set_margin(1, 0)
+        .expect("a reflowable document supports margins");
+    assert!(
+        moved < doc.page_count(),
+        "position must land inside the new pagination"
+    );
+
+    // A narrower margin is a wider measure, so the book cannot get longer.
+    assert!(
+        doc.page_count() <= default_pages,
+        "{} pages at 1% vs {default_pages} at the default",
+        doc.page_count()
+    );
+
+    // A wider margin is a shorter measure, so it cannot get shorter.
+    doc.set_margin(12, 0);
+    assert!(
+        doc.page_count() >= default_pages,
+        "{} pages at 12% vs {default_pages} at the default",
+        doc.page_count()
+    );
+
+    // And returning to the default reproduces the original pagination exactly.
+    doc.set_margin(i32::from(DEFAULT_MARGIN_PCT), 0);
+    assert_eq!(doc.page_count(), default_pages);
+}
+
+/// The default must lay a book out exactly as it did before the margin was configurable, or every
+/// pagination already cached on a device is invalidated for nothing (#162/#186).
+#[test]
+fn the_default_margin_matches_the_layout_engines_own() {
+    let configured = EpubBackend::open(SAMPLE.to_vec(), vp(1200, 1600)).expect("sample opens");
+    let pages = configured.page_count();
+
+    let engine_default = inkread_epub::LayoutOpts::new(1200.0, 1600.0, 56.0).margin;
+    let ours = super::margin_px(1200.0, DEFAULT_MARGIN_PCT);
+    assert!(
+        (engine_default - ours).abs() < f32::EPSILON,
+        "engine default {engine_default}px vs configured default {ours}px"
+    );
+    assert!(pages > 0);
+}
+
+/// Out-of-range margins are clamped rather than trusted — the value crosses JNI (RR21-FR3).
+#[test]
+fn an_out_of_range_margin_is_clamped() {
+    let doc = EpubBackend::open(SAMPLE.to_vec(), vp(1200, 1600)).expect("sample opens");
+
+    doc.set_margin(i32::from(MAX_MARGIN_PCT), 0);
+    let widest = doc.page_count();
+    for absurd in [99, i32::MAX] {
+        doc.set_margin(absurd, 0);
+        assert_eq!(doc.page_count(), widest, "clamped to the widest ({absurd})");
+    }
+
+    doc.set_margin(0, 0);
+    let narrowest = doc.page_count();
+    for absurd in [-1, i32::MIN] {
+        doc.set_margin(absurd, 0);
+        assert_eq!(
+            doc.page_count(),
+            narrowest,
+            "clamped to the narrowest ({absurd})"
+        );
+    }
+}
+
+/// A zero margin still keeps a hair, so glyph side bearings are never clipped against the panel
+/// edge — the reader gets the narrowest margin we can draw, not literally none.
+#[test]
+fn a_zero_margin_keeps_a_minimum_gutter() {
+    assert!(super::margin_px(1200.0, 0) > 0.0);
+    // On any panel we ship on, the floor is what a 0% request resolves to.
+    assert!((super::margin_px(1920.0, 0) - super::margin_px(1404.0, 0)).abs() < f32::EPSILON);
 }
 
 /// The request is stored even when the page is too narrow to honour it, so a later font-size

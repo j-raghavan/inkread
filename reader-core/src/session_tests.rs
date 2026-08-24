@@ -1438,6 +1438,7 @@ fn reading_typography() -> Typography {
         line_spacing: 1.7,
         align_code: 1,
         columns: 1,
+        margin_pct: i32::from(crate::document::reflow::DEFAULT_MARGIN_PCT),
     }
 }
 
