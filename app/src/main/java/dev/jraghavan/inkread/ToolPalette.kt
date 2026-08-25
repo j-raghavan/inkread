@@ -87,7 +87,19 @@ class ToolPalette(
         private set
 
     private val density = activity.resources.displayMetrics.density
+
+    /** An unscaled dimension — for geometry the reader's Menu Size must not move (drag insets). */
     private fun dp(v: Int) = (v * density).toInt()
+
+    /**
+     * A chrome dimension scaled by the reader's Menu Size preference (#133 / #200).
+     *
+     * The pill was the one piece of reader chrome that never adopted [Ink.sdp], so its buttons
+     * stayed a fixed 60dp however small the reader had asked their menus to be. Routing the button
+     * box, its glyph inset and the spacing between buttons through here puts the pill under the
+     * same control as every other menu.
+     */
+    private fun sdp(v: Int) = Ink.sdp(v)
     private val touchSlop = ViewConfiguration.get(activity).scaledTouchSlop
 
     /**
@@ -219,9 +231,9 @@ class ToolPalette(
         if (expanded) {
             container.background = pill()
             if (horizontal) {
-                container.setPadding(dp(7), dp(5), dp(7), dp(5))
+                container.setPadding(sdp(7), sdp(5), sdp(7), sdp(5))
             } else {
-                container.setPadding(dp(5), dp(7), dp(5), dp(7))
+                container.setPadding(sdp(5), sdp(7), sdp(5), sdp(7))
             }
             // The grip belongs on the docked edge, so the strip grows inward from it and the grip
             // itself never moves. Docked right, that means building the row back to front.
@@ -265,9 +277,9 @@ class ToolPalette(
     private fun collapsedPuck(): ImageView = ImageView(activity).apply {
         setImageResource(R.drawable.ic_inkwell)
         setColorFilter(Ink.ink)
-        val pad = dp(15)
+        val pad = sdp(TOOL_GLYPH_INSET + 1)
         setPadding(pad, pad, pad, pad)
-        val side = dp(60)
+        val side = sdp(TOOL_BOX)
         layoutParams = LinearLayout.LayoutParams(side, side)
         contentDescription = "Tools — tap to open, drag to move"
         applyDragToggle(this)
@@ -278,14 +290,14 @@ class ToolPalette(
         setBackgroundColor(Ink.hairline)
         // The separator runs across the strip, so it swaps axis with it.
         layoutParams = if (horizontal) {
-            LinearLayout.LayoutParams(Ink.hair(), dp(42)).apply {
+            LinearLayout.LayoutParams(Ink.hair(), sdp(DIVIDER_RUN)).apply {
                 gravity = Gravity.CENTER_VERTICAL
-                val h = dp(4); setMargins(h, 0, h, 0)
+                val h = sdp(4); setMargins(h, 0, h, 0)
             }
         } else {
-            LinearLayout.LayoutParams(dp(42), Ink.hair()).apply {
+            LinearLayout.LayoutParams(sdp(DIVIDER_RUN), Ink.hair()).apply {
                 gravity = Gravity.CENTER_HORIZONTAL
-                val v = dp(4); setMargins(0, v, 0, v)
+                val v = sdp(4); setMargins(0, v, 0, v)
             }
         }
     }
@@ -295,9 +307,9 @@ class ToolPalette(
         ImageView(activity).apply {
             setImageResource(iconRes)
             setColorFilter(Ink.ink)
-            val pad = dp(14); setPadding(pad, pad, pad, pad)
-            val side = dp(60)
-            layoutParams = LinearLayout.LayoutParams(side, side).apply { val m = dp(2); setMargins(m, m, m, m) }
+            val pad = sdp(TOOL_GLYPH_INSET); setPadding(pad, pad, pad, pad)
+            val side = sdp(TOOL_BOX)
+            layoutParams = LinearLayout.LayoutParams(side, side).apply { val m = sdp(TOOL_GAP); setMargins(m, m, m, m) }
             isClickable = true
             contentDescription = desc
             setOnClickListener { onTap() }
@@ -307,11 +319,11 @@ class ToolPalette(
     private fun handle(): ImageView = ImageView(activity).apply {
         setImageResource(R.drawable.ic_tool_handle)
         setColorFilter(Ink.ink)
-        val pad = dp(14)
+        val pad = sdp(TOOL_GLYPH_INSET)
         setPadding(pad, pad, pad, pad)
-        val side = dp(60)
+        val side = sdp(TOOL_BOX)
         layoutParams = LinearLayout.LayoutParams(side, side).apply {
-            val m = dp(2); setMargins(m, m, m, m)
+            val m = sdp(TOOL_GAP); setMargins(m, m, m, m)
         }
         contentDescription = "Collapse / move tools"
         applyDragToggle(this)
@@ -413,11 +425,11 @@ class ToolPalette(
         val active = tool == current
         setColorFilter(if (active) Ink.paper else Ink.ink)
         alpha = if (tool.phase2) 0.35f else 1f
-        val pad = dp(14)
+        val pad = sdp(TOOL_GLYPH_INSET)
         setPadding(pad, pad, pad, pad)
-        val side = dp(60)
+        val side = sdp(TOOL_BOX)
         layoutParams = LinearLayout.LayoutParams(side, side).apply {
-            val m = dp(2); setMargins(m, m, m, m)
+            val m = sdp(TOOL_GAP); setMargins(m, m, m, m)
         }
         if (active) {
             background = GradientDrawable().apply {
@@ -489,6 +501,23 @@ class ToolPalette(
     internal companion object {
         /** Resting opacity of the docked puck — translucent so the text behind it stays readable. */
         const val IDLE_ALPHA = 0.55f
+
+        /**
+         * Design sizes for one tool button, in dp before the Menu Size scale (#200).
+         *
+         * [TOOL_BOX] is the touch target and [TOOL_GLYPH_INSET] the padding around the icon inside
+         * it, so the glyph is `TOOL_BOX - 2 * TOOL_GLYPH_INSET` — 32dp in a 60dp target by default.
+         * Keeping them separate is what lets the icon shrink without the target shrinking with it,
+         * which is what was asked for: smaller icons, still comfortably far apart.
+         */
+        const val TOOL_BOX = 60
+        const val TOOL_GLYPH_INSET = 14
+
+        /** Space between adjacent buttons, on top of each one's own inset. */
+        const val TOOL_GAP = 2
+
+        /** How far the hairline separator runs across the strip. */
+        const val DIVIDER_RUN = 42
 
         /** Where the view's leading edge sits, given its anchor and offset. */
         fun edge(anchor: Anchor, offset: Float, host: Int, view: Int): Float {

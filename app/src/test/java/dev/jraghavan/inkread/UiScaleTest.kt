@@ -26,10 +26,15 @@ class UiScaleTest {
 
     @Test
     fun nearestUiScaleIndexSnapsToTheClosestStep() {
-        assertEquals(0, DisplayPrefs.nearestUiScaleIndex(0.9f)) // exact min
+        assertEquals(0, DisplayPrefs.nearestUiScaleIndex(0.8f)) // exact min
         assertEquals(DisplayPrefs.UI_SCALES.size - 1, DisplayPrefs.nearestUiScaleIndex(1.5f)) // exact max
         // Off-grid inputs snap to the nearest step, and out-of-range clamps to an end.
-        assertEquals(1, DisplayPrefs.nearestUiScaleIndex(1.02f)) // nearest 1.0
+        // Named by value, not index: adding a step shifts every index but not what 1.02 snaps to.
+        assertEquals(
+            1.0,
+            DisplayPrefs.UI_SCALES[DisplayPrefs.nearestUiScaleIndex(1.02f)].toDouble(),
+            0.0,
+        )
         assertEquals(0, DisplayPrefs.nearestUiScaleIndex(0.1f)) // below range -> min
         assertEquals(DisplayPrefs.UI_SCALES.size - 1, DisplayPrefs.nearestUiScaleIndex(9f)) // above range -> max
     }
@@ -39,5 +44,26 @@ class UiScaleTest {
         // The DRY nearestIndex refactor must not conflate the two scales' arrays.
         assertEquals(1.0, DisplayPrefs.TEXT_SCALES[DisplayPrefs.nearestScaleIndex(1.0f)].toDouble(), 0.0)
         assertEquals(3.0, DisplayPrefs.TEXT_SCALES[DisplayPrefs.nearestScaleIndex(9f)].toDouble(), 0.0) // TEXT max 3.0
+    }
+
+    /**
+     * #200: the smallest menu size must leave the palette's tool buttons on a target the platform
+     * still calls tappable. XS exists so the pill can shrink; it must not shrink past 48dp.
+     */
+    @Test
+    fun the_smallest_menu_size_keeps_a_48dp_tool_target() {
+        val smallest = DisplayPrefs.UI_SCALES.min()
+        val target = ToolPalette.TOOL_BOX * smallest
+        assertEquals(48.0, target.toDouble(), 0.01)
+        assertTrue("no step may take the tool button below 48dp", target >= 48f)
+    }
+
+    /** The glyph stays inside its target at every step, or the icon would overflow the button. */
+    @Test
+    fun the_glyph_always_fits_inside_the_tool_target() {
+        assertTrue(
+            "glyph inset must leave a glyph",
+            ToolPalette.TOOL_BOX - 2 * ToolPalette.TOOL_GLYPH_INSET > 0,
+        )
     }
 }
