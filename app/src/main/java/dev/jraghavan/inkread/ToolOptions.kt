@@ -32,14 +32,16 @@ class ToolOptions(
     private val activity: Activity,
     private val host: FrameLayout,
     /**
-     * Where the tool palette currently sits, in host coordinates, or `null` before it has been laid
-     * out. The column opens beside the pill rather than at a fixed edge — it used to be pinned to
-     * the right whatever the reader had chosen, so docking the bar left or on top left the colours
-     * and thicknesses stranded on the far side of the page (#200).
+     * Where the tool palette currently sits, or `null` before it has been laid out. The column
+     * opens beside the pill rather than at a fixed edge — it used to be pinned to the right
+     * whatever the reader had chosen, so docking the bar left or on top left the colours and
+     * thicknesses stranded on the far side of the page (#200).
+     *
+     * Read at [show] time, not captured: the pill is draggable. The column does **not** follow a
+     * drag that happens while it is already open — re-placing a mounted view would cost an EPD
+     * repaint, and the pill moving out from under its own options is rare next to that.
      */
-    private val paletteBounds: () -> android.graphics.Rect? = { null },
-    /** Whether that palette is the horizontal (top-docked) bar rather than a vertical pill. */
-    private val paletteIsHorizontal: () -> Boolean = { false },
+    private val toolbar: () -> ToolPalette.Placement? = { null },
 ) {
     private val density = activity.resources.displayMetrics.density
     private fun dp(v: Int) = (v * density).toInt()
@@ -121,69 +123,91 @@ class ToolOptions(
     /**
      * Lay the column out beside the palette.
      *
-     * Only the axis the pill docks along is derived; the other stays centred. Centring cannot put
-     * the column off-screen, whereas aligning it to the pill's near edge could — the pill is
-     * free-dragged and can rest hard against a corner, and the column's own size is not known until
-     * it has been measured. Kept deliberately simple for that reason.
+     * The column is displaced from the pill along one axis — across from a vertical pill, above or
+     * below a horizontal bar — and lines up with the pill's docked edge on the other. Both are on
+     * screen by construction: the pill's drag is clamped to keep it fully within the host, so a
+     * margin measured from one of its edges cannot be negative or push past the far side.
      *
      * With no palette laid out yet, this falls back to the right edge, which is where the palette
-     * itself starts.
+     * itself starts. Only reachable before first layout, when no tool button exists to tap.
      */
     private fun placement(): FrameLayout.LayoutParams {
         val lp = FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.WRAP_CONTENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
         )
-        val pill = paletteBounds()
-        val gap = dp(16)
-        when (
-            sideFor(
-                hasPill = pill != null,
-                horizontal = paletteIsHorizontal(),
-                pillCenterX = pill?.centerX() ?: 0,
-                hostWidth = host.width,
-            )
-        ) {
-            Side.RIGHT_EDGE -> {
-                lp.gravity = Gravity.END or Gravity.CENTER_VERTICAL
-                lp.marginEnd = dp(88)
-            }
+        // Absolute LEFT/RIGHT rather than START/END: every input here is an absolute pixel
+        // coordinate, and the manifest declares supportsRtl, so a direction-resolved gravity would
+        // mirror the margins out from under coordinates that had not mirrored with them.
+        val pill = toolbar() ?: return lp.apply {
+            gravity = Gravity.RIGHT or Gravity.CENTER_VERTICAL
+            rightMargin = Ink.sdp(FALLBACK_INSET)
+        }
+        val gap = Ink.dp(GAP)
+        when (sideFor(pill, host.width, host.height)) {
             Side.BELOW_PILL -> {
-                lp.gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
-                lp.topMargin = pill!!.bottom + gap
+                lp.gravity = Gravity.TOP or dockedEdge(pill)
+                lp.topMargin = pill.bottom + gap
+                alignToDockedEdge(lp, pill)
+            }
+            Side.ABOVE_PILL -> {
+                lp.gravity = Gravity.BOTTOM or dockedEdge(pill)
+                lp.bottomMargin = (host.height - pill.top) + gap
+                alignToDockedEdge(lp, pill)
             }
             Side.LEFT_OF_PILL -> {
-                lp.gravity = Gravity.END or Gravity.CENTER_VERTICAL
-                lp.marginEnd = (host.width - pill!!.left) + gap
+                lp.gravity = Gravity.RIGHT or Gravity.CENTER_VERTICAL
+                lp.rightMargin = (host.width - pill.left) + gap
             }
             Side.RIGHT_OF_PILL -> {
-                lp.gravity = Gravity.START or Gravity.CENTER_VERTICAL
-                lp.marginStart = pill!!.right + gap
+                lp.gravity = Gravity.LEFT or Gravity.CENTER_VERTICAL
+                lp.leftMargin = pill.right + gap
             }
         }
         return lp
     }
 
+    /** The horizontal edge a top/bottom-placed column lines up with — the one the bar docks to. */
+    private fun dockedEdge(pill: ToolPalette.Placement) =
+        if (pill.dockedStart) Gravity.LEFT else Gravity.RIGHT
+
+    /**
+     * Line the column up with the docked end of the bar rather than centring it on the page.
+     *
+     * Centring is safe from an overflow point of view but reproduces a milder form of the bug being
+     * fixed: the bar docks into a *corner*, so a centred column lands a long way from the button
+     * that summoned it. The bar's own docked edge is on screen by construction, so aligning to it
+     * cannot overflow either.
+     */
+    private fun alignToDockedEdge(lp: FrameLayout.LayoutParams, pill: ToolPalette.Placement) {
+        if (pill.dockedStart) lp.leftMargin = pill.left
+        else lp.rightMargin = host.width - pill.right
+    }
+
     /** Which side of the palette the options column opens on. */
-    enum class Side { RIGHT_EDGE, BELOW_PILL, LEFT_OF_PILL, RIGHT_OF_PILL }
+    enum class Side { BELOW_PILL, ABOVE_PILL, LEFT_OF_PILL, RIGHT_OF_PILL }
 
     companion object {
+        /** Spacing between the pill and the column, and the pre-layout fallback inset, in dp. */
+        const val GAP = 16
+        const val FALLBACK_INSET = 88
+
         /**
          * Pick the side the column opens on (#200).
          *
          * Pure, and tested on the JVM like the pill's own placement maths, because this is the
-         * decision that was wrong: the column used to be pinned to [Side.RIGHT_EDGE] unconditionally,
+         * decision that was wrong: the column used to be pinned to the right edge unconditionally,
          * so docking the bar on the left or across the top left it on the far side of the page.
+         *
+         * Both axes get a midline test. Orientation says which axis the column is displaced along;
+         * position says which way. A horizontal bar is not necessarily a *top* bar — it is dragged
+         * over the whole page, and assuming it stays near the top pushed the column off the bottom.
          */
-        fun sideFor(hasPill: Boolean, horizontal: Boolean, pillCenterX: Int, hostWidth: Int): Side =
-            when {
-                // Nothing laid out yet: the right edge is where the palette itself starts.
-                !hasPill -> Side.RIGHT_EDGE
-                // A bar across the top — the column drops beneath it.
-                horizontal -> Side.BELOW_PILL
-                // A vertical pill opens the column into the page, away from its own edge.
-                pillCenterX * 2 > hostWidth -> Side.LEFT_OF_PILL
-                else -> Side.RIGHT_OF_PILL
+        fun sideFor(pill: ToolPalette.Placement, hostWidth: Int, hostHeight: Int): Side =
+            if (pill.horizontal) {
+                if (pill.centerY * 2 > hostHeight) Side.ABOVE_PILL else Side.BELOW_PILL
+            } else {
+                if (pill.centerX * 2 > hostWidth) Side.LEFT_OF_PILL else Side.RIGHT_OF_PILL
             }
     }
 

@@ -1,7 +1,7 @@
 package dev.jraghavan.inkread
 
-import dev.jraghavan.inkread.ToolOptions.Side
 import dev.jraghavan.inkread.ToolOptions.Companion.sideFor
+import dev.jraghavan.inkread.ToolOptions.Side
 import org.junit.Assert.assertEquals
 import org.junit.Test
 
@@ -17,70 +17,73 @@ import org.junit.Test
 class ToolOptionsPlacementTest {
 
     private val hostW = 1920
+    private val hostH = 2560
 
-    /** A vertical pill docked right — the default, and the one case the old code got right. */
+    private fun pill(
+        left: Int,
+        top: Int,
+        right: Int,
+        bottom: Int,
+        horizontal: Boolean = false,
+        dockedStart: Boolean = false,
+    ) = ToolPalette.Placement(left, top, right, bottom, horizontal, dockedStart)
+
+    /** A vertical pill, centred at [centerX], the width the expanded strip actually is. */
+    private fun verticalPillAt(centerX: Int) = pill(centerX - 56, 900, centerX + 56, 1660)
+
+    /** A horizontal bar, centred at [centerY], spanning from the left dock. */
+    private fun horizontalBarAt(centerY: Int, dockedStart: Boolean = true) =
+        pill(20, centerY - 68, 1040, centerY + 68, horizontal = true, dockedStart = dockedStart)
+
     @Test
-    fun a_pill_on_the_right_opens_the_column_to_its_left() {
-        assertEquals(
-            Side.LEFT_OF_PILL,
-            sideFor(hasPill = true, horizontal = false, pillCenterX = 1830, hostWidth = hostW),
-        )
+    fun aPillOnTheRightOpensTheColumnToItsLeft() {
+        assertEquals(Side.LEFT_OF_PILL, sideFor(verticalPillAt(1830), hostW, hostH))
     }
 
     /** The regression: docked left, the column used to stay on the right regardless. */
     @Test
-    fun a_pill_on_the_left_opens_the_column_to_its_right() {
-        assertEquals(
-            Side.RIGHT_OF_PILL,
-            sideFor(hasPill = true, horizontal = false, pillCenterX = 90, hostWidth = hostW),
-        )
-    }
-
-    /** Docked across the top there is no side to open into, so it drops below the bar. */
-    @Test
-    fun a_bar_across_the_top_opens_the_column_beneath_it() {
-        assertEquals(
-            Side.BELOW_PILL,
-            sideFor(hasPill = true, horizontal = true, pillCenterX = 960, hostWidth = hostW),
-        )
-    }
-
-    /** Orientation wins over position: a top bar dropped below even when dragged to an edge. */
-    @Test
-    fun a_horizontal_bar_stays_below_wherever_it_is_dragged() {
-        for (x in intArrayOf(0, 90, 960, 1830, hostW)) {
-            assertEquals(
-                "dragged to x=$x",
-                Side.BELOW_PILL,
-                sideFor(hasPill = true, horizontal = true, pillCenterX = x, hostWidth = hostW),
-            )
-        }
-    }
-
-    /** Before the palette has been laid out there is nothing to sit beside. */
-    @Test
-    fun with_no_palette_yet_the_column_falls_back_to_the_right_edge() {
-        assertEquals(
-            Side.RIGHT_EDGE,
-            sideFor(hasPill = false, horizontal = false, pillCenterX = 0, hostWidth = hostW),
-        )
-    }
-
-    /** Dead centre counts as the left half, so the column opens into the wider space to the right. */
-    @Test
-    fun a_pill_at_the_exact_centre_opens_to_its_right() {
-        assertEquals(
-            Side.RIGHT_OF_PILL,
-            sideFor(hasPill = true, horizontal = false, pillCenterX = hostW / 2, hostWidth = hostW),
-        )
+    fun aPillOnTheLeftOpensTheColumnToItsRight() {
+        assertEquals(Side.RIGHT_OF_PILL, sideFor(verticalPillAt(90), hostW, hostH))
     }
 
     /** The pill is draggable, so the side must track it across the midline, not stay where it docked. */
     @Test
-    fun dragging_a_pill_across_the_midline_flips_the_side() {
-        val justLeft = sideFor(true, horizontal = false, pillCenterX = hostW / 2 - 1, hostWidth = hostW)
-        val justRight = sideFor(true, horizontal = false, pillCenterX = hostW / 2 + 1, hostWidth = hostW)
-        assertEquals(Side.RIGHT_OF_PILL, justLeft)
-        assertEquals(Side.LEFT_OF_PILL, justRight)
+    fun draggingAPillAcrossTheMidlineFlipsTheSide() {
+        assertEquals(Side.RIGHT_OF_PILL, sideFor(verticalPillAt(hostW / 2 - 1), hostW, hostH))
+        assertEquals(Side.LEFT_OF_PILL, sideFor(verticalPillAt(hostW / 2 + 1), hostW, hostH))
+    }
+
+    @Test
+    fun aBarNearTheTopOpensTheColumnBeneathIt() {
+        assertEquals(Side.BELOW_PILL, sideFor(horizontalBarAt(150), hostW, hostH))
+    }
+
+    /**
+     * The bug an earlier version of this test enshrined: `horizontal` is an orientation, not a
+     * position. The bar is dragged over the whole page, and assuming it stays near the top pushed
+     * the options column off the bottom of the screen, where it was silently clipped.
+     */
+    @Test
+    fun aBarDraggedDownThePageOpensTheColumnAboveIt() {
+        assertEquals(Side.ABOVE_PILL, sideFor(horizontalBarAt(hostH - 200), hostW, hostH))
+    }
+
+    @Test
+    fun aBarCrossingTheVerticalMidlineFlipsTheSide() {
+        assertEquals(Side.BELOW_PILL, sideFor(horizontalBarAt(hostH / 2 - 1), hostW, hostH))
+        assertEquals(Side.ABOVE_PILL, sideFor(horizontalBarAt(hostH / 2 + 1), hostW, hostH))
+    }
+
+    /** Orientation picks the axis; only position picks the direction along it. */
+    @Test
+    fun orientationDecidesTheAxisIndependentlyOfPosition() {
+        for (x in intArrayOf(0, 480, 960, 1440, hostW)) {
+            val bar = pill(x, 100, x + 400, 236, horizontal = true, dockedStart = true)
+            assertEquals("bar at x=$x", Side.BELOW_PILL, sideFor(bar, hostW, hostH))
+        }
+        for (y in intArrayOf(0, 640, 1280, 1920, hostH)) {
+            val column = pill(1700, y, 1812, y + 400, horizontal = false, dockedStart = false)
+            assertEquals("pill at y=$y", Side.LEFT_OF_PILL, sideFor(column, hostW, hostH))
+        }
     }
 }

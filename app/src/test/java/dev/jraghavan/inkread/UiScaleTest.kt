@@ -47,23 +47,55 @@ class UiScaleTest {
     }
 
     /**
-     * #200: the smallest menu size must leave the palette's tool buttons on a target the platform
-     * still calls tappable. XS exists so the pill can shrink; it must not shrink past 48dp.
+     * #200. The reader asked for smaller icons "but with some margin to keep some distance between
+     * button for ease of activation". Uniform scaling cannot do that — it preserves every ratio, so
+     * the buttons stay exactly as crowded. Only the glyph scales, so a smaller Menu Size must leave
+     * proportionally MORE clearance around each icon, not the same.
+     *
+     * This is the assertion that fails against a uniform-scaling implementation.
      */
     @Test
-    fun the_smallest_menu_size_keeps_a_48dp_tool_target() {
-        val smallest = DisplayPrefs.UI_SCALES.min()
-        val target = ToolPalette.TOOL_BOX * smallest
-        assertEquals(48.0, target.toDouble(), 0.01)
-        assertTrue("no step may take the tool button below 48dp", target >= 48f)
+    fun aSmallerMenuSizeWidensTheClearanceAroundEachIcon() {
+        val steps = DisplayPrefs.UI_SCALES.sorted()
+        val clearance = steps.map { scale ->
+            val box = ToolPalette.boxDp(scale)
+            (box - ToolPalette.glyphDp(scale)).toDouble() / box
+        }
+        for (i in 1 until clearance.size) {
+            assertTrue(
+                "clearance share must fall as the scale grows: ${clearance[i - 1]} -> ${clearance[i]}",
+                clearance[i] < clearance[i - 1],
+            )
+        }
     }
 
-    /** The glyph stays inside its target at every step, or the icon would overflow the button. */
+    /** Menu Size M must reproduce the toolbar exactly as it was, or every reader's pill moves. */
     @Test
-    fun the_glyph_always_fits_inside_the_tool_target() {
-        assertTrue(
-            "glyph inset must leave a glyph",
-            ToolPalette.TOOL_BOX - 2 * ToolPalette.TOOL_GLYPH_INSET > 0,
-        )
+    fun theDefaultMenuSizeReproducesTheOriginalButton() {
+        assertEquals(32, ToolPalette.glyphDp(1.0f))
+        assertEquals(60, ToolPalette.boxDp(1.0f))
+    }
+
+    /**
+     * No offered step may take the touch target under the platform floor. Asserted across every
+     * step rather than the smallest, so adding one cannot quietly slip beneath it.
+     */
+    @Test
+    fun noMenuSizeTakesTheToolTargetBelowTheFloor() {
+        for (scale in DisplayPrefs.UI_SCALES) {
+            assertTrue(
+                "scale $scale gives ${ToolPalette.boxDp(scale)}dp",
+                ToolPalette.boxDp(scale) >= ToolPalette.TOOL_BOX_MIN,
+            )
+        }
+    }
+
+    /** The glyph must stay strictly inside its target at every step, with room to read as an icon. */
+    @Test
+    fun theGlyphFitsItsTargetAtEveryStep() {
+        for (scale in DisplayPrefs.UI_SCALES) {
+            val slack = ToolPalette.boxDp(scale) - ToolPalette.glyphDp(scale)
+            assertTrue("scale $scale leaves ${slack}dp around the glyph", slack >= 2 * ToolPalette.TOOL_INSET)
+        }
     }
 }

@@ -211,6 +211,9 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             refreshCadence.interval = n // @Volatile — safe from this UI-thread setter
             engine.execute { refreshCadence.reset() } // restart the count on the engine thread (#99)
         }
+        override fun refreshToolPalette() {
+            if (::toolPalette.isInitialized) toolPalette.refreshChrome()
+        }
         override fun setReflowMode(on: Boolean) = this@ReaderActivity.setReflowMode(on)
         override fun zoomIn() = zoomBy(ZOOM_STEP)
         override fun zoomOut() = zoomBy(1f / ZOOM_STEP)
@@ -578,12 +581,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         // top no longer strands the colours on the right of the page (#200). Read through lambdas
         // rather than captured once: the pill is draggable, so its position is only true at the
         // moment the column is shown.
-        toolOptions = ToolOptions(
-            this,
-            root,
-            paletteBounds = { if (::toolPalette.isInitialized) toolPalette.boundsInHost() else null },
-            paletteIsHorizontal = { ::toolPalette.isInitialized && toolPalette.isHorizontal },
-        )
+        toolOptions = ToolOptions(this, root, toolbar = { toolPalette.placement() })
         // Restore the saved pen thickness (#199) before any stroke can be committed, so the first
         // stroke after a relaunch is the width the reader chose rather than the default.
         stylus.penWidthIndex = prefs

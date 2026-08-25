@@ -56,6 +56,9 @@ class AdjustSheetController(private val host: Host) {
         /** Apply a changed periodic full-refresh interval (#99) to the live page-turn cadence. */
         fun applyFullRefreshInterval(n: Int)
 
+        /** Rebuild the floating tool palette at the current [Ink.uiScale] (#133 / #200). */
+        fun refreshToolPalette()
+
         /** Toggle PDF reflow; owns the zoom/pan/progress-dialog state the toggle disturbs. */
         fun setReflowMode(on: Boolean)
 
@@ -423,14 +426,19 @@ class AdjustSheetController(private val host: Host) {
         return container
     }
 
-    /** Persist + apply the menu/chrome scale (#133) for large panels (e.g. the Manta). The reader's
-     *  menus read [Ink.uiScale] as they build, so the new size lands as each menu/sheet is next
-     *  opened; this open sheet keeps its current size, so a toast confirms the change. */
+    /** Persist + apply the menu/chrome scale (#133) for large panels (e.g. the Manta).
+     *
+     *  Menus read [Ink.uiScale] as they build, so most of the reader's chrome takes the new size
+     *  when it is next opened. The tool palette is the exception: it is built once and stays on
+     *  screen, so it is rebuilt here. Without that it kept its old size until something unrelated
+     *  happened to re-render it, and the reader — looking straight at the toolbar while the toast
+     *  told them to reopen a menu — would reasonably conclude the setting did not cover it (#200). */
     private fun applyUiScale(scale: Float) {
         prefs.uiScale = scale
         Ink.uiScale = scale
+        host.refreshToolPalette()
         val label = DisplayPrefs.UI_SCALE_LABELS[DisplayPrefs.nearestUiScaleIndex(scale)]
-        Toast.makeText(activity, "Menu size $label — reopen a menu to see it", Toast.LENGTH_SHORT).show()
+        Toast.makeText(activity, "Menu size $label — menus resize as you reopen them", Toast.LENGTH_SHORT).show()
     }
 
     /** A reading style preset (1.10): a bundle of (text scale, line-spacing index, contrast step,
