@@ -31,6 +31,15 @@ import android.widget.TextView
 class ToolOptions(
     private val activity: Activity,
     private val host: FrameLayout,
+    /**
+     * Where the tool palette currently sits, in host coordinates, or `null` before it has been laid
+     * out. The column opens beside the pill rather than at a fixed edge — it used to be pinned to
+     * the right whatever the reader had chosen, so docking the bar left or on top left the colours
+     * and thicknesses stranded on the far side of the page (#200).
+     */
+    private val paletteBounds: () -> android.graphics.Rect? = { null },
+    /** Whether that palette is the horizontal (top-docked) bar rather than a vertical pill. */
+    private val paletteIsHorizontal: () -> Boolean = { false },
 ) {
     private val density = activity.resources.displayMetrics.density
     private fun dp(v: Int) = (v * density).toInt()
@@ -105,12 +114,77 @@ class ToolOptions(
                 })
             }
         }
+        host.addView(col, placement())
+        panel = col
+    }
+
+    /**
+     * Lay the column out beside the palette.
+     *
+     * Only the axis the pill docks along is derived; the other stays centred. Centring cannot put
+     * the column off-screen, whereas aligning it to the pill's near edge could — the pill is
+     * free-dragged and can rest hard against a corner, and the column's own size is not known until
+     * it has been measured. Kept deliberately simple for that reason.
+     *
+     * With no palette laid out yet, this falls back to the right edge, which is where the palette
+     * itself starts.
+     */
+    private fun placement(): FrameLayout.LayoutParams {
         val lp = FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.WRAP_CONTENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { gravity = Gravity.END or Gravity.CENTER_VERTICAL; marginEnd = dp(88) }
-        host.addView(col, lp)
-        panel = col
+        )
+        val pill = paletteBounds()
+        val gap = dp(16)
+        when (
+            sideFor(
+                hasPill = pill != null,
+                horizontal = paletteIsHorizontal(),
+                pillCenterX = pill?.centerX() ?: 0,
+                hostWidth = host.width,
+            )
+        ) {
+            Side.RIGHT_EDGE -> {
+                lp.gravity = Gravity.END or Gravity.CENTER_VERTICAL
+                lp.marginEnd = dp(88)
+            }
+            Side.BELOW_PILL -> {
+                lp.gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
+                lp.topMargin = pill!!.bottom + gap
+            }
+            Side.LEFT_OF_PILL -> {
+                lp.gravity = Gravity.END or Gravity.CENTER_VERTICAL
+                lp.marginEnd = (host.width - pill!!.left) + gap
+            }
+            Side.RIGHT_OF_PILL -> {
+                lp.gravity = Gravity.START or Gravity.CENTER_VERTICAL
+                lp.marginStart = pill!!.right + gap
+            }
+        }
+        return lp
+    }
+
+    /** Which side of the palette the options column opens on. */
+    enum class Side { RIGHT_EDGE, BELOW_PILL, LEFT_OF_PILL, RIGHT_OF_PILL }
+
+    companion object {
+        /**
+         * Pick the side the column opens on (#200).
+         *
+         * Pure, and tested on the JVM like the pill's own placement maths, because this is the
+         * decision that was wrong: the column used to be pinned to [Side.RIGHT_EDGE] unconditionally,
+         * so docking the bar on the left or across the top left it on the far side of the page.
+         */
+        fun sideFor(hasPill: Boolean, horizontal: Boolean, pillCenterX: Int, hostWidth: Int): Side =
+            when {
+                // Nothing laid out yet: the right edge is where the palette itself starts.
+                !hasPill -> Side.RIGHT_EDGE
+                // A bar across the top — the column drops beneath it.
+                horizontal -> Side.BELOW_PILL
+                // A vertical pill opens the column into the page, away from its own edge.
+                pillCenterX * 2 > hostWidth -> Side.LEFT_OF_PILL
+                else -> Side.RIGHT_OF_PILL
+            }
     }
 
     /** Remove the column (only on a tool switch away from an inking tool). */

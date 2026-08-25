@@ -243,6 +243,24 @@ class ToolPalette(
         }
     }
 
+    /**
+     * Where the pill actually is, in host coordinates, drag translation included — `null` until the
+     * first layout has given it a size.
+     *
+     * Satellite chrome (the tool-options column) has to open beside the pill wherever the reader
+     * parked it, and only the pill knows where that is. Reported as geometry rather than as a
+     * placement so the caller keeps its own layout decisions (#200).
+     */
+    fun boundsInHost(): android.graphics.Rect? {
+        if (container.width == 0 || container.height == 0) return null
+        val left = (container.left + container.translationX).toInt()
+        val top = (container.top + container.translationY).toInt()
+        return android.graphics.Rect(left, top, left + container.width, top + container.height)
+    }
+
+    /** True when the strip runs across the screen (docked to the top) rather than down an edge. */
+    val isHorizontal: Boolean get() = horizontal
+
     /** The collapsed puck: the inkwell brand mark in the circle (tap = expand, drag = move). */
     private fun collapsedPuck(): ImageView = ImageView(activity).apply {
         setImageResource(R.drawable.ic_inkwell)

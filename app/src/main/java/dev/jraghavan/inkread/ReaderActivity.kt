@@ -574,7 +574,16 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             },
         )
         selectionToolbar = SelectionToolbar(this, root) { action -> lasso.onSelectionAction(action) }
-        toolOptions = ToolOptions(this, root)
+        // The column opens beside the pill wherever it is parked, so docking the bar left or on
+        // top no longer strands the colours on the right of the page (#200). Read through lambdas
+        // rather than captured once: the pill is draggable, so its position is only true at the
+        // moment the column is shown.
+        toolOptions = ToolOptions(
+            this,
+            root,
+            paletteBounds = { if (::toolPalette.isInitialized) toolPalette.boundsInHost() else null },
+            paletteIsHorizontal = { ::toolPalette.isInitialized && toolPalette.isHorizontal },
+        )
         // Restore the saved pen thickness (#199) before any stroke can be committed, so the first
         // stroke after a relaunch is the width the reader chose rather than the default.
         stylus.penWidthIndex = prefs
