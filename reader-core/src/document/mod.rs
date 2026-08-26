@@ -105,6 +105,8 @@ pub struct Typography {
     pub align_code: i32,
     /// Text columns per page — 1 or 2 (#194).
     pub columns: i32,
+    /// Page margin as a percentage of page width (RR16-FR2 / #167).
+    pub margin_pct: i32,
 }
 
 impl Default for Typography {
@@ -117,6 +119,7 @@ impl Default for Typography {
             line_spacing: 1.4,
             align_code: 0,
             columns: 1,
+            margin_pct: crate::document::reflow::DEFAULT_MARGIN_PCT as i32,
         }
     }
 }
@@ -482,6 +485,13 @@ pub trait Document {
         None
     }
 
+    /// Set the reflow **page margin**, as a percentage of page width, and repaginate, preserving
+    /// the chapter (RR16-FR2 / RR9-FR4 / #167). Returns the new page, or `None` for a fixed-layout
+    /// format (PDF), which has margins of its own that reflow does not own. Default: unsupported.
+    fn set_margin(&self, _margin_pct: i32, _current_page: usize) -> Option<usize> {
+        None
+    }
+
     /// Columns the layout is **actually** using, which is not always what was asked for: a page too
     /// narrow for a readable measure lays out single-column regardless (#194). The shell needs this
     /// to tell the reader their request was declined rather than ignored. Default: 1.
@@ -515,6 +525,7 @@ pub trait Document {
             t.line_spacing,
             t.align_code,
             t.columns,
+            t.margin_pct,
             current_page,
         )
     }
@@ -534,6 +545,7 @@ pub trait Document {
         line_spacing: f32,
         align_code: i32,
         columns: i32,
+        margin_pct: i32,
         current_page: usize,
     ) -> Option<usize> {
         // Threaded, not batched: each step repaginates, so the next must resolve its chapter
@@ -558,6 +570,10 @@ pub trait Document {
             at = p;
         }
         if let Some(p) = self.set_columns(columns, at) {
+            page = Some(p);
+            at = p;
+        }
+        if let Some(p) = self.set_margin(margin_pct, at) {
             page = Some(p);
         }
         page

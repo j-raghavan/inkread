@@ -213,6 +213,7 @@ pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeOpenDocumen
     line_spacing: jfloat,
     align_code: jint,
     columns: jint,
+    margin_pct: jint,
 ) -> jlong {
     env.with_env(|env| -> jni::errors::Result<jlong> {
         let path: String = path.try_to_string(env)?;
@@ -228,6 +229,7 @@ pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeOpenDocumen
             line_spacing,
             align_code,
             columns,
+            margin_pct,
         };
 
         let bytes = read_document_file(&path).map_err(|e| throw(env, &e))?;
@@ -1037,9 +1039,9 @@ pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeCancelPagin
     .resolve::<jni::errors::ThrowRuntimeExAndDefault>();
 }
 
-// nativeSetTypography(handle, scale, fontId, lineSpacing, alignCode) : int — apply all four reflow
-// typography settings and repaginate ONCE (RR4). The open path restores persisted settings with
-// this instead of four separate calls: one repagination instead of four, which on a large book is
+// nativeSetTypography(handle, scale, fontId, lineSpacing, alignCode, columns, marginPct) : int —
+// apply every reflow typography setting and repaginate ONCE (RR4). The open path restores persisted
+// settings with this instead of one call each: one repagination instead of six, which on a large book is
 // the difference between opening in seconds and opening in minutes (#161/#162). Returns the new
 // page index, or -1 for a fixed-layout PDF. Re-render after.
 #[unsafe(no_mangle)]
@@ -1052,10 +1054,39 @@ pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeSetTypograp
     line_spacing: jfloat,
     align_code: jint,
     columns: jint,
+    margin_pct: jint,
 ) -> jint {
     env.with_env(|env| -> jni::errors::Result<jint> {
         let session = unsafe { session_mut(handle) }.map_err(|e| throw(env, &e))?;
-        if session.set_typography(scale, font_id, line_spacing, align_code, columns) {
+        if session.set_typography(
+            scale,
+            font_id,
+            line_spacing,
+            align_code,
+            columns,
+            margin_pct,
+        ) {
+            Ok(session.current_page() as jint)
+        } else {
+            Ok(-1)
+        }
+    })
+    .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
+}
+
+// nativeSetMargin(handle, marginPct) : int — reflow page margin as a percentage of page width
+// (RR16-FR2 / #167); repaginates EPUB. Out-of-range values are clamped by the backend, not rejected
+// (RR21-FR3). Returns the new page index, or -1 for a fixed-layout PDF. Re-render after.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeSetMargin<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+    margin_pct: jint,
+) -> jint {
+    env.with_env(|env| -> jni::errors::Result<jint> {
+        let session = unsafe { session_mut(handle) }.map_err(|e| throw(env, &e))?;
+        if session.set_margin(margin_pct) {
             Ok(session.current_page() as jint)
         } else {
             Ok(-1)
