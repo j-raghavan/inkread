@@ -86,8 +86,27 @@ class ToolPalette(
     var current: Tool = Tool.PEN
         private set
 
-    private val density = activity.resources.displayMetrics.density
-    private fun dp(v: Int) = (v * density).toInt()
+    /**
+     * The pill's sizing (#133 / #200). Menu Size scales the **glyph**; the spacing around it does
+     * not move.
+     *
+     * The reader asked for "smaller icons ... but with some margin to keep some distance between
+     * button for ease of activation". Scaling everything by one factor cannot deliver that — every
+     * ratio survives, so the buttons end up proportionally as crowded as they started. Scaling only
+     * the glyph and holding the inset and the gap at their design size means a smaller icon leaves
+     * *more* clearance around it, not the same.
+     *
+     * The box is derived rather than set, so the glyph is always exactly [TOOL_GLYPH] scaled and
+     * always centred, including when [TOOL_BOX_MIN] catches it.
+     */
+    private fun glyphPx() = Ink.dp(glyphDp(Ink.uiScale))
+
+    private fun boxPx() = Ink.dp(boxDp(Ink.uiScale))
+
+    private fun insetPx() = (boxPx() - glyphPx()) / 2
+
+    /** The separator runs most of the way across the strip, so it tracks the button box. */
+    private fun dividerRunPx() = boxPx() * DIVIDER_RUN_PERCENT / 100
     private val touchSlop = ViewConfiguration.get(activity).scaledTouchSlop
 
     /**
@@ -130,7 +149,7 @@ class ToolPalette(
                 // right, a horizontal bar sits across the top, which is where it was asked for.
                 val sideGravity = if (side == Anchor.START) Gravity.START else Gravity.END
                 gravity = sideGravity or if (horizontal) Gravity.TOP else Gravity.CENTER_VERTICAL
-                val inset = dp(6)
+                val inset = Ink.dp(6)
                 // Clearance applies along the docked side, and only to the horizontal form: the
                 // vertical pill rides the middle of its edge and never reaches the corner.
                 val docked = inset + if (horizontal) dockClearance else 0
@@ -219,9 +238,9 @@ class ToolPalette(
         if (expanded) {
             container.background = pill()
             if (horizontal) {
-                container.setPadding(dp(7), dp(5), dp(7), dp(5))
+                container.setPadding(Ink.dp(7), Ink.dp(5), Ink.dp(7), Ink.dp(5))
             } else {
-                container.setPadding(dp(5), dp(7), dp(5), dp(7))
+                container.setPadding(Ink.dp(5), Ink.dp(7), Ink.dp(5), Ink.dp(7))
             }
             // The grip belongs on the docked edge, so the strip grows inward from it and the grip
             // itself never moves. Docked right, that means building the row back to front.
@@ -243,13 +262,36 @@ class ToolPalette(
         }
     }
 
+    /**
+     * Where the pill actually is, and how it is oriented — `null` until the first layout has given
+     * it a size.
+     *
+     * Satellite chrome (the tool-options column) has to open beside the pill wherever the reader
+     * parked it, and only the pill knows where that is. Reported as geometry rather than as a
+     * placement so the caller keeps its own layout decisions (#200). Bounds and orientation travel
+     * together because they are one fact: there is no such thing as an orientation without a pill.
+     */
+    fun placement(): Placement? {
+        if (container.width == 0 || container.height == 0) return null
+        val left = (container.left + container.translationX).toInt()
+        val top = (container.top + container.translationY).toInt()
+        return Placement(
+            left = left,
+            top = top,
+            right = left + container.width,
+            bottom = top + container.height,
+            horizontal = horizontal,
+            dockedStart = side == Anchor.START,
+        )
+    }
+
     /** The collapsed puck: the inkwell brand mark in the circle (tap = expand, drag = move). */
     private fun collapsedPuck(): ImageView = ImageView(activity).apply {
         setImageResource(R.drawable.ic_inkwell)
         setColorFilter(Ink.ink)
-        val pad = dp(15)
+        val pad = insetPx()
         setPadding(pad, pad, pad, pad)
-        val side = dp(60)
+        val side = boxPx()
         layoutParams = LinearLayout.LayoutParams(side, side)
         contentDescription = "Tools — tap to open, drag to move"
         applyDragToggle(this)
@@ -260,14 +302,14 @@ class ToolPalette(
         setBackgroundColor(Ink.hairline)
         // The separator runs across the strip, so it swaps axis with it.
         layoutParams = if (horizontal) {
-            LinearLayout.LayoutParams(Ink.hair(), dp(42)).apply {
+            LinearLayout.LayoutParams(Ink.hair(), dividerRunPx()).apply {
                 gravity = Gravity.CENTER_VERTICAL
-                val h = dp(4); setMargins(h, 0, h, 0)
+                val h = Ink.dp(DIVIDER_GAP); setMargins(h, 0, h, 0)
             }
         } else {
-            LinearLayout.LayoutParams(dp(42), Ink.hair()).apply {
+            LinearLayout.LayoutParams(dividerRunPx(), Ink.hair()).apply {
                 gravity = Gravity.CENTER_HORIZONTAL
-                val v = dp(4); setMargins(0, v, 0, v)
+                val v = Ink.dp(DIVIDER_GAP); setMargins(0, v, 0, v)
             }
         }
     }
@@ -277,9 +319,9 @@ class ToolPalette(
         ImageView(activity).apply {
             setImageResource(iconRes)
             setColorFilter(Ink.ink)
-            val pad = dp(14); setPadding(pad, pad, pad, pad)
-            val side = dp(60)
-            layoutParams = LinearLayout.LayoutParams(side, side).apply { val m = dp(2); setMargins(m, m, m, m) }
+            val pad = insetPx(); setPadding(pad, pad, pad, pad)
+            val side = boxPx()
+            layoutParams = LinearLayout.LayoutParams(side, side).apply { val m = Ink.dp(TOOL_GAP); setMargins(m, m, m, m) }
             isClickable = true
             contentDescription = desc
             setOnClickListener { onTap() }
@@ -289,11 +331,11 @@ class ToolPalette(
     private fun handle(): ImageView = ImageView(activity).apply {
         setImageResource(R.drawable.ic_tool_handle)
         setColorFilter(Ink.ink)
-        val pad = dp(14)
+        val pad = insetPx()
         setPadding(pad, pad, pad, pad)
-        val side = dp(60)
+        val side = boxPx()
         layoutParams = LinearLayout.LayoutParams(side, side).apply {
-            val m = dp(2); setMargins(m, m, m, m)
+            val m = Ink.dp(TOOL_GAP); setMargins(m, m, m, m)
         }
         contentDescription = "Collapse / move tools"
         applyDragToggle(this)
@@ -332,6 +374,25 @@ class ToolPalette(
                 }
                 else -> false
             }
+        }
+    }
+
+    /**
+     * Rebuild the strip at the current [Ink.uiScale] (#133 / #200).
+     *
+     * The reader changes Menu Size in a sheet that sits over the pill; without this the pill keeps
+     * whatever size it was built at until something else happens to re-render it, so the setting
+     * looks as though it does not reach the toolbar at all. Re-anchored for the same reason a
+     * collapse is: the pill is centred on its axis, so changing its size moves the grip unless the
+     * offset compensates.
+     */
+    fun refreshChrome() {
+        val sizeBefore = if (horizontal) container.width else container.height
+        render()
+        reanchor(sizeBefore) {
+            reattach()
+            persist()
+            onChrome()
         }
     }
 
@@ -395,11 +456,11 @@ class ToolPalette(
         val active = tool == current
         setColorFilter(if (active) Ink.paper else Ink.ink)
         alpha = if (tool.phase2) 0.35f else 1f
-        val pad = dp(14)
+        val pad = insetPx()
         setPadding(pad, pad, pad, pad)
-        val side = dp(60)
+        val side = boxPx()
         layoutParams = LinearLayout.LayoutParams(side, side).apply {
-            val m = dp(2); setMargins(m, m, m, m)
+            val m = Ink.dp(TOOL_GAP); setMargins(m, m, m, m)
         }
         if (active) {
             background = GradientDrawable().apply {
@@ -451,6 +512,27 @@ class ToolPalette(
     enum class Orientation { VERTICAL, HORIZONTAL }
 
     /**
+     * Everything satellite chrome needs to sit beside the pill: where it is, which way it runs, and
+     * which edge it docks to (#200). One object rather than several accessors, so a caller cannot
+     * hold an orientation for a pill that is not laid out.
+     */
+    data class Placement(
+        val left: Int,
+        val top: Int,
+        val right: Int,
+        val bottom: Int,
+        /** The strip runs across the screen rather than down an edge. */
+        val horizontal: Boolean,
+        /** It docks to the left/top edge rather than the right. */
+        val dockedStart: Boolean,
+    ) {
+        // Plain Ints rather than a `Rect`: this is the input to placement decisions that are tested
+        // on the JVM, and an android.graphics.Rect is a stub there.
+        val centerX get() = (left + right) / 2
+        val centerY get() = (top + bottom) / 2
+    }
+
+    /**
      * A parked position for the pill, held as host-relative fractions (#200). Persisted by the
      * host so the toolbar reopens where the reader left it instead of back at the default dock.
      */
@@ -471,6 +553,46 @@ class ToolPalette(
     internal companion object {
         /** Resting opacity of the docked puck — translucent so the text behind it stays readable. */
         const val IDLE_ALPHA = 0.55f
+
+        /**
+         * Design sizes for one tool button, in dp (#200).
+         *
+         * Only [TOOL_GLYPH] answers to Menu Size. [TOOL_INSET] and [TOOL_GAP] are held at their
+         * design size, so shrinking the icon widens the clearance around it rather than closing it
+         * up — see the sizing helpers above for why one uniform factor cannot do that.
+         *
+         * At Menu Size M this reproduces the original 32dp glyph in a 60dp box exactly, so a reader
+         * who never touches the setting sees the toolbar they already had.
+         */
+        const val TOOL_GLYPH = 32
+        const val TOOL_INSET = 14
+        const val TOOL_GAP = 2
+
+        /**
+         * The smallest touch target the box may be derived down to, whatever the glyph does.
+         *
+         * 48dp is the platform's recommended minimum. It is a floor rather than the target itself
+         * because this is a stylus-first panel where the pen tip is under a millimetre — the floor
+         * is there for the finger, not the pen.
+         */
+        const val TOOL_BOX_MIN = 48
+
+        /** How far the hairline separator runs across the strip, as a percentage of the box. */
+        const val DIVIDER_RUN_PERCENT = 70
+
+        /** Clearance either side of a separator. Spacing, so it does not scale. */
+        const val DIVIDER_GAP = 4
+
+        /**
+         * The design sizes at a given Menu Size, in dp before density (#200).
+         *
+         * Resolved in dp and multiplied by density once, rather than scaling an already-converted
+         * pixel size: two truncations would leave the box a fraction under the [TOOL_BOX_MIN] floor
+         * the setting is chosen against.
+         */
+        fun glyphDp(uiScale: Float) = (TOOL_GLYPH * uiScale).toInt()
+
+        fun boxDp(uiScale: Float) = maxOf(TOOL_BOX_MIN, glyphDp(uiScale) + 2 * TOOL_INSET)
 
         /** Where the view's leading edge sits, given its anchor and offset. */
         fun edge(anchor: Anchor, offset: Float, host: Int, view: Int): Float {

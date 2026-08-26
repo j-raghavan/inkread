@@ -117,10 +117,15 @@ class DisplayPrefs(private val context: Context) {
         /** Reflow font-size steps (multiples of the core's base body size); 1.0 = default. */
         val TEXT_SCALES = floatArrayOf(0.6f, 0.7f, 0.8f, 0.9f, 1.0f, 1.15f, 1.3f, 1.5f, 1.75f, 2.0f, 2.5f, 3.0f)
 
-        /** Menu/chrome scale steps (#133); 1.0 = current sizing, the default (index 1). Kept small
-         *  and coarse so the segmented control stays e-ink-tappable. */
-        val UI_SCALES = floatArrayOf(0.9f, 1.0f, 1.15f, 1.3f, 1.5f)
-        val UI_SCALE_LABELS = listOf("S", "M", "L", "XL", "2XL")
+        /** Menu/chrome scale steps (#133); 1.0 = the default sizing. Kept small and coarse so the
+         *  segmented control stays e-ink-tappable.
+         *
+         *  XS (0.8) exists because the tool palette read as oversized once it could be docked along
+         *  the top (#200). It is the smallest step offered on purpose: it puts the palette's 60dp
+         *  button on exactly 48dp, the minimum touch target the platform recommends. Anything
+         *  smaller is below that floor and is not offered without a device in hand. */
+        val UI_SCALES = floatArrayOf(0.8f, 0.9f, 1.0f, 1.15f, 1.3f, 1.5f)
+        val UI_SCALE_LABELS = listOf("XS", "S", "M", "L", "XL", "2XL")
 
         /** Page-turn intervals for the periodic full refresh (#99); index 0 = Off, the default. */
         val REFRESH_INTERVALS = listOf(0, 1, 3, 5, 10)
