@@ -302,6 +302,53 @@ fn a_declared_normal_font_weight_unbolds_a_heading() {
     assert!(p[0].lines[0].runs[0].bold);
 }
 
+/// #170: a declared `font-style` has to reach the placed run, or the renderer never learns to set
+/// it in an italic face. Italic already arrived from `<i>`/`<em>`/`<cite>`; a stylesheet saying so
+/// was parsed and then dropped on the floor between `BlockStyle` and the run.
+#[test]
+fn a_declared_font_style_reaches_the_placed_runs() {
+    let opts = style_opts();
+
+    let plain = paginate(&[styled_para("x", BlockStyle::default())], &opts, &Mono);
+    assert!(!plain[0].lines[0].runs[0].italic, "prose defaults upright");
+
+    let style = BlockStyle {
+        italic: Some(true),
+        ..Default::default()
+    };
+    let italic = paginate(&[styled_para("x", style)], &opts, &Mono);
+    assert!(
+        italic[0].lines[0].runs[0].italic,
+        "font-style: italic was ignored"
+    );
+
+    // It applies to a heading too, which carries its own default weight but no default slant.
+    let head = paginate(&[styled_heading("Title", style)], &opts, &Mono);
+    assert!(head[0].lines[0].runs[0].italic);
+    assert!(
+        head[0].lines[0].runs[0].bold,
+        "and does not disturb the weight"
+    );
+}
+
+/// A block-level italic covers every run in the block, including ones the markup did not italicise,
+/// exactly as a block-level weight covers every run.
+#[test]
+fn a_block_italic_covers_runs_the_markup_left_upright() {
+    let opts = style_opts();
+    let style = BlockStyle {
+        italic: Some(true),
+        ..Default::default()
+    };
+    let laid = paginate(&[styled_para("one two three", style)], &opts, &Mono);
+    let runs = &laid[0].lines[0].runs;
+    assert!(!runs.is_empty());
+    assert!(
+        runs.iter().all(|r| r.italic),
+        "a run escaped the block style"
+    );
+}
+
 #[test]
 fn long_paragraph_wraps_to_multiple_lines() {
     // 10px font → 5px/char. content_w = 100 → 20 chars/line. 60-char paragraph → 3 lines.
