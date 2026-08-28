@@ -69,8 +69,7 @@ class DailyController(private val context: Context) {
     fun addSource(url: String) {
         val u = url.trim()
         if (u.isEmpty()) return
-        val name = runCatching { URL(u).host.removePrefix("www.") }.getOrDefault(u).ifBlank { u }
-        val updated = sources().filterNot { it.url == u } + Source(name, u)
+        val updated = sources().filterNot { it.url == u } + Source(bylineFor(u), u)
         save(updated)
     }
 
@@ -82,6 +81,7 @@ class DailyController(private val context: Context) {
 
     /** Persist an edited source list wholesale (enable/disable + removals from the Sources editor). */
     fun setSources(list: List<Source>) = save(list)
+
 
     /** The sources a compile actually fetches (muted ones excluded). */
     fun enabledSources(): List<Source> = sources().filter { it.enabled }
@@ -365,6 +365,32 @@ class DailyController(private val context: Context) {
         const val TAG = "DailyController"
 
         /** Curated popular feeds for the suggested-sources picker (stable, well-known RSS/Atom). */
+        /**
+         * Point [source] at [newUrl], keeping everything else about it (#166).
+         *
+         * The byline follows the URL only when it was derived from one. A source added by pasting a URL
+         * is bylined with its host, so moving it to another host should move the byline too; a curated
+         * source is bylined "BBC News", and re-deriving would rename it to `feeds.bbci.co.uk` for the
+         * sake of a URL correction. Comparing the stored name against what [bylineFor] would have
+         * produced for the *old* URL is what tells the two apart.
+         *
+         * A blank [newUrl] leaves the source alone: an emptied field is a slip, not an instruction.
+         */
+        fun withUrl(source: Source, newUrl: String): Source {
+            val u = newUrl.trim()
+            if (u.isEmpty() || u == source.url) return source
+            val wasDerived = source.name == bylineFor(source.url)
+            return source.copy(name = if (wasDerived) bylineFor(u) else source.name, url = u)
+        }
+
+        /**
+         * The byline shown for a feed added by URL: its host, minus `www.`. Falls back to the whole
+         * string when it does not parse as a URL, so a mistyped entry still shows the reader something
+         * they recognise rather than a blank row.
+         */
+        fun bylineFor(url: String): String =
+            runCatching { URL(url).host.removePrefix("www.") }.getOrDefault(url).ifBlank { url }
+
         val SUGGESTED = listOf(
             Source("Hacker News", "https://hnrss.org/frontpage"),
             Source("Lobsters", "https://lobste.rs/rss"),

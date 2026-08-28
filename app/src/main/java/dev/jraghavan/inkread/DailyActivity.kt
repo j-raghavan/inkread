@@ -493,8 +493,40 @@ class DailyActivity : Activity() {
             .show()
     }
 
+    /**
+     * Prompt for a replacement feed URL, pre-filled with the current one (#166).
+     *
+     * A feed URL could be added and removed but never corrected, so a typo or a publisher moving
+     * their feed meant losing the row and its per-source article limit and re-adding it from
+     * scratch. [onAccept] receives the new URL only when it is worth applying: blank input is a
+     * slip rather than an instruction, and a URL already followed by another row would otherwise
+     * produce two entries fetching the same feed.
+     */
+    private fun editSourceUrlDialog(current: String, others: List<String>, onAccept: (String) -> Unit) {
+        val input = EditText(this).apply {
+            setText(current)
+            setSelection(current.length)
+            setSingleLine()
+        }
+        AlertDialog.Builder(this, R.style.InkDialog)
+            .setTitle("Edit feed URL")
+            .setMessage("The byline follows the address when it was taken from one.")
+            .setView(input)
+            .setPositiveButton("Save") { _, _ ->
+                val u = input.text.toString().trim()
+                when {
+                    u.isEmpty() -> Unit
+                    u in others -> Toast.makeText(this, "Already following that feed", Toast.LENGTH_SHORT).show()
+                    else -> onAccept(u)
+                }
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
     /** Edit sources: a checklist (uncheck a row to mute it without losing it — e.g. disable NPR) with
-     *  a per-row Remove to drop it entirely. Saving applies mutes + removals in one pass. */
+     *  a per-row Edit to correct its URL and a per-row Remove to drop it entirely. Saving applies
+     *  URL edits, mutes and removals in one pass. */
     private fun sourcesDialog() {
         val sources = daily.sources()
         if (sources.isEmpty()) {
@@ -504,6 +536,10 @@ class DailyActivity : Activity() {
         val enabled = sources.map { it.enabled }.toBooleanArray()
         val removed = BooleanArray(sources.size)
         val limits = sources.map { it.limit }.toIntArray()
+        // Edited URLs are staged like the limits and mutes, and committed by the same Save, so the
+        // dialog keeps one way of working rather than a per-row action that writes behind the
+        // reader's back while their other edits are still pending (#166).
+        val urls = sources.map { it.url }.toTypedArray()
 
         val list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         sources.forEachIndexed { i, s ->
@@ -519,6 +555,16 @@ class DailyActivity : Activity() {
             val info = TextView(this).apply {
                 text = "${s.name}\n${s.url}"; setTextColor(ink); textSize = fs(13f); typeface = serif
             }
+            val edit = TextView(this).apply {
+                text = "Edit"; setTextColor(ink); textSize = fs(11f); typeface = mono
+                letterSpacing = 0.1f; setPadding(dim(12), dim(6), dim(2), dim(6)); isClickable = true
+                setOnClickListener {
+                    editSourceUrlDialog(urls[i], others = urls.filterIndexed { j, _ -> j != i }) { u ->
+                        urls[i] = u
+                        info.text = "${s.name}\n$u"
+                    }
+                }
+            }
             val remove = TextView(this).apply {
                 text = "Remove"; setTextColor(ink); textSize = fs(11f); typeface = mono
                 letterSpacing = 0.1f; setPadding(dim(12), dim(6), dim(2), dim(6)); isClickable = true
@@ -528,6 +574,7 @@ class DailyActivity : Activity() {
             row.addView(info, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
                 .apply { marginStart = dim(8) })
             row.addView(limitStepper(limits, i))
+            row.addView(edit)
             row.addView(remove)
             list.addView(row)
             if (i < sources.size - 1) list.addView(blackRule(Ink.hair()))
@@ -537,11 +584,12 @@ class DailyActivity : Activity() {
             addView(list)
         }
         AlertDialog.Builder(this, R.style.InkDialog)
-            .setTitle("Sources — uncheck to mute, ± sets articles per issue")
+            .setTitle("Sources — uncheck to mute, ± sets articles per issue, Edit changes the URL")
             .setView(scroll)
             .setPositiveButton("Save") { _, _ ->
                 val updated = sources.mapIndexedNotNull { i, s ->
-                    if (removed[i]) null else s.copy(enabled = enabled[i], limit = limits[i])
+                    if (removed[i]) null
+                    else DailyController.withUrl(s, urls[i]).copy(enabled = enabled[i], limit = limits[i])
                 }
                 daily.setSources(updated)
                 setContentView(buildView())
