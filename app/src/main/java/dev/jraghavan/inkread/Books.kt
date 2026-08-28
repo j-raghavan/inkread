@@ -72,8 +72,8 @@ object Books {
 
     /** Stream [input] → [out], aborting once more than [max] bytes have been read (mirrors the native
      *  open cap so a file the core would refuse never gets fully written). Returns false if the source
-     *  exceeded the cap, true otherwise. */
-    private fun copyCapped(input: InputStream, out: OutputStream, max: Long): Boolean {
+     *  exceeded the cap, true otherwise. Shared with [UserFonts]. */
+    internal fun copyCapped(input: InputStream, out: OutputStream, max: Long): Boolean {
         val buf = ByteArray(64 * 1024)
         var total = 0L
         while (true) {
@@ -365,7 +365,8 @@ object Books {
     // rejected before it's fully copied into app storage, not after (the review's import-cap note).
     private const val MAX_IMPORT_BYTES = 2L shl 30
 
-    private fun queryName(context: Context, uri: Uri): String? =
+    /** The picker's display name for [uri], for naming the stored copy. Shared with [UserFonts]. */
+    internal fun queryName(context: Context, uri: Uri): String? =
         context.contentResolver
             .query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)
             ?.use { c -> if (c.moveToFirst()) c.getString(0) else null }
@@ -373,7 +374,8 @@ object Books {
     private fun sanitize(name: String): String =
         sanitizeStem(name.substringBeforeLast('.').ifBlank { "document" })
 
-    /** Make [stem] safe as a file name (no extension handling — see [sanitize]). */
-    private fun sanitizeStem(stem: String): String =
+    /** Make [stem] safe as a file name (no extension handling — see [sanitize]). Shared with
+     *  [UserFonts], which stores imported font files the same way. */
+    internal fun sanitizeStem(stem: String): String =
         stem.replace(Regex("[^A-Za-z0-9 ._-]"), "_").trim().take(80).ifBlank { "document" }
 }

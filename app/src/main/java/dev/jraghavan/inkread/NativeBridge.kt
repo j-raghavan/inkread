@@ -207,8 +207,18 @@ object NativeBridge {
      *  the chapter. Returns the new page index, or -1 for a fixed-layout PDF. Re-render after. */
     external fun nativeSetFont(handle: Long, fontId: Int): Int
 
-    /** The bundled reading-face display names, newline-joined, in id order (index = the font id). */
+    /** Reading-face display names, newline-joined, in id order (index = the font id): the bundled
+     *  families first, then any faces registered via [nativeRegisterReadingFont]. */
     external fun nativeFontNames(): String
+
+    /** Register a user reading face (raw TTF/OTF bytes) so it appears in the picker after the
+     *  bundled families (RR28-FR3). Returns its font id for [nativeSetFont], or -1 if the bytes
+     *  are not a usable font. Process-wide; ids are positional, so register in a stable order. */
+    external fun nativeRegisterReadingFont(name: String, fontBytes: ByteArray): Int
+
+    /** Forget every registered user reading face, so the `fonts/` directory can be re-registered
+     *  after an import or a removal. Process-wide. */
+    external fun nativeClearReadingFonts()
 
     /** Register a runtime fallback face (raw TTF/OTF/TTC bytes) consulted for glyphs the reading
      *  faces lack — e.g. the device's CJK font, so Chinese/Japanese/Korean stop rendering as □

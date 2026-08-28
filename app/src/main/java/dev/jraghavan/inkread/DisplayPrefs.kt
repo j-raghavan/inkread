@@ -75,9 +75,46 @@ class DisplayPrefs(private val context: Context) {
         get() = typography.getFloat("scale", 1.0f)
         set(scale) = typography.edit().putFloat("scale", scale).apply()
 
-    var font: Int
-        get() = typography.getInt("font_id", 0)
-        set(id) = typography.edit().putInt("font_id", id).apply()
+    /**
+     * The chosen reading face, stored by **name** (key `font_name`).
+     *
+     * Faces are numbered positionally by the core — the bundled families first, then the reader's
+     * imported fonts in sorted order — so importing or removing a font renumbers every face after
+     * it. An index therefore stops meaning the face it was saved for: remove the font sorting above
+     * the one you read in, and the book silently changes typeface. [stylePreset] and
+     * [lineSpacingMult] already store the value rather than its index for the same reason.
+     *
+     * Empty = the default face.
+     */
+    var fontName: String
+        get() = typography.getString("font_name", "") ?: ""
+        set(name) = typography.edit().putString("font_name", name).apply()
+
+    /**
+     * The id to hand the core for the saved face, against the faces it currently has registered.
+     *
+     * A name that is no longer registered — its font was removed — resolves to the default face
+     * rather than to whatever has taken its old index, which is the point of storing the name.
+     */
+    fun fontId(faces: List<String>): Int = fontIdFor(fontName, faces)
+
+    /** Remember the face at [id] in [faces] by the name it stands for. */
+    fun setFontId(faces: List<String>, id: Int) {
+        fontName = faces.getOrElse(id) { "" }
+    }
+
+    /**
+     * One-time move from the positional `font_id` key to [fontName].
+     *
+     * Safe to do lazily because it runs before the reader can change the font set: the directory is
+     * still in the order that produced the saved id, so the index still names the face it did when
+     * it was written. Deferred while [faces] is empty — a failed registry read must not be recorded
+     * as "no face chosen" — and the legacy key is ignored once the new one exists.
+     */
+    fun migrateFontIdToName(faces: List<String>) {
+        if (faces.isEmpty() || typography.contains("font_name")) return
+        fontName = faces.getOrElse(typography.getInt("font_id", 0)) { "" }
+    }
 
     /** The saved line-spacing multiplier (value-based; new key, so a changed option set never
      *  mis-maps an old index). Defaults to the core default 1.4. */
@@ -117,6 +154,13 @@ class DisplayPrefs(private val context: Context) {
 
     companion object {
         const val CONTRAST_MAX = 8 // mirrors reader-core render::contrast::MAX_CONTRAST_STEP (RR4).
+
+        /**
+         * Resolve a saved face [name] against the currently registered [faces], to the id the core
+         * numbers it by. An unregistered name — or none saved — is the default face, never a
+         * neighbour that has since inherited its index.
+         */
+        fun fontIdFor(name: String, faces: List<String>): Int = faces.indexOf(name).coerceAtLeast(0)
 
         // Line-spacing multipliers (RR4), tight → loose. Stored as the value (not the index) so this
         // set can grow without corrupting saved prefs. 1.4 = the core default.
