@@ -171,6 +171,18 @@ class SettingsActivity : Activity() {
         column.addView(spacer(dp(8)))
         for ((title, desc) in HELP) column.addView(helpRow(title, desc))
 
+        // ── Quit (#168) ────────────────────────────────────────────────────────────
+        column.addView(spacer(dp(34)))
+        column.addView(eyebrow("Quit"))
+        column.addView(spacer(dp(12)))
+        column.addView(actionRow("Quit inkread") { quit() })
+        column.addView(TextView(this).apply {
+            text = "Closes inkread and clears it from recent apps. Your place in the book and any " +
+                "handwriting are saved first."
+            setTextColor(inkSoft); textSize = 14f; typeface = serif
+            setPadding(0, dp(6), 0, 0); setLineSpacing(0f, 1.2f)
+        })
+
         // ── About ──────────────────────────────────────────────────────────────────
         column.addView(spacer(dp(34)))
         column.addView(eyebrow("About"))
@@ -195,6 +207,21 @@ class SettingsActivity : Activity() {
             addView(column)
         }
     }
+
+    /**
+     * Close inkread outright (#168).
+     *
+     * There was no way to do this short of force-stop, which readers were resorting to. The device
+     * has no system Back and the launcher leaves the task resident, so leaving the app is not the
+     * same as closing it.
+     *
+     * [finishAndRemoveTask] rather than [finish]: it ends every activity in the task and drops it
+     * from recents, which is what "closed" has to mean here. Nothing is confirmed and nothing is
+     * lost by it — the reader's position and any ink are written in `ReaderActivity.onPause`, which
+     * has already run by the time Settings is on screen, and the document is closed in `onDestroy`
+     * as the task tears down.
+     */
+    private fun quit() = finishAndRemoveTask()
 
     /** Turning overwrite ON is destructive, so confirm; turning it OFF is immediate. */
     private fun onExportOverwriteTapped() {
