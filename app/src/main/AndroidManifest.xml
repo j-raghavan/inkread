@@ -24,6 +24,16 @@
     <uses-permission android:name="com.ratta.supernote.knowledge.permission.READ_KNOWLEDGE" />
     <uses-permission android:name="com.ratta.supernote.knowledge.permission.WRITE_KNOWLEDGE" />
 
+    <!-- Package visibility (Android 11+): the post-add jump into the Digest app (#124) resolves an
+         explicit component before offering it, and from targetSdk 30 onward another package is
+         invisible to that check unless declared here. Without this the offer would silently never
+         appear on device, which is exactly the kind of failure that looks like the feature was never
+         built. Narrow by design: one package, not QUERY_ALL_PACKAGES. -->
+    <queries>
+        <package android:name="com.ratta.supernote.knowledge" />
+    </queries>
+
+
     <application
         android:allowBackup="false"
         android:icon="@mipmap/ic_launcher"
