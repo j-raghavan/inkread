@@ -1,8 +1,12 @@
 package dev.jraghavan.inkread
 
 import android.app.Activity
+import android.app.AlertDialog
+import android.content.ActivityNotFoundException
+import android.content.ComponentName
 import android.content.ContentUris
 import android.content.ContentValues
+import android.content.Intent
 import android.net.Uri
 import android.util.Log
 import android.widget.Toast
@@ -70,8 +74,7 @@ class DigestController(private val host: Host) {
                 toast("No selectable text under the selection")
                 return@engineExecute
             }
-            val ok = insertDigest(path, page, text, selectionAnchor(page, boundsNorm))
-            toast(if (ok) "Added to Digest" else "Couldn't add to Digest")
+            reportAdded(insertDigest(path, page, text, selectionAnchor(page, boundsNorm)))
         }
     }
 
@@ -88,8 +91,7 @@ class DigestController(private val host: Host) {
             return
         }
         host.engineExecute {
-            val ok = insertDigest(path, page, text, boundsNorm?.let { selectionAnchor(page, it) })
-            toast(if (ok) "Added to Digest" else "Couldn't add to Digest")
+            reportAdded(insertDigest(path, page, text, boundsNorm?.let { selectionAnchor(page, it) }))
         }
     }
 
@@ -165,6 +167,63 @@ class DigestController(private val host: Host) {
         return metadata.toString()
     }
 
+    /**
+     * Report the outcome of an insert, offering the jump into the Digest app on success (#124).
+     *
+     * The native reader lets you carry straight on into Digest to annotate what you just saved, and
+     * that is the whole point of the ask: the entry is only half-made until you have written your
+     * note against it. Digest exposes no deep link (its only activity filter is MAIN/LAUNCHER, no
+     * data actions), so this opens the app and no further — the reader lands on the entry list with
+     * their new entry at the top.
+     *
+     * A device that does not have the Digest app falls back to the plain toast, so this stays
+     * useful on anything the APK is sideloaded onto.
+     */
+    private fun reportAdded(ok: Boolean) {
+        if (!ok) {
+            toast("Couldn't add to Digest")
+            return
+        }
+        val intent = digestIntent()
+        if (intent == null) {
+            toast("Added to Digest")
+            return
+        }
+        activity.runOnUiThread {
+            AlertDialog.Builder(activity, R.style.InkDialog)
+                .setTitle("Added to Digest")
+                .setMessage("Open Digest to write a note against it?")
+                .setPositiveButton("Open Digest") { _, _ ->
+                    try {
+                        activity.startActivity(intent)
+                    } catch (e: ActivityNotFoundException) {
+                        // Resolved a moment ago; it can still be gone (uninstalled, or disabled for
+                        // this user). Never let a convenience action take the reader down.
+                        Log.e(TAG, "Digest launch failed: ${e.message}")
+                        toast("Couldn't open Digest")
+                    }
+                }
+                .setNegativeButton("Not now", null)
+                .show()
+        }
+    }
+
+    /**
+     * An explicit intent for the Digest app's entry screen, or null when it is not installed.
+     *
+     * Explicit rather than by action: Digest declares only MAIN/LAUNCHER, so there is no action or
+     * data URI to aim at, and an implicit MAIN/LAUNCHER intent would offer the reader a chooser of
+     * every launcher activity on the device. NEW_TASK because Digest is a separate app and belongs
+     * in its own task, not pushed onto inkread's back stack.
+     */
+    private fun digestIntent(): Intent? {
+        val intent = Intent(Intent.ACTION_MAIN)
+            .setComponent(ComponentName(DIGEST_PACKAGE, DIGEST_ACTIVITY))
+            .addCategory(Intent.CATEGORY_LAUNCHER)
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        return intent.takeIf { activity.packageManager.resolveActivity(it, 0) != null }
+    }
+
     private fun toast(msg: String) =
         activity.runOnUiThread { Toast.makeText(activity, msg, Toast.LENGTH_SHORT).show() }
 
@@ -173,6 +232,12 @@ class DigestController(private val host: Host) {
 
         // --- Supernote "Knowledge" provider contract (the only vendor-named surface; IR-7). ---
         const val INSERT_URI = "content://com.ratta.supernote.knowledge.provider/knowledge/insert"
+
+        // The Digest app itself, for the post-add jump (#124). Device-verified on a Manta: this is
+        // its only launchable activity, it carries no data filter (so there is nothing to deep-link
+        // to), and a sideloaded app can start it with no permission.
+        const val DIGEST_PACKAGE = "com.ratta.supernote.knowledge"
+        const val DIGEST_ACTIVITY = "com.ratta.supernote.knowledge.activity.KnowledgeActivity"
 
         const val SOURCE_TYPE_DOCUMENT = 1 // 1=DOCUMENT(PDF), 2=NOTE, 3=PASTEBOARD, 4=SELF_ADD
 
