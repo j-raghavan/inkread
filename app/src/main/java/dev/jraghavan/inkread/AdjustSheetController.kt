@@ -283,13 +283,12 @@ class AdjustSheetController(private val host: Host) {
             .setItems(names) { _, which ->
                 val font = fonts[which]
                 UserFonts.remove(activity, font)
-                // The removed face may have been the one in use; re-apply the (clamped) choice so
-                // the open book is never left rendering with an id that now means something else.
-                val faces = try {
-                    NativeBridge.nativeFontNames().split("\n").filter { it.isNotBlank() }
-                } catch (e: RuntimeException) { emptyList() }
-                val id = prefs.font.coerceIn(0, (faces.size - 1).coerceAtLeast(0))
-                prefs.font = id
+                // Every face after the removed one has just been renumbered. The choice is stored
+                // by name, so re-resolving it against the new list holds the book on the face it
+                // was on — or returns it to the default if that face is the one just removed,
+                // rather than to whichever face has inherited its id (#169).
+                val faces = UserFonts.faceNames()
+                val id = prefs.fontId(faces)
                 host.engineExecute {
                     try { NativeBridge.nativeSetFont(host.docHandle, id) } catch (e: RuntimeException) { -1 }
                     host.refreshPageCount()
@@ -584,12 +583,10 @@ class AdjustSheetController(private val host: Host) {
         }
         val container = LinearLayout(activity).apply { orientation = LinearLayout.VERTICAL }
         // Typeface picker — the bundled reading faces (EPUB/reflow; a toast on fixed-layout PDF).
-        val faces = try {
-            NativeBridge.nativeFontNames().split("\n").filter { it.isNotBlank() }
-        } catch (e: RuntimeException) { emptyList() }
+        val faces = UserFonts.faceNames()
         if (faces.isNotEmpty()) {
-            container.addView(settingRow("Typeface", scrollable(segmented(faces, prefs.font.coerceIn(0, faces.size - 1)) { which ->
-                prefs.font = which
+            container.addView(settingRow("Typeface", scrollable(segmented(faces, prefs.fontId(faces)) { which ->
+                prefs.setFontId(faces, which)
                 host.engineExecute {
                     val np = try { NativeBridge.nativeSetFont(host.docHandle, which) } catch (e: RuntimeException) { -1 }
                     if (np >= 0) { host.refreshPageCount(); host.repaintPanel() }

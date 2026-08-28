@@ -39,6 +39,21 @@ object UserFonts {
     fun displayName(file: File): String = file.nameWithoutExtension
 
     /**
+     * Every reading face the core has registered, in id order: the bundled families first, then the
+     * imported fonts. A face's id *is* its index here, which is why the reader stores its choice by
+     * name rather than by index — see [DisplayPrefs.fontName].
+     *
+     * Empty if the core could not be asked; callers treat that as "nothing to resolve against" and
+     * leave the saved choice alone.
+     */
+    fun faceNames(): List<String> = try {
+        NativeBridge.nativeFontNames().split("\n").filter { it.isNotBlank() }
+    } catch (e: RuntimeException) {
+        Log.e(TAG, "font names failed: ${e.message}")
+        emptyList()
+    }
+
+    /**
      * Re-register every imported face with the core, replacing whatever was registered before.
      * Call once at startup and again after any import or removal — ids shift when the set changes,
      * so a partial update would leave the picker pointing at the wrong face.

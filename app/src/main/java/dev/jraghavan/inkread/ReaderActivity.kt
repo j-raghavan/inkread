@@ -758,6 +758,9 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
     /** Copy a picked font into `fonts/` and re-register, then report what happened. */
     private fun importFont(uri: Uri) {
         val stored = UserFonts.import(this, uri, suggestedName = null)
+        // No need to re-apply the reader's face here: an import renumbers the registry, but the
+        // open document holds a built `AbFont` that owns its bytes, so it is unaffected — and the
+        // saved choice is a name, which resolves the same before and after (#169).
         runOnUiThread {
             val message = if (stored == null) {
                 "That file isn't a font inkread can use"
@@ -900,13 +903,18 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         // The reader's own imported faces, registered in the same breath so the picker lists them
         // from the first document open (RR28-FR3).
         UserFonts.register(this)
+        // The saved typeface is a name, but installs predating that stored an index. Convert it
+        // here: the registry has just been rebuilt and the font directory has not changed since the
+        // index was written, so it still names the face the reader chose (#169).
+        val faces = UserFonts.faceNames()
+        displayPrefs.migrateFontIdToName(faces)
         val capsBytes = WireCodec.encodeCapabilities(adapter.capabilities())
         NativeBridge.nativeInit(capsBytes)
         val dbPath = File(filesDir, "reader.db").absolutePath
         docHandle = try {
             NativeBridge.nativeOpenDocumentWithStore(
                 path, capsBytes, viewW, viewH, DPI, dbPath, bookId,
-                displayPrefs.textScale, displayPrefs.font,
+                displayPrefs.textScale, displayPrefs.fontId(faces),
                 displayPrefs.lineSpacingMult, displayPrefs.alignment, displayPrefs.columns,
                 displayPrefs.marginPct,
             )
@@ -1988,7 +1996,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
                         NativeBridge.nativeSetTypography(
                             docHandle,
                             displayPrefs.textScale,
-                            displayPrefs.font,
+                            displayPrefs.fontId(UserFonts.faceNames()),
                             displayPrefs.lineSpacingMult,
                             displayPrefs.alignment,
                             displayPrefs.columns,
