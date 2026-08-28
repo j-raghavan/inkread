@@ -706,15 +706,29 @@ impl Document for EpubBackend {
     fn render_page(&self, index: usize, buf: &mut PixelBuffer<'_>) -> CoreResult<()> {
         self.viewport.set((buf.width(), buf.height()));
         let (w, h) = (buf.width(), buf.height());
+        // Range-checked here rather than left to `with_page`, so the two ways it can decline are
+        // told apart (#215). Past the end is the reader's fault and says so; anything else is the
+        // pagination index claiming a page the layout does not have, which is our fault and a
+        // different bug entirely — reporting it as out-of-range sends the next person hunting for
+        // a page number that was never wrong.
+        let available = self.laid().total_pages;
+        if index >= available {
+            return Err(CoreError::PageOutOfRange {
+                requested: index,
+                available,
+            });
+        }
         let canvas = self
             .with_page(index, |page, opts| {
                 let mut canvas = GrayCanvas::new(w, h);
                 raster_page(page, opts, &self.font.borrow(), self, &mut canvas);
                 canvas
             })
-            .ok_or(CoreError::PageOutOfRange {
-                requested: index,
-                available: self.laid().total_pages,
+            .ok_or_else(|| {
+                CoreError::RenderBackend(format!(
+                    "pagination index and layout disagree: page {index} of {available} is counted \
+                     by the index but its chapter did not lay it out"
+                ))
             })?;
         buf.fill_white();
         // Expand 8-bit grayscale → opaque RGBA (CHANNEL_ORDER r,g,b,a). One byte → three equal.
@@ -1011,8 +1025,14 @@ pub(crate) fn reset_layout_passes() {
 ///   centred block, drops the first-line indent, so lines fit differently than a `v2` pass assumed.
 /// - `v3` → `v4`: illustrations occupy a real box instead of one line of `[image]` text (#187),
 ///   which changes the page count of every illustrated chapter.
+/// - `v4` → `v5`: bold and italic runs are measured as themselves (#239). `advance()` had ignored
+///   the bold flag, so a bold line was measured narrower than it was inked, and three families now
+///   set their emphasis in real faces rather than a smear and a shear. Both move line breaks, so a
+///   `v4` index describes boundaries this engine no longer produces — and because a stored index is
+///   trusted verbatim, that mismatch surfaces as a page the index counts and the layout lacks
+///   (#215) rather than as anything obviously font-related.
 fn layout_key(opts: &LayoutOpts, font_id: usize, chapters: usize) -> String {
-    format!("v4|{:016x}|{font_id}|{chapters}", opts.layout_digest())
+    format!("v5|{:016x}|{font_id}|{chapters}", opts.layout_digest())
 }
 
 /// A materialized chapter: the pages laid out so far, and whether that is all of them (#186).
