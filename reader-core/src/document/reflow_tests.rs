@@ -814,6 +814,47 @@ fn a_page_past_the_end_is_a_typed_error_not_a_panic() {
     assert!(b.page_pin(count).is_none());
 }
 
+/// #215: a page the pagination index counts but the layout does not have must not be reported as
+/// out of range. It is not — the index believes it exists, and that disagreement is the fault.
+///
+/// This is what a stale persisted pagination does: it is trusted verbatim (see
+/// `a_stored_pagination_of_the_right_shape_is_used_verbatim`), so an index written by a build that
+/// measured text differently claims pages the current layout never produces. The device report had
+/// no reproduction; planting an inflated index is that reproduction, and it separates the two
+/// faults the one message used to blur together.
+#[test]
+fn a_page_the_index_claims_but_the_layout_lacks_is_not_reported_as_out_of_range() {
+    let b = synthetic_book();
+    let chapters = b.chapter_count();
+    // Every chapter is short of this, so the index counts pages no chapter can lay out.
+    b.set_pagination_cache(fake(Some(vec![40; chapters])).0);
+    let inflated = b.page_count();
+    assert_eq!(inflated, 40 * chapters, "the planted index is in force");
+
+    let mut bytes = vec![0u8; 400 * 600 * 4];
+    let mut buf = PixelBuffer::from_rgba(&mut bytes, 400, 600).unwrap();
+
+    // Well inside the index, far past what chapter 0 actually lays out.
+    let err = b
+        .render_page(30, &mut buf)
+        .expect_err("a claimed-but-unlaid page must fail");
+    assert!(
+        !matches!(err, CoreError::PageOutOfRange { .. }),
+        "divergence reported as a plain out-of-range page: {err}"
+    );
+    let message = err.to_string();
+    assert!(
+        message.contains("index and layout disagree"),
+        "the message does not say what actually went wrong: {message}"
+    );
+
+    // A genuinely out-of-range page still reports as one, so the new path did not swallow the old.
+    assert!(matches!(
+        b.render_page(inflated, &mut buf),
+        Err(CoreError::PageOutOfRange { .. })
+    ));
+}
+
 /// An empty chapter still occupies exactly one page, so the chapter -> page mapping stays 1:1 and
 /// a TOC entry pointing at it lands somewhere real. Front matter and section dividers produce these
 /// in real books, and the index build, the materialization path and the persisted counts each have
@@ -1058,18 +1099,51 @@ fn a_books_declared_styles_reach_the_laid_out_page() {
 
 /// The pagination cache key must move whenever anything changes how much content fits on a page,
 /// or a cache written by an older build is replayed against a layout it does not describe and the
-/// reader lands on stale page boundaries. #163 bumped it to v2, #188 to v3, #187 to v4.
+/// reader lands on stale page boundaries. #163 bumped it to v2, #188 to v3, #187 to v4, #239 to v5.
 ///
-/// This is a tripwire, not a tautology: it fails until whoever changed line fitting bumps the key.
+/// This test used to assert only the key's prefix, which made it a tautology dressed as a tripwire:
+/// it could not fail for the thing it was written to catch. #239 taught `advance()` to pay for a
+/// synthesized bold's smear and gave three families real bold and italic faces — both of which move
+/// line breaks — and this test stayed green while every persisted pagination on disk went stale.
+/// That is #215.
+///
+/// It pins **measurement** rather than the page count it produces. Pinning pages looked like the
+/// stronger check and is in fact the weaker one: line breaking has slack, so a small width change
+/// is absorbed without moving a break, and the test goes green for a layout that no longer matches
+/// the cache. Advance widths have no slack — every change to face selection, synthesis or metrics
+/// moves them.
+///
+/// When these move, bump the version in `layout_key` **and** update them in the same commit.
+/// Updating them alone re-arms the bug.
 #[test]
 fn the_pagination_cache_version_tracks_changes_to_line_fitting() {
     let opts = LayoutOpts::new(600.0, 800.0, 16.0);
     assert!(
-        layout_key(&opts, 0, 1).starts_with("v4|"),
+        layout_key(&opts, 0, 1).starts_with("v5|"),
         "{}",
         layout_key(&opts, 0, 1)
     );
+
+    // All four styles: a family's real faces and the synthesis that stands in for the ones it
+    // does not bundle both feed line breaking, so both have to be pinned.
+    use inkread_epub::Metrics as _;
+    let font = AbFont::default_font();
+    let sample = "The morning was wholly unremarkable";
+    let measured: Vec<u32> = [(false, false), (true, false), (false, true), (true, true)]
+        .iter()
+        .map(|&(bold, italic)| font.advance(sample, 16.0, bold, italic).to_bits())
+        .collect();
+
+    assert_eq!(
+        measured, PINNED_ADVANCES,
+        "text measurement changed — bump the version in layout_key with this update"
+    );
 }
+
+/// Advance widths (f32 bit patterns) of the sample in regular, bold, italic and bold-italic,
+/// pinned by [`the_pagination_cache_version_tracks_changes_to_line_fitting`]. Bit patterns rather
+/// than a rounded comparison, so a sub-pixel drift that would accumulate across a line still fails.
+const PINNED_ADVANCES: [u32; 4] = [1_127_625_679, 1_128_079_691, 1_126_559_188, 1_127_093_121];
 
 /// #187 end to end: an illustration has to survive the whole path — out of the container, through
 /// layout as a box with real height, and onto the rasterized page as pixels.
