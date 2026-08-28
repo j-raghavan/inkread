@@ -240,6 +240,63 @@ fn font_weight_splits_at_600_like_css() {
     );
 }
 
+/// #170. Italic already came from `<i>`, `<em>` and `<cite>`; a book that italicises through its
+/// stylesheet instead rendered upright, which is the gap this closes.
+#[test]
+fn font_style_declares_italic_upright_or_nothing() {
+    for italic in ["italic", "oblique"] {
+        let css = format!("p {{ font-style: {italic} }}");
+        assert_eq!(
+            styled(&css, "<body><p data-t>x</p></body>").italic,
+            Some(true),
+            "{italic}"
+        );
+    }
+    assert_eq!(
+        styled("p { font-style: normal }", "<body><p data-t>x</p></body>").italic,
+        Some(false),
+        "font-style: normal was dropped"
+    );
+    assert_eq!(
+        styled("p { font-style: wat }", "<body><p data-t>x</p></body>").italic,
+        None,
+        "an unparseable style declares nothing rather than forcing upright"
+    );
+    assert_eq!(
+        styled("p { text-align: left }", "<body><p data-t>x</p></body>").italic,
+        None,
+        "a book that says nothing about style declares nothing"
+    );
+}
+
+/// A container's declared style folds into the block nested inside it through `overlaid_with`, and
+/// style has to travel that step the same way weight does — otherwise an italicised `<div>` would
+/// leave its paragraphs upright.
+#[test]
+fn font_style_travels_the_container_overlay() {
+    let container = BlockStyle {
+        italic: Some(true),
+        ..BlockStyle::default()
+    };
+    assert_eq!(
+        BlockStyle::default().overlaid_with(&container).italic,
+        Some(true)
+    );
+
+    // A block that declares its own style keeps it: the overlay is the container's, applied first.
+    let upright = BlockStyle {
+        italic: Some(false),
+        ..BlockStyle::default()
+    };
+    assert_eq!(
+        upright.overlaid_with(&BlockStyle::default()).italic,
+        Some(false)
+    );
+
+    // And a style-only declaration is not "empty", or the whole block would be discarded.
+    assert!(!container.is_empty());
+}
+
 #[test]
 fn important_is_stripped_and_alignment_keywords_map() {
     assert_eq!(

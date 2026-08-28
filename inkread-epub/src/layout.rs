@@ -482,6 +482,7 @@ pub fn paginate_upto(
                     0.0,
                     0.0,
                     bold,
+                    style.italic.unwrap_or(false),
                     effective_align(style, opts.align),
                     block_index,
                     &mut cursor,
@@ -512,6 +513,7 @@ pub fn paginate_upto(
                     first_indent,
                     0.0,
                     style.bold.unwrap_or(false),
+                    style.italic.unwrap_or(false),
                     align,
                     block_index,
                     &mut cursor,
@@ -537,6 +539,7 @@ pub fn paginate_upto(
                     content,
                     opts.font_px,
                     style.bold.unwrap_or(false),
+                    style.italic.unwrap_or(false),
                     block_index,
                     &mut cursor,
                     m,
@@ -576,6 +579,7 @@ pub fn paginate_upto(
                     0.0,
                     0.0,
                     false,
+                    false,
                     opts.align,
                     block_index,
                     &mut cursor,
@@ -589,6 +593,7 @@ pub fn paginate_upto(
                     cells,
                     opts.font_px,
                     style.bold.unwrap_or(false),
+                    style.italic.unwrap_or(false),
                     effective_align(style, opts.align),
                     block_index,
                     &mut cursor,
@@ -733,6 +738,7 @@ impl<'o> Pager<'o> {
         first_indent: f32,
         rest_indent: f32,
         bold_all: bool,
+        italic_all: bool,
         align: Align,
         block: usize,
         cursor: &mut usize,
@@ -745,6 +751,7 @@ impl<'o> Pager<'o> {
             rest_indent,
             self.opts.content_w(),
             bold_all,
+            italic_all,
             block,
             cursor,
             m,
@@ -777,6 +784,7 @@ impl<'o> Pager<'o> {
         cells: &[Vec<Inline>],
         size: f32,
         bold_all: bool,
+        italic_all: bool,
         align: Align,
         block: usize,
         cursor: &mut usize,
@@ -794,14 +802,16 @@ impl<'o> Pager<'o> {
         let cell_w = ((measure - gutter * (n - 1.0)) / n).max(1.0);
         if cell_w < MIN_CELL_EM * size {
             for cell in cells {
-                self.add_paragraph(cell, size, 0.0, 0.0, bold_all, align, block, cursor, m);
+                self.add_paragraph(
+                    cell, size, 0.0, 0.0, bold_all, italic_all, align, block, cursor, m,
+                );
             }
             return;
         }
         let mut columns: Vec<Vec<Vec<PlacedRun>>> = Vec::with_capacity(cells.len());
         for (index, cell) in cells.iter().enumerate() {
             let mut lines = break_lines(
-                cell, size, 0.0, 0.0, cell_w, bold_all, block, cursor, m, self.hyph,
+                cell, size, 0.0, 0.0, cell_w, bold_all, italic_all, block, cursor, m, self.hyph,
             );
             let last = lines.len();
             let dx = index as f32 * (cell_w + gutter);
@@ -833,6 +843,7 @@ impl<'o> Pager<'o> {
         inlines: &[Inline],
         size: f32,
         bold: bool,
+        italic: bool,
         block: usize,
         cursor: &mut usize,
         m: &dyn Metrics,
@@ -854,6 +865,7 @@ impl<'o> Pager<'o> {
             indent,
             self.opts.content_w(),
             bold,
+            italic,
             block,
             cursor,
             m,
@@ -939,6 +951,7 @@ enum Tok<'a> {
 fn tokenize<'a>(
     inlines: &'a [Inline],
     bold_all: bool,
+    italic_all: bool,
     block: usize,
     cursor: &mut usize,
 ) -> Vec<Tok<'a>> {
@@ -973,7 +986,7 @@ fn tokenize<'a>(
                         toks.push(Tok::Word {
                             text: part,
                             bold: r.bold || bold_all,
-                            italic: r.italic,
+                            italic: r.italic || italic_all,
                             href: r.href.as_deref(),
                             anchor: SourceAnchor {
                                 block,
@@ -1040,6 +1053,7 @@ fn break_lines(
     rest_indent: f32,
     content_w: f32,
     bold_all: bool,
+    italic_all: bool,
     block: usize,
     cursor: &mut usize,
     m: &dyn Metrics,
@@ -1051,7 +1065,7 @@ fn break_lines(
     let mut x = 0.0f32; // offset within the body column (excludes indent)
     let mut need_space = false;
 
-    for tok in tokenize(inlines, bold_all, block, cursor) {
+    for tok in tokenize(inlines, bold_all, italic_all, block, cursor) {
         match tok {
             Tok::Break => {
                 if !cur.is_empty() {

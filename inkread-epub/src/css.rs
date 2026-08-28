@@ -33,13 +33,21 @@ pub struct BlockStyle {
     /// `font-weight`: `Some(true)` for bold-ish (`bold`/`bolder`/`600`+), `Some(false)` for
     /// normal-ish (`normal`/`lighter`/`500`-).
     pub bold: Option<bool>,
+    /// `font-style`: `Some(true)` for `italic`/`oblique`, `Some(false)` for `normal` (#170).
+    ///
+    /// Italic already rendered from `<i>`, `<em>` and `<cite>`; what was missing was the CSS. A book
+    /// that italicises through its stylesheet rather than a tag rendered upright.
+    pub italic: Option<bool>,
 }
 
 impl BlockStyle {
-    /// True when the book declared none of the three properties.
+    /// True when the book declared none of the properties.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.align.is_none() && self.indent.is_none() && self.bold.is_none()
+        self.align.is_none()
+            && self.indent.is_none()
+            && self.bold.is_none()
+            && self.italic.is_none()
     }
 
     /// Return `self` with every property `higher` declares overridden — the inheritance step, used
@@ -54,6 +62,9 @@ impl BlockStyle {
         }
         if higher.bold.is_some() {
             self.bold = higher.bold;
+        }
+        if higher.italic.is_some() {
+            self.italic = higher.italic;
         }
         self
     }
@@ -77,6 +88,11 @@ impl BlockStyle {
             "font-weight" => {
                 if let Some(b) = parse_font_weight(&value) {
                     self.bold = Some(b);
+                }
+            }
+            "font-style" => {
+                if let Some(i) = parse_font_style(&value) {
+                    self.italic = Some(i);
                 }
             }
             _ => {}
@@ -240,6 +256,20 @@ fn is_zero_length(value: &str) -> bool {
         .take_while(|c| c.is_ascii_digit() || *c == '.' || *c == '-' || *c == '+')
         .collect();
     num.parse::<f32>().is_ok_and(|n| n == 0.0)
+}
+
+/// `font-style` → italic or upright (#170).
+///
+/// `oblique` counts as italic: it is a slant request, and the renderer already falls back to
+/// shearing a regular face for a family that bundles no italic, which is exactly what oblique asks
+/// for. An unrecognised value declares nothing rather than guessing upright, so a reader's own
+/// setting is not overridden by a keyword we failed to understand.
+fn parse_font_style(value: &str) -> Option<bool> {
+    match value {
+        "normal" => Some(false),
+        "italic" | "oblique" => Some(true),
+        _ => None,
+    }
 }
 
 /// `font-weight` → bold-ish or normal-ish. Numeric weights split at 600, as CSS does.

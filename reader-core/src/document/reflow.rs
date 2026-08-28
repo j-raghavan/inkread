@@ -1031,8 +1031,16 @@ pub(crate) fn reset_layout_passes() {
 ///   `v4` index describes boundaries this engine no longer produces — and because a stored index is
 ///   trusted verbatim, that mismatch surfaces as a page the index counts and the layout lacks
 ///   (#215) rather than as anything obviously font-related.
+/// - `v5` → `v6`: CSS `font-style: italic` is honoured (#170). A book that italicises through its
+///   stylesheet rather than an `<i>` tag now sets those runs in an italic face, which measures
+///   differently and moves the line breaks a `v5` index recorded.
+///
+/// Note the tripwire in the tests pins *measurement* — what `advance()` returns for a given style —
+/// so it does not fire for a change like `v6`, which alters **which style a run gets** rather than
+/// how a style measures. Both invalidate a stored index. A change to run styling has to bump this
+/// by hand.
 fn layout_key(opts: &LayoutOpts, font_id: usize, chapters: usize) -> String {
-    format!("v5|{:016x}|{font_id}|{chapters}", opts.layout_digest())
+    format!("v6|{:016x}|{font_id}|{chapters}", opts.layout_digest())
 }
 
 /// A materialized chapter: the pages laid out so far, and whether that is all of them (#186).
