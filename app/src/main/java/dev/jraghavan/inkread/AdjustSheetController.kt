@@ -131,6 +131,7 @@ class AdjustSheetController(private val host: Host) {
             val cell = LinearLayout(activity).apply {
                 orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER
                 setPadding(Ink.sdp(4), Ink.sdp(10), Ink.sdp(4), Ink.sdp(10)); isClickable = true
+                minimumHeight = Ink.tap() // #245: 47.5dp at XS
                 setOnClickListener { select(i) }
                 addView(
                     ImageView(activity).apply { setImageResource(icon); setColorFilter(Ink.ink) },
@@ -202,6 +203,7 @@ class AdjustSheetController(private val host: Host) {
                 val tv = TextView(activity).apply {
                     text = opt; textSize = Ink.sp(15f); gravity = Gravity.CENTER
                     setPadding(Ink.sdp(6), Ink.sdp(10), Ink.sdp(6), Ink.sdp(10)); isClickable = true
+                    minHeight = Ink.tap() // #245: 31.5dp at XS, incl. the Menu Size selector itself
                     setOnClickListener { sel = i; segs.forEachIndexed { j, t -> style(t, j == sel) }; onSelect(i) }
                 }
                 style(tv, i == sel)
@@ -231,6 +233,10 @@ class AdjustSheetController(private val host: Host) {
                         repaint(); invalidate()
                         onSet(filled)
                     }
+                    // Deliberately NOT floored to Ink.tap() (#245). This is a level indicator drawn
+                    // as a row of segments, not a row of buttons: each cell is ~111dp wide, so it is
+                    // a forgiving target despite its height, and forcing 48dp would turn a thin bar
+                    // into a chunky one at every menu size including the default.
                 }, LinearLayout.LayoutParams(0, Ink.sdp(30), 1f).apply { val m = Ink.sdp(2); setMargins(m, 0, m, 0) })
             }
             repaint()
@@ -421,6 +427,7 @@ class AdjustSheetController(private val host: Host) {
         return TextView(activity).apply {
             text = t; textSize = Ink.sp(16f); gravity = Gravity.CENTER; setTextColor(Color.BLACK)
             setPadding(Ink.sdp(18), Ink.sdp(10), Ink.sdp(18), Ink.sdp(10)); isClickable = true
+            minHeight = Ink.tap() // #245
             background = GradientDrawable().apply {
                 setColor(Color.WHITE); cornerRadius = Ink.sdp(20).toFloat(); setStroke(Ink.hair(), Color.parseColor("#9E9E9E"))
             }

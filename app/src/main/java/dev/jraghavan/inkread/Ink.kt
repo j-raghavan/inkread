@@ -62,6 +62,34 @@ object Ink {
 
     fun dpf(v: Int): Float = v * density
 
+    /**
+     * Minimum extent for a **compact** tappable control (#245) — a button or an option cell, where
+     * the target is roughly as wide as it is tall.
+     *
+     * Deliberately **not** scaled by [uiScale]. Menu Size changes how big the chrome looks; it does
+     * not change how big a fingertip is, and the smaller steps were putting clickable cells at
+     * 20-32dp. Measured on a Manta at XS: the page label 21.9dp, the chapter buttons 24.0dp, the
+     * Adjust sheet's segmented options 31.5dp — including the Menu Size selector itself, so the
+     * control that gets you back out of XS was among the hardest to hit.
+     *
+     * 44 rather than the 48 the platform recommends. 48 was tried first and made the reading bar
+     * 26% taller at the default, which reads as a bar that has taken over the page. 44 keeps every
+     * control comfortably hittable while giving that back. Applied as a minimum, so a control
+     * already larger is untouched.
+     */
+    fun tap(): Int = dp(44)
+
+    /**
+     * Minimum height for a **full-width row** (#245) — a list row or the chapter line, spanning the
+     * whole panel.
+     *
+     * Lower than [tap] on purpose. A row 1920px wide is a far more forgiving target than a 90px
+     * button of the same height: the hard part of hitting a control is its smaller dimension, and
+     * these have none. Trading 4dp of height per row back to the page is worth more here than the
+     * margin it buys.
+     */
+    fun tapRow(): Int = dp(40)
+
     /** A hairline that never collapses to 0 px. */
     fun hair(): Int = maxOf(1, dp(1))
 

@@ -129,6 +129,7 @@ class BottomBarController(private val host: Host) {
             typeface = Ink.mono
             letterSpacing = 0.04f
             gravity = Gravity.CENTER
+            minHeight = Ink.tap() // #245: 21.9dp at XS before this
             setPadding(Ink.sdp(12), Ink.sdp(6), Ink.sdp(12), Ink.sdp(6))
             background = GradientDrawable().apply {
                 setColor(Ink.fill)
@@ -166,6 +167,7 @@ class BottomBarController(private val host: Host) {
         fun chapterBtn(glyph: String, dir: Int) = TextView(activity).apply {
             text = glyph; setTextColor(Ink.ink); textSize = Ink.sp(20f); typeface = Ink.serifBold
             gravity = Gravity.CENTER; setPadding(Ink.sdp(8), Ink.sdp(2), Ink.sdp(8), Ink.sdp(2)); isClickable = true
+            minHeight = Ink.tap(); minWidth = Ink.tap() // #245: 24.0dp at XS, 44.8dp even at 2XL
             setOnClickListener { dialog.dismiss(); chapterJump(dir) }
         }
         fileNameLine()?.let(container::addView)
@@ -189,6 +191,7 @@ class BottomBarController(private val host: Host) {
                 gravity = Gravity.CENTER_VERTICAL
                 setPadding(Ink.sdp(24), 0, Ink.sdp(24), Ink.sdp(8))
                 isClickable = true
+                minimumHeight = Ink.tapRow() // #245: 19.7dp at XS before this
                 setOnClickListener { dialog.dismiss(); showContentsLazy() }
                 addView(TextView(activity).apply {
                     text = lbl; setTextColor(Ink.inkSoft); textSize = Ink.sp(12f); typeface = Ink.serif
@@ -443,6 +446,7 @@ class BottomBarController(private val host: Host) {
                 gravity = Gravity.CENTER_VERTICAL
                 setPadding(Ink.sdp(4), Ink.sdp(14), Ink.sdp(4), Ink.sdp(14))
                 isClickable = true
+                minimumHeight = Ink.tapRow() // #245: list rows must stay tappable at any menu size
                 setOnClickListener { dialog.dismiss(); host.postJump(page) }
                 addView(TextView(activity).apply {
                     text = "Page ${page + 1}"
@@ -486,6 +490,7 @@ class BottomBarController(private val host: Host) {
                 gravity = Gravity.CENTER_VERTICAL
                 setPadding(Ink.sdp(4) + item.depth * Ink.sdp(18), Ink.sdp(14), Ink.sdp(4), Ink.sdp(14))
                 isClickable = true
+                minimumHeight = Ink.tapRow() // #245: list rows must stay tappable at any menu size
                 setOnClickListener { dialog.dismiss(); item.targetPage?.let { host.postJump(it) } }
                 addView(TextView(activity).apply {
                     text = item.title
