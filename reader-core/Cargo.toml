@@ -59,3 +59,5 @@ jni-bridge = ["dep:jni"]
 # Test fixtures encode PNGs to exercise the CBZ and reflow paths; nothing in the crate proper
 # decodes an image directly any more.
 png = { workspace = true }
+# `PinPosition` round-trip + ordering totality over arbitrary values (RR6-AC1, RR17-FR3).
+proptest = { workspace = true }

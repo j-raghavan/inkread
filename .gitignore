@@ -56,6 +56,14 @@ keystore.properties
 outputs/
 
 # ───────────────────────────────────────────────────────────────
+# Test artifacts
+# ───────────────────────────────────────────────────────────────
+# proptest writes a failing case's minimal seed here so the next run replays it. Useful locally;
+# a committed one would pin a fixed seed into everyone's run. Turn a real counterexample into a
+# named regression test in the example `mod tests` instead.
+proptest-regressions/
+
+# ───────────────────────────────────────────────────────────────
 # OS / editor / logs
 # ───────────────────────────────────────────────────────────────
 .DS_Store

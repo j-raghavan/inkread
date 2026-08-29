@@ -198,6 +198,10 @@ fn pad_i64(v: i64) -> String {
 }
 
 #[cfg(test)]
+#[path = "property_tests.rs"]
+mod property_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 

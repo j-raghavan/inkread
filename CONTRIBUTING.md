@@ -185,6 +185,10 @@ These come straight from [`CLAUDE.md`](./CLAUDE.md) and they're applied in revie
 - Public items get doc comments. Reference the requirement they satisfy where it helps
   (`// RR5-FR1: …`).
 - New behaviour ships with a test. A bug fix ships with a regression test that fails before the fix.
+- A codec, a serializer, or an ordering gets a **property test** (`proptest`, a dev-dependency)
+  alongside its examples: round-trip losslessness, order totality, and — for anything decoding
+  bytes from disk or across JNI — totality over arbitrary and truncated input. See
+  `reader-core/src/position/property_tests.rs` for the house shape.
 - Prefer total functions and explicit error types at the system boundary; no `unwrap()` on
   untrusted input.
 

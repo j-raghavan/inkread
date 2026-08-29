@@ -10,3 +10,7 @@ description = "Vendor-neutral e-ink refresh contracts (RefreshIntent/RefreshComm
 
 [lib]
 crate-type = ["rlib"]
+
+[dev-dependencies]
+# Wire-codec round-trip + hostile-input properties over arbitrary values (RR17-FR3).
+proptest = { workspace = true }

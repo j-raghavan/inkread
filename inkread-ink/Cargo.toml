@@ -10,3 +10,8 @@ description = "The vector-ink domain model (RR6): Stroke/InkPoint/Tool/InkColor,
 
 [lib]
 crate-type = ["rlib"]
+
+[dev-dependencies]
+# `.inkbin` round-trip + hostile-input properties over arbitrary layers (RR17-FR3). The crate
+# proper stays dependency-free — this is a dev-dependency and never enters the cdylib.
+proptest = { workspace = true }

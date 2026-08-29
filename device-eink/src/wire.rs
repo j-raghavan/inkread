@@ -194,6 +194,10 @@ pub fn decode_commands(bytes: &[u8]) -> Result<Vec<RefreshCommand>, WireError> {
 }
 
 #[cfg(test)]
+#[path = "wire_property_tests.rs"]
+mod property_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 

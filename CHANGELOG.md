@@ -19,6 +19,12 @@ number is given in parentheses.
   `controllable_epd`, and `ResourceBudget::default_supernote` is `default_tablet_epd` — the
   capability, not the manufacturer. `scripts/check-vendor-neutral.sh` now enforces IR-7 in CI.
 
+### Added
+
+- Property-based tests (`proptest`) for `PinPosition` round-trip and ordering totality, the
+  `device-eink` capability and command wire codecs, and the `.inkbin` stroke codec — the RR6-AC1 /
+  RR17-FR3 acceptance criteria, and what `CONTRIBUTING.md` already claimed the suite had.
+
 ### Fixed
 
 - Production `unwrap`/`expect` removed from the PDF backend, `PinPosition` serialization, text
