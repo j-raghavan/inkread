@@ -627,7 +627,8 @@ pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeJumpToPage<
 // =====================================================================================
 // Ink annotation seam (RR6/RR7/RR10/RR20). The Kotlin shell feeds stylus geometry through
 // these; the Rust core owns the model + sidecar persistence. The live firmware-ink *render*
-// (ADR-SUPERNOTE-INK) is a separate device path and does NOT cross this seam.
+// (ADR-SUPERNOTE-INK) is a separate device path and does NOT cross this seam. IR-7-ALLOW: an
+// annex-ADR id, not a device assumption — the decision record's filename carries the name.
 //
 //   nativeAttachInkStore(handle, docPath)        — bind the document's book.inkread/ sidecar
 //   nativeInkBeginStroke(handle, tool, rgba, width, createdAtMs)

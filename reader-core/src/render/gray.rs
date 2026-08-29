@@ -19,7 +19,7 @@ pub enum DitherMode {
     FloydSteinberg,
 }
 
-/// The Supernote Carta panel is 16-level gray (RR4-FR3).
+/// The target panel class is 16-level gray (RR4-FR3).
 pub const GRAY_LEVELS: u16 = 16;
 
 /// Rec. 601 luma of an (r,g,b) triple, rounded, 0..=255.

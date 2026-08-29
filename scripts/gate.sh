@@ -30,6 +30,8 @@ run() { # run "<label>" cmd...
 run "fmt --check"      cargo fmt --all --check
 run "clippy -D warnings" cargo clippy --all -- -D warnings
 run "test --workspace" cargo test --workspace
+run "IR-7 vendor-neutral core" ./scripts/check-vendor-neutral.sh
+run "dependency licenses"      ./scripts/check-licenses.sh
 
 if [ "${1:-}" != "--fast" ]; then
   NDK=$(ls -d "$HOME"/Library/Android/sdk/ndk/* 2>/dev/null | sort -V | tail -1)

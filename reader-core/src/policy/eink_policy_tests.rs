@@ -5,7 +5,7 @@ use super::*;
 use device_eink::MockDeviceRecorder;
 
 fn screen() -> Rect {
-    Rect::full(1404, 1872) // a representative Supernote-class panel
+    Rect::full(1404, 1872) // a representative tablet-class e-ink panel
 }
 
 fn page() -> Rect {
@@ -15,7 +15,7 @@ fn page() -> Rect {
 // RR3-AC1: 6 turns on a capable device => 5 Partial then a WaitForLast+Full, counter resets.
 #[test]
 fn six_page_turns_promote_to_flash_on_the_sixth() {
-    let mut rec = MockDeviceRecorder::with_profile(DeviceCapabilities::supernote_full());
+    let mut rec = MockDeviceRecorder::with_profile(DeviceCapabilities::controllable_epd());
     let mut policy = EinkRefreshPolicy::new(rec.capabilities(), screen());
 
     for _ in 0..6 {
@@ -48,7 +48,7 @@ fn six_page_turns_promote_to_flash_on_the_sixth() {
 // RR3-AC3: on an eink_full=false profile, every turn is a full-screen Full.
 #[test]
 fn basic_panel_collapses_every_turn_to_full_screen_full() {
-    let mut rec = MockDeviceRecorder::with_profile(DeviceCapabilities::supernote_baseline());
+    let mut rec = MockDeviceRecorder::with_profile(DeviceCapabilities::flashing_epd());
     let mut policy = EinkRefreshPolicy::new(rec.capabilities(), screen());
 
     for _ in 0..8 {
@@ -69,7 +69,7 @@ fn basic_panel_collapses_every_turn_to_full_screen_full() {
 
 #[test]
 fn custom_interval_promotes_on_that_turn() {
-    let caps = DeviceCapabilities::supernote_full();
+    let caps = DeviceCapabilities::controllable_epd();
     let mut policy = EinkRefreshPolicy::with_interval(caps, screen(), 3);
     // turns 1,2 => Partial; turn 3 => WaitForLast+Full.
     assert!(matches!(
@@ -95,7 +95,7 @@ fn custom_interval_promotes_on_that_turn() {
 
 #[test]
 fn interval_zero_is_clamped_to_one() {
-    let caps = DeviceCapabilities::supernote_full();
+    let caps = DeviceCapabilities::controllable_epd();
     let mut policy = EinkRefreshPolicy::with_interval(caps, screen(), 0);
     // Every turn flashes.
     let cmds = policy.on_page_turn(page());
@@ -105,7 +105,7 @@ fn interval_zero_is_clamped_to_one() {
 
 #[test]
 fn dither_flag_propagates_to_updates() {
-    let caps = DeviceCapabilities::supernote_full();
+    let caps = DeviceCapabilities::controllable_epd();
     let mut policy = EinkRefreshPolicy::new(caps, screen()).with_dither(true);
     assert!(matches!(
         policy.on_page_turn(page()).as_slice(),
@@ -117,7 +117,7 @@ fn dither_flag_propagates_to_updates() {
 // counter; settle restores a Partial. EnterFastMode/LeaveFastMode bracket the motion.
 #[test]
 fn scroll_emits_fast_and_brackets_with_fast_mode() {
-    let caps = DeviceCapabilities::supernote_full();
+    let caps = DeviceCapabilities::controllable_epd();
     let mut policy = EinkRefreshPolicy::new(caps, screen());
 
     assert_eq!(
@@ -152,7 +152,7 @@ fn scroll_emits_fast_and_brackets_with_fast_mode() {
 // resumes normal promotion.
 #[test]
 fn scroll_start_resets_counter_then_page_turn_resumes_promotion() {
-    let caps = DeviceCapabilities::supernote_full();
+    let caps = DeviceCapabilities::controllable_epd();
     let mut policy = EinkRefreshPolicy::with_interval(caps, screen(), 3);
     // Advance the counter toward the flash threshold (2 of 3).
     policy.on_page_turn(page());
@@ -183,7 +183,7 @@ fn scroll_start_resets_counter_then_page_turn_resumes_promotion() {
 // page turn must still un-stick promotion — never suppress ghost-clears forever.
 #[test]
 fn page_turn_unsticks_a_lost_scroll_end() {
-    let caps = DeviceCapabilities::supernote_full();
+    let caps = DeviceCapabilities::controllable_epd();
     let mut policy = EinkRefreshPolicy::with_interval(caps, screen(), 2);
     policy.on_scroll_start(); // ... and suppose on_scroll_end never arrives.
                               // Page turns still promote normally: turn 1 Partial, turn 2 flashes.
@@ -205,7 +205,7 @@ fn page_turn_unsticks_a_lost_scroll_end() {
 fn no_fast_mode_scroll_uses_partial() {
     let caps = DeviceCapabilities {
         fast_mode: false,
-        ..DeviceCapabilities::supernote_full()
+        ..DeviceCapabilities::controllable_epd()
     };
     let mut policy = EinkRefreshPolicy::new(caps, screen());
     assert_eq!(policy.on_scroll_start(), Vec::new());
@@ -231,12 +231,12 @@ fn no_fast_mode_scroll_uses_partial() {
 }
 
 // RR3-FR10: a fast panel that can't do regional updates coalesces the dirty rect to a
-// full-screen Fast update (the Rockchip full-screen quirk, RR2-FR4).
+// full-screen Fast update (the full-screen-only quirk, RR2-FR4).
 #[test]
 fn no_regional_coalesces_scroll_to_screen() {
     let caps = DeviceCapabilities {
         regional_update: false,
-        ..DeviceCapabilities::supernote_full()
+        ..DeviceCapabilities::controllable_epd()
     };
     let mut policy = EinkRefreshPolicy::new(caps, screen());
     policy.on_scroll_start();
@@ -253,7 +253,7 @@ fn no_regional_coalesces_scroll_to_screen() {
 // RR3-FR10 / RR3-AC3: on a basic panel, scroll emits nothing mid-motion and settles full.
 #[test]
 fn basic_panel_scroll_settles_full_screen() {
-    let caps = DeviceCapabilities::supernote_baseline();
+    let caps = DeviceCapabilities::flashing_epd();
     let mut policy = EinkRefreshPolicy::new(caps, screen());
     assert_eq!(policy.on_scroll_start(), Vec::new());
     assert_eq!(
@@ -274,7 +274,7 @@ fn basic_panel_scroll_settles_full_screen() {
 // WaitForLast, no Full) but the cadence is preserved (the counter still resets).
 #[test]
 fn avoid_flashing_downgrades_promotion_to_partial() {
-    let caps = DeviceCapabilities::supernote_full();
+    let caps = DeviceCapabilities::controllable_epd();
     let mut policy = EinkRefreshPolicy::with_interval(caps, screen(), 3).with_avoid_flashing(true);
     policy.on_page_turn(page());
     policy.on_page_turn(page());
@@ -294,7 +294,7 @@ fn avoid_flashing_downgrades_promotion_to_partial() {
 // RR3-FR7: avoid_flashing also downgrades the menu-close FlashUi to a plain Ui.
 #[test]
 fn avoid_flashing_downgrades_menu_close_to_ui() {
-    let caps = DeviceCapabilities::supernote_full();
+    let caps = DeviceCapabilities::controllable_epd();
     let mut policy = EinkRefreshPolicy::new(caps, screen()).with_avoid_flashing(true);
     let region = Rect::new(0, 0, 1404, 200);
     assert!(matches!(
@@ -310,7 +310,7 @@ fn avoid_flashing_downgrades_menu_close_to_ui() {
 // touches the page-turn flash counter.
 #[test]
 fn menu_open_close_leaves_flash_counter_unchanged() {
-    let caps = DeviceCapabilities::supernote_full();
+    let caps = DeviceCapabilities::controllable_epd();
     let mut policy = EinkRefreshPolicy::with_interval(caps, screen(), 6);
     // Advance the page-turn counter.
     policy.on_page_turn(page());
@@ -342,7 +342,7 @@ fn menu_open_close_leaves_flash_counter_unchanged() {
 // with a Full, resets the night counter, and leaves the day counter untouched.
 #[test]
 fn night_mode_uses_independent_counter() {
-    let caps = DeviceCapabilities::supernote_full();
+    let caps = DeviceCapabilities::controllable_epd();
     let mut policy = EinkRefreshPolicy::with_interval(caps, screen(), 6).with_night_interval(3);
 
     // Day mode: 5 turns, below the day interval (6) — no flash.
@@ -391,7 +391,7 @@ fn night_mode_uses_independent_counter() {
 
 #[test]
 fn night_mode_flip_emits_full_screen_full() {
-    let caps = DeviceCapabilities::supernote_full();
+    let caps = DeviceCapabilities::controllable_epd();
     let mut policy = EinkRefreshPolicy::new(caps, screen());
     assert_eq!(
         policy.on_night_mode(true),
@@ -406,7 +406,7 @@ fn night_mode_flip_emits_full_screen_full() {
 // RR3-FR6/FR7: avoid_flashing downgrades the night-flip flush to a Partial on a capable panel.
 #[test]
 fn avoid_flashing_downgrades_night_flip_on_capable_panel() {
-    let caps = DeviceCapabilities::supernote_full();
+    let caps = DeviceCapabilities::controllable_epd();
     let mut policy = EinkRefreshPolicy::new(caps, screen()).with_avoid_flashing(true);
     assert!(matches!(
         policy.on_night_mode(true).as_slice(),
@@ -421,7 +421,7 @@ fn avoid_flashing_downgrades_night_flip_on_capable_panel() {
 // (the `&& eink_full` guard).
 #[test]
 fn avoid_flashing_keeps_night_flip_full_on_basic_panel() {
-    let caps = DeviceCapabilities::supernote_baseline();
+    let caps = DeviceCapabilities::flashing_epd();
     let mut policy = EinkRefreshPolicy::new(caps, screen()).with_avoid_flashing(true);
     assert!(matches!(
         policy.on_night_mode(true).as_slice(),
@@ -436,7 +436,7 @@ fn avoid_flashing_keeps_night_flip_full_on_basic_panel() {
 // night counter is left untouched on exit.
 #[test]
 fn exiting_night_mode_resets_day_counter() {
-    let caps = DeviceCapabilities::supernote_full();
+    let caps = DeviceCapabilities::controllable_epd();
     let mut policy = EinkRefreshPolicy::with_interval(caps, screen(), 6).with_night_interval(6);
     for _ in 0..3 {
         policy.on_page_turn(page());
@@ -456,7 +456,7 @@ fn exiting_night_mode_resets_day_counter() {
 // RR3-FR6: the night interval is clamped to 1 (every night-mode turn flashes at interval 0).
 #[test]
 fn night_interval_zero_is_clamped_to_one() {
-    let caps = DeviceCapabilities::supernote_full();
+    let caps = DeviceCapabilities::controllable_epd();
     let mut policy = EinkRefreshPolicy::new(caps, screen()).with_night_interval(0);
     policy.on_night_mode(true);
     let cmds = policy.on_page_turn(page());
@@ -470,7 +470,7 @@ fn night_interval_zero_is_clamped_to_one() {
 fn fast_scroll_forces_no_dither_but_degraded_partial_honors_it() {
     let dirty = Rect::new(0, 0, 700, 400);
 
-    let caps = DeviceCapabilities::supernote_full();
+    let caps = DeviceCapabilities::controllable_epd();
     let mut fast = EinkRefreshPolicy::new(caps, screen()).with_dither(true);
     fast.on_scroll_start();
     assert_eq!(
@@ -484,7 +484,7 @@ fn fast_scroll_forces_no_dither_but_degraded_partial_honors_it() {
 
     let degraded_caps = DeviceCapabilities {
         fast_mode: false,
-        ..DeviceCapabilities::supernote_full()
+        ..DeviceCapabilities::controllable_epd()
     };
     let mut degraded = EinkRefreshPolicy::new(degraded_caps, screen()).with_dither(true);
     degraded.on_scroll_start();
@@ -502,7 +502,7 @@ fn fast_scroll_forces_no_dither_but_degraded_partial_honors_it() {
 // identical command streams regardless of the order with_* were called.
 #[test]
 fn builder_order_is_independent() {
-    let caps = DeviceCapabilities::supernote_full();
+    let caps = DeviceCapabilities::controllable_epd();
     let mut a = EinkRefreshPolicy::with_interval(caps, screen(), 4)
         .with_dither(true)
         .with_night_interval(2)
@@ -538,7 +538,7 @@ fn rotated() -> Rect {
 // defaults while the UI still showed the reader's choice.
 #[test]
 fn set_screen_keeps_the_configuration_a_rebuild_would_drop() {
-    let caps = DeviceCapabilities::supernote_full();
+    let caps = DeviceCapabilities::controllable_epd();
     let mut policy = EinkRefreshPolicy::with_interval(caps, screen(), 2)
         .with_night_interval(3)
         .with_avoid_flashing(true)
@@ -575,7 +575,7 @@ fn set_screen_keeps_the_configuration_a_rebuild_would_drop() {
 // anyway, so both cadences restart from zero.
 #[test]
 fn set_screen_restarts_both_flash_cadences() {
-    let caps = DeviceCapabilities::supernote_full();
+    let caps = DeviceCapabilities::controllable_epd();
     let mut policy = EinkRefreshPolicy::with_interval(caps, screen(), 6);
     for _ in 0..5 {
         policy.on_page_turn(page());
@@ -597,7 +597,7 @@ fn set_screen_restarts_both_flash_cadences() {
 // rotation it has to describe the panel the reader is actually looking at.
 #[test]
 fn set_screen_moves_the_full_screen_fallback_to_the_new_panel() {
-    let caps = DeviceCapabilities::supernote_baseline();
+    let caps = DeviceCapabilities::flashing_epd();
     let mut policy = EinkRefreshPolicy::new(caps, screen());
 
     policy.set_screen(rotated());
@@ -615,7 +615,7 @@ fn set_screen_moves_the_full_screen_fallback_to_the_new_panel() {
 // The setters share the builders' clamp: an interval of 0 means every turn flashes, not never.
 #[test]
 fn interval_setters_clamp_zero_to_one() {
-    let caps = DeviceCapabilities::supernote_full();
+    let caps = DeviceCapabilities::controllable_epd();
     let mut policy = EinkRefreshPolicy::with_interval(caps, screen(), 6);
     policy.set_interval(0);
     policy.set_night_interval(0);

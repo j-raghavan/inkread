@@ -29,7 +29,7 @@ use crate::persistence::{PaginationCache, PaginationProgress};
 use crate::position::PinPosition;
 use crate::render::PixelBuffer;
 
-/// Base body font size in device pixels at scale `1.0` (Supernote-class panel). The user's text
+/// Base body font size in device pixels at scale `1.0` (tablet-class e-ink panel). The user's text
 /// scale multiplies this (RR2-FR5 font-size control).
 const BASE_FONT_PX: f32 = 56.0;
 

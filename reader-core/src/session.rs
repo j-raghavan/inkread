@@ -151,7 +151,7 @@ impl ReaderSession {
     /// Open a PDF from bytes and build a session for `caps` on `viewport` (RR1-FR3 open).
     ///
     /// The initial page is 0. The policy is sized to the viewport for the full-screen
-    /// fallback / Rockchip full quirk (RR2-FR4).
+    /// fallback / full-screen-only quirk (RR2-FR4).
     pub fn open_pdf(
         bytes: Vec<u8>,
         caps: DeviceCapabilities,
@@ -276,7 +276,7 @@ impl ReaderSession {
             page: 0,
             store: None,
             book: None,
-            caches: Caches::new(&ResourceBudget::default_supernote()),
+            caches: Caches::new(&ResourceBudget::default_tablet_epd()),
             ink: None,
             layer: InkLayer::new(),
             zoom: 1.0,
@@ -554,7 +554,7 @@ impl ReaderSession {
         }
         self.render_fit_pixels(buf)?;
         // Grayscale + dithering are deliberately NOT applied here. The shell blits this RGBA buffer
-        // to a SurfaceView and the Supernote's EPD controller does the waveform grayscale + dithering
+        // to a SurfaceView and the device's EPD controller does the waveform grayscale + dithering
         // in hardware; pre-quantizing in the core would double-process (fighting the panel) for no
         // gain. The `render::gray` module (to_grayscale / DitherMode) is retained for host/emulator
         // rendering + golden tests, and for a future direct-framebuffer path (KOReader-style fb
@@ -1252,7 +1252,7 @@ impl ReaderSession {
     /// batched form of [`Self::ink_add_point`]. `xy` is packed `[x0, y0, x1, y1, …]`; pressure
     /// defaults to 1.0 with no tilt/timestamp (the shell's stylus-capture path supplies none). This
     /// lets the shell hand a 200-point stroke across JNI once instead of paying 200 round-trips on
-    /// the RK3566 annotation hot path (the review's per-point-JNI finding). A trailing odd float is
+    /// the annotation hot path (the review's per-point-JNI finding). A trailing odd float is
     /// ignored; an invalid sample aborts the batch with the same error the per-point call raises.
     pub fn ink_add_points(&mut self, xy: &[f32]) -> CoreResult<()> {
         for pt in xy.chunks_exact(2) {

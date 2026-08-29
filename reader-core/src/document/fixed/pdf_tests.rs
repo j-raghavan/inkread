@@ -744,7 +744,7 @@ fn pdf_selection_pins_none_for_fixed_layout() {
 }
 
 /// Visual gate (ADR-INKREAD-0011): render the first reflowed pages of a real text PDF to BMPs for
-/// human inspection — the black-screencap Supernote can't self-verify, so we eyeball on the host.
+/// human inspection — the target device's screencap comes back black, so we eyeball on the host.
 /// Run on demand: `INKREAD_REFLOW_PDF=/path/book.pdf cargo test -p reader-core
 /// pdf_reflow_visual_dump -- --ignored --nocapture` → writes `target/reflow-bmp/reflow-NNN.bmp`.
 #[test]
@@ -763,7 +763,7 @@ fn pdf_reflow_visual_dump() {
     let doc = PdfBackend::open(bytes).expect("open pdf");
     assert!(doc.supports_reflow(), "no extractable text layer in {path}");
 
-    let (w, h) = (1404u32, 1872u32); // a Supernote-class portrait panel
+    let (w, h) = (1404u32, 1872u32); // a tablet-class portrait e-ink panel
     let mut warm = vec![0u8; (w * h * 4) as usize];
     doc.render_page(0, &mut PixelBuffer::from_rgba(&mut warm, w, h).unwrap())
         .ok(); // records the viewport for pagination

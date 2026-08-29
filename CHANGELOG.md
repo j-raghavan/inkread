@@ -12,7 +12,12 @@ number is given in parentheses.
 
 ## [Unreleased]
 
-Nothing yet.
+### Changed
+
+- `device-eink` and `reader-core` no longer name a vendor.
+  `DeviceCapabilities::supernote_baseline` / `supernote_full` are now `flashing_epd` /
+  `controllable_epd`, and `ResourceBudget::default_supernote` is `default_tablet_epd` — the
+  capability, not the manufacturer. `scripts/check-vendor-neutral.sh` now enforces IR-7 in CI.
 
 ## [1.3.2] — 2026-08-29
 

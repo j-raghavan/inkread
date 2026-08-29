@@ -87,7 +87,7 @@ impl RefreshPolicy for StubPolicy {
 }
 
 /// A SECOND executor, distinct from `MockDeviceRecorder` — it does not record the stream, it
-/// only counts commands by kind. A real adapter (Supernote/Boox) is just another `execute`.
+/// only counts commands by kind. A real device adapter is just another `execute`.
 #[derive(Default)]
 struct CountingExecutor {
     updates: usize,

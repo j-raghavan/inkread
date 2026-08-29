@@ -135,6 +135,7 @@ cargo clippy --all -- -D warnings    # lint — warnings are errors
 cargo test --workspace               # unit + property + golden-image tests (host)
 cargo llvm-cov --workspace           # coverage — must hold the RR17 gate
 ./scripts/check-licenses.sh          # every dep's SPDX license is AGPL-compatible
+./scripts/check-vendor-neutral.sh    # IR-7: the Rust core names no vendor
 ```
 
 Building the actual Android APK (only needed for device-facing changes):
@@ -168,6 +169,10 @@ These come straight from [`CLAUDE.md`](./CLAUDE.md) and they're applied in revie
 - **Do what's asked — nothing more, nothing less.** Scope creep gets split into its own PR.
 - **Validate at the boundary; never panic across JNI** (RR21-FR3). The bridge catches panics and
   converts them to Java exceptions — keep `panic = "unwind"`.
+- **The core names no vendor** (IR-7). `reader-core` and `device-eink` speak capabilities and
+  `RefreshIntent`/`RefreshCommand`; device, EPD, and pen specifics live in the Kotlin adapter.
+  Say what the panel *can do*, not who made it — `scripts/check-vendor-neutral.sh` enforces it, and
+  a genuinely necessary mention is exempted with `IR-7-ALLOW` on the line.
 
 ---
 

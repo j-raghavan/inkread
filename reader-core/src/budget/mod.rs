@@ -127,8 +127,8 @@ impl Caches {
     }
 }
 
-/// Committed cache sizes + the page-pixel cap (RR24-FR1/FR2). Tunable; the defaults are the
-/// Supernote baseline.
+/// Committed cache sizes + the page-pixel cap (RR24-FR1/FR2). Tunable; the defaults are sized
+/// for a tablet-class e-ink panel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ResourceBudget {
     /// Byte ceiling for the rendered-page (RR4-FR6) cache.
@@ -140,10 +140,11 @@ pub struct ResourceBudget {
 }
 
 impl ResourceBudget {
-    /// The committed Supernote defaults: ~64 MiB render cache (a few full 1920×2560 pages),
-    /// ~8 MiB cover cache, and a 16 Mpx page cap (~3× the panel area, room for zoom).
+    /// The committed defaults for a tablet-class e-ink panel (~1920×2560): a ~64 MiB render
+    /// cache (a few full pages), a ~8 MiB cover cache, and a 16 Mpx page cap — about 3× the
+    /// panel area, leaving room for zoom.
     #[must_use]
-    pub fn default_supernote() -> Self {
+    pub fn default_tablet_epd() -> Self {
         Self {
             render_cache_bytes: 64 << 20,
             cover_cache_bytes: 8 << 20,
@@ -177,14 +178,14 @@ mod tests {
 
     #[test]
     fn clamp_keeps_a_within_budget_zoom_unchanged() {
-        let b = ResourceBudget::default_supernote();
+        let b = ResourceBudget::default_tablet_epd();
         // 1000×1000 = 1 Mpx; at 2× = 4 Mpx, under the 16 Mpx cap → unchanged.
         assert_eq!(b.clamp_render_scale(1000, 1000, 2.0), 2.0);
     }
 
     #[test]
     fn clamp_caps_excessive_zoom_to_the_pixel_budget() {
-        let b = ResourceBudget::default_supernote();
+        let b = ResourceBudget::default_tablet_epd();
         // 2000×2000 = 4 Mpx; 16 Mpx cap → max zoom sqrt(4) = 2.0. A request of 5× clamps to 2×.
         let z = b.clamp_render_scale(2000, 2000, 5.0);
         assert!((z - 2.0).abs() < 1e-3, "expected ~2.0, got {z}");
@@ -195,7 +196,7 @@ mod tests {
 
     #[test]
     fn clamp_scales_an_oversized_page_below_one() {
-        let b = ResourceBudget::default_supernote();
+        let b = ResourceBudget::default_tablet_epd();
         // 8000×8000 = 64 Mpx at 1× — already over the 16 Mpx cap → max zoom 0.5.
         let z = b.clamp_render_scale(8000, 8000, 1.0);
         assert!(z < 1.0 && z > 0.0, "oversized page scaled down, got {z}");
@@ -203,7 +204,7 @@ mod tests {
 
     #[test]
     fn clamp_handles_degenerate_inputs() {
-        let b = ResourceBudget::default_supernote();
+        let b = ResourceBudget::default_tablet_epd();
         // Zero dimension → passthrough of the sanitized zoom.
         assert_eq!(b.clamp_render_scale(0, 100, 3.0), 3.0);
         // Non-finite / non-positive zoom → treated as 1.0, then capped.

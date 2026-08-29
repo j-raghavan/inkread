@@ -15,13 +15,15 @@ pub struct DeviceCapabilities {
     /// Is an e-ink panel at all (vs LCD/desktop).
     pub eink: bool,
     /// FULL refresh control (partial/fast/flash) vs basic-only. `false` is the honest
-    /// Supernote baseline — the policy collapses to periodic full refreshes (RR3-FR10).
+    /// baseline for a panel the OS will not let us drive — the policy collapses to periodic
+    /// full refreshes (RR3-FR10).
     pub eink_full: bool,
     /// Anti-ghost waveform available (Partial → REAGL/REGAL).
     pub regal: bool,
     /// A2/DU fast path for scroll/keyboard.
     pub fast_mode: bool,
-    /// Partial-rect refresh (vs full-screen-only — the Rockchip quirk, RR2-FR4).
+    /// Partial-rect refresh. `false` means the controller only ever refreshes the whole
+    /// screen, so the policy must widen every rect to full (RR2-FR4).
     pub regional_update: bool,
     /// Hardware night-mode inversion.
     pub hw_invert: bool,
@@ -86,11 +88,12 @@ impl DeviceCapabilities {
         }
     }
 
-    /// The honest Supernote M0 baseline: an e-ink panel without full refresh control
-    /// (`eink_full = false`) — the policy collapses to periodic full-screen refreshes
-    /// (RR2-FR2, RR3-AC3).
+    /// An e-ink panel with **no refresh control**: every update is a full-screen flash
+    /// (`eink_full = false`), so the policy collapses to periodic full refreshes
+    /// (RR2-FR2, RR3-AC3). The honest profile for a sideloaded app on a panel whose waveform
+    /// selection the platform does not expose — see `docs/EINK-LIMITS.md`.
     #[must_use]
-    pub const fn supernote_baseline() -> Self {
+    pub const fn flashing_epd() -> Self {
         Self {
             eink: true,
             eink_full: false,
@@ -107,10 +110,11 @@ impl DeviceCapabilities {
         }
     }
 
-    /// The aspirational Supernote profile once the RR19-FR4b spike proves the fast path:
-    /// full refresh control + regional partial updates + a fast scroll mode.
+    /// An e-ink panel that **does** expose refresh control: full waveform selection, regional
+    /// partial updates, a fast scroll mode, and a low-latency pen path. The profile the policy
+    /// is written against; reachable on a panel the platform lets an app drive (RR19-FR4b).
     #[must_use]
-    pub const fn supernote_full() -> Self {
+    pub const fn controllable_epd() -> Self {
         Self {
             eink: true,
             eink_full: true,
@@ -155,7 +159,7 @@ mod tests {
     fn flag_count_matches_declared_fields() {
         // Guards against adding a field without updating FLAG_COUNT / flags()/from_flags().
         assert_eq!(
-            DeviceCapabilities::supernote_full().flags().len(),
+            DeviceCapabilities::controllable_epd().flags().len(),
             DeviceCapabilities::FLAG_COUNT
         );
     }
@@ -163,8 +167,8 @@ mod tests {
     #[test]
     fn flags_round_trip_in_declaration_order() {
         for caps in [
-            DeviceCapabilities::supernote_baseline(),
-            DeviceCapabilities::supernote_full(),
+            DeviceCapabilities::flashing_epd(),
+            DeviceCapabilities::controllable_epd(),
             DeviceCapabilities::desktop_mock(),
         ] {
             let flags = caps.flags();
@@ -182,18 +186,18 @@ mod tests {
 
     #[test]
     fn from_flags_ignores_extra_trailing_flags() {
-        let mut flags = DeviceCapabilities::supernote_full().flags().to_vec();
+        let mut flags = DeviceCapabilities::controllable_epd().flags().to_vec();
         flags.push(true); // unknown future flag
         flags.push(true);
         assert_eq!(
             DeviceCapabilities::from_flags(&flags),
-            DeviceCapabilities::supernote_full()
+            DeviceCapabilities::controllable_epd()
         );
     }
 
     #[test]
     fn baseline_is_not_full() {
-        assert!(!DeviceCapabilities::supernote_baseline().eink_full);
-        assert!(DeviceCapabilities::supernote_baseline().eink);
+        assert!(!DeviceCapabilities::flashing_epd().eink_full);
+        assert!(DeviceCapabilities::flashing_epd().eink);
     }
 }

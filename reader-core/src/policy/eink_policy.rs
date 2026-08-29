@@ -20,7 +20,7 @@ fn clamp_interval(interval: u32) -> u32 {
 #[derive(Debug, Clone)]
 pub struct EinkRefreshPolicy {
     caps: DeviceCapabilities,
-    /// Full-screen rect, for the `!eink_full` collapse and the Rockchip full quirk (RR2-FR4).
+    /// Full-screen rect, for the `!eink_full` collapse and the full-screen-only quirk (RR2-FR4).
     screen: Rect,
     /// Partial refreshes accumulated since the last flash (RR3-FR3).
     partial_count: u32,
@@ -161,7 +161,7 @@ impl EinkRefreshPolicy {
 
 impl RefreshPolicy for EinkRefreshPolicy {
     fn on_page_turn(&mut self, page_rect: Rect) -> Vec<RefreshCommand> {
-        // `!eink_full` (the Supernote baseline): collapse to a periodic full-screen Full
+        // `!eink_full` (the flashing-EPD baseline): collapse to a periodic full-screen Full
         // refresh — the only correct stream a basic panel can execute (RR3-FR10 / RR3-AC3).
         if !self.caps.eink_full {
             return vec![RefreshCommand::Update {
@@ -311,7 +311,7 @@ impl RefreshPolicy for EinkRefreshPolicy {
     fn on_night_mode(&mut self, on: bool) -> Vec<RefreshCommand> {
         // First-class night mode (RR3-FR6): switch the active theme and reset the counter of
         // the mode being entered so its promotion cadence starts fresh. A theme flip emits a
-        // Full to clear the inverted/non-inverted residue; on the Rockchip EBC a Full is
+        // Full to clear the inverted/non-inverted residue; on a full-screen-only controller a Full is
         // full-screen regardless (RR2-FR4).
         self.night_mode = on;
         if on {
