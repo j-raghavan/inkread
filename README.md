@@ -18,7 +18,7 @@
   <a href="https://codecov.io/gh/j-raghavan/inkread"><img alt="coverage" src="https://codecov.io/gh/j-raghavan/inkread/branch/master/graph/badge.svg"></a>
   <img alt="core: Rust" src="https://img.shields.io/badge/core-Rust-orange?logo=rust&logoColor=white">
   <a href="./LICENSE"><img alt="License: AGPL-3.0" src="https://img.shields.io/badge/license-AGPL--3.0-blue.svg"></a>
-  <img alt="status: stable (v1.0)" src="https://img.shields.io/badge/status-stable%20(v1.0)-brightgreen.svg">
+  <img alt="status: stable" src="https://img.shields.io/badge/status-stable-brightgreen.svg">
 </p>
 
 ---
@@ -61,7 +61,8 @@ an open [AGPL-3.0](./LICENSE) Rust core you can audit and extend.
     content, not just their extension
   - **Reflowable reading for both PDF and EPUB** — flip Reflow on and the text re-wraps to your
     screen instead of pinch-zooming a fixed layout
-  - **Choose a font family** from bundled open-source faces (serif / sans / mono)
+  - **Choose a font family** from bundled open-source faces (serif / sans / mono), or **import your
+    own** `.ttf`/`.otf` — a family's real bold and italic faces are used, not synthesized
   - Adjustable **font size** (60%–300%), **line spacing**, and **alignment**
   - **Swipe** or tap the page edge to turn pages
   - Pinch-to-zoom with a page navigator (minimap + zoom controls)
@@ -126,7 +127,7 @@ an open [AGPL-3.0](./LICENSE) Rust core you can audit and extend.
 | Daily reading companion (RSS → on-device issue) | **Built-in** (InkRead Daily) | Plugin (NewsDownloader) | No |
 | calibre library over the air | **Built-in** (OPDS: calibre + Calibre-Web) | Plugin (OPDS) | No |
 | E-ink refresh control | Vendor-neutral policy in core ([platform-capped](./docs/EINK-LIMITS.md)) | **Excellent** (on devices that allow it) | Native / vendor-optimal |
-| Extensibility | Native Lua API + selected KOReader-shim | **Huge Lua ecosystem** | None (closed) |
+| Extensibility | Lua runtime embedded, plugin API [on the roadmap](#roadmap) | **Huge Lua ecosystem** | None (closed) |
 | Architecture | Rust core, host-testable | C + Lua | Closed-source |
 | Open source | **AGPL-3.0** | **AGPL-3.0** | Proprietary |
 | Devices | Supernote family (RK3566) | **Broad** (Kindle/Kobo/Android…) | Supernote only |
@@ -137,16 +138,32 @@ an open [AGPL-3.0](./LICENSE) Rust core you can audit and extend.
 > latency rides the firmware's own sub-frame ink path; refresh tuning is capped by what the platform
 > exposes to sideloaded apps — [docs/EINK-LIMITS.md](./docs/EINK-LIMITS.md) states those limits plainly.
 
-inkread is **not** a KOReader clone. KOReader is prior art and compatibility inspiration; inkread
-reuses its plugin *style* (a selected `.koplugin` shim) but ships its own Rust-native engine.
+inkread is **not** a KOReader clone. KOReader is prior art and compatibility inspiration, and the
+planned plugin API borrows its *style*; inkread ships its own Rust-native engine. No `.koplugin`
+shim exists yet — see [Roadmap](#roadmap).
 
 ## Status
 
-**v1.0 — stable.** The Rust workspace (parse · reflow · ink · refresh policy · dictionary · Lua
-runtime) builds and tests green on the host, **and the app runs on the Supernote**
-(Manta / Nomad / A5X / A6X): reading, reflow, handwriting, dictionary, export, and **InkRead Daily**
-all work on-device. The document formats and the on-disk annotation sidecars are stable; further
-work (a broader Lua plugin API, more formats, additional devices) lands additively.
+**Stable, and a daily driver on the Supernote family** (Manta / Nomad / A5X / A6X) — see the
+[latest release](https://github.com/j-raghavan/inkread/releases/latest) for the current version and
+[CHANGELOG.md](./CHANGELOG.md) for what changed. The Rust workspace (parse · reflow · ink · refresh
+policy · dictionary) builds and tests green on the host with no device and no Android SDK, and
+reading, reflow, handwriting, dictionary, export, and **InkRead Daily** all work on-device. The
+document formats and the on-disk annotation sidecars are stable; further work lands additively.
+
+### Roadmap
+
+These are **specified or partially built, and not shipped in the app.** They are listed here rather
+than in the feature tables so the tables stay a description of what you get when you install it.
+
+| | Where it stands |
+|---|---|
+| **Lua plugin API** | `inkread-lua` embeds a real Lua 5.4 VM and runs a plugin script end to end, but it ships only `inkread.log` and is not yet wired into `reader-core` or the app. The `inkread.{document,selection,annotations,ui,settings,storage,network}` modules and the capability sandbox are designed, not written. |
+| **KOReader `.koplugin` shim** | Design intent. No shim exists in the tree. |
+| **Cross-document search** | Single-document search ships; searching across a library does not. |
+| **Additional devices** | `EinkAdapter` is a vendor-neutral seam and a second implementation (e.g. Boox) would slot in, but Supernote RK3566 is the only adapter that exists. |
+| **Markdown / HTML and native notebook formats** | Planned; PDF, EPUB, CBZ and plain text ship today. |
+| **Waveform-level refresh control** | Not reachable by a sideloaded app on this SoC — a platform ceiling, not missing code. [docs/EINK-LIMITS.md](./docs/EINK-LIMITS.md) states it plainly. |
 
 ## Quick start
 
@@ -241,14 +258,14 @@ Centre-tap → **Adjust** opens a tabbed sheet, remembered per book:
 | Tab | Controls |
 |---|---|
 | **Rotate** | Screen orientation — **0° / 90° / 180° / 270°** (portrait, landscape, and both flips) |
-| **Font** | **Typeface** — pick a bundled font family (serif / sans / mono); **Text size** — A− / A+ steppers plus **100%** (default) and **XL** presets, 60%–300% (reflowable books) |
+| **Font** | **Typeface** — pick a bundled family (serif / sans / mono) or **import your own** `.ttf`/`.otf` faces; **Text size** — A− / A+ steppers plus **100%** (default) and **XL** presets, 60%–300% (reflowable books) |
 | **Page** | **Reflow** on/off, line spacing + alignment (reflowable books) |
 | **Zoom** | Fit mode + zoom level |
 | **Crop** | Auto-crop white margins + margin size |
 | **Display** | Contrast / display enhancement, **night mode** (inverted), and **reading-style presets** |
 
-> **On the roadmap:** Lua plugins and cross-document search are in the core or specified but not yet
-> exposed in the shipped app — see [Status](#status).
+> **On the roadmap:** Lua plugins and cross-document search are not yet in the shipped app — see
+> [Roadmap](#roadmap).
 
 ## Architecture
 
