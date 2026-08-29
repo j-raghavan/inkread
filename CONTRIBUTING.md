@@ -220,7 +220,10 @@ fix(reflow): clamp column width so RTL pages don't overflow
    [Commit Criteria](./CLAUDE.md#commit-criteria): no format errors, no clippy warnings, no type
    errors, tests pass, coverage holds, and the core still builds **host-only**.
 5. Reference the issue (`Closes #123`) and any requirement IDs (`RR…` / `ADR-…`) you implemented.
-6. CI runs the host gate, cross-checks the JNI bridge for the device target, lints commits, and
+6. Add a line to the **`## [Unreleased]`** section of [`CHANGELOG.md`](./CHANGELOG.md) for anything a
+   user would notice — a feature, a fix, a behaviour change. Internal refactors and test-only
+   changes don't need one.
+7. CI runs the host gate, cross-checks the JNI bridge for the device target, lints commits, and
    verifies the license manifest. Green CI + one maintainer approval merges.
 
 Small, well-scoped PRs get reviewed *fast*. A 2,000-line PR sits for a week — please don't.
