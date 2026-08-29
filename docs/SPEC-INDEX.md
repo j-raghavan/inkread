@@ -168,6 +168,7 @@ Recorded in ADR-INKREAD-0000. An **amendment** = the implementation exceeds the 
 | ADR-INKREAD-0013 | Reflow pagination: layout digest, `PageRange` boundaries, disk cache. |
 | ADR-INKREAD-0014 | In-app GitHub self-update. |
 | ADR-INKREAD-0015 | Any-script text rendering (system-font fallback + line breaking; shaping/BiDi next). |
+| ADR-INKREAD-0016 | calibre / Calibre-Web library over OPDS: catalog client, URL handling, and the credential trade-off (Decision 4). |
 | ADR-RUST-READER | Reflow engine, product license, and distribution model (annex ADR). |
 | ADR-SUPERNOTE-INK | Handwriting ink path & the Rust-vs-Lua architecture question (annex ADR). |
 

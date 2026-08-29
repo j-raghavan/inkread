@@ -279,6 +279,12 @@ The core never names a vendor and never leaks Android types — device specifics
 adapter and the feature-gated JNI bridge. Supporting crates: `inkread-pdftext`, `inkread-epub`,
 `inkread-ink`, `inkread-dict`, `inkread-lua`, and the vendor-neutral `device-eink`.
 
+Source comments cite requirements and decisions by ID (`RR5-FR1`, `ADR-0010`). The canonical design
+documents are not distributable — they carry private on-device research — so
+**[docs/SPEC-INDEX.md](./docs/SPEC-INDEX.md)** is the public, redacted map that resolves every
+citable ID, including the two overlapping `RR` series. Read it before a citation sends you looking
+for a file that isn't in the repo.
+
 ## Contributing
 
 Contributions are very welcome — you don't need a Supernote to help. Start with
