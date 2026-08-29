@@ -321,11 +321,14 @@ fn xy_cut(
         .flatten();
 
     // Prefer the separator with the larger axis-normalized score; vertical wins ties (a clean
-    // column gutter is a stronger reading-order signal than an incidental band gap).
-    let take_vertical = match (&vert, &horiz) {
-        (Some(v), Some(h)) => v.1 >= h.1,
-        (Some(_), None) => true,
-        (None, Some(_)) => false,
+    // column gutter is a stronger reading-order signal than an incidental band gap). The chosen
+    // band's midpoint comes out of the match with the decision, so the arm that picked it is the
+    // arm that unwraps it — the previous shape decided here and re-opened the Option below.
+    let (take_vertical, mid) = match (vert, horiz) {
+        (Some(v), Some(h)) if v.1 >= h.1 => (true, v.0),
+        (Some(_), Some(h)) => (false, h.0),
+        (Some(v), None) => (true, v.0),
+        (None, Some(h)) => (false, h.0),
         (None, None) => {
             let lines = cluster_lines(glyphs, opts);
             out.extend(group_blocks(&lines, metrics, opts));
@@ -334,13 +337,11 @@ fn xy_cut(
     };
 
     if take_vertical {
-        let (mid, _) = vert.unwrap();
         let (left, right): (Vec<&Glyph>, Vec<&Glyph>) =
             glyphs.iter().copied().partition(|g| g.x_center() < mid);
         xy_cut(&left, opts, metrics, depth + 1, out);
         xy_cut(&right, opts, metrics, depth + 1, out);
     } else {
-        let (mid, _) = horiz.unwrap();
         let (top, bottom): (Vec<&Glyph>, Vec<&Glyph>) =
             glyphs.iter().copied().partition(|g| g.y_center() < mid);
         xy_cut(&top, opts, metrics, depth + 1, out);

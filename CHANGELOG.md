@@ -19,6 +19,13 @@ number is given in parentheses.
   `controllable_epd`, and `ResourceBudget::default_supernote` is `default_tablet_epd` — the
   capability, not the manufacturer. `scripts/check-vendor-neutral.sh` now enforces IR-7 in CI.
 
+### Fixed
+
+- Production `unwrap`/`expect` removed from the PDF backend, `PinPosition` serialization, text
+  selection, and the PDF text-block splitter — paths the JNI bridge reaches, where an unwind would
+  have violated RR21-FR3. A missing symbol-fallback face or hyphenation pattern set now degrades
+  (lost glyph coverage, whole-word wrapping) instead of taking the reader down.
+
 ## [1.3.2] — 2026-08-29
 
 ### Added

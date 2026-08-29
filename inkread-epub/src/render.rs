@@ -127,14 +127,18 @@ const FALLBACK_FONT: &[u8] = include_bytes!("../fonts/NotoMusic-Regular.ttf");
 
 /// The bundled symbol fallback, parsed once and shared — every [`AbFont`] construction (each face
 /// switch, each reflow view) reuses it instead of re-parsing the TTF.
-fn bundled_fallback() -> Arc<FontVec> {
-    static BUNDLED: OnceLock<Arc<FontVec>> = OnceLock::new();
+///
+/// `None` if the compiled-in face ever failed to parse, which costs symbol coverage (a musical
+/// glyph draws as `.notdef`) and nothing else. That is a far better outcome than taking the reader
+/// down over a fallback, and it keeps the panic off a path the JNI bridge reaches (RR21-FR3).
+/// `bundled_fallback_parses` asserts it is `Some` for the face we actually ship.
+fn bundled_fallback() -> Option<Arc<FontVec>> {
+    static BUNDLED: OnceLock<Option<Arc<FontVec>>> = OnceLock::new();
     BUNDLED
         .get_or_init(|| {
-            Arc::new(
-                FontVec::try_from_vec(FALLBACK_FONT.to_vec())
-                    .expect("bundled fallback face is valid"),
-            )
+            FontVec::try_from_vec(FALLBACK_FONT.to_vec())
+                .ok()
+                .map(Arc::new)
         })
         .clone()
 }
@@ -309,7 +313,8 @@ fn fallback_chain() -> Vec<Arc<FontVec>> {
         Ok(guard) => guard,
         Err(poisoned) => poisoned.into_inner(),
     };
-    std::iter::once(bundled_fallback())
+    bundled_fallback()
+        .into_iter()
         .chain(extras.iter().cloned())
         .collect()
 }
@@ -380,6 +385,11 @@ impl AbFont {
             return Self::for_face(0);
         }
         let family = READING_FONTS.get(id).unwrap_or(&READING_FONTS[0]);
+        // The one assertion left in this file. Unlike the symbol fallback and the hyphenation
+        // patterns, there is no reading to degrade to without a regular face — every glyph on the
+        // page comes from it. Both candidates are `include_bytes!` of files in this crate, and
+        // `every_bundled_face_parses` parses all of them, so a break is a build-time break that
+        // CI catches, not a runtime one a reader meets.
         let regular = parse_face(family.regular)
             .or_else(|| parse_face(DEFAULT_FONT))
             .expect("a bundled reading face is valid");
@@ -453,10 +463,15 @@ impl AbFont {
 }
 
 /// English (US) Knuth-Liang hyphenation — the same pattern model KOReader uses — so justified lines
-/// break long words like a book. Patterns are embedded (no filesystem); construction is fallible only
-/// if the bundled data is corrupt, so [`Self::new`] is infallible in practice.
+/// break long words like a book. Patterns are embedded, so there is no filesystem to fail.
+///
+/// `dict` is an `Option` because loading is nominally fallible and this type is constructed on the
+/// reflow path the JNI bridge drives (RR21-FR3). Without patterns it reports no break
+/// opportunities, which is exactly the crate's existing `NoHyphenation` behaviour: long words wrap
+/// whole instead of breaking. Losing hyphenation is a typographic regression; panicking mid-reflow
+/// is a crash. `embedded_hyphenation_patterns_load` asserts the shipped data does load.
 pub struct EnHyphenator {
-    dict: Standard,
+    dict: Option<Standard>,
 }
 
 impl EnHyphenator {
@@ -464,8 +479,7 @@ impl EnHyphenator {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            dict: Standard::from_embedded(Language::EnglishUS)
-                .expect("embedded en-US patterns valid"),
+            dict: Standard::from_embedded(Language::EnglishUS).ok(),
         }
     }
 }
@@ -480,7 +494,10 @@ impl Hyphenator for EnHyphenator {
     fn opportunities(&self, word: &str) -> Vec<usize> {
         // `breaks` are byte offsets into `word` where a soft hyphen may be inserted (ascending). The
         // dictionary enforces sensible left/right minimums, so short fragments don't occur.
-        self.dict.hyphenate(word).breaks
+        match &self.dict {
+            Some(d) => d.hyphenate(word).breaks,
+            None => Vec::new(), // no patterns → no break opportunities (whole-word wrapping)
+        }
     }
 }
 
@@ -796,6 +813,64 @@ pub fn page_glyphs(page: &Page, opts: &LayoutOpts, font: &AbFont) -> Vec<PlacedG
 mod tests {
     use super::*;
     use crate::content::{Block, Inline, TextRun};
+
+    /// Every compiled-in reading face parses, in every slot the family declares.
+    ///
+    /// `AbFont::for_face` asserts that a bundled regular is valid, because there is no reading to
+    /// degrade to without one. This is what makes that assertion a build-time guarantee rather
+    /// than a runtime hope: a face that failed to parse — a truncated `include_bytes!`, a font
+    /// swapped for one `ab_glyph` cannot read — fails here instead of on a reader's device.
+    #[test]
+    fn every_bundled_face_parses() {
+        assert!(
+            parse_face(DEFAULT_FONT).is_some(),
+            "the default face must parse: for_face falls back to it"
+        );
+        for family in READING_FONTS {
+            assert!(
+                parse_face(family.regular).is_some(),
+                "{}: regular face does not parse",
+                family.name
+            );
+            for (slot, bytes) in [
+                ("bold", family.bold),
+                ("italic", family.italic),
+                ("bold_italic", family.bold_italic),
+            ] {
+                if let Some(bytes) = bytes {
+                    assert!(
+                        parse_face(bytes).is_some(),
+                        "{}: declared {slot} face does not parse",
+                        family.name
+                    );
+                }
+            }
+        }
+    }
+
+    /// The symbol fallback degrades to `None` rather than panicking, so this pins that the face we
+    /// actually ship is present — otherwise the degradation would quietly become the normal case
+    /// and musical glyphs would draw as `.notdef` with nothing failing.
+    #[test]
+    fn bundled_fallback_parses() {
+        assert!(bundled_fallback().is_some());
+        assert!(
+            !fallback_chain().is_empty(),
+            "the chain must carry the bundled symbol face"
+        );
+    }
+
+    /// Likewise for hyphenation: `EnHyphenator` reports no opportunities when the patterns are
+    /// missing, which is indistinguishable from a word that simply cannot break. This pins that
+    /// the shipped patterns load and produce real breaks.
+    #[test]
+    fn embedded_hyphenation_patterns_load() {
+        let h = EnHyphenator::new();
+        assert!(
+            !h.opportunities("hyphenation").is_empty(),
+            "en-US patterns should break 'hyphenation'"
+        );
+    }
     use std::sync::Mutex;
 
     /// The reading-font registry is process-wide and tests run in parallel, so every test that

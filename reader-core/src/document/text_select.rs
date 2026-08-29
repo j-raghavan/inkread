@@ -644,11 +644,8 @@ pub fn text_line_span(chars: &[CharBox], start: (f32, f32), end: (f32, f32)) -> 
     }
     // The lift line (the candidate for clipping) is the bottom-most overlap for a downward drag,
     // the top-most for an upward one.
-    let focus = if downward {
-        *sel.last().unwrap()
-    } else {
-        sel[0]
-    };
+    // `sel` is non-empty (checked above), so both ends index safely.
+    let focus = if downward { sel[sel.len() - 1] } else { sel[0] };
     // Clip that line to the lift word ONLY when the pen lifted *on* it (lift y inside the line). If
     // the pen lifted in the gap PAST the line (dragged beyond it), the whole line was meant — taking
     // it whole, not clipped. (This is the "too little" case: lifting just below the last line.)
