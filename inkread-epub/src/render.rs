@@ -166,25 +166,87 @@ pub fn register_fallback_font(bytes: Vec<u8>, collection_index: u32) -> bool {
     true
 }
 
-/// A reading face the user supplied, kept as raw bytes rather than a parsed `FontVec` because
-/// [`AbFont`] owns its primary by value and is rebuilt on every face switch. Parsing costs a few ms
-/// and only happens when the reader actually changes font.
-struct UserFont {
+/// A reading **family** the reader supplied, assembled from the files they imported (#248).
+///
+/// One file is one style, so a family is built up across several registrations: each file declares
+/// its own family and style in its `name` table, and lands in the matching slot. That is what lets
+/// an imported family have the real bold and italic a bundled one has, instead of a stem smear and
+/// a shear standing in for faces the reader already has on disk.
+///
+/// Kept as raw bytes rather than parsed `FontVec`s because [`AbFont`] owns its primary by value and
+/// is rebuilt on every face switch. Parsing costs a few ms and only happens on an actual change.
+struct UserFamily {
     name: String,
-    bytes: Arc<Vec<u8>>,
+    regular: Option<Arc<Vec<u8>>>,
+    bold: Option<Arc<Vec<u8>>>,
+    italic: Option<Arc<Vec<u8>>>,
+    bold_italic: Option<Arc<Vec<u8>>>,
+}
+
+impl UserFamily {
+    /// The face to measure and set body text in. Normally the regular, but a reader who imported
+    /// only an italic still gets a usable family rather than a silent fallback to the default.
+    fn primary(&self) -> Option<&Arc<Vec<u8>>> {
+        self.regular
+            .as_ref()
+            .or(self.bold.as_ref())
+            .or(self.italic.as_ref())
+            .or(self.bold_italic.as_ref())
+    }
+
+    /// Put `bytes` in the slot its own flags describe. A second file claiming a slot that is already
+    /// filled is ignored: the first import wins, so re-registering the directory is idempotent.
+    fn place(&mut self, bytes: Arc<Vec<u8>>, bold: bool, italic: bool) {
+        let slot = match (bold, italic) {
+            (false, false) => &mut self.regular,
+            (true, false) => &mut self.bold,
+            (false, true) => &mut self.italic,
+            (true, true) => &mut self.bold_italic,
+        };
+        if slot.is_none() {
+            *slot = Some(bytes);
+        }
+    }
+}
+
+/// The family name and style a font declares about itself (#248).
+///
+/// Style comes from the OS/2 selection flags rather than the file name: `Alegreya-Italic.ttf` and
+/// `AlegreyaItalic.ttf` and `alegreya_it.ttf` are the same font, and no filename convention covers
+/// what every foundry ships. The typographic family (name id 16) is preferred over the family name
+/// (id 1) because id 1 splits large families into `Alegreya` and `Alegreya Medium` to keep the
+/// four-style limit older systems imposed; id 16 is the whole family.
+///
+/// `fallback` names a font whose name table says nothing useful, so it still reaches the picker.
+fn family_and_style(bytes: &[u8], fallback: &str) -> (String, bool, bool) {
+    let Ok(face) = ttf_parser::Face::parse(bytes, 0) else {
+        return (fallback.to_string(), false, false);
+    };
+    let named = |id: u16| {
+        face.names()
+            .into_iter()
+            .filter(|n| n.name_id == id && n.is_unicode())
+            .find_map(|n| n.to_string())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    };
+    let name = named(ttf_parser::name_id::TYPOGRAPHIC_FAMILY)
+        .or_else(|| named(ttf_parser::name_id::FAMILY))
+        .unwrap_or_else(|| fallback.to_string());
+    (name, face.is_bold(), face.is_italic())
 }
 
 /// User reading faces registered at runtime, in registration order — the picker lists them after the
 /// bundled families, and their `id` continues that numbering. Process-wide for the same reason as
 /// [`extra_fallbacks`]. The shell owns the files (RR22-FR1 `fonts/`) and hands over bytes, so the
 /// core never learns a filesystem path (IR-7).
-fn user_fonts() -> &'static RwLock<Vec<UserFont>> {
-    static USER: OnceLock<RwLock<Vec<UserFont>>> = OnceLock::new();
+fn user_fonts() -> &'static RwLock<Vec<UserFamily>> {
+    static USER: OnceLock<RwLock<Vec<UserFamily>>> = OnceLock::new();
     USER.get_or_init(|| RwLock::new(Vec::new()))
 }
 
 /// Read the user font registry, surviving a poisoned lock (a font list cannot be half-written).
-fn read_user_fonts() -> std::sync::RwLockReadGuard<'static, Vec<UserFont>> {
+fn read_user_fonts() -> std::sync::RwLockReadGuard<'static, Vec<UserFamily>> {
     match user_fonts().read() {
         Ok(guard) => guard,
         Err(poisoned) => poisoned.into_inner(),
@@ -198,17 +260,36 @@ fn read_user_fonts() -> std::sync::RwLockReadGuard<'static, Vec<UserFont>> {
 /// Ids are positional, so the shell must register in a stable order (it registers the `fonts/`
 /// directory sorted, once at startup) for a remembered choice to survive a restart.
 pub fn register_reading_font(name: String, bytes: Vec<u8>) -> Option<usize> {
-    // Parse once here purely to reject junk at the boundary; the bytes are what we keep.
+    // Parse once here purely to reject junk at the boundary; the bytes are what we keep. This is
+    // the authoritative check because it is the renderer's own parser.
     FontVec::try_from_vec(bytes.clone()).ok()?;
+    // What the font says it is, which decides the family it joins and the slot it fills (#248).
+    let (family, bold, italic) = family_and_style(&bytes, &name);
+    let bytes = Arc::new(bytes);
     let mut fonts = match user_fonts().write() {
         Ok(guard) => guard,
         Err(poisoned) => poisoned.into_inner(),
     };
-    fonts.push(UserFont {
-        name,
-        bytes: Arc::new(bytes),
-    });
-    Some(READING_FONTS.len() + fonts.len() - 1)
+    // Case-insensitive, because a foundry shipping `Alegreya` and `alegreya` across a family is not
+    // describing two families and the reader would see two entries for one font.
+    let at = fonts
+        .iter()
+        .position(|f| f.name.eq_ignore_ascii_case(&family));
+    let at = match at {
+        Some(i) => i,
+        None => {
+            fonts.push(UserFamily {
+                name: family,
+                regular: None,
+                bold: None,
+                italic: None,
+                bold_italic: None,
+            });
+            fonts.len() - 1
+        }
+    };
+    fonts[at].place(bytes, bold, italic);
+    Some(READING_FONTS.len() + at)
 }
 
 /// Forget every registered user reading face — the shell calls this before re-registering the
@@ -267,11 +348,34 @@ impl AbFont {
         // Ids past the bundled families address the user's own (RR28-FR3); an id past those — a
         // font removed since the choice was made — falls back to the default rather than failing.
         if id >= READING_FONTS.len() {
-            let bytes = read_user_fonts()
-                .get(id - READING_FONTS.len())
-                .map(|f| Arc::clone(&f.bytes));
-            if let Some(font) = bytes.and_then(|b| Self::from_bytes(b.as_ref().clone())) {
-                return font;
+            // Take the four slots and drop the lock before parsing: parsing is milliseconds and the
+            // registry is process-wide, so it must not be held across it.
+            let slots = {
+                let fonts = read_user_fonts();
+                fonts.get(id - READING_FONTS.len()).map(|f| {
+                    (
+                        f.primary().map(Arc::clone),
+                        f.bold.as_ref().map(Arc::clone),
+                        f.italic.as_ref().map(Arc::clone),
+                        f.bold_italic.as_ref().map(Arc::clone),
+                    )
+                })
+            };
+            let owned = |b: Option<Arc<Vec<u8>>>| {
+                b.and_then(|b| FontVec::try_from_vec(b.as_ref().clone()).ok())
+            };
+            if let Some((primary, bold, italic, bold_italic)) = slots {
+                if let Some(regular) = owned(primary) {
+                    // Real faces where the reader imported them, synthesis only for the gaps —
+                    // exactly what a bundled family gets (#248).
+                    return Self {
+                        regular,
+                        bold: owned(bold),
+                        italic: owned(italic),
+                        bold_italic: owned(bold_italic),
+                        fallbacks: fallback_chain(),
+                    };
+                }
             }
             return Self::for_face(0);
         }
@@ -692,6 +796,12 @@ pub fn page_glyphs(page: &Page, opts: &LayoutOpts, font: &AbFont) -> Vec<PlacedG
 mod tests {
     use super::*;
     use crate::content::{Block, Inline, TextRun};
+    use std::sync::Mutex;
+
+    /// The reading-font registry is process-wide and tests run in parallel, so every test that
+    /// registers, lists or clears it takes this first. Without it a family test and the single-file
+    /// test observe each other's registrations and both fail intermittently.
+    static REGISTRY: Mutex<()> = Mutex::new(());
     use crate::css::BlockStyle;
     use crate::layout::paginate;
 
@@ -1058,6 +1168,10 @@ mod tests {
     fn a_user_font_joins_the_picker_and_loads_by_id() {
         // Registering, listing and clearing in one test: the registry is process-wide, so splitting
         // these would let them observe each other's state.
+        let _registry = REGISTRY
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        clear_reading_fonts();
         let bundled = READING_FONTS.len();
         let before = reading_font_names().len();
         assert_eq!(before, bundled, "no user fonts registered yet");
@@ -1069,7 +1183,9 @@ mod tests {
 
         let names = reading_font_names();
         assert_eq!(names.len(), bundled + 1);
-        assert_eq!(names[id], "My Font", "the picker shows the given name");
+        // The picker shows what the font calls itself, not what the caller labelled it (#248). The
+        // caller's label is only a fallback for a font whose name table says nothing.
+        assert_eq!(names[id], "Droid Sans Mono");
 
         // The id resolves to that face, not to the default (RR28-AC2).
         let user = AbFont::for_face(id);
@@ -1084,9 +1200,115 @@ mod tests {
         assert_eq!(reading_font_names().len(), bundled, "cleared");
     }
 
+    /// #248: the four files of a family are one entry in the picker, with the real faces the reader
+    /// imported rather than a smear and a shear standing in for them.
+    #[test]
+    fn four_files_of_one_family_become_a_single_entry_with_real_faces() {
+        let _registry = REGISTRY
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        clear_reading_fonts();
+        let bundled = READING_FONTS.len();
+
+        // Deliberately useless labels: the grouping must come from each font's own name table, not
+        // from what the shell happened to call the file.
+        let files: [(&str, &[u8]); 4] = [
+            ("file-a", include_bytes!("../fonts/NotoSerif-Regular.ttf")),
+            ("file-b", include_bytes!("../fonts/NotoSerif-Bold.ttf")),
+            ("file-c", include_bytes!("../fonts/NotoSerif-Italic.ttf")),
+            (
+                "file-d",
+                include_bytes!("../fonts/NotoSerif-BoldItalic.ttf"),
+            ),
+        ];
+        let ids: Vec<usize> = files
+            .iter()
+            .map(|(label, bytes)| {
+                register_reading_font((*label).into(), bytes.to_vec())
+                    .expect("a real face registers")
+            })
+            .collect();
+
+        assert_eq!(ids, vec![bundled; 4], "every file joined the same family");
+        let names = reading_font_names();
+        assert_eq!(names.len(), bundled + 1, "four files, one picker entry");
+        assert_eq!(names[bundled], "Noto Serif");
+
+        // The point of the exercise: nothing is synthesized, because the faces are all present.
+        let family = AbFont::for_face(bundled);
+        for (bold, italic) in [(true, false), (false, true), (true, true)] {
+            let (_, synth) = family.face_for('a', bold, italic);
+            assert!(
+                !synth.embolden && !synth.oblique,
+                "bold={bold} italic={italic} was faked despite the file being imported"
+            );
+        }
+        clear_reading_fonts();
+    }
+
+    /// The single-file case has to keep working: one import is still a usable family, with the
+    /// styles it does not have synthesized exactly as before.
+    #[test]
+    fn a_lone_file_is_still_a_family_and_still_synthesizes() {
+        let _registry = REGISTRY
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        clear_reading_fonts();
+        let bundled = READING_FONTS.len();
+
+        let bytes = include_bytes!("../fonts/NotoSerif-Italic.ttf").to_vec();
+        let id = register_reading_font("whatever".into(), bytes).expect("registers");
+        assert_eq!(reading_font_names().len(), bundled + 1);
+
+        // Importing only the italic still yields a readable family rather than a fallback to the
+        // default: the face present stands in as the primary.
+        let family = AbFont::for_face(id);
+        let (_, synth) = family.face_for('a', false, true);
+        assert!(!synth.oblique, "the imported italic is the real one");
+        let (_, synth) = family.face_for('a', true, false);
+        assert!(
+            synth.embolden,
+            "no bold was imported, so bold is synthesized"
+        );
+        clear_reading_fonts();
+    }
+
+    /// Re-registering the same directory must not double-slot a face. The shell rebuilds the whole
+    /// registry after every import and removal, so this runs constantly.
+    #[test]
+    fn re_registering_the_same_file_is_idempotent() {
+        let _registry = REGISTRY
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        clear_reading_fonts();
+        let bundled = READING_FONTS.len();
+        let bytes = include_bytes!("../fonts/NotoSerif-Regular.ttf");
+        for _ in 0..3 {
+            register_reading_font("x".into(), bytes.to_vec()).expect("registers");
+        }
+        assert_eq!(
+            reading_font_names().len(),
+            bundled + 1,
+            "one family, not three"
+        );
+        clear_reading_fonts();
+    }
+
+    /// A font whose name table gives nothing usable still reaches the picker, under the name the
+    /// shell supplied. Without the fallback such a font would register into an empty-named family.
+    #[test]
+    fn a_font_that_names_nothing_falls_back_to_the_supplied_name() {
+        let (name, bold, italic) = family_and_style(b"not a font at all", "From The File");
+        assert_eq!(name, "From The File");
+        assert!(!bold && !italic, "an unreadable face declares no style");
+    }
+
     #[test]
     fn junk_bytes_are_refused_rather_than_registered() {
         // RR21-FR3: invalid input at the boundary is a `None`, never a panic.
+        let _registry = REGISTRY
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         assert!(register_reading_font("Not a font".into(), b"nope".to_vec()).is_none());
         assert!(register_reading_font("Empty".into(), Vec::new()).is_none());
     }

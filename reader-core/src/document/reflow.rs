@@ -1035,12 +1035,17 @@ pub(crate) fn reset_layout_passes() {
 ///   stylesheet rather than an `<i>` tag now sets those runs in an italic face, which measures
 ///   differently and moves the line breaks a `v5` index recorded.
 ///
+/// - `v6` → `v7`: imported font files are grouped into families (#248), so a reader's four Alegreya
+///   files are one id where they were four. Every user font id after the first grouped family
+///   shifts, and an id is what this key records, so a stored pagination would be read back for a
+///   different face.
+///
 /// Note the tripwire in the tests pins *measurement* — what `advance()` returns for a given style —
 /// so it does not fire for a change like `v6`, which alters **which style a run gets** rather than
 /// how a style measures. Both invalidate a stored index. A change to run styling has to bump this
 /// by hand.
 fn layout_key(opts: &LayoutOpts, font_id: usize, chapters: usize) -> String {
-    format!("v6|{:016x}|{font_id}|{chapters}", opts.layout_digest())
+    format!("v7|{:016x}|{font_id}|{chapters}", opts.layout_digest())
 }
 
 /// A materialized chapter: the pages laid out so far, and whether that is all of them (#186).

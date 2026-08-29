@@ -670,6 +670,7 @@ dependencies = [
  "rbook",
  "scraper",
  "simplecss",
+ "ttf-parser",
  "unicode-linebreak",
  "zip",
 ]
