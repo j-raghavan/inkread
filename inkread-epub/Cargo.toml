@@ -38,3 +38,4 @@ simplecss = "0.2.2"
 # one decoder serves both paths (see `img.rs`), so this adds no codec that was not already shipping.
 jpeg-decoder = { workspace = true }
 png = { workspace = true }
+ttf-parser = { version = "0.25", default-features = false, features = ["std", "opentype-layout", "apple-layout", "variable-fonts", "glyph-names"] }
