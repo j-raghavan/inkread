@@ -109,8 +109,6 @@ class BottomBarController(private val host: Host) {
         }
         val total = host.pageCount.coerceAtLeast(1)
         val cur = host.currentPage.coerceIn(0, total - 1)
-        val d = activity.resources.displayMetrics.density
-        fun dp(v: Int) = (v * d).toInt()
 
         val dialog = Dialog(activity).apply { requestWindowFeature(Window.FEATURE_NO_TITLE) }
         val container = LinearLayout(activity).apply {
@@ -131,7 +129,7 @@ class BottomBarController(private val host: Host) {
             typeface = Ink.mono
             letterSpacing = 0.04f
             gravity = Gravity.CENTER
-            setPadding(dp(12), dp(6), dp(12), dp(6))
+            setPadding(Ink.sdp(12), Ink.sdp(6), Ink.sdp(12), Ink.sdp(6))
             background = GradientDrawable().apply {
                 setColor(Ink.fill)
                 cornerRadius = Ink.dpf(40)
@@ -139,7 +137,7 @@ class BottomBarController(private val host: Host) {
             setOnClickListener { dialog.dismiss(); showPageEntry(total) }
         }
         // A refined, thin grayscale track + small round thumb (the default SeekBar reads clunky).
-        val trackH = dp(3).coerceAtLeast(2)
+        val trackH = Ink.sdp(3).coerceAtLeast(2)
         fun bar(c: Int) = GradientDrawable().apply { setColor(c); cornerRadius = trackH.toFloat(); setSize(0, trackH) }
         val track = android.graphics.drawable.LayerDrawable(
             arrayOf(
@@ -147,14 +145,14 @@ class BottomBarController(private val host: Host) {
                 android.graphics.drawable.ClipDrawable(bar(Ink.ink), Gravity.START, android.graphics.drawable.ClipDrawable.HORIZONTAL),
             ),
         ).apply { setId(0, android.R.id.background); setId(1, android.R.id.progress) }
-        val knob = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(Ink.ink); setSize(dp(16), dp(16)) }
+        val knob = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(Ink.ink); setSize(Ink.sdp(16), Ink.sdp(16)) }
         val seek = SeekBar(activity).apply {
             max = total - 1
             progress = cur
             progressDrawable = track
             thumb = knob
             splitTrack = false
-            setPadding(dp(10), dp(4), dp(10), dp(4))
+            setPadding(Ink.sdp(10), Ink.sdp(4), Ink.sdp(10), Ink.sdp(4))
             setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
                 override fun onProgressChanged(sb: SeekBar, p: Int, fromUser: Boolean) {
                     if (fromUser) pageLabel.text = "${p + 1} / $total"
@@ -167,7 +165,7 @@ class BottomBarController(private val host: Host) {
         // shown only when the document has a table of contents (1.7).
         fun chapterBtn(glyph: String, dir: Int) = TextView(activity).apply {
             text = glyph; setTextColor(Ink.ink); textSize = Ink.sp(20f); typeface = Ink.serifBold
-            gravity = Gravity.CENTER; setPadding(dp(8), dp(2), dp(8), dp(2)); isClickable = true
+            gravity = Gravity.CENTER; setPadding(Ink.sdp(8), Ink.sdp(2), Ink.sdp(8), Ink.sdp(2)); isClickable = true
             setOnClickListener { dialog.dismiss(); chapterJump(dir) }
         }
         fileNameLine()?.let(container::addView)
@@ -175,11 +173,11 @@ class BottomBarController(private val host: Host) {
             LinearLayout(activity).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
-                setPadding(dp(16), dp(12), dp(16), dp(6))
+                setPadding(Ink.sdp(16), Ink.sdp(12), Ink.sdp(16), Ink.sdp(6))
                 if (host.chapters.isNotEmpty()) addView(chapterBtn("‹‹", -1))
                 addView(seek, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
                 if (host.chapters.isNotEmpty()) addView(chapterBtn("››", +1))
-                addView(pageLabel, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { marginStart = dp(12) })
+                addView(pageLabel, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { marginStart = Ink.sdp(12) })
             },
         )
         // Current-chapter line under the scrubber: orients the reader and makes the ‹‹/›› obvious.
@@ -189,7 +187,7 @@ class BottomBarController(private val host: Host) {
             container.addView(LinearLayout(activity).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
-                setPadding(dp(24), 0, dp(24), dp(8))
+                setPadding(Ink.sdp(24), 0, Ink.sdp(24), Ink.sdp(8))
                 isClickable = true
                 setOnClickListener { dialog.dismiss(); showContentsLazy() }
                 addView(TextView(activity).apply {
@@ -199,7 +197,7 @@ class BottomBarController(private val host: Host) {
                 inChapterPosition()?.let { pos ->
                     addView(TextView(activity).apply {
                         text = pos; setTextColor(Ink.muted); textSize = Ink.sp(12f); typeface = Ink.mono
-                        setPadding(dp(10), 0, 0, 0)
+                        setPadding(Ink.sdp(10), 0, 0, 0)
                     })
                 }
             })
@@ -208,7 +206,7 @@ class BottomBarController(private val host: Host) {
         // Control row: flat, evenly-weighted icon+label cells.
         val controls = LinearLayout(activity).apply {
             orientation = LinearLayout.HORIZONTAL
-            setPadding(dp(2), dp(6), dp(2), dp(12))
+            setPadding(Ink.sdp(2), Ink.sdp(6), Ink.sdp(2), Ink.sdp(12))
         }
         // One control = a line icon over a small label (Boox/NeoReader bottom-bar style, frame 069).
         //
@@ -219,7 +217,7 @@ class BottomBarController(private val host: Host) {
             val cell = LinearLayout(activity).apply {
                 orientation = LinearLayout.VERTICAL
                 gravity = Gravity.CENTER
-                setPadding(dp(2), dp(8), dp(2), dp(8))
+                setPadding(Ink.sdp(2), Ink.sdp(8), Ink.sdp(2), Ink.sdp(8))
                 isClickable = true
                 setOnClickListener {
                     if (!staysOpen) dialog.dismiss()
@@ -427,12 +425,10 @@ class BottomBarController(private val host: Host) {
 
     /** The inked pages as a scrollable "Page N · M notes" list; tap a row to jump there. */
     private fun showAnnotationsList(items: List<Pair<Int, Int>>) {
-        val d = activity.resources.displayMetrics.density
-        fun dp(v: Int) = (v * d).toInt()
         val dialog = Dialog(activity).apply { requestWindowFeature(Window.FEATURE_NO_TITLE) }
         val outer = LinearLayout(activity).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(24), dp(22), dp(24), dp(14))
+            setPadding(Ink.sdp(24), Ink.sdp(22), Ink.sdp(24), Ink.sdp(14))
         }
         outer.addView(Ink.eyebrow(activity, "Annotations"))
         outer.addView(Ink.gap(activity, 10))
@@ -445,7 +441,7 @@ class BottomBarController(private val host: Host) {
             list.addView(LinearLayout(activity).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
-                setPadding(dp(4), dp(14), dp(4), dp(14))
+                setPadding(Ink.sdp(4), Ink.sdp(14), Ink.sdp(4), Ink.sdp(14))
                 isClickable = true
                 setOnClickListener { dialog.dismiss(); host.postJump(page) }
                 addView(TextView(activity).apply {
@@ -471,13 +467,11 @@ class BottomBarController(private val host: Host) {
     /** The document's table of contents (RR11-FR2), shown as a scrollable list from the popup. */
     private fun showContents(toc: List<TocItem>) {
         if (toc.isEmpty()) return
-        val d = activity.resources.displayMetrics.density
-        fun dp(v: Int) = (v * d).toInt()
         val dialog = Dialog(activity).apply { requestWindowFeature(Window.FEATURE_NO_TITLE) }
 
         val outer = LinearLayout(activity).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(24), dp(22), dp(24), dp(14))
+            setPadding(Ink.sdp(24), Ink.sdp(22), Ink.sdp(24), Ink.sdp(14))
         }
         outer.addView(Ink.eyebrow(activity, "Contents"))
         outer.addView(Ink.gap(activity, 10))
@@ -490,7 +484,7 @@ class BottomBarController(private val host: Host) {
             list.addView(LinearLayout(activity).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
-                setPadding(dp(4) + item.depth * dp(18), dp(14), dp(4), dp(14))
+                setPadding(Ink.sdp(4) + item.depth * Ink.sdp(18), Ink.sdp(14), Ink.sdp(4), Ink.sdp(14))
                 isClickable = true
                 setOnClickListener { dialog.dismiss(); item.targetPage?.let { host.postJump(it) } }
                 addView(TextView(activity).apply {
@@ -503,7 +497,7 @@ class BottomBarController(private val host: Host) {
                 item.targetPage?.let { p ->
                     addView(TextView(activity).apply {
                         text = "${p + 1}"; setTextColor(Ink.muted); textSize = Ink.sp(12f); typeface = Ink.mono
-                        setPadding(dp(12), 0, 0, 0)
+                        setPadding(Ink.sdp(12), 0, 0, 0)
                     })
                 }
             })
@@ -540,8 +534,6 @@ class BottomBarController(private val host: Host) {
      * here rather than behind a twelfth control in a row that is already full on a small panel.
      */
     private fun fileNameLine(): View? {
-        val d = activity.resources.displayMetrics.density
-        fun dp(v: Int) = (v * d).toInt()
         val file = java.io.File(host.requestedPath ?: return null)
         val title = Books.metaTitle(activity, file.name) ?: Books.title(file)
         val name = Books.disambiguatingFileName(title, file.name)
@@ -556,7 +548,7 @@ class BottomBarController(private val host: Host) {
             typeface = Ink.mono
             maxLines = 1
             ellipsize = android.text.TextUtils.TruncateAt.MIDDLE
-            setPadding(dp(24), dp(12), dp(24), 0)
+            setPadding(Ink.sdp(24), Ink.sdp(12), Ink.sdp(24), 0)
         }
     }
 

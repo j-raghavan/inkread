@@ -92,8 +92,6 @@ class AdjustSheetController(private val host: Host) {
      */
     fun show() {
         if (host.docHandle == 0L) { host.openPicker(); return }
-        val d = activity.resources.displayMetrics.density
-        fun dp(v: Int) = (v * d).toInt()
         val dialog = Dialog(activity).apply { requestWindowFeature(Window.FEATURE_NO_TITLE) }
         val content = android.widget.FrameLayout(activity)
 
@@ -132,15 +130,15 @@ class AdjustSheetController(private val host: Host) {
         panels.forEachIndexed { i, (label, icon, _) ->
             val cell = LinearLayout(activity).apply {
                 orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER
-                setPadding(dp(4), dp(10), dp(4), dp(10)); isClickable = true
+                setPadding(Ink.sdp(4), Ink.sdp(10), Ink.sdp(4), Ink.sdp(10)); isClickable = true
                 setOnClickListener { select(i) }
                 addView(
                     ImageView(activity).apply { setImageResource(icon); setColorFilter(Ink.ink) },
-                    LinearLayout.LayoutParams(dp(24), dp(24)),
+                    LinearLayout.LayoutParams(Ink.sdp(24), Ink.sdp(24)),
                 )
                 addView(TextView(activity).apply {
                     text = label; textSize = Ink.sp(10f); setTextColor(Ink.inkSoft); typeface = Ink.mono
-                    gravity = Gravity.CENTER; setPadding(0, dp(3), 0, 0)
+                    gravity = Gravity.CENTER; setPadding(0, Ink.sdp(3), 0, 0)
                 })
             }
             cells.add(cell)
@@ -179,9 +177,7 @@ class AdjustSheetController(private val host: Host) {
     /** A KOReader-style **segmented control**: a rounded pill of [options] with the [selected]
      *  segment filled dark. Updates its own highlight on tap, then calls [onSelect]. */
     private fun segmented(options: List<String>, selected: Int, onSelect: (Int) -> Unit): View {
-        val d = activity.resources.displayMetrics.density
-        fun dp(v: Int) = (v * d).toInt()
-        val radius = dp(20).toFloat()
+        val radius = Ink.sdp(20).toFloat()
         var sel = selected
         val segs = ArrayList<TextView>()
         fun style(tv: TextView, on: Boolean) {
@@ -201,11 +197,11 @@ class AdjustSheetController(private val host: Host) {
                 setColor(Ink.paper); cornerRadius = radius
                 setStroke(Ink.hair(), Ink.ringSoft)
             }
-            val p = dp(3); setPadding(p, p, p, p)
+            val p = Ink.sdp(3); setPadding(p, p, p, p)
             options.forEachIndexed { i, opt ->
                 val tv = TextView(activity).apply {
                     text = opt; textSize = Ink.sp(15f); gravity = Gravity.CENTER
-                    setPadding(dp(6), dp(10), dp(6), dp(10)); isClickable = true
+                    setPadding(Ink.sdp(6), Ink.sdp(10), Ink.sdp(6), Ink.sdp(10)); isClickable = true
                     setOnClickListener { sel = i; segs.forEachIndexed { j, t -> style(t, j == sel) }; onSelect(i) }
                 }
                 style(tv, i == sel)
@@ -218,8 +214,6 @@ class AdjustSheetController(private val host: Host) {
     /** A KOReader-style **cell bar**: [count] boxes filled up to the current level; tapping box i
      *  sets level i+1 (tapping the current top cell turns it off → 0). Repaints on tap. */
     private fun cellBar(count: Int, initial: Int, onSet: (Int) -> Unit): View {
-        val d = activity.resources.displayMetrics.density
-        fun dp(v: Int) = (v * d).toInt()
         var filled = initial
         val draws = ArrayList<GradientDrawable>()
         fun repaint() = draws.forEachIndexed { i, g ->
@@ -237,7 +231,7 @@ class AdjustSheetController(private val host: Host) {
                         repaint(); invalidate()
                         onSet(filled)
                     }
-                }, LinearLayout.LayoutParams(0, dp(30), 1f).apply { val m = dp(2); setMargins(m, 0, m, 0) })
+                }, LinearLayout.LayoutParams(0, Ink.sdp(30), 1f).apply { val m = Ink.sdp(2); setMargins(m, 0, m, 0) })
             }
             repaint()
         }
@@ -256,8 +250,6 @@ class AdjustSheetController(private val host: Host) {
 
     /** "Add…" / "Remove…" for the reader's imported faces (RR28-FR3). */
     private fun fontLibraryControls(): View {
-        val d = activity.resources.displayMetrics.density
-        fun dp(v: Int) = (v * d).toInt()
         return LinearLayout(activity).apply {
             orientation = LinearLayout.HORIZONTAL
             addView(pill("Add…") { host.openFontPicker() })
@@ -266,7 +258,7 @@ class AdjustSheetController(private val host: Host) {
                     pill("Remove…") { showRemoveFontDialog() },
                     LinearLayout.LayoutParams(
                         ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
-                    ).apply { leftMargin = dp(8) },
+                    ).apply { leftMargin = Ink.sdp(8) },
                 )
             }
         }
@@ -301,16 +293,14 @@ class AdjustSheetController(private val host: Host) {
     }
 
     private fun settingRow(label: String, control: View): View {
-        val d = activity.resources.displayMetrics.density
-        fun dp(v: Int) = (v * d).toInt()
         return LinearLayout(activity).apply {
             orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(16), dp(14), dp(16), dp(14))
+            setPadding(Ink.sdp(16), Ink.sdp(14), Ink.sdp(16), Ink.sdp(14))
             addView(TextView(activity).apply {
                 text = label; textSize = Ink.sp(16f); setTextColor(Color.BLACK); gravity = Gravity.END
-            }, LinearLayout.LayoutParams(dp(96), ViewGroup.LayoutParams.WRAP_CONTENT))
+            }, LinearLayout.LayoutParams(Ink.sdp(96), ViewGroup.LayoutParams.WRAP_CONTENT))
             addView(control, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
-                marginStart = dp(14)
+                marginStart = Ink.sdp(14)
             })
         }
     }
@@ -428,13 +418,11 @@ class AdjustSheetController(private val host: Host) {
 
     /** A white rounded stepper pill (shared by the Zoom and Font tabs). */
     private fun pill(t: String, on: () -> Unit): TextView {
-        val d = activity.resources.displayMetrics.density
-        fun dp(v: Int) = (v * d).toInt()
         return TextView(activity).apply {
             text = t; textSize = Ink.sp(16f); gravity = Gravity.CENTER; setTextColor(Color.BLACK)
-            setPadding(dp(18), dp(10), dp(18), dp(10)); isClickable = true
+            setPadding(Ink.sdp(18), Ink.sdp(10), Ink.sdp(18), Ink.sdp(10)); isClickable = true
             background = GradientDrawable().apply {
-                setColor(Color.WHITE); cornerRadius = dp(20).toFloat(); setStroke(maxOf(1, dp(1)), Color.parseColor("#9E9E9E"))
+                setColor(Color.WHITE); cornerRadius = Ink.sdp(20).toFloat(); setStroke(Ink.hair(), Color.parseColor("#9E9E9E"))
             }
             setOnClickListener { on() }
         }
@@ -442,10 +430,8 @@ class AdjustSheetController(private val host: Host) {
 
     /** The "Zoom" tab: the Fit segmented row + a live zoom −/+ stepper (zoom moved off the bar). */
     private fun zoomPanel(): View {
-        val d = activity.resources.displayMetrics.density
-        fun dp(v: Int) = (v * d).toInt()
         val zlabel = TextView(activity).apply {
-            textSize = Ink.sp(16f); setTextColor(Color.BLACK); gravity = Gravity.CENTER; minWidth = dp(64)
+            textSize = Ink.sp(16f); setTextColor(Color.BLACK); gravity = Gravity.CENTER; minWidth = Ink.sdp(64)
         }
         fun refresh() { zlabel.text = "${host.zoomPercent}%" }
         refresh()
@@ -453,7 +439,7 @@ class AdjustSheetController(private val host: Host) {
             orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
             addView(pill("−") { host.zoomOut(); refresh() })
             addView(zlabel, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
-                val m = dp(10); setMargins(m, 0, m, 0)
+                val m = Ink.sdp(10); setMargins(m, 0, m, 0)
             })
             addView(pill("+") { host.zoomIn(); refresh() })
         }
@@ -558,11 +544,9 @@ class AdjustSheetController(private val host: Host) {
     }
 
     private fun fontPanel(): View {
-        val d = activity.resources.displayMetrics.density
-        fun dp(v: Int) = (v * d).toInt()
         var idx = DisplayPrefs.nearestScaleIndex(prefs.textScale)
         val value = TextView(activity).apply {
-            textSize = Ink.sp(16f); setTextColor(Color.BLACK); gravity = Gravity.CENTER; minWidth = dp(64)
+            textSize = Ink.sp(16f); setTextColor(Color.BLACK); gravity = Gravity.CENTER; minWidth = Ink.sdp(64)
         }
         fun refresh() { value.text = "${(DisplayPrefs.TEXT_SCALES[idx] * 100).toInt()}%" }
         refresh()
@@ -571,13 +555,13 @@ class AdjustSheetController(private val host: Host) {
             orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
             addView(pill("A−") { if (idx > 0) { idx--; apply() } })
             addView(value, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
-                val m = dp(10); setMargins(m, 0, m, 0)
+                val m = Ink.sdp(10); setMargins(m, 0, m, 0)
             })
             addView(pill("A+") { if (idx < DisplayPrefs.TEXT_SCALES.size - 1) { idx++; apply() } })
             // Quick presets next to the steppers: jump straight to default / largest (#55).
             fun preset(p: View) = addView(p, LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
-            ).apply { leftMargin = dp(8) })
+            ).apply { leftMargin = Ink.sdp(8) })
             preset(pill("100%") { idx = DisplayPrefs.nearestScaleIndex(1.0f); apply() })
             preset(pill("XL") { idx = DisplayPrefs.TEXT_SCALES.size - 1; apply() })
         }
