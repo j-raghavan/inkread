@@ -44,6 +44,21 @@ impl Length {
     }
 }
 
+/// What a book asked to happen at a block's edge, or inside it (#251).
+///
+/// One type for `page-break-before`/`-after`/`-inside` and their CSS3 `break-*` spellings, because
+/// they share a value grammar. `Auto` is kept distinct from "not declared" so a later rule can
+/// cancel an earlier one — `h3 { page-break-before: always }` then `.run-on h3 { ...: auto }`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PageBreak {
+    /// No constraint, explicitly declared.
+    Auto,
+    /// Force a break here (`always`, and the page-side keywords, which inkread has no notion of).
+    Always,
+    /// Do not break here (`avoid`).
+    Avoid,
+}
+
 /// The block-level properties a book may declare that inkread honours.
 ///
 /// Every field is `Option` so "the book said nothing" stays distinguishable from "the book asked
@@ -74,6 +89,19 @@ pub struct BlockStyle {
     pub margin_top: Option<Length>,
     /// `margin-bottom`, from the longhand or the `margin` shorthand (#251).
     pub margin_bottom: Option<Length>,
+    /// `page-break-before` / `break-before` (#251): start this block on a new page.
+    ///
+    /// Like `margin`, and unlike the four properties above, the break properties do not inherit —
+    /// but a book routinely declares one on the container rather than the block, so [`crate::content`]
+    /// transfers a container's onto the blocks it wraps.
+    pub break_before: Option<PageBreak>,
+    /// `page-break-after` / `break-after` (#251). `Avoid` is what keeps a heading on the same page
+    /// as the text it introduces, and is also how a container's `page-break-inside: avoid` is
+    /// expressed over the several blocks it wraps.
+    pub break_after: Option<PageBreak>,
+    /// `page-break-inside` / `break-inside` (#251): `Avoid` asks for the block not to be split
+    /// across a page boundary, so a stanza moves whole to the next page rather than being halved.
+    pub break_inside: Option<PageBreak>,
 }
 
 impl BlockStyle {
@@ -86,6 +114,9 @@ impl BlockStyle {
             && self.italic.is_none()
             && self.margin_top.is_none()
             && self.margin_bottom.is_none()
+            && self.break_before.is_none()
+            && self.break_after.is_none()
+            && self.break_inside.is_none()
     }
 
     /// Return `self` with every property `higher` declares overridden — the inheritance step, used
@@ -109,6 +140,12 @@ impl BlockStyle {
         // two ems between every line of it.
         self.margin_top = higher.margin_top;
         self.margin_bottom = higher.margin_bottom;
+        // Nor do the break properties. A container's are transferred onto the blocks it wraps by
+        // `content::apply_container_breaks`, which is a different thing from inheriting them: a
+        // `page-break-before` on a `<div>` means one break, not one before every block inside.
+        self.break_before = higher.break_before;
+        self.break_after = higher.break_after;
+        self.break_inside = higher.break_inside;
         self
     }
 
@@ -140,6 +177,15 @@ impl BlockStyle {
             }
             "margin-top" => self.margin_top = parse_length(&value).or(self.margin_top),
             "margin-bottom" => self.margin_bottom = parse_length(&value).or(self.margin_bottom),
+            "page-break-before" | "break-before" => {
+                self.break_before = parse_page_break(&value).or(self.break_before);
+            }
+            "page-break-after" | "break-after" => {
+                self.break_after = parse_page_break(&value).or(self.break_after);
+            }
+            "page-break-inside" | "break-inside" => {
+                self.break_inside = parse_page_break(&value).or(self.break_inside);
+            }
             "margin" => {
                 let (top, bottom) = parse_margin_shorthand(&value);
                 self.margin_top = top.or(self.margin_top);
@@ -333,6 +379,22 @@ fn parse_length(value: &str) -> Option<Length> {
         // A CSS absolute unit: convert at the reference 96 dpi rather than dropping the intent.
         "pt" => Some(Length::Px(n * 96.0 / 72.0)),
         "" if n == 0.0 => Some(Length::Px(0.0)),
+        _ => None,
+    }
+}
+
+/// A `page-break-*` / `break-*` value → [`PageBreak`].
+///
+/// inkread paginates a single stream with no notion of a left- or right-hand page, so `left` and
+/// `right` (and their CSS3 `recto`/`verso` spellings) are honoured as the break they request and
+/// not as the parity they request. Column- and region-scoped values ask for a break in a flow
+/// inkread does not have, so they declare no constraint rather than being promoted to a page break
+/// the book did not ask for.
+fn parse_page_break(value: &str) -> Option<PageBreak> {
+    match value {
+        "always" | "page" | "left" | "right" | "recto" | "verso" => Some(PageBreak::Always),
+        "avoid" | "avoid-page" => Some(PageBreak::Avoid),
+        "auto" | "column" | "region" | "avoid-column" | "avoid-region" => Some(PageBreak::Auto),
         _ => None,
     }
 }

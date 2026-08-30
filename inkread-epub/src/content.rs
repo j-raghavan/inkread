@@ -16,7 +16,7 @@ use ego_tree::NodeRef;
 use scraper::node::Node;
 use scraper::{Html, Selector};
 
-use crate::css::{self, BlockStyle, StyledNode, Stylesheet};
+use crate::css::{self, BlockStyle, PageBreak, StyledNode, Stylesheet};
 
 /// Inline-level content within a [`Block`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -86,6 +86,30 @@ pub enum Block {
     Image { src: String, alt: String },
     /// A horizontal rule (`<hr/>`) — a section divider.
     Rule,
+}
+
+impl Block {
+    /// The style this block carries, if it carries one. A rule and a standalone image declare
+    /// nothing; a row's declarations live on the blocks inside its cells.
+    #[must_use]
+    pub fn style(&self) -> Option<&BlockStyle> {
+        match self {
+            Block::Heading { style, .. }
+            | Block::Paragraph { style, .. }
+            | Block::ListItem { style, .. } => Some(style),
+            Block::Row { .. } | Block::Image { .. } | Block::Rule => None,
+        }
+    }
+
+    /// As [`Block::style`], for amending what a container declared onto the blocks it wraps.
+    fn style_mut(&mut self) -> Option<&mut BlockStyle> {
+        match self {
+            Block::Heading { style, .. }
+            | Block::Paragraph { style, .. }
+            | Block::ListItem { style, .. } => Some(style),
+            Block::Row { .. } | Block::Image { .. } | Block::Rule => None,
+        }
+    }
 }
 
 /// Accumulated inline emphasis as the walker descends styled spans.
@@ -285,8 +309,10 @@ fn walk_blocks(
                     _ => {
                         let inner = declared(child, el, sheet, inherited);
                         flush_paragraph(out, pending, inherited);
+                        let start = out.len();
                         walk_blocks(child, out, pending, sheet, inner);
                         flush_paragraph(out, pending, inner);
+                        apply_container_breaks(&mut out[start..], &inner);
                     }
                 }
             }
@@ -338,6 +364,46 @@ fn walk_table(
                 }
             }
             _ => {}
+        }
+    }
+}
+
+/// Transfer a container's page-break request onto the blocks it wraps (#251).
+///
+/// The break properties do not inherit, but books declare them on the wrapper far more often than
+/// on the block — `<div class="poem" style="page-break-before: always">`. Inheriting them would be
+/// wrong (one break before the poem, not one before every line of it), so they are *transferred*
+/// instead: the request lands on the edge of the run the container produced.
+///
+/// `page-break-inside: avoid` becomes `page-break-after: avoid` on every block but the last, which
+/// is what it means over a run — do not break *between* these — expressed in the vocabulary the
+/// pager already needs for `page-break-after: avoid` itself. Each block also keeps the request, so
+/// a block long enough to fill a page still asks not to be halved.
+///
+/// A block that declared its own value keeps it: a container's request is the weaker one.
+fn apply_container_breaks(blocks: &mut [Block], container: &BlockStyle) {
+    if blocks.is_empty() || container.is_empty() {
+        return;
+    }
+    let last = blocks.len() - 1;
+    let inside_avoid = container.break_inside == Some(PageBreak::Avoid);
+    for (i, block) in blocks.iter_mut().enumerate() {
+        let Some(style) = block.style_mut() else {
+            continue;
+        };
+        if i == 0 && style.break_before.is_none() {
+            style.break_before = container.break_before;
+        }
+        if i == last && style.break_after.is_none() {
+            style.break_after = container.break_after;
+        }
+        if inside_avoid {
+            if style.break_inside.is_none() {
+                style.break_inside = Some(PageBreak::Avoid);
+            }
+            if i != last && style.break_after.is_none() {
+                style.break_after = Some(PageBreak::Avoid);
+            }
         }
     }
 }
@@ -1034,6 +1100,67 @@ mod table_tests {
             panic!("expected a paragraph");
         };
         assert_eq!(style.indent, Some(true), "the book's declaration wins");
+    }
+
+    /// A container's forced break lands on the edge of the run it wraps, not on every block in it:
+    /// a `<div class="poem" style="page-break-before: always">` is one break, not one per line.
+    #[test]
+    fn a_containers_forced_break_lands_on_the_runs_edges() {
+        let sheet =
+            Stylesheet::parse(".poem { page-break-before: always; page-break-after: always }");
+        let b = parse_blocks_with(
+            &body(r#"<div class="poem"><p>a</p><p>b</p><p>c</p></div>"#),
+            &sheet,
+        );
+        assert_eq!(b.len(), 3);
+        let br = |i: usize| {
+            let s = b[i].style().expect("a paragraph carries a style");
+            (s.break_before, s.break_after)
+        };
+        assert_eq!(br(0).0, Some(PageBreak::Always), "before the first only");
+        assert_eq!(br(1).0, None);
+        assert_eq!(br(2).0, None);
+        assert_eq!(br(2).1, Some(PageBreak::Always), "after the last only");
+        assert_eq!(br(0).1, None);
+    }
+
+    /// `page-break-inside: avoid` on a container means "do not break *between* these", which is
+    /// `page-break-after: avoid` on every block but the last.
+    #[test]
+    fn a_containers_avoid_inside_binds_its_blocks_together() {
+        let sheet = Stylesheet::parse(".stanza { page-break-inside: avoid }");
+        let b = parse_blocks_with(
+            &body(r#"<div class="stanza"><p>a</p><p>b</p><p>c</p></div>"#),
+            &sheet,
+        );
+        let after: Vec<_> = b.iter().map(|x| x.style().unwrap().break_after).collect();
+        assert_eq!(
+            after,
+            vec![Some(PageBreak::Avoid), Some(PageBreak::Avoid), None],
+            "the last block is free to be followed by a break",
+        );
+        assert!(
+            b.iter()
+                .all(|x| x.style().unwrap().break_inside == Some(PageBreak::Avoid)),
+            "each block also asks not to be halved on its own",
+        );
+    }
+
+    /// A block that declared its own break keeps it: a container's request is the weaker one.
+    #[test]
+    fn a_blocks_own_break_beats_its_containers() {
+        let sheet = Stylesheet::parse(
+            ".poem { page-break-before: always } .run-on { page-break-before: auto }",
+        );
+        let b = parse_blocks_with(
+            &body(r#"<div class="poem"><p class="run-on">a</p><p>b</p></div>"#),
+            &sheet,
+        );
+        assert_eq!(
+            b[0].style().unwrap().break_before,
+            Some(PageBreak::Auto),
+            "the paragraph's own declaration stands",
+        );
     }
 
     /// Inline emphasis inside a cell is preserved rather than flattened away.

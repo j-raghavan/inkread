@@ -1701,3 +1701,209 @@ mod margins {
         );
     }
 }
+
+// ── Forced and avoided page breaks (#251) ─────────────────────────────────────────────────────
+
+mod page_breaks {
+    use super::*;
+    use crate::css::PageBreak;
+
+    /// A page whose content box holds exactly `lines` lines of `chars` characters, so a fixture
+    /// can straddle a boundary deliberately. `Mono` advances half the font size per character.
+    fn page(lines: f32, chars: f32) -> LayoutOpts {
+        const FONT: f32 = 20.0;
+        LayoutOpts {
+            page_w: chars * FONT * 0.5,
+            page_h: lines * FONT * 1.4,
+            margin: 0.0,
+            ..LayoutOpts::new(100.0, 100.0, FONT)
+        }
+    }
+
+    /// Four lines at a comfortable measure: nothing wraps unless the fixture means it to.
+    fn four_line_page() -> LayoutOpts {
+        page(4.0, 40.0)
+    }
+
+    fn p(text: &str, style: BlockStyle) -> Block {
+        Block::Paragraph {
+            content: vec![Inline::Run(TextRun {
+                text: text.to_string(),
+                bold: false,
+                italic: false,
+                href: None,
+            })],
+            style,
+        }
+    }
+
+    fn text_of(page: &Page) -> Vec<String> {
+        page.lines
+            .iter()
+            .flat_map(|l| l.runs.iter().map(|r| r.text.clone()))
+            .collect()
+    }
+
+    fn always_before() -> BlockStyle {
+        BlockStyle {
+            break_before: Some(PageBreak::Always),
+            ..BlockStyle::default()
+        }
+    }
+
+    /// #251(4): the property the reporter wants for starting each poem on a fresh page.
+    #[test]
+    fn a_forced_break_starts_the_block_on_a_new_page() {
+        let blocks = [p("a", BlockStyle::default()), p("b", always_before())];
+        let pages = paginate(&blocks, &four_line_page(), &Mono);
+        assert_eq!(pages.len(), 2, "both would otherwise share a page");
+        assert_eq!(text_of(&pages[0]), ["a"]);
+        assert_eq!(text_of(&pages[1]), ["b"]);
+    }
+
+    /// A forced break at the top of a page must not leave a blank one.
+    #[test]
+    fn a_forced_break_at_the_top_of_a_page_does_not_blank_it() {
+        let pages = paginate(&[p("a", always_before())], &four_line_page(), &Mono);
+        assert_eq!(pages.len(), 1);
+        assert_eq!(text_of(&pages[0]), ["a"]);
+    }
+
+    /// `page-break-after: always` breaks on the far side of the block.
+    #[test]
+    fn a_forced_break_after_ends_the_page() {
+        let blocks = [
+            p(
+                "a",
+                BlockStyle {
+                    break_after: Some(PageBreak::Always),
+                    ..BlockStyle::default()
+                },
+            ),
+            p("b", BlockStyle::default()),
+        ];
+        let pages = paginate(&blocks, &four_line_page(), &Mono);
+        assert_eq!(pages.len(), 2);
+        assert_eq!(text_of(&pages[0]), ["a"]);
+    }
+
+    /// #251(4): the stanza that must not be halved. Three lines will not fit in the one left on
+    /// the page, so the whole stanza moves rather than two lines going over.
+    #[test]
+    fn an_avoided_break_moves_the_whole_block_to_the_next_page() {
+        // One line of a three-line page spent, then a stanza three lines long: it cannot fit in
+        // what is left, so unbound it straddles the boundary.
+        let o = page(3.0, 12.0);
+        let stanza = "one two three four five six";
+        let long = |style| {
+            paginate(
+                &[p("x", BlockStyle::default()), p(stanza, style)],
+                &o,
+                &Mono,
+            )
+        };
+        let split = long(BlockStyle::default());
+        assert!(
+            split[0].lines.len() > 1,
+            "the fixture must actually straddle the boundary: {split:?}",
+        );
+        let kept = long(BlockStyle {
+            break_inside: Some(PageBreak::Avoid),
+            ..BlockStyle::default()
+        });
+        assert_eq!(
+            text_of(&kept[0]),
+            ["x"],
+            "the stanza should move whole to the next page",
+        );
+        let total: usize = kept.iter().map(|pg| pg.lines.len()).sum();
+        assert_eq!(
+            total,
+            split.iter().map(|pg| pg.lines.len()).sum::<usize>(),
+            "no line is lost or duplicated by moving the block",
+        );
+    }
+
+    /// Honouring `avoid` is a preference; losing text is not an acceptable way to keep it. A block
+    /// taller than any page still splits.
+    #[test]
+    fn a_block_taller_than_a_page_still_splits() {
+        let narrow = page(4.0, 12.0);
+        let huge = (0..40)
+            .map(|i| format!("w{i}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let pages = paginate(
+            &[p(
+                &huge,
+                BlockStyle {
+                    break_inside: Some(PageBreak::Avoid),
+                    ..BlockStyle::default()
+                },
+            )],
+            &narrow,
+            &Mono,
+        );
+        assert!(pages.len() > 1, "it cannot fit; it must split");
+        let placed: Vec<String> = pages.iter().flat_map(text_of).collect();
+        assert!(
+            placed.iter().any(|t| t.contains("w0")) && placed.iter().any(|t| t.contains("w39")),
+            "every word must still be placed: {placed:?}",
+        );
+    }
+
+    /// `page-break-after: avoid` binds a heading to the text it introduces, so the pair moves
+    /// together rather than leaving the heading stranded at the foot of a page.
+    #[test]
+    fn avoid_after_keeps_a_block_with_the_next_one() {
+        let o = four_line_page();
+        let blocks = |style| {
+            [
+                p("a", BlockStyle::default()),
+                p("b", BlockStyle::default()),
+                p("c", BlockStyle::default()),
+                p("heading", style),
+                p("body", BlockStyle::default()),
+            ]
+        };
+        let loose = paginate(&blocks(BlockStyle::default()), &o, &Mono);
+        assert_eq!(
+            text_of(&loose[0]),
+            ["a", "b", "c", "heading"],
+            "unbound, the heading fills the page and its body goes over",
+        );
+        let bound = paginate(
+            &blocks(BlockStyle {
+                break_after: Some(PageBreak::Avoid),
+                ..BlockStyle::default()
+            }),
+            &o,
+            &Mono,
+        );
+        assert_eq!(
+            text_of(&bound[0]),
+            ["a", "b", "c"],
+            "bound, the heading goes over with its body",
+        );
+        assert_eq!(text_of(&bound[1]), ["heading", "body"]);
+    }
+
+    /// A forced break is a stronger statement than a preference not to break, so it ends a keep-run
+    /// rather than being swallowed by it.
+    #[test]
+    fn a_forced_break_wins_over_an_avoid_beside_it() {
+        let blocks = [
+            p(
+                "a",
+                BlockStyle {
+                    break_after: Some(PageBreak::Avoid),
+                    ..BlockStyle::default()
+                },
+            ),
+            p("b", always_before()),
+        ];
+        let pages = paginate(&blocks, &four_line_page(), &Mono);
+        assert_eq!(pages.len(), 2, "the forced break still happens");
+        assert_eq!(text_of(&pages[0]), ["a"]);
+    }
+}

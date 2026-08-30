@@ -18,7 +18,7 @@
 //! [`Page`]s into a `PixelBuffer`.
 
 use crate::content::{Block, Inline};
-use crate::css::{BlockStyle, Length};
+use crate::css::{BlockStyle, Length, PageBreak};
 
 /// Glyph-advance measurement for a font (Phase 4 supplies a real implementation; tests use a
 /// fixed-pitch fake). `bold`/`italic` may select a different face/metrics.
@@ -382,6 +382,29 @@ fn fit_image(
     })
 }
 
+/// Read one break property off a block, or `None` when the block carries no style at all.
+fn declares(block: &Block, pick: impl Fn(&BlockStyle) -> Option<PageBreak>) -> Option<PageBreak> {
+    block.style().and_then(pick)
+}
+
+/// The end (exclusive) of the run of blocks starting at `i` that must stay on one page (#251).
+///
+/// A run grows while the block before it says `page-break-after: avoid` — which is both the
+/// property itself (keeping a heading with the text it introduces) and how a container's
+/// `page-break-inside: avoid` reaches the several blocks it wraps. An explicit
+/// `page-break-before: always` wins over an `avoid` beside it: a forced break is a stronger
+/// statement than a preference not to break.
+fn keep_run_end(blocks: &[Block], i: usize) -> usize {
+    let mut end = i + 1;
+    while end < blocks.len()
+        && declares(&blocks[end - 1], |s| s.break_after) == Some(PageBreak::Avoid)
+        && declares(&blocks[end], |s| s.break_before) != Some(PageBreak::Always)
+    {
+        end += 1;
+    }
+    end
+}
+
 /// Merge a table row's per-cell flows into one `top`-ordered stream, coalescing the lines that
 /// share a vertical position into a single line box (#251).
 ///
@@ -494,14 +517,19 @@ pub fn paginate_upto(
     // `max_pages` counts pages, but the pager is producing *columns* — a two-column page needs two
     // of them before it is whole.
     let column_budget = max_pages.saturating_mul(usize::from(opts.effective_columns()));
-    for (block_index, block) in blocks.iter().enumerate() {
-        // Checked before the block, not after: once enough whole pages exist, laying out one more
+    // Walked in keep-runs rather than block by block: `page-break-after: avoid` binds a block to
+    // the next one, so what may be split across a page is a run, not always a single block (#251).
+    let mut i = 0;
+    while i < blocks.len() {
+        // Checked before the run, not after: once enough whole pages exist, laying out one more
         // block is work the caller has said it does not need.
         if pager.finished_page_count() >= column_budget {
             complete = false;
             break;
         }
-        pager.add_block(block, block_index, &mut cursor, m, images);
+        let end = keep_run_end(blocks, i);
+        pager.add_group(&blocks[i..end], i, &mut cursor, m, images);
+        i = end;
     }
     let columns = opts.effective_columns();
     let laid = if complete {
@@ -587,8 +615,10 @@ impl<'o> Pager<'o> {
         }
     }
 
-    /// A pager for one table cell: `measure` wide, unpaged.
-    fn cell(opts: &'o LayoutOpts, hyph: &'o dyn Hyphenator, measure: f32) -> Self {
+    /// A pager with no vertical budget, `measure` wide: it flows content without ever breaking a
+    /// page, so the caller can place the result as one unit. Used for a table cell and for a run of
+    /// blocks a book asked to keep together.
+    fn unpaged(opts: &'o LayoutOpts, hyph: &'o dyn Hyphenator, measure: f32) -> Self {
         Self {
             measure,
             page_h: f32::INFINITY,
@@ -679,6 +709,18 @@ impl<'o> Pager<'o> {
         (self.current, self.cursor_y)
     }
 
+    /// Start a new page because the book asked to (`page-break-before/after: always`), rather than
+    /// because the current one filled up (#251).
+    ///
+    /// A no-op at the top of a page — a forced break must not leave a blank one — and in an unpaged
+    /// flow, which has no pages to break: a `page-break-before` inside a table cell asks for
+    /// something a cell cannot give.
+    fn force_break(&mut self) {
+        if self.page_h.is_finite() && !self.current.is_empty() {
+            self.break_page();
+        }
+    }
+
     fn break_page(&mut self) {
         self.pages.push(Page {
             lines: std::mem::take(&mut self.current),
@@ -711,6 +753,47 @@ impl<'o> Pager<'o> {
     /// book declared none (#251).
     fn margin(&self, declared: Option<Length>, default_em: f32) -> f32 {
         declared.map_or(self.opts.font_px * default_em, |l| l.px(self.opts.font_px))
+    }
+
+    /// Lay out one keep-run: the blocks between two places a page break is allowed (#251).
+    ///
+    /// Most runs are a single block with nothing declared, and take the direct path — a chapter of
+    /// prose must still break wherever it fills the page. A run that asked not to be split is
+    /// flowed whole first and then placed by [`Self::emit_flow`], which moves it to the next page
+    /// when it does not fit on this one and still fits on a page of its own. A run too tall for any
+    /// page is split at a line boundary rather than dropped: honouring `avoid` is a preference, and
+    /// losing text is not an acceptable way to keep it.
+    fn add_group(
+        &mut self,
+        blocks: &[Block],
+        first_index: usize,
+        cursor: &mut usize,
+        m: &dyn Metrics,
+        images: &dyn ImageSizer,
+    ) {
+        let (Some(first), Some(last)) = (blocks.first(), blocks.last()) else {
+            return;
+        };
+        if declares(first, |s| s.break_before) == Some(PageBreak::Always) {
+            self.force_break();
+        }
+        let indivisible = blocks.len() > 1
+            || blocks
+                .iter()
+                .any(|b| declares(b, |s| s.break_inside) == Some(PageBreak::Avoid));
+        if indivisible {
+            let mut sub = Pager::unpaged(self.opts, self.hyph, self.measure);
+            for (k, b) in blocks.iter().enumerate() {
+                sub.add_block(b, first_index + k, cursor, m, images);
+            }
+            let (lines, height) = sub.into_flow();
+            self.emit_flow(lines, height);
+        } else {
+            self.add_block(first, first_index, cursor, m, images);
+        }
+        if declares(last, |s| s.break_after) == Some(PageBreak::Always) {
+            self.force_break();
+        }
     }
 
     /// Lay out one block. The single place a [`Block`] becomes lines — a chapter's blocks and a
@@ -943,10 +1026,13 @@ impl<'o> Pager<'o> {
             }
             return;
         }
+        // Cells lay out block by block rather than in keep-runs: the row already places its whole
+        // flow as one unit, which keeps together everything a run inside a cell could have asked
+        // for. A forced break inside a cell is likewise nothing a cell can give.
         let mut flows: Vec<Vec<LayoutLine>> = Vec::with_capacity(cells.len());
         let mut tallest = 0.0f32;
         for (index, cell) in cells.iter().enumerate() {
-            let mut sub = Pager::cell(self.opts, self.hyph, cell_w);
+            let mut sub = Pager::unpaged(self.opts, self.hyph, cell_w);
             for b in cell {
                 sub.add_block(b, block, cursor, m, images);
             }

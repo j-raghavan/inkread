@@ -581,3 +581,76 @@ fn a_margin_only_style_is_not_empty() {
     };
     assert!(!st.is_empty());
 }
+
+// ── page-break (#251) ─────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn the_page_break_properties_are_honoured() {
+    let st = styled(
+        "h3 { page-break-before: always; page-break-after: avoid; page-break-inside: avoid }",
+        "<h3 data-t>x</h3>",
+    );
+    assert_eq!(st.break_before, Some(PageBreak::Always));
+    assert_eq!(st.break_after, Some(PageBreak::Avoid));
+    assert_eq!(st.break_inside, Some(PageBreak::Avoid));
+}
+
+/// CSS3 renamed these; books in the wild use both spellings, sometimes in the same stylesheet.
+#[test]
+fn the_css3_break_spellings_mean_the_same() {
+    let st = styled(
+        "h3 { break-before: page; break-inside: avoid-page }",
+        "<h3 data-t>x</h3>",
+    );
+    assert_eq!(st.break_before, Some(PageBreak::Always));
+    assert_eq!(st.break_inside, Some(PageBreak::Avoid));
+}
+
+/// inkread has no left/right page parity, so a parity request is honoured as the break it asks for
+/// rather than dropped.
+#[test]
+fn page_side_keywords_still_force_a_break() {
+    for value in ["left", "right", "recto", "verso"] {
+        let st = styled(
+            &format!("h1 {{ page-break-before: {value} }}"),
+            "<h1 data-t>x</h1>",
+        );
+        assert_eq!(st.break_before, Some(PageBreak::Always), "{value}");
+    }
+}
+
+/// A break in a flow inkread does not have must not be promoted to a page break the book never
+/// asked for.
+#[test]
+fn column_and_region_breaks_request_nothing() {
+    let st = styled(
+        "p { break-before: column; break-inside: avoid-column }",
+        "<p data-t>x</p>",
+    );
+    assert_eq!(st.break_before, Some(PageBreak::Auto));
+    assert_eq!(st.break_inside, Some(PageBreak::Auto));
+}
+
+/// `auto` is a declaration, so a later rule can cancel an earlier one.
+#[test]
+fn auto_cancels_an_earlier_forced_break() {
+    let st = styled(
+        "h3 { page-break-before: always } h3.run-on { page-break-before: auto }",
+        r#"<h3 class="run-on" data-t>x</h3>"#,
+    );
+    assert_eq!(st.break_before, Some(PageBreak::Auto));
+}
+
+/// The break properties do not inherit: a container's request is transferred onto the run it wraps
+/// by `content`, which is a different thing.
+#[test]
+fn breaks_do_not_inherit_from_a_container() {
+    let container = BlockStyle {
+        break_before: Some(PageBreak::Always),
+        break_inside: Some(PageBreak::Avoid),
+        ..BlockStyle::default()
+    };
+    let inner = container.overlaid_with(&BlockStyle::default());
+    assert_eq!(inner.break_before, None);
+    assert_eq!(inner.break_inside, None);
+}
