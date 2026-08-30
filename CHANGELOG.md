@@ -21,9 +21,10 @@ number is given in parentheses.
   RR17-FR3 acceptance criteria, and what `CONTRIBUTING.md` already claimed the suite had.
 - `scripts/check-vendor-neutral.sh`, which enforces IR-7 ("the core names no vendor") in CI beside
   the existing check that `jni` stays out of the host dependency graph.
-- Eleven host tests for the zoom minimap's geometry and pan maths, which had none — including a
-  regression pin replaying the touch coordinates and resolved regions from a device session on a
-  Manta.
+- Fifteen host tests for the zoom minimap's geometry and pan maths and the bookmark ribbon's, both
+  of which had none — including a regression pin replaying the touch coordinates and resolved
+  regions from a device session on a Manta, and a check that the drawn ribbon stays inside the tap
+  zone that toggles it.
 - `MinimapController` logs one line per touch-down while zoomed, naming the region hit and the card's
   bounds, so "this button does nothing" is answerable from a logcat.
 
@@ -47,8 +48,8 @@ number is given in parentheses.
   bodies byte-identical, so the ABI the Kotlin side links against is unchanged;
   `reader-core/src/session.rs` (1,630 lines, one `impl` with 102 methods) into a `session/` module;
   `reader-core/src/document/text_select.rs` (1,634 lines) into a `text_select/` module, with its
-  public surface unchanged; and the zoom minimap out of `ReaderActivity` (2,134 lines) into
-  `MinimapController`.
+  public surface unchanged; and the zoom minimap and page overlays out of `ReaderActivity`
+  (2,134 lines) into `MinimapController` and `PageOverlays`.
 
 ### Fixed
 
@@ -70,6 +71,11 @@ number is given in parentheses.
   locator rather than being "always `None`"; and `ReaderActivity` is no longer marked
   `DEVICE-UNVERIFIED`. The settings registry's typesetting and pen keys are still genuinely
   unconsumed, and now say so in those terms instead of naming a milestone.
+- Four orphaned KDoc blocks in `ReaderActivity` — a comment sitting above another comment, which
+  Kotlin drops — are reattached to the functions they describe, including the tap-zone contract on
+  `handleTap` and the palm-rejection note on `onFingerDown`, both of which had no doc at all.
+- The PR template asks for the `CHANGELOG` line `CONTRIBUTING` requires, and names
+  `check-vendor-neutral.sh` instead of restating IR-7 in prose.
 - `ADR-INKREAD-0016` (the calibre/OPDS library) is cited from ten call sites and had no row in
   `docs/SPEC-INDEX.md`; the README now links that index too.
 - `scripts/gate.sh` claimed to mirror CI but ran neither script gate. It now runs both.

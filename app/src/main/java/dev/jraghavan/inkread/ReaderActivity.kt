@@ -372,26 +372,13 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
     @Volatile private var currentDocPath: String? = null
     @Volatile private var requestedId: String? = null
 
-    private val bookmarkPaint = Paint().apply { color = Color.BLACK; style = Paint.Style.FILL; isAntiAlias = true }
-    private val bookmarkOutlinePaint = Paint().apply { color = Color.parseColor("#9E9E9E"); style = Paint.Style.STROKE; strokeWidth = 2f; isAntiAlias = true }
-    /** White halo drawn under the ribbon so it stays visible over a dark page region (e.g. a black
-     *  title band) — without it a black/gray ribbon vanishes on dark backgrounds. */
-    private val bookmarkHaloPaint = Paint().apply { color = Color.WHITE; style = Paint.Style.STROKE; strokeWidth = 5f; isAntiAlias = true }
-    /** Dashed box around the active lasso selection (ADR-INKREAD-0010). */
-    private val selectionPaint = Paint().apply {
-        color = Color.BLACK
-        style = Paint.Style.STROKE
-        strokeWidth = 2f
-        isAntiAlias = true
-        pathEffect = android.graphics.DashPathEffect(floatArrayOf(12f, 8f), 0f)
-    }
-    /** Filled square handles at the selection box corners (NeoReader frame 132). */
-    private val selectionHandlePaint = Paint().apply { color = Color.BLACK; style = Paint.Style.FILL; isAntiAlias = true }
-    /** Search-hit highlight: a light translucent fill so the matched text stays readable on e-ink. */
-    private val searchFillPaint = Paint().apply { color = Color.parseColor("#33000000"); style = Paint.Style.FILL; isAntiAlias = true }
-    /** A crisp outline around the active search hit (the one the reader is parked on). */
-    private val searchBoxPaint = Paint().apply { color = Color.BLACK; style = Paint.Style.STROKE; strokeWidth = 2f; isAntiAlias = true }
-    /** Small full-page thumbnail (from the fit render) for the zoom minimap; null until first render. */
+    /** Chrome painted onto the page bitmap: bookmark ribbon, selection box, search highlight. */
+    private val overlays = PageOverlays(object : PageOverlays.Host {
+        override fun nToVx(nx: Float) = this@ReaderActivity.nToVx(nx)
+        override fun nToVy(ny: Float) = this@ReaderActivity.nToVy(ny)
+        override val viewW get() = this@ReaderActivity.viewW
+    })
+
     /** The zoom minimap (#60) — the top-right page thumbnail and its −/+ buttons. */
     private val minimap = MinimapController(object : MinimapController.Host {
         override val viewW get() = this@ReaderActivity.viewW
@@ -1073,16 +1060,16 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         val cv = Canvas(bmp)
         for (s in pageStrokes) stylus.drawStroke(cv, s)
         // The active lasso selection's bounding box (ADR-INKREAD-0010).
-        if (lasso.hasSelection && lasso.selectionBounds.size == 4) drawSelectionBox(cv)
+        if (lasso.hasSelection) overlays.drawSelectionBox(cv, lasso.selectionBounds)
         // The active in-document search hit's highlight boxes (RR2), if it lives on this page.
         val searchHl = search.highlightForPage(currentPage)
-        if (searchHl.isNotEmpty()) drawSearchHighlight(cv, searchHl)
+        if (searchHl.isNotEmpty()) overlays.drawSearchHighlight(cv, searchHl)
         // Zoom minimap (top-right): full page + the current viewport window (RR5-FR3). The fit
         // thumbnail it draws is captured lazily when zoom is first engaged (captureFitThumb), not on
         // every fit-page turn — so ordinary reading pays no per-flip scale + alloc.
         if (zoom > 1f) minimap.draw(cv)
         // A top-right dog-ear: faint outline (tap-to-bookmark affordance) / solid when bookmarked.
-        drawBookmarkCorner(cv)
+        overlays.drawBookmark(cv, marked = bookmarks?.has(currentPage) == true)
         // Cache the first page as the book's thumbnail, once (RR17-FR5).
         if (currentPage == 0 && currentBookId.isNotEmpty() && !Books.thumbFile(this, currentBookId).exists()) {
             Books.saveThumbnail(this, currentBookId, bmp)
@@ -1180,54 +1167,6 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
     // ---- input (UI thread) → engine ----
 
     /**
-     * Route a tap: a tapped link wins (RR11-FR3), else tap zones (RR25-FR3 — left third = prev,
-     * right third = next, center = contents). The page fills the viewport (stretched render), so
-     * the hit-test is the normalized tap `(x/w, y/h)` against the link rects.
-     */
-    /** Draw the active lasso selection's dashed bounding box + square corner handles (frame 132). */
-    private fun drawSelectionBox(canvas: Canvas) {
-        val b = lasso.selectionBounds
-        val l = nToVx(b[0]); val t = nToVy(b[1]); val r = nToVx(b[2]); val btm = nToVy(b[3])
-        canvas.drawRect(l, t, r, btm, selectionPaint)
-        val hs = SELECTION_HANDLE_PX
-        for (cx in floatArrayOf(l, r)) for (cy in floatArrayOf(t, btm)) {
-            canvas.drawRect(cx - hs, cy - hs, cx + hs, cy + hs, selectionHandlePaint)
-        }
-    }
-
-    /** A small filled dog-ear in the top-right corner marking a bookmarked page (RR16). */
-    /** Top-right **ribbon bookmark** (swallowtail): a faint outline always (the tappable affordance)
-     *  that fills solid when the page is bookmarked. Tapping the top-right corner toggles it. */
-    private fun drawBookmarkCorner(canvas: Canvas) {
-        val w = viewW.toFloat()
-        val rw = viewW * 0.035f                 // ribbon width
-        val len = rw * 2.1f                      // ribbon length
-        val notch = rw * 0.45f                   // depth of the swallowtail notch
-        val right = w - rw * 1.4f                // inset from the right edge
-        val left = right - rw
-        val path = Path().apply {
-            moveTo(left, 0f)
-            lineTo(right, 0f)
-            lineTo(right, len)
-            lineTo((left + right) / 2f, len - notch) // swallowtail
-            lineTo(left, len)
-            close()
-        }
-        // A white halo first so the ribbon reads on any background (e.g. a black title band).
-        canvas.drawPath(path, bookmarkHaloPaint)
-        if (bookmarks?.has(currentPage) == true) {
-            canvas.drawPath(path, bookmarkPaint)
-        } else {
-            canvas.drawPath(path, bookmarkOutlinePaint)
-        }
-    }
-
-    /**
-     * Finger DOWN: reject obvious palms (multi-touch, large contact, a recent/in-progress stylus, an
-     * active stroke); otherwise arm the long-press → lookup timer. The tap itself is decided on UP
-     * (the panel delivers finger UP reliably), so "rest the hand, then write" never turns a page.
-     */
-    /**
      * Heuristic palm / stray-touch test shared by the reading surface AND the chrome dialogs
      * (RR19 palm rejection): a **finger** touch is treated as a palm when it is multi-pointer, lands
      * within [PALM_REJECT_MS] of pen activity, arrives mid-stroke, or has a large contact major
@@ -1281,6 +1220,11 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             addView(content, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
         }
 
+    /**
+     * Finger DOWN: reject obvious palms (multi-touch, large contact, a recent/in-progress stylus, an
+     * active stroke); otherwise arm the long-press → lookup timer. The tap itself is decided on UP
+     * (the panel delivers finger UP reliably), so "rest the hand, then write" never turns a page.
+     */
     private fun onFingerDown(e: MotionEvent) {
         if (isPalmTouch(e)) {
             diag { "DIAG palm-reject down pc=${e.pointerCount} major=${e.getTouchMajor(0)}" }
@@ -1407,6 +1351,11 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         }
     }
 
+    /**
+     * Route a tap: a tapped link wins (RR11-FR3), else tap zones (RR25-FR3 — left third = prev,
+     * right third = next, center = contents). The page fills the viewport (stretched render), so
+     * the hit-test is the normalized tap `(x/w, y/h)` against the link rects.
+     */
     private fun handleTap(x: Float, y: Float) {
         val w = surfaceView.width.toFloat()
         val h = surfaceView.height.toFloat()
@@ -1532,18 +1481,6 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         }
     }
 
-
-    // ---- in-document search (RR2) ----
-
-    /** Draw the search hit's highlight [boxes] on the page (a light fill + crisp outline). The
-     *  active boxes for the current page come from [SearchController.highlightForPage]. */
-    private fun drawSearchHighlight(canvas: Canvas, boxes: List<SelBox>) {
-        for (b in boxes) {
-            val l = nToVx(b.x0); val t = nToVy(b.y0); val r = nToVx(b.x1); val btm = nToVy(b.y1)
-            canvas.drawRect(l, t, r, btm, searchFillPaint)
-            canvas.drawRect(l, t, r, btm, searchBoxPaint)
-        }
-    }
 
     // ===== Tool model (ADR-INKREAD-0010) =====
 
