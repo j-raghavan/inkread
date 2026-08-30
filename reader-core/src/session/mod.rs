@@ -317,3 +317,11 @@ fn u32_to_ids(ids: &[u32]) -> Vec<StrokeId> {
 #[cfg(test)]
 #[path = "session_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "view_tests.rs"]
+mod view_tests;
+
+#[cfg(test)]
+#[path = "open_tests.rs"]
+mod open_tests;
