@@ -73,10 +73,15 @@ pub enum Block {
     /// as an unknown container the grid flattens into document order, which is row-by-row then
     /// cell-by-cell, so the two languages interleave down the page and the correspondence the book
     /// is entirely about is lost.
-    Row {
-        cells: Vec<Vec<Inline>>,
-        style: BlockStyle,
-    },
+    ///
+    /// Each cell holds *blocks*, not a flat inline run (#251): a cell is a block container like any
+    /// other, so a heading inside one is a heading, two paragraphs inside one are two paragraphs,
+    /// and every block carries the style the book declared for it. Collapsing a cell to inlines
+    /// dropped all of that — the structure survived only where the book had written `<br/>`.
+    ///
+    /// The row itself carries no style: what the `<tr>` and each `<td>` declared is already folded
+    /// into the blocks inside, by the same inheritance every other container uses.
+    Row { cells: Vec<Vec<Block>> },
     /// A standalone (block-level) image.
     Image { src: String, alt: String },
     /// A horizontal rule (`<hr/>`) — a section divider.
@@ -268,8 +273,10 @@ fn walk_blocks(
                     }
                     _ if NON_CONTENT_TAGS.contains(&name) => {}
                     _ if INLINE_TAGS.contains(&name) => {
-                        // Inline emphasis at block level → fold into the anonymous paragraph.
-                        collect_inlines_into(child, Style::default(), None, pending);
+                        // Inline emphasis at block level → fold into the anonymous paragraph, the
+                        // tag's *own* emphasis included: `<em>x</em>` between two paragraphs is
+                        // italic, and descending straight into its children would drop that.
+                        collect_element(child, el, Style::default(), None, pending);
                     }
                     // Any other element (div/section/blockquote/figure/article/… or unknown) is a
                     // transparent block container: flush, then descend so its content forms its own
@@ -315,26 +322,55 @@ fn walk_table(
                 }
             }
             "tr" => {
-                let cells: Vec<Vec<Inline>> = child
+                let row_style = declared(child, el, sheet, inherited);
+                let cells: Vec<Vec<Block>> = child
                     .children()
                     .filter_map(|c| match c.value() {
                         Node::Element(ce) if matches!(ce.name(), "td" | "th") => {
-                            Some(collect_inlines(c))
+                            Some(walk_cell(c, sheet, declared(c, ce, sheet, row_style)))
                         }
                         _ => None,
                     })
                     .collect();
                 // A row of nothing but spacing cells is layout scaffolding, not content.
-                if !cells.is_empty() && !cells.iter().all(|c| is_blank(c)) {
-                    out.push(Block::Row {
-                        cells,
-                        style: declared(child, el, sheet, inherited),
-                    });
+                if !cells.is_empty() && !cells.iter().all(Vec::is_empty) {
+                    out.push(Block::Row { cells });
                 }
             }
             _ => {}
         }
     }
+}
+
+/// Lower one `<td>`/`<th>` into the blocks it contains (#251).
+///
+/// A cell is an ordinary block container, so this is [`walk_blocks`] over the cell's children — the
+/// same walker that gives headings, paragraphs, lists, rules and images their meaning everywhere
+/// else. Reusing it is the point: a heading in a cell is styled by exactly the code that styles a
+/// heading in a chapter, rather than by a second, thinner implementation that drifts from it.
+///
+/// `inherited` is the cell's own declared style, already overlaid on the row's.
+///
+/// One thing does not carry in: inkread's first-line prose indent. That indent is inkread's
+/// typography, not the book's (CSS defaults `text-indent` to zero), and a table cell is a layout
+/// context — often only half the measure wide, where an indent on a two-word cell reads as a
+/// mistake. A book that genuinely wants indented paragraphs inside a cell still gets them, because
+/// its own declaration overrides this default like any other.
+fn walk_cell(
+    node: NodeRef<Node>,
+    sheet: &simplecss::StyleSheet<'_>,
+    inherited: BlockStyle,
+) -> Vec<Block> {
+    let inherited = BlockStyle {
+        indent: Some(false),
+        ..BlockStyle::default()
+    }
+    .overlaid_with(&inherited);
+    let mut out = Vec::new();
+    let mut pending = Vec::new();
+    walk_blocks(node, &mut out, &mut pending, sheet, inherited);
+    flush_paragraph(&mut out, &mut pending, inherited);
+    out
 }
 
 /// Emit each `<li>` of a list as a flattened [`Block::ListItem`]; `inherited` is the list's own
@@ -383,47 +419,60 @@ fn collect_inlines_into(
     for child in node.children() {
         match child.value() {
             Node::Text(t) => push_text(out, t, style, href),
-            Node::Element(el) => {
-                let name = el.name();
-                match name {
-                    "b" | "strong" => collect_inlines_into(
-                        child,
-                        Style {
-                            bold: true,
-                            ..style
-                        },
-                        href,
-                        out,
-                    ),
-                    "i" | "em" | "cite" => collect_inlines_into(
-                        child,
-                        Style {
-                            italic: true,
-                            ..style
-                        },
-                        href,
-                        out,
-                    ),
-                    "a" => {
-                        let nested = el.attr("href").or(href);
-                        collect_inlines_into(child, style, nested, out);
-                    }
-                    "br" => out.push(Inline::Break),
-                    "img" => {
-                        if let Some(src) = el.attr("src") {
-                            out.push(Inline::Image {
-                                src: src.to_string(),
-                                alt: el.attr("alt").unwrap_or_default().to_string(),
-                            });
-                        }
-                    }
-                    _ if NON_CONTENT_TAGS.contains(&name) => {}
-                    // span/code/sub/sup/… and any unknown inline wrapper: descend, keep style.
-                    _ => collect_inlines_into(child, style, href, out),
-                }
-            }
+            Node::Element(el) => collect_element(child, el, style, href, out),
             _ => {}
         }
+    }
+}
+
+/// Collect one inline element — the emphasis/link/replacement it introduces, then its children.
+///
+/// Split out from [`collect_inlines_into`] so a caller that is *already looking at* the element can
+/// reuse the dispatch. [`walk_blocks`] is that caller: it meets `<em>` at block level and needs the
+/// tag's own italic, which descending straight into the tag's children would drop.
+fn collect_element(
+    node: NodeRef<Node>,
+    el: &scraper::node::Element,
+    style: Style,
+    href: Option<&str>,
+    out: &mut Vec<Inline>,
+) {
+    let name = el.name();
+    match name {
+        "b" | "strong" => collect_inlines_into(
+            node,
+            Style {
+                bold: true,
+                ..style
+            },
+            href,
+            out,
+        ),
+        "i" | "em" | "cite" => collect_inlines_into(
+            node,
+            Style {
+                italic: true,
+                ..style
+            },
+            href,
+            out,
+        ),
+        "a" => {
+            let nested = el.attr("href").or(href);
+            collect_inlines_into(node, style, nested, out);
+        }
+        "br" => out.push(Inline::Break),
+        "img" => {
+            if let Some(src) = el.attr("src") {
+                out.push(Inline::Image {
+                    src: src.to_string(),
+                    alt: el.attr("alt").unwrap_or_default().to_string(),
+                });
+            }
+        }
+        _ if NON_CONTENT_TAGS.contains(&name) => {}
+        // span/code/sub/sup/… and any unknown inline wrapper: descend, keep style.
+        _ => collect_inlines_into(node, style, href, out),
     }
 }
 
@@ -775,6 +824,11 @@ mod tests {
 #[cfg(test)]
 mod table_tests {
     use super::*;
+    use crate::layout::Align;
+
+    fn body(inner: &str) -> String {
+        format!("<html><body>{inner}</body></html>")
+    }
 
     fn text_of(inlines: &[Inline]) -> String {
         inlines
@@ -786,11 +840,27 @@ mod table_tests {
             .collect()
     }
 
+    /// All the text a cell's blocks carry, joined — the cell as the reader sees it, whatever
+    /// structure it is built from.
+    fn blocks_text(blocks: &[Block]) -> String {
+        blocks
+            .iter()
+            .map(|b| match b {
+                Block::Heading { content, .. }
+                | Block::Paragraph { content, .. }
+                | Block::ListItem { content, .. } => text_of(content),
+                Block::Row { cells } => cells.iter().map(|c| blocks_text(c)).collect(),
+                Block::Image { .. } | Block::Rule => String::new(),
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
     fn rows(html: &str) -> Vec<Vec<String>> {
         parse_blocks(html)
             .into_iter()
             .filter_map(|b| match b {
-                Block::Row { cells, .. } => Some(cells.iter().map(|c| text_of(c)).collect()),
+                Block::Row { cells } => Some(cells.iter().map(|c| blocks_text(c)).collect()),
                 _ => None,
             })
             .collect()
@@ -866,6 +936,106 @@ mod table_tests {
         );
     }
 
+    /// #251(1): a heading in a cell was flattened to body text — no level, no bold, no centring.
+    #[test]
+    fn a_heading_in_a_cell_stays_a_heading() {
+        let b = parse_blocks("<table><tr><td><h3>Canto I</h3><p>line</p></td></tr></table>");
+        let Some(Block::Row { cells }) = b.into_iter().next() else {
+            panic!("expected a row");
+        };
+        assert!(
+            matches!(cells[0][0], Block::Heading { level: 3, .. }),
+            "{:?}",
+            cells[0]
+        );
+        assert!(
+            matches!(cells[0][1], Block::Paragraph { .. }),
+            "{:?}",
+            cells[0]
+        );
+    }
+
+    /// #251(2): consecutive blocks in a cell ran together, because a cell held one flat inline run.
+    #[test]
+    fn a_cell_keeps_its_blocks_apart() {
+        let b = parse_blocks("<table><tr><td><p>one</p><p>two</p></td></tr></table>");
+        let Some(Block::Row { cells }) = b.into_iter().next() else {
+            panic!("expected a row");
+        };
+        assert_eq!(
+            blocks_text(&cells[0]),
+            "one two",
+            "two paragraphs, not one run: {:?}",
+            cells[0]
+        );
+        assert_eq!(cells[0].len(), 2, "{:?}", cells[0]);
+    }
+
+    /// Every block kind a cell may contain goes through the ordinary walker, so a list in a cell is
+    /// a list rather than its items run together.
+    #[test]
+    fn a_cell_lowers_lists_and_rules_like_any_container() {
+        let b = parse_blocks("<table><tr><td><ul><li>a</li><li>b</li></ul><hr/></td></tr></table>");
+        let Some(Block::Row { cells }) = b.into_iter().next() else {
+            panic!("expected a row");
+        };
+        assert!(
+            matches!(
+                cells[0].as_slice(),
+                [
+                    Block::ListItem { index: 1, .. },
+                    Block::ListItem { index: 2, .. },
+                    Block::Rule
+                ]
+            ),
+            "{:?}",
+            cells[0]
+        );
+    }
+
+    /// A cell's own declaration was never resolved at all: only the `<tr>` was.
+    #[test]
+    fn a_cells_own_declaration_reaches_the_blocks_inside_it() {
+        let sheet = Stylesheet::parse("td.verse { text-align: center }");
+        let b = parse_blocks_with(
+            &body(r#"<table><tr><td class="verse"><p>x</p></td><td><p>y</p></td></tr></table>"#),
+            &sheet,
+        );
+        let Some(Block::Row { cells }) = b.into_iter().next() else {
+            panic!("expected a row");
+        };
+        let align = |c: &Vec<Block>| match &c[0] {
+            Block::Paragraph { style, .. } => style.align,
+            other => panic!("unexpected {other:?}"),
+        };
+        assert_eq!(align(&cells[0]), Some(Align::Center));
+        assert_eq!(align(&cells[1]), None, "the other cell is untouched");
+    }
+
+    /// A table cell is a layout context, so inkread's invented prose indent does not apply inside
+    /// one — but the book may still ask for it.
+    #[test]
+    fn a_cell_drops_the_prose_indent_unless_the_book_asks_for_it() {
+        let plain = parse_blocks("<table><tr><td><p>x</p></td></tr></table>");
+        let Some(Block::Row { cells }) = plain.into_iter().next() else {
+            panic!("expected a row");
+        };
+        let Block::Paragraph { style, .. } = &cells[0][0] else {
+            panic!("expected a paragraph");
+        };
+        assert_eq!(style.indent, Some(false));
+
+        let sheet = Stylesheet::parse("td p { text-indent: 1.5em }");
+        let asked = parse_blocks_with(&body("<table><tr><td><p>x</p></td></tr></table>"), &sheet);
+        let Some(Block::Row { cells }) = asked.into_iter().next() else {
+            panic!("expected a row");
+        };
+        let Block::Paragraph { style, .. } = &cells[0][0] else {
+            panic!("expected a paragraph");
+        };
+        assert_eq!(style.indent, Some(true), "the book's declaration wins");
+    }
+
     /// Inline emphasis inside a cell is preserved rather than flattened away.
     #[test]
     fn cells_keep_their_inline_emphasis() {
@@ -873,7 +1043,10 @@ mod table_tests {
         let Some(Block::Row { cells, .. }) = blocks.into_iter().next() else {
             panic!("expected a row");
         };
-        let italics: Vec<bool> = cells[0]
+        let Some(Block::Paragraph { content, .. }) = cells[0].first() else {
+            panic!("expected the cell's loose text to become a paragraph");
+        };
+        let italics: Vec<bool> = content
             .iter()
             .filter_map(|i| match i {
                 Inline::Run(r) => Some(r.italic),

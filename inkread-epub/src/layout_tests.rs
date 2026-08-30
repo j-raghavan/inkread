@@ -1314,19 +1314,26 @@ fn a_nomad_at_a_comfortable_reading_size_gets_two_columns() {
 mod row_layout {
     use super::*;
 
-    fn cell(text: &str) -> Vec<Inline> {
-        vec![Inline::Run(TextRun {
-            text: text.to_string(),
-            bold: false,
-            italic: false,
-            href: None,
-        })]
+    fn cell(text: &str) -> Vec<Block> {
+        vec![Block::Paragraph {
+            content: vec![Inline::Run(TextRun {
+                text: text.to_string(),
+                bold: false,
+                italic: false,
+                href: None,
+            })],
+            // Cells are built by `walk_cell`, which zeroes the prose indent; keep the fixture
+            // faithful to that so measured `x` positions match what a book produces.
+            style: BlockStyle {
+                indent: Some(false),
+                ..BlockStyle::default()
+            },
+        }]
     }
 
     fn row(cells: &[&str]) -> Block {
         Block::Row {
             cells: cells.iter().map(|c| cell(c)).collect(),
-            style: BlockStyle::default(),
         }
     }
 
@@ -1410,6 +1417,130 @@ mod row_layout {
             out.len() > 1,
             "unusably narrow cells should stack, not share one line",
         );
+    }
+
+    /// The blocks inside a cell (#251). Built by hand rather than parsed: these tests are about
+    /// layout, and `content` owns the lowering.
+    fn para(text: &str) -> Block {
+        cell(text).remove(0)
+    }
+
+    fn heading(level: u8, text: &str) -> Block {
+        Block::Heading {
+            level,
+            content: vec![Inline::Run(TextRun {
+                text: text.to_string(),
+                bold: false,
+                italic: false,
+                href: None,
+            })],
+            style: BlockStyle::default(),
+        }
+    }
+
+    fn row_of(cells: Vec<Vec<Block>>) -> Block {
+        Block::Row { cells }
+    }
+
+    /// #251(1): the heading was flattened into body text. It must now be set as a heading — bigger
+    /// than the body, and bold by inkread's typography.
+    #[test]
+    fn a_heading_in_a_cell_is_set_as_a_heading() {
+        let out = lines(
+            &[row_of(vec![vec![heading(3, "Canto"), para("body")]])],
+            &opts(),
+        );
+        let title = &out[0].runs[0];
+        let body = out
+            .iter()
+            .flat_map(|l| &l.runs)
+            .find(|r| r.text.contains("body"))
+            .expect("the body paragraph should be laid out");
+        assert!(
+            title.size_px > body.size_px,
+            "a heading in a cell should outsize the body ({} vs {})",
+            title.size_px,
+            body.size_px,
+        );
+        assert!(title.bold, "headings are bold by default");
+    }
+
+    /// #251(2): two paragraphs in a cell ran together on one line, because a cell was one flat
+    /// inline run. They must now occupy separate line boxes.
+    #[test]
+    fn consecutive_blocks_in_a_cell_do_not_run_together() {
+        let out = lines(&[row_of(vec![vec![para("one"), para("two")]])], &opts());
+        let tops: Vec<f32> = out
+            .iter()
+            .filter(|l| !l.runs.is_empty())
+            .map(|l| l.top)
+            .collect();
+        assert_eq!(tops.len(), 2, "one line box each: {tops:?}");
+        assert!(tops[1] > tops[0], "the second must sit below the first");
+    }
+
+    /// A heading's block gap is real vertical space, and it has to survive the trip through the
+    /// cell flow: merging cells by line *index* would drop it.
+    #[test]
+    fn a_cells_block_gaps_survive_into_the_page() {
+        let o = opts();
+        let plain = lines(&[row_of(vec![vec![para("a"), para("b")]])], &o);
+        let spaced = lines(&[row_of(vec![vec![para("a"), heading(3, "b")]])], &o);
+        let drop = |v: &[LayoutLine]| v[1].top - v[0].top;
+        assert!(
+            drop(&spaced) > drop(&plain),
+            "a heading's 0.7em margin-before should widen the gap ({} vs {})",
+            drop(&spaced),
+            drop(&plain),
+        );
+    }
+
+    /// The parallel-text guarantee, restated over blocks: cells whose structure matches stay
+    /// side by side, line for line.
+    #[test]
+    fn matching_cells_stay_aligned_line_for_line() {
+        let out = lines(
+            &[row_of(vec![
+                vec![heading(3, "Canto"), para("original")],
+                vec![heading(3, "Chant"), para("translation")],
+            ])],
+            &opts(),
+        );
+        let tops: Vec<f32> = out.iter().map(|l| l.top).collect();
+        assert_eq!(tops.len(), 2, "a heading row and a body row: {tops:?}");
+        for line in &out {
+            assert_eq!(
+                line.runs.len(),
+                2,
+                "both languages share the line box: {:?}",
+                line.runs,
+            );
+        }
+    }
+
+    /// A cell taller than the page splits at a line boundary, keeping the columns aligned rather
+    /// than losing content or overflowing.
+    #[test]
+    fn a_row_taller_than_the_page_splits_across_pages() {
+        let short = LayoutOpts::new(1200.0, 220.0, 20.0);
+        let many: Vec<Block> = (0..12).map(|i| para(&format!("line{i}"))).collect();
+        let pages = paginate(&[row_of(vec![many.clone(), many.clone()])], &short, &Mono);
+        assert!(pages.len() > 1, "12 paragraphs cannot fit 220px");
+        for page in &pages {
+            for line in &page.lines {
+                assert!(
+                    line.top + line.height <= short.content_h() + 0.5,
+                    "a line overflowed the content box: {line:?}",
+                );
+                assert_eq!(
+                    line.runs.len(),
+                    2,
+                    "the two cells stay aligned across the break"
+                );
+            }
+        }
+        let placed: usize = pages.iter().map(|p| p.lines.len()).sum();
+        assert_eq!(placed, 12, "every paragraph is placed exactly once");
     }
 
     /// A single-cell table is how a lot of EPUB2 does plain layout, so a lone cell must get the
