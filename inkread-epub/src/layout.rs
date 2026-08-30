@@ -46,7 +46,6 @@ impl Hyphenator for NoHyphen {
     }
 }
 
-/// Viewport + typography for a layout pass (all pixels). Repagination on a font-size or margin
 /// Narrowest column worth setting, in ems of the body size (#194).
 ///
 /// A comfortable single-column measure is 45-75 characters, but newspaper columns are deliberately
@@ -113,6 +112,7 @@ fn effective_align(style: &BlockStyle, user: Align) -> Align {
     }
 }
 
+/// Viewport + typography for a layout pass (all pixels). Repagination on a font-size or margin
 /// change just reruns [`paginate`] with new opts.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LayoutOpts {
@@ -416,10 +416,17 @@ fn keep_run_end(blocks: &[Block], i: usize) -> usize {
 /// Only plain text lines coalesce. A rule or an image spans its own cell (it carries a `column_x`
 /// and at most one image per line box), so those stay separate; they render at the same `top`
 /// regardless, which is all that side-by-side needs.
+///
+/// Cells that disagree on their block structure — a heading in one and body text in the other —
+/// genuinely sit at different positions, and stay in separate line boxes. That is the honest
+/// outcome: there is no shared line to share. It does mean such a row is not a single paging unit
+/// throughout, so a page break can fall between two lines the cells did not agree on anyway.
 fn merge_cell_flows(flows: Vec<Vec<LayoutLine>>) -> Vec<LayoutLine> {
-    /// Positions closer than this are the same line box. Cells are measured independently, so two
-    /// halves of one line agree to within float noise rather than exactly.
-    const SAME_LINE: f32 = 0.5;
+    /// Positions closer than this are the same line box. Cells that agree on their block structure
+    /// produce identical positions and would coalesce on exact equality alone; the tolerance is for
+    /// cells that differ only in a rounded font size, where a sub-pixel disagreement should not
+    /// split a line the reader sees as one.
+    const SAME_LINE_EPSILON: f32 = 0.5;
 
     let mut lines: Vec<LayoutLine> = flows.into_iter().flatten().collect();
     // Stable, so cells stay in source order within a line box and `x` runs left to right.
@@ -433,10 +440,9 @@ fn merge_cell_flows(flows: Vec<Vec<LayoutLine>>) -> Vec<LayoutLine> {
                 if plain
                     && !prev.rule
                     && prev.image.is_none()
-                    && (line.top - prev.top).abs() < SAME_LINE =>
+                    && (line.top - prev.top).abs() < SAME_LINE_EPSILON =>
             {
                 prev.height = prev.height.max(line.height);
-                prev.column_x = prev.column_x.min(line.column_x);
                 prev.runs.extend(line.runs);
             }
             _ => out.push(line),
@@ -580,9 +586,7 @@ fn combine_columns(pages: Vec<Page>, opts: &LayoutOpts, columns: u8) -> Vec<Page
 /// Accumulates lines into pages, breaking when the content box is full.
 ///
 /// `measure`/`page_h` are held rather than read off `opts` so the same pager can flow a *table cell*
-/// — a narrower measure with no page budget of its own (#251). That is what lets a cell's blocks go
-/// through the very same [`Pager::add_block`] dispatch as the chapter's, instead of a second,
-/// thinner implementation that would drift from it.
+/// or a keep-run — a narrower measure, with no page budget of its own (#251).
 struct Pager<'o> {
     opts: &'o LayoutOpts,
     hyph: &'o dyn Hyphenator,

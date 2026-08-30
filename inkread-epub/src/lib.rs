@@ -24,7 +24,7 @@ pub mod measure;
 pub mod render;
 mod transcode;
 pub use content::{parse_blocks, parse_blocks_with, Block, Inline, TextRun};
-pub use css::{BlockStyle, Stylesheet};
+pub use css::{BlockStyle, Length, PageBreak, Stylesheet};
 pub use img::ImageError;
 pub use layout::{
     paginate, paginate_upto, paginate_with, paginate_with_images, Align, Hyphenator, ImageSizer,

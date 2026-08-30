@@ -1,15 +1,20 @@
-//! A deliberately tiny **CSS subset** for EPUB block styling (#188, widened in #201).
+//! A deliberately tiny **CSS subset** for EPUB block styling (#188, widened in #201 and #251).
 //!
 //! `ADR-INKREAD-0007` / `ADR-RUST-READER` Decision 1 chose a simplified block/inline content model
-//! over an arbitrary CSS box tree, and that stays true here: this module does **not** implement the
-//! cascade, inheritance, the box model, or layout. It answers one narrow question — *"did the book
-//! ask for this block to be centred, unindented, or unbolded?"* — because dropping those three
-//! declarations is what makes a normal trade EPUB's title page render as left-aligned bold
-//! fragments instead of a centred title block.
+//! over an arbitrary CSS box tree, and that stays true here: this module implements no cascade and
+//! no layout. It answers one narrow question — *"what did the book ask for this block?"* — because
+//! dropping those declarations is what makes a normal trade EPUB's title page render as
+//! left-aligned bold fragments instead of a centred title block, and its poetry as prose.
+//!
+//! Of the box model it honours exactly one thing: **vertical margins**. That is not a slippery
+//! slope towards a box tree but the narrowest answer to a real defect — vertical space is how a
+//! book marks off a stanza, and there is no other way for it to say so. Horizontal margins,
+//! padding, borders and percentage lengths stay out, because each needs a containing block's width
+//! to mean anything and there is no box here to measure (#251).
 //!
 //! Selector matching is [`simplecss`]'s, not ours: it handles descendant/child/sibling combinators,
 //! ids, attribute and pseudo-class selectors, and specificity ordering. What stays inkread's is the
-//! *policy* — which three properties are honoured, and what their values mean here.
+//! *policy* — which properties are honoured, which of them inherit, and what their values mean.
 
 use ego_tree::NodeRef;
 use scraper::node::Node;
@@ -23,12 +28,27 @@ use crate::layout::Align;
 /// `%` is deliberately absent: a percentage margin resolves against the *containing block's width*,
 /// which is a box-model measurement inkread does not have (ADR-INKREAD-0007), and guessing it
 /// against the height or the font size would be a different length than the book asked for.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy)]
 pub enum Length {
-    /// A multiple of the font size (`em`, and `rem` — the root size is the body size here).
+    /// A multiple of the **block's own** font size, as CSS resolves `em` (`rem` too — the root size
+    /// is the body size here), so a margin on a heading scales with the heading.
     Em(f32),
     /// An absolute CSS pixel length.
     Px(f32),
+}
+
+/// Total equality, so that [`BlockStyle`] and [`crate::content::Block`] can derive `Eq` — which
+/// they need to be compared for a repagination check. Written by hand rather than derived because
+/// `f32`'s `PartialEq` says `NaN != NaN`, which would break `Eq`'s reflexivity: [`parse_length`]
+/// rejects non-finite values, but the variants are public and a caller could still build one.
+impl PartialEq for Length {
+    fn eq(&self, other: &Self) -> bool {
+        let same = |a: f32, b: f32| a == b || (a.is_nan() && b.is_nan());
+        match (self, other) {
+            (Length::Em(a), Length::Em(b)) | (Length::Px(a), Length::Px(b)) => same(*a, *b),
+            _ => false,
+        }
+    }
 }
 
 impl Eq for Length {}
@@ -180,22 +200,12 @@ impl BlockStyle {
             .trim()
             .to_ascii_lowercase();
         match name.trim().to_ascii_lowercase().as_str() {
-            "text-align" => {
-                if let Some(a) = parse_align(&value) {
-                    self.align = Some(a);
-                }
-            }
+            // Every arm reads `x = parse(..).or(x)`: a value we cannot parse declares nothing and
+            // leaves the previous declaration standing, rather than cancelling it.
+            "text-align" => self.align = parse_align(&value).or(self.align),
             "text-indent" => self.indent = Some(!is_zero_length(&value)),
-            "font-weight" => {
-                if let Some(b) = parse_font_weight(&value) {
-                    self.bold = Some(b);
-                }
-            }
-            "font-style" => {
-                if let Some(i) = parse_font_style(&value) {
-                    self.italic = Some(i);
-                }
-            }
+            "font-weight" => self.bold = parse_font_weight(&value).or(self.bold),
+            "font-style" => self.italic = parse_font_style(&value).or(self.italic),
             "margin-top" => self.margin_top = parse_length(&value).or(self.margin_top),
             "margin-bottom" => self.margin_bottom = parse_length(&value).or(self.margin_bottom),
             "page-break-before" | "break-before" => {
@@ -365,14 +375,21 @@ fn parse_align(value: &str) -> Option<Align> {
     }
 }
 
+/// Split a CSS length into its numeric prefix and its unit, as borrowed slices.
+///
+/// The prefix characters are all ASCII, so the split is always on a char boundary however the value
+/// is spelled — a leading multi-byte character simply yields an empty number.
+fn split_number(value: &str) -> (&str, &str) {
+    let end = value
+        .find(|c: char| !c.is_ascii_digit() && !matches!(c, '.' | '-' | '+'))
+        .unwrap_or(value.len());
+    (&value[..end], value[end..].trim())
+}
+
 /// True for `0` in any unit (`0`, `0em`, `0%`, `0.0px`) — the only `text-indent` value that changes
 /// what we do. A malformed or unparseable value reads as non-zero, preserving the default indent.
 fn is_zero_length(value: &str) -> bool {
-    let num: String = value
-        .chars()
-        .take_while(|c| c.is_ascii_digit() || *c == '.' || *c == '-' || *c == '+')
-        .collect();
-    num.parse::<f32>().is_ok_and(|n| n == 0.0)
+    split_number(value).0.parse::<f32>().is_ok_and(|n| n == 0.0)
 }
 
 /// A CSS length → [`Length`], for the vertical margins inkread honours (#251).
@@ -382,19 +399,15 @@ fn is_zero_length(value: &str) -> bool {
 /// inkread's own typography stands rather than a guessed length replacing it. A bare `0` is valid
 /// in any unit and means zero.
 fn parse_length(value: &str) -> Option<Length> {
-    let value = value.trim();
-    let digits: String = value
-        .chars()
-        .take_while(|c| c.is_ascii_digit() || matches!(c, '.' | '-' | '+'))
-        .collect();
-    let n: f32 = digits.parse().ok()?;
+    let (number, unit) = split_number(value.trim());
+    let n: f32 = number.parse().ok()?;
     if !n.is_finite() {
         return None;
     }
     // Negative margins pull content into its neighbour; without a box model there is nothing for
     // them to overlap, and honouring them would only eat the gap around them.
     let n = n.max(0.0);
-    match value[digits.len()..].trim() {
+    match unit {
         "em" | "rem" | "ex" | "ch" => Some(Length::Em(n)),
         "px" => Some(Length::Px(n)),
         // A CSS absolute unit: convert at the reference 96 dpi rather than dropping the intent.

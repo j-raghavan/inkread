@@ -1713,11 +1713,10 @@ mod margins {
 
 mod page_breaks {
     use super::*;
-    use crate::css::PageBreak;
 
     /// A page whose content box holds exactly `lines` lines of `chars` characters, so a fixture
     /// can straddle a boundary deliberately. `Mono` advances half the font size per character.
-    fn page(lines: f32, chars: f32) -> LayoutOpts {
+    fn page_opts(lines: f32, chars: f32) -> LayoutOpts {
         const FONT: f32 = 20.0;
         LayoutOpts {
             page_w: chars * FONT * 0.5,
@@ -1729,7 +1728,7 @@ mod page_breaks {
 
     /// Four lines at a comfortable measure: nothing wraps unless the fixture means it to.
     fn four_line_page() -> LayoutOpts {
-        page(4.0, 40.0)
+        page_opts(4.0, 40.0)
     }
 
     fn p(text: &str, style: BlockStyle) -> Block {
@@ -1800,7 +1799,7 @@ mod page_breaks {
     fn an_avoided_break_moves_the_whole_block_to_the_next_page() {
         // One line of a three-line page spent, then a stanza three lines long: it cannot fit in
         // what is left, so unbound it straddles the boundary.
-        let o = page(3.0, 12.0);
+        let o = page_opts(3.0, 12.0);
         let stanza = "one two three four five six";
         let long = |style| {
             paginate(
@@ -1835,7 +1834,7 @@ mod page_breaks {
     /// taller than any page still splits.
     #[test]
     fn a_block_taller_than_a_page_still_splits() {
-        let narrow = page(4.0, 12.0);
+        let narrow = page_opts(4.0, 12.0);
         let huge = (0..40)
             .map(|i| format!("w{i}"))
             .collect::<Vec<_>>()
