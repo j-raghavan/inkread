@@ -404,6 +404,12 @@ fn keep_run_end(blocks: &[Block], i: usize) -> usize {
     end
 }
 
+/// The height a flow occupies: the bottom of its lowest line. Gaps still pending at the flow's
+/// trailing edge are deliberately excluded — they belong to whatever comes next.
+fn flow_height(lines: &[LayoutLine]) -> f32 {
+    lines.iter().map(|l| l.top + l.height).fold(0.0, f32::max)
+}
+
 /// Merge a table row's per-cell flows into one `top`-ordered stream, coalescing the lines that
 /// share a vertical position into a single line box (#251).
 ///
@@ -533,7 +539,7 @@ pub fn paginate_upto(
             break;
         }
         let end = keep_run_end(blocks, i);
-        let laid = pager.add_keep_run(&blocks[i..end], i, &mut cursor, m, images);
+        let laid = pager.add_keep_run(&blocks[i..end], |k| i + k, &mut cursor, m, images);
         i += laid.max(1);
     }
     let columns = opts.effective_columns();
@@ -714,26 +720,28 @@ impl<'o> Pager<'o> {
         self.cursor_y = self.cursor_y.max(base + total_h);
     }
 
-    /// Consume an unpaged pager, yielding its lines, the height they occupy, and the gap still
-    /// pending at its trailing edge.
+    /// Consume an unpaged pager, yielding its segments and the gap still pending at its trailing
+    /// edge.
     ///
-    /// An unpaged pager has no vertical budget, so nothing was ever broken off into `pages` — the
-    /// whole flow is still in `current`. The trailing gap is handed back rather than folded into
-    /// the height because it is the *next* block's business: only there can it collapse against
-    /// what actually follows, or against a page edge.
-    fn into_flow(self) -> (Vec<LayoutLine>, f32, f32) {
-        debug_assert!(self.pages.is_empty(), "an unpaged flow must not paginate");
-        (self.current, self.cursor_y, self.pending_gap)
+    /// There is more than one segment only where the book forced a break inside the flow; an
+    /// unpaged pager never breaks on overflow, so ordinary content comes back as a single segment.
+    /// The trailing gap is handed back rather than folded into the height because it is the *next*
+    /// block's business: only there can it collapse against what actually follows, or a page edge.
+    fn into_segments(self) -> (Vec<Vec<LayoutLine>>, f32) {
+        let mut segments: Vec<Vec<LayoutLine>> = self.pages.into_iter().map(|p| p.lines).collect();
+        segments.push(self.current);
+        (segments, self.pending_gap)
     }
 
     /// Start a new page because the book asked to (`page-break-before/after: always`), rather than
     /// because the current one filled up (#251).
     ///
-    /// A no-op at the top of a page — a forced break must not leave a blank one — and in an unpaged
-    /// flow, which has no pages to break: a `page-break-before` inside a table cell asks for
-    /// something a cell cannot give.
+    /// A no-op at the top of a page — a forced break must not leave a blank one. An unpaged flow
+    /// honours it too: it never breaks on *overflow*, having no budget to overflow, but a break the
+    /// book asked for cuts it into segments its caller places with a real page between them. That
+    /// is what lets a poem laid out in a table start each canto on a fresh page.
     fn force_break(&mut self) {
-        if self.page_h.is_finite() && !self.current.is_empty() {
+        if !self.current.is_empty() {
             self.break_page();
         }
     }
@@ -794,6 +802,9 @@ impl<'o> Pager<'o> {
 
     /// Lay out one keep-run: the blocks between two places a page break is allowed (#251).
     ///
+    /// `index_of` maps a position in the run to the source block it anchors to — successive blocks
+    /// for a chapter, the row itself for every block of a table cell.
+    ///
     /// Returns how many of `blocks` it laid out. That is normally all of them, but a run is only
     /// worth holding together while it could still fit a page: past that the `avoid` cannot be
     /// honoured whatever we do, and continuing to accumulate would hold a whole chapter in memory
@@ -809,7 +820,7 @@ impl<'o> Pager<'o> {
     fn add_keep_run(
         &mut self,
         blocks: &[Block],
-        first_index: usize,
+        index_of: impl Fn(usize) -> usize,
         cursor: &mut usize,
         m: &dyn Metrics,
         images: &dyn ImageSizer,
@@ -831,22 +842,28 @@ impl<'o> Pager<'o> {
                 if sub.cursor_y > self.page_h {
                     break;
                 }
-                sub.add_block(b, first_index + k, cursor, m, images);
+                sub.add_block(b, index_of(k), cursor, m, images);
                 laid = k + 1;
             }
-            let (mut lines, height, trailing) = sub.into_flow();
-            // The flow kept the gap at its own top edge (see `Pager::unpaged`). Lift it back out so
-            // it collapses against what precedes it on the real page, or against a page edge.
-            let lead = lines.first().map_or(0.0, |l| l.top);
-            for line in &mut lines {
-                line.top -= lead;
+            let (segments, trailing) = sub.into_segments();
+            for (i, mut lines) in segments.into_iter().enumerate() {
+                if i > 0 {
+                    self.force_break();
+                }
+                // The flow kept the gap at its own top edge (see `Pager::unpaged`). Lift it back
+                // out so it collapses against what precedes it on the page, or against a page edge.
+                let lead = lines.first().map_or(0.0, |l| l.top);
+                for line in &mut lines {
+                    line.top -= lead;
+                }
+                let height = flow_height(&lines);
+                self.gap(lead);
+                self.emit_flow(lines, height);
             }
-            self.gap(lead);
-            self.emit_flow(lines, height - lead);
             self.gap(trailing);
             laid
         } else {
-            self.add_block(first, first_index, cursor, m, images);
+            self.add_block(first, index_of(0), cursor, m, images);
             1
         };
         if laid == blocks.len() && last.style().break_after == Some(PageBreak::Always) {
@@ -1069,20 +1086,24 @@ impl<'o> Pager<'o> {
             }
             return;
         }
-        // Cells lay out block by block rather than in keep-runs: the row already places its whole
-        // flow as one unit, which keeps together everything a run inside a cell could have asked
-        // for. A forced break inside a cell is likewise nothing a cell can give.
-        let mut flows: Vec<Vec<LayoutLine>> = Vec::with_capacity(cells.len());
-        let mut tallest = 0.0f32;
+        // Cells lay out block by block rather than in keep-runs: the row already places each of
+        // its segments as one unit, which keeps together everything a run inside a cell could have
+        // asked for.
+        let mut cells_segments: Vec<Vec<Vec<LayoutLine>>> = Vec::with_capacity(cells.len());
         let mut trailing_gap = 0.0f32;
         for (index, cell) in cells.iter().enumerate() {
             let mut sub = Pager::unpaged(self.opts, self.hyph, cell_w);
-            for b in cell {
-                sub.add_block(b, block, cursor, m, images);
+            // Walked in keep-runs like a chapter's blocks, so a cell honours the same break
+            // properties. Every block anchors to the row: a cell is one source block.
+            let mut k = 0;
+            while k < cell.len() {
+                let end = keep_run_end(cell, k);
+                let laid = sub.add_keep_run(&cell[k..end], |_| block, cursor, m, images);
+                k += laid.max(1);
             }
-            let (mut lines, height, trailing) = sub.into_flow();
+            let (mut segments, trailing) = sub.into_segments();
             let dx = index as f32 * (cell_w + gutter);
-            for line in &mut lines {
+            for line in segments.iter_mut().flatten() {
                 for run in &mut line.runs {
                     run.x += dx;
                 }
@@ -1092,11 +1113,25 @@ impl<'o> Pager<'o> {
                 // A rule or an image inside a cell spans that cell, not the page.
                 line.column_x += dx;
             }
-            tallest = tallest.max(height);
             trailing_gap = trailing_gap.max(trailing);
-            flows.push(lines);
+            cells_segments.push(segments);
         }
-        self.emit_flow(merge_cell_flows(flows), tallest);
+        // A cell that forced a break cut itself into segments; segment n of every cell is laid out
+        // together, with a real page break between one segment and the next. A juxtalinear text
+        // declares the break on both languages' headings, so the two stay paired across it.
+        let count = cells_segments.iter().map(Vec::len).max().unwrap_or(0);
+        for i in 0..count {
+            if i > 0 {
+                self.force_break();
+            }
+            let flows: Vec<Vec<LayoutLine>> = cells_segments
+                .iter_mut()
+                .filter_map(|c| c.get_mut(i).map(std::mem::take))
+                .collect();
+            let lines = merge_cell_flows(flows);
+            let tallest = flow_height(&lines);
+            self.emit_flow(lines, tallest);
+        }
         self.gap(trailing_gap);
     }
 

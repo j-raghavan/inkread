@@ -2132,6 +2132,60 @@ mod css_to_page {
         assert!(!complete);
     }
 
+    /// The reporter's own case: a poem laid out as a bilingual table, each canto asked to start on
+    /// a fresh page. A cell's forced break cuts the row into segments rather than being ignored.
+    #[test]
+    fn a_forced_break_inside_a_cell_splits_the_row() {
+        let p = pages(
+            "h3 { page-break-before: always }",
+            "<table><tr>\
+               <td><h3>I</h3><p>original</p><h3>II</h3><p>more</p></td>\
+               <td><h3>I</h3><p>translation</p><h3>II</h3><p>plus</p></td>\
+             </tr></table>",
+        );
+        assert_eq!(p.len(), 2, "the second canto starts a new page");
+        for page in &p {
+            for line in &page.lines {
+                assert_eq!(
+                    line.runs.len(),
+                    2,
+                    "both languages stay paired across the break: {:?}",
+                    line.runs,
+                );
+            }
+        }
+    }
+
+    /// A forced break must not leave a blank page when the row's first block declares it.
+    #[test]
+    fn a_forced_break_on_a_cells_first_block_does_not_blank_a_page() {
+        let p = pages(
+            "h3 { page-break-before: always }",
+            "<table><tr><td><h3>I</h3><p>x</p></td></tr></table>",
+        );
+        assert_eq!(p.len(), 1);
+        assert!(!p[0].lines.is_empty());
+    }
+
+    /// In two-column mode the pager produces columns, which `combine_columns` then pairs into
+    /// pages — so a forced break starts a new *column*, not a new page. Pinned because it is the
+    /// kind of interaction that otherwise gets discovered on a device.
+    #[test]
+    fn a_forced_break_in_two_column_mode_starts_a_column() {
+        let two = LayoutOpts {
+            columns: 2,
+            ..opts()
+        };
+        let b = blocks("h2 { page-break-before: always }", "<p>a</p><h2>B</h2>");
+        let p = paginate_with_images(&b, &two, &Mono, &NoHyphen, &NoImages);
+        assert_eq!(p.len(), 1, "two columns still make one page: {p:?}");
+        let xs: Vec<f32> = p[0].lines.iter().map(|l| l.runs[0].x).collect();
+        assert!(
+            xs[1] > xs[0],
+            "the break moved the heading into the second column: {xs:?}",
+        );
+    }
+
     /// The block-level `<em>` fix (a walker that descended into the tag rather than dispatching on
     /// it) has no other test: the cell test that covers it reaches the same code by another route.
     #[test]
