@@ -84,7 +84,11 @@ number is given in parentheses.
   `check-vendor-neutral.sh` instead of restating IR-7 in prose.
 - `ADR-INKREAD-0016` (the calibre/OPDS library) is cited from ten call sites and had no row in
   `docs/SPEC-INDEX.md`; the README now links that index too.
-- `scripts/gate.sh` claimed to mirror CI but ran neither script gate. It now runs both.
+- `scripts/gate.sh` claimed to mirror CI but ran neither script gate. It now runs both, and warns
+  when the pdfium render tests are skipping — a skip still passes, so a green suite could silently
+  be missing a thousand-line file and read ~5 points below CI under `cargo llvm-cov`.
+  `CONTRIBUTING.md` documents that, how to fetch the prebuilt CI pins, and that `cargo llvm-cov`
+  builds into its own `target/llvm-cov-target` which `cargo clean -p` does not touch.
 
 ## [1.3.2] — 2026-08-29
 

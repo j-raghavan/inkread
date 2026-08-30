@@ -151,10 +151,34 @@ sha256-verifies the pinned vendored `libpdfium.so`, stages the dictionary corpus
 
 ### A note on the PDF render tests
 
-The pdfium render tests **skip** unless `PDFIUM_DYNAMIC_LIB_PATH` points at a `libpdfium.so`. CI
-fetches the BSD bblanchon prebuilt and re-runs them for real, so the render path actually executes.
-Locally they skip cleanly — that's expected, not a failure. To run them yourself, set the env var to
-a downloaded `libpdfium.so`.
+The pdfium render tests **skip** unless `PDFIUM_DYNAMIC_LIB_PATH` points at a real pdfium library.
+CI fetches the BSD bblanchon prebuilt and re-runs them for real, so the render path actually
+executes. Locally they skip cleanly — that's expected for `cargo test`, not a failure.
+
+> **It is not harmless under `cargo llvm-cov`.** A skipped test still *passes*, so nothing tells you
+> it did not run, and `document/fixed/pdf.rs` is over a thousand lines — measuring coverage with the
+> library absent reads it at ~1% and drops the whole-workspace figure by about five points. If your
+> local coverage number is far below CI's, this is why. `scripts/gate.sh` warns when the tests are
+> skipping.
+
+To run them for real, download the prebuilt CI pins and point the variable at the **library file**:
+
+```bash
+ver=chromium/7881   # keep in step with .github/workflows/ci.yml
+# macOS arm64; use pdfium-linux-x64.tgz on Linux
+curl -sSL -o /tmp/pdfium.tgz \
+  "https://github.com/bblanchon/pdfium-binaries/releases/download/$ver/pdfium-mac-arm64.tgz"
+mkdir -p /tmp/pdfium && tar -xzf /tmp/pdfium.tgz -C /tmp/pdfium
+export PDFIUM_DYNAMIC_LIB_PATH=/tmp/pdfium/lib/libpdfium.dylib
+```
+
+Use that build specifically. A `libpdfium.dylib` from elsewhere — pypdfium2's Python wheel, for
+instance — can be the right architecture and still fail to bind, and the failure surfaces only as
+the same silent skip.
+
+Coverage also builds into its **own** target directory, `target/llvm-cov-target`. `cargo clean -p
+<crate>` cleans `target/debug` and leaves it untouched, so a stale report can list files that no
+longer exist. `cargo llvm-cov clean --workspace` is the one to use.
 
 ---
 
