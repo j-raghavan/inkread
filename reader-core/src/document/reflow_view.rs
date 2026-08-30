@@ -7,9 +7,13 @@
 //! font-size, line-spacing, alignment, selection, and search for free, with no new layout code.
 //!
 //! This mirrors the cache/repaginate shape of [`crate::document::reflow::EpubBackend`] but is a
-//! standalone helper so the working EPUB backend is left untouched (approach b); a future refactor
-//! could fold EPUB onto it. Each unit starts a new viewport page (book convention), which also gives
-//! a stable unit → page mapping for reading-position preservation.
+//! standalone helper so the working EPUB backend was left untouched (approach b). Folding EPUB onto
+//! it remains open, and is a real refactor rather than a tidy-up: the two have diverged on their
+//! base font size and scale clamp (see [`BASE_FONT_PX`]), so converging the engines means first
+//! deciding which typography wins — a change every existing reader would see.
+//!
+//! Each unit starts a new viewport page (book convention), which also gives a stable unit → page
+//! mapping for reading-position preservation.
 
 use std::cell::{Cell, RefCell};
 
@@ -51,11 +55,26 @@ pub(crate) fn page_charboxes(page: &Page, opts: &LayoutOpts, font: &AbFont) -> V
         .collect()
 }
 
-/// Base body font size in device pixels at scale `1.0` — matches the EPUB backend so a PDF and an
-/// EPUB read at the same nominal size (RR2-FR5 font-size control).
+/// Base body font size in device pixels at scale `1.0` (RR2-FR5 font-size control).
+///
+/// **This does not match the EPUB backend, and the difference is user-visible.**
+/// [`crate::document::reflow`] uses `56.0` with a `0.6..=3.0` clamp; this path uses `38.0` with
+/// `0.6..=2.5`. Both lay out through the same `LayoutOpts::new(w, h, font_px)` against the same
+/// viewport in device pixels, so the values are directly comparable: a reflowed PDF at "100%"
+/// renders body text about **68%** the size of an EPUB at "100%", and tops out at `95px` against
+/// the EPUB's `168px`.
+///
+/// That gap is widest exactly where it matters least to a developer and most to a reader — someone
+/// who has turned the size up because they need it gets substantially less headroom on a reflowed
+/// PDF than on an EPUB.
+///
+/// Left as-is deliberately rather than quietly reconciled: converging them changes the text size on
+/// every existing reader's device, in one direction or the other, which is a product decision and
+/// not a comment fix. The header previously claimed these matched, which was the actual defect.
 const BASE_FONT_PX: f32 = 38.0;
 
-/// Clamp for the user text scale (font size). `1.0` = [`BASE_FONT_PX`].
+/// Clamp for the user text scale (font size). `1.0` = [`BASE_FONT_PX`]. See the note there: the
+/// EPUB backend clamps to `3.0`, not `2.5`.
 const MIN_SCALE: f32 = 0.6;
 const MAX_SCALE: f32 = 2.5;
 
