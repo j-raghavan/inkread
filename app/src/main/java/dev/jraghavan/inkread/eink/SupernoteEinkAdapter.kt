@@ -11,32 +11,37 @@ import dev.jraghavan.inkread.RefreshIntent
 /**
  * The Supernote (RK3566 EBC) refresh adapter (RR15).
  *
- * Maps each vendor-neutral [RefreshIntent] to an EBC waveform mode. This is the ONLY
- * vendor-named code in the project (IR-7); the core stays agnostic.
+ * Maps each vendor-neutral [RefreshIntent] onto the panel mechanism this device actually exposes.
+ * This is the ONLY vendor-named code in the project (IR-7); the core stays agnostic, and
+ * `scripts/check-vendor-neutral.sh` keeps it that way.
  *
- * M0 STATUS (device-verified 2026-06-11): the reader **displays on the panel via the device's
- * automatic refresh** — a PDF rendered on the Supernote with these methods as no-ops. So explicit
- * waveform control is intentionally not exercised at M0 (see the execution-path note below).
+ * ## What this adapter does
+ * It refreshes the panel, on every page. The RK3566 is a **full-only** panel and a blit to our
+ * Surface does not repaint the EPD by itself — only the first window draw is auto-refreshed — so
+ * every subsequent page explicitly asks for a frame via
+ * `android.os.EinkManager.sendOneFullFrame()`, reached by reflection through the system `eink`
+ * service. It also releases the firmware's global and stylus gesture grabs, without which the
+ * vendor gesture layer eats touch events before the reader's window sees them. See the panel
+ * mechanism note further down for the details.
  *
- * ## Rockchip full-screen quirk (RR2-FR4)
- * On the RK3566 EBC a FULL/Flash refresh refreshes the WHOLE screen regardless of the rect
- * (coordinates ignored). So [RefreshIntent.FULL]/`FLASH_*` are treated as full-screen here;
- * only PARTIAL/FAST honor the per-update rect.
+ * ## Full-screen quirk (RR2-FR4)
+ * A refresh repaints the WHOLE screen regardless of the rect, so `refreshRegion` collapses to the
+ * same full frame as `refreshFullScreen`. The [EbcMode] mapping in [mapIntent] is therefore
+ * *descriptive* rather than load-bearing: it records what each intent would ask for on a panel that
+ * let an app choose, and is staged for a device that does. [waitForLast] is genuinely a no-op —
+ * this panel exposes no completion marker.
  *
- * ## Execution path (RR15-FR3 — settled by the RR19-FR4b spike)
- * The spike confirmed the **reader rides the device's automatic e-ink refresh**: a sideloaded
- * app draws to its Surface and the Supernote firmware's system-level einkhwc refreshes the
- * window — no app-side waveform call needed. (KOReader runs on the Supernote exactly this way:
- * it detects the device as non-eink and issues *zero* e-ink calls.) Explicit waveform control
- * from a sideload is **system/privilege-gated**: `android.os.EinkManager` is reachable but its
- * `setMode`/refresh calls are no-ops for an untrusted window; `com.ratta.DrawService` returns a
- * null binder; `/dev/ebc` opens (Ratta `ht_eink` 'HT' ioctl family — *not* stock ebc-dev) and
- * the FB is mmap-readable, but the write/refresh path is unproven and reboot-risky. Therefore
- * M0 advertises [DeviceCapabilities.supernoteBaseline] (`einkFull = false`) and the refresh
- * methods below are intentional **no-ops** — the device drives the panel. The low-latency A2
- * pen path (explicit refresh control) is deferred to **M1c handwriting**, where it needs the
- * privileged HandWriteClient route (RR19-FR3b) or a best-effort auto-path fallback. The
- * EBC-mode mapping below is staged for that future, vendor-named work.
+ * ## What it deliberately does not do (RR15-FR3, settled by the RR19-FR4b spike)
+ * Waveform selection and dirty-rect refresh are **not reachable from a sideloaded app** on this
+ * SoC: `EinkManager.setMode` is a no-op for an untrusted window, `com.ratta.DrawService` returns a
+ * null binder, and the `/dev/ebc` write path is unproven and reboot-risky. That is why
+ * [capabilities] advertises `einkFull = false` — an honest declaration, not a placeholder, and the
+ * core's policy degrades on it correctly. `docs/EINK-LIMITS.md` states the ceiling plainly.
+ *
+ * Live pen ink is likewise not this adapter's job and never will be: the firmware's own overlay
+ * draws wet ink at sub-frame latency and inkread feeds it stroke geometry, keeping the Rust stroke
+ * model underneath (spec amendment S-2, ADR-INKREAD-0004). Nothing an app-side refresh path could
+ * add would beat it.
  */
 class SupernoteEinkAdapter : EinkAdapter {
 

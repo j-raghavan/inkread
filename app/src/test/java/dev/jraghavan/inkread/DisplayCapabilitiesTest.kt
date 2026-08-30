@@ -22,7 +22,7 @@ class DisplayCapabilitiesTest {
         val caps = DeviceCapabilities.supernoteBaseline()
         assertTrue("Supernote is e-ink", caps.eink)
         assertTrue("and needs a refresh after resume", caps.needsRefreshAfterResume)
-        assertFalse("M0 has no full-refresh control", caps.einkFull)
+        assertFalse("a sideloaded app has no full-refresh control on this panel", caps.einkFull)
         assertFalse("monochrome panel", caps.colorScreen)
     }
 

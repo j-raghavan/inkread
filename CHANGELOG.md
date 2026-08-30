@@ -56,6 +56,13 @@ number is given in parentheses.
   selection, and the PDF text-block splitter — paths the JNI bridge reaches, where an unwind would
   have violated RR21-FR3. A missing symbol-fallback face or hyphenation pattern set now degrades
   (lost glyph coverage, whole-word wrapping) instead of taking the reader down.
+- `SupernoteEinkAdapter`'s header described its refresh methods as "intentional no-ops" and
+  handwriting as deferred, while the body calls `EinkManager.sendOneFullFrame()` on every page and
+  the firmware pen path has shipped. It now describes what the adapter does, what the platform
+  makes unreachable, and why live ink is the firmware's job by design.
+- `DeviceCapabilities.supernoteBaseline`'s KDoc had been orphaned above `genericDisplay`'s own
+  KDoc by #220, so it documented nothing and `supernoteBaseline` was undocumented. Reattached, and
+  it no longer says the profile is provisional "until the RR19-FR4b spike" — that spike concluded.
 - Module headers that still described the M0 milestone now describe the shipped code: the `Document`
   trait has four backends and defaulted `toc`/`search`/`hint_page` rather than "the PDF backend is
   the one implementation", the render pipeline has a cache and prefetch, the refresh policy has
