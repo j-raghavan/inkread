@@ -119,8 +119,29 @@ impl BlockStyle {
             && self.break_inside.is_none()
     }
 
+    /// The half of this style that a container passes down to the blocks nested inside it.
+    ///
+    /// `margin` and the `page-break-*` properties are not inherited in CSS, and threading them into
+    /// a container's descendants is not a near-miss but the opposite of what the book asked: a
+    /// `<div style="margin: 2em">` around a poem would put two ems between every line of it, and a
+    /// `page-break-before` on it would start every line on a new page. What a container declares
+    /// for itself reaches the blocks it wraps through [`crate::content`]'s transfer step instead.
+    #[must_use]
+    pub(crate) fn inherited_only(self) -> BlockStyle {
+        BlockStyle {
+            align: self.align,
+            indent: self.indent,
+            bold: self.bold,
+            italic: self.italic,
+            ..BlockStyle::default()
+        }
+    }
+
     /// Return `self` with every property `higher` declares overridden — the inheritance step, used
     /// to fold a container's declared style into the block nested inside it.
+    ///
+    /// Only the four text properties actually overlay. The rest are *replaced* by `higher`'s,
+    /// because they do not inherit; see [`BlockStyle::inherited_only`].
     #[must_use]
     pub(crate) fn overlaid_with(mut self, higher: &BlockStyle) -> BlockStyle {
         if higher.align.is_some() {

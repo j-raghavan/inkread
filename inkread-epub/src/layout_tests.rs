@@ -819,6 +819,7 @@ fn image_block(src: &str) -> Block {
     Block::Image {
         src: src.into(),
         alt: "a plate".into(),
+        style: BlockStyle::default(),
     }
 }
 
@@ -1256,7 +1257,9 @@ fn two_col_opts_with(columns: u8) -> LayoutOpts {
 fn a_rule_spans_only_its_own_column() {
     let opts = two_col_opts();
     let mut blocks: Vec<Block> = (0..20).map(|i| para(&format!("w{i}"))).collect();
-    blocks.push(Block::Rule);
+    blocks.push(Block::Rule {
+        style: BlockStyle::default(),
+    });
     blocks.extend((20..40).map(|i| para(&format!("w{i}"))));
     let pages = paginate(&blocks, &opts, &Mono);
     let rules: Vec<f32> = pages
@@ -1334,6 +1337,7 @@ mod row_layout {
     fn row(cells: &[&str]) -> Block {
         Block::Row {
             cells: cells.iter().map(|c| cell(c)).collect(),
+            style: BlockStyle::default(),
         }
     }
 
@@ -1439,7 +1443,10 @@ mod row_layout {
     }
 
     fn row_of(cells: Vec<Vec<Block>>) -> Block {
-        Block::Row { cells }
+        Block::Row {
+            cells,
+            style: BlockStyle::default(),
+        }
     }
 
     /// #251(1): the heading was flattened into body text. It must now be set as a heading — bigger
@@ -1905,5 +1912,240 @@ mod page_breaks {
         let pages = paginate(&blocks, &four_line_page(), &Mono);
         assert_eq!(pages.len(), 2, "the forced break still happens");
         assert_eq!(text_of(&pages[0]), ["a"]);
+    }
+}
+
+// ── Stylesheet through to laid-out page (#251) ────────────────────────────────────────────────
+//
+// The unit tests above build `Block`s by hand. These drive the whole path the reporter's book
+// takes — book CSS, XHTML, lowering, pagination — because most of what #251 reported was not any
+// one stage being wrong but two stages disagreeing about who owned a property.
+
+mod css_to_page {
+    use super::*;
+    use crate::content::parse_blocks_with;
+    use crate::css::Stylesheet;
+    use crate::layout::{paginate_upto, paginate_with_images, ImageSizer, NoImages};
+
+    fn opts() -> LayoutOpts {
+        LayoutOpts {
+            page_w: 600.0,
+            page_h: 400.0,
+            margin: 0.0,
+            ..LayoutOpts::new(600.0, 400.0, 20.0)
+        }
+    }
+
+    fn blocks(css: &str, body: &str) -> Vec<Block> {
+        parse_blocks_with(
+            &format!("<html><body>{body}</body></html>"),
+            &Stylesheet::parse(css),
+        )
+    }
+
+    fn pages(css: &str, body: &str) -> Vec<Page> {
+        paginate_with_images(&blocks(css, body), &opts(), &Mono, &NoHyphen, &NoImages)
+    }
+
+    fn tops(css: &str, body: &str) -> Vec<f32> {
+        pages(css, body)
+            .into_iter()
+            .flat_map(|p| p.lines)
+            .map(|l| l.top)
+            .collect()
+    }
+
+    /// The two halves of #251 must not cancel: a stanza asks to be spaced *and* to be kept whole,
+    /// and flowing it through a sub-pager used to swallow both of its margins.
+    #[test]
+    fn keeping_a_block_together_does_not_delete_its_margins() {
+        let html = "<p>a</p><p>b</p><p>c</p>";
+        assert_eq!(
+            tops("p { margin: 2em 0; page-break-inside: avoid }", html),
+            tops("p { margin: 2em 0 }", html),
+            "`avoid` must not cost the block its spacing",
+        );
+    }
+
+    /// A container's margin reaches the run it wraps, the way its page-break request does.
+    /// Blockquote-wrapped verse is one of the commonest shapes in an EPUB.
+    #[test]
+    fn a_container_margin_separates_the_run_it_wraps() {
+        let t = tops(
+            "blockquote { margin: 2em 0 }",
+            "<p>a</p><blockquote><p>b</p></blockquote><p>c</p>",
+        );
+        assert!(t[1] - t[0] > 40.0, "the blockquote's margin is lost: {t:?}");
+        assert!(t[2] - t[1] > 40.0, "…on both edges: {t:?}");
+    }
+
+    /// A container's margin and break must reach the run, NOT every block in it. An anonymous
+    /// paragraph is stamped with the style it inherits, so this is where a leak shows up first.
+    #[test]
+    fn a_container_break_does_not_leak_onto_every_anonymous_paragraph() {
+        assert_eq!(
+            pages(
+                ".x { page-break-before: always }",
+                r#"<div class="x">one<hr/>two<hr/>three</div>"#
+            )
+            .len(),
+            1,
+            "one break before the div, not one before every paragraph in it",
+        );
+    }
+
+    /// The same leak by the other route: with no book CSS, `declared` takes a fast path that never
+    /// reaches the inheritance step, so the rule has to be enforced in `declared` itself.
+    #[test]
+    fn a_container_break_does_not_leak_through_the_no_stylesheet_fast_path() {
+        let b = parse_blocks_with(
+            r#"<html><body><div style="page-break-before: always"><p>a</p><p>b</p><p>c</p></div></body></html>"#,
+            &Stylesheet::default(),
+        );
+        let breaks: Vec<_> = b.iter().map(|x| x.style().break_before).collect();
+        assert_eq!(
+            breaks,
+            vec![Some(PageBreak::Always), None, None],
+            "an inline style on a wrapper must not descend",
+        );
+    }
+
+    /// `<hr class="pagebreak"/>` is how a great many EPUB2 books start a chapter. A rule that
+    /// cannot carry a style cannot say it.
+    #[test]
+    fn a_rule_can_force_a_page_break() {
+        assert_eq!(
+            pages(
+                ".pb { page-break-after: always }",
+                r#"<p>a</p><hr class="pb"/><p>b</p>"#
+            )
+            .len(),
+            2,
+        );
+    }
+
+    /// A break declared around a table reaches it. The reporter's whole document is a table, so a
+    /// break that only worked on paragraphs would not close #251 for them.
+    #[test]
+    fn a_break_around_a_table_reaches_the_row() {
+        assert_eq!(
+            pages(
+                ".poem { page-break-before: always }",
+                r#"<p>a</p><div class="poem"><table><tr><td>x</td><td>y</td></tr></table></div>"#,
+            )
+            .len(),
+            2,
+        );
+    }
+
+    /// CSS resolves `em` against the element's own font size, so a margin on an `<h1>` is one
+    /// h1-em. Resolving against the body size made every heading margin come out short.
+    #[test]
+    fn an_em_margin_resolves_against_the_blocks_own_font_size() {
+        let t = tops("h1 { margin-top: 1em }", "<p>a</p><h1>H</h1>");
+        let gap = t[1] - t[0] - 20.0 * 1.4;
+        assert!(
+            gap > 30.0,
+            "1em on an h1 is 1.8 body-ems (36px), not 20px: gap {gap}",
+        );
+    }
+
+    /// A cell's margin must not depend on whether the book wrapped the cell's text in a `<p>`.
+    #[test]
+    fn a_cell_margin_does_not_depend_on_how_the_cell_is_written() {
+        let b = blocks(
+            "td { margin-top: 2em }",
+            "<table><tr><td>bare</td><td><p>wrapped</p></td></tr></table>",
+        );
+        let Some(Block::Row { cells, .. }) = b.first() else {
+            panic!("expected a row");
+        };
+        assert_eq!(
+            cells[0][0].style().margin_top,
+            cells[1][0].style().margin_top,
+        );
+    }
+
+    /// A rule spans its own cell. The renderer takes the span off the line, so a cell rule that
+    /// reported a page-wide column would be drawn across its neighbours.
+    #[test]
+    fn a_rule_in_a_cell_spans_only_that_cell() {
+        let p = pages("", "<table><tr><td><hr/></td><td>b</td></tr></table>");
+        let rule = p[0].lines.iter().find(|l| l.rule).expect("a rule line");
+        assert!(
+            rule.column_w < opts().content_w() * 0.6,
+            "a cell rule must not span the page: {} of {}",
+            rule.column_w,
+            opts().content_w(),
+        );
+    }
+
+    struct Tall;
+    impl ImageSizer for Tall {
+        fn size(&self, _s: &str) -> Option<(u32, u32)> {
+            Some((100, 10_000))
+        }
+    }
+
+    /// An unpaged flow has no vertical budget of its own, but the page it lands on still does — so
+    /// an image inside a cell must be fitted to the page, not to the flow's infinity.
+    #[test]
+    fn an_image_in_a_cell_is_still_capped_by_the_page() {
+        let o = opts();
+        let p = paginate_with_images(
+            &blocks("", "<table><tr><td><img src=\"a.png\"/></td></tr></table>"),
+            &o,
+            &Mono,
+            &NoHyphen,
+            &Tall,
+        );
+        let h = p[0].lines[0].height;
+        assert!(h <= o.content_h(), "a 10000px plate must scale down: {h}");
+    }
+
+    /// A `page-break-inside: avoid` on a section wrapper binds every block in it into one run.
+    /// Holding a whole chapter before emitting a page is what #186's incremental pagination exists
+    /// to avoid, so a run stops being held once it can no longer fit a page anyway.
+    #[test]
+    fn a_chapter_wide_avoid_still_paginates_incrementally() {
+        let body: String = (0..200).map(|i| format!("<p>para {i}</p>")).collect();
+        let short = LayoutOpts {
+            page_h: 100.0,
+            ..opts()
+        };
+        let (p, complete) = paginate_upto(
+            &blocks(
+                ".c { page-break-inside: avoid }",
+                &format!(r#"<div class="c">{body}</div>"#),
+            ),
+            &short,
+            &Mono,
+            &NoHyphen,
+            &NoImages,
+            1,
+        );
+        assert_eq!(
+            p.len(),
+            1,
+            "asking for one page laid out {} of them",
+            p.len()
+        );
+        assert!(!complete);
+    }
+
+    /// The block-level `<em>` fix (a walker that descended into the tag rather than dispatching on
+    /// it) has no other test: the cell test that covers it reaches the same code by another route.
+    #[test]
+    fn a_block_level_emphasis_tag_keeps_its_own_emphasis() {
+        let b = blocks("", "<p>a</p><em>stressed</em><p>b</p>");
+        let Some(Block::Paragraph { content, .. }) = b.get(1) else {
+            panic!("expected an anonymous paragraph: {b:?}");
+        };
+        assert!(
+            content
+                .iter()
+                .any(|i| matches!(i, Inline::Run(r) if r.italic)),
+            "the <em> itself must italicise what it wraps: {content:?}",
+        );
     }
 }

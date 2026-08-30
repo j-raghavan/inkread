@@ -81,33 +81,54 @@ pub enum Block {
     ///
     /// The row itself carries no style: what the `<tr>` and each `<td>` declared is already folded
     /// into the blocks inside, by the same inheritance every other container uses.
-    Row { cells: Vec<Vec<Block>> },
+    Row {
+        cells: Vec<Vec<Block>>,
+        /// The row's own declared style. Only its non-inherited half is read — a row is spaced and
+        /// broken like any block; what it declares for its *text* is inherited by the cells.
+        style: BlockStyle,
+    },
     /// A standalone (block-level) image.
-    Image { src: String, alt: String },
+    Image {
+        src: String,
+        alt: String,
+        style: BlockStyle,
+    },
     /// A horizontal rule (`<hr/>`) — a section divider.
-    Rule,
+    ///
+    /// It carries a style for the same reason the others do: `<hr class="pagebreak"/>` styled
+    /// `page-break-after: always` is how a great many EPUB2 books start a chapter, and a rule that
+    /// could declare nothing could not say it.
+    Rule { style: BlockStyle },
 }
 
 impl Block {
-    /// The style this block carries, if it carries one. A rule and a standalone image declare
-    /// nothing; a row's declarations live on the blocks inside its cells.
+    /// What the book declared for this block.
+    ///
+    /// Every block kind carries one. Spacing and page breaks are not typographic niceties that only
+    /// text can want: `<hr class="pagebreak"/>`, `table { margin: 1em 0 }` and a plate on its own
+    /// page are all ordinary things for a book to ask for, and a block that could declare nothing
+    /// could not ask.
     #[must_use]
-    pub fn style(&self) -> Option<&BlockStyle> {
+    pub fn style(&self) -> &BlockStyle {
         match self {
             Block::Heading { style, .. }
             | Block::Paragraph { style, .. }
-            | Block::ListItem { style, .. } => Some(style),
-            Block::Row { .. } | Block::Image { .. } | Block::Rule => None,
+            | Block::ListItem { style, .. }
+            | Block::Row { style, .. }
+            | Block::Image { style, .. }
+            | Block::Rule { style } => style,
         }
     }
 
     /// As [`Block::style`], for amending what a container declared onto the blocks it wraps.
-    fn style_mut(&mut self) -> Option<&mut BlockStyle> {
+    fn style_mut(&mut self) -> &mut BlockStyle {
         match self {
             Block::Heading { style, .. }
             | Block::Paragraph { style, .. }
-            | Block::ListItem { style, .. } => Some(style),
-            Block::Row { .. } | Block::Image { .. } | Block::Rule => None,
+            | Block::ListItem { style, .. }
+            | Block::Row { style, .. }
+            | Block::Image { style, .. }
+            | Block::Rule { style } => style,
         }
     }
 }
@@ -192,12 +213,17 @@ fn style_text(doc: &Html) -> String {
 }
 
 /// Resolve an element's declared style against `sheet`, folding it over what it inherits from its
-/// containers. All three properties in [`BlockStyle`] are inherited ones in CSS, and books routinely
-/// declare them on a wrapping `<div>` rather than on each block inside it.
+/// containers. Books routinely declare the *inherited* properties on a wrapping `<div>` rather than
+/// on each block inside it.
 ///
 /// Note this is *narrower* than what the selector engine can express: a rule matching a container
 /// styles the blocks nested inside it, which is inheritance — the engine resolves descendant
 /// selectors such as `div.titlepage p` on its own.
+///
+/// Whatever `inherited` holds, the result carries only *this* element's `margin` and `page-break-*`
+/// — never a container's. The rule is enforced here rather than trusted to every caller, because
+/// the fast path below returns without ever reaching [`BlockStyle::overlaid_with`], which is where
+/// it would otherwise live.
 fn declared(
     node: NodeRef<Node>,
     el: &scraper::node::Element,
@@ -207,10 +233,10 @@ fn declared(
     let style_attr = el.attr("style");
     // Fast path for the overwhelmingly common block: no book CSS and no inline style to apply.
     if sheet.rules.is_empty() && style_attr.is_none() {
-        return inherited;
+        return inherited.inherited_only();
     }
     let own = css::resolve(sheet, &StyledNode(node), style_attr);
-    inherited.overlaid_with(&own)
+    inherited.inherited_only().overlaid_with(&own)
 }
 
 /// Depth-first search for the `<body>` element.
@@ -269,21 +295,23 @@ fn walk_blocks(
                     "br" => pending.push(Inline::Break),
                     "hr" => {
                         flush_paragraph(out, pending, inherited);
-                        out.push(Block::Rule);
+                        out.push(Block::Rule {
+                            style: declared(child, el, sheet, inherited),
+                        });
                     }
                     "table" => {
                         flush_paragraph(out, pending, inherited);
-                        walk_table(child, out, sheet, declared(child, el, sheet, inherited));
+                        let own = declared(child, el, sheet, inherited);
+                        let start = out.len();
+                        walk_table(child, out, sheet, own.inherited_only());
+                        apply_container_style(&mut out[start..], &own);
                     }
                     "ul" | "ol" => {
                         flush_paragraph(out, pending, inherited);
-                        walk_list(
-                            child,
-                            name == "ol",
-                            out,
-                            sheet,
-                            declared(child, el, sheet, inherited),
-                        );
+                        let own = declared(child, el, sheet, inherited);
+                        let start = out.len();
+                        walk_list(child, name == "ol", out, sheet, own.inherited_only());
+                        apply_container_style(&mut out[start..], &own);
                     }
                     "img" => {
                         // Standalone (block-level) image.
@@ -292,6 +320,7 @@ fn walk_blocks(
                             out.push(Block::Image {
                                 src: src.to_string(),
                                 alt: el.attr("alt").unwrap_or_default().to_string(),
+                                style: declared(child, el, sheet, inherited),
                             });
                         }
                     }
@@ -307,12 +336,13 @@ fn walk_blocks(
                     // blocks rather than merging across the boundary. Its declared style descends
                     // with it — a `<div class="titlepage">` styles the blocks it wraps.
                     _ => {
-                        let inner = declared(child, el, sheet, inherited);
+                        let own = declared(child, el, sheet, inherited);
+                        let descends = own.inherited_only();
                         flush_paragraph(out, pending, inherited);
                         let start = out.len();
-                        walk_blocks(child, out, pending, sheet, inner);
-                        flush_paragraph(out, pending, inner);
-                        apply_container_breaks(&mut out[start..], &inner);
+                        walk_blocks(child, out, pending, sheet, descends);
+                        flush_paragraph(out, pending, descends);
+                        apply_container_style(&mut out[start..], &own);
                     }
                 }
             }
@@ -348,19 +378,20 @@ fn walk_table(
                 }
             }
             "tr" => {
-                let row_style = declared(child, el, sheet, inherited);
+                let style = declared(child, el, sheet, inherited);
+                let descends = style.inherited_only();
                 let cells: Vec<Vec<Block>> = child
                     .children()
                     .filter_map(|c| match c.value() {
                         Node::Element(ce) if matches!(ce.name(), "td" | "th") => {
-                            Some(walk_cell(c, sheet, declared(c, ce, sheet, row_style)))
+                            Some(walk_cell(c, sheet, declared(c, ce, sheet, descends)))
                         }
                         _ => None,
                     })
                     .collect();
                 // A row of nothing but spacing cells is layout scaffolding, not content.
                 if !cells.is_empty() && !cells.iter().all(Vec::is_empty) {
-                    out.push(Block::Row { cells });
+                    out.push(Block::Row { cells, style });
                 }
             }
             _ => {}
@@ -368,41 +399,43 @@ fn walk_table(
     }
 }
 
-/// Transfer a container's page-break request onto the blocks it wraps (#251).
+/// Transfer what a container declared for *itself* onto the blocks it wraps (#251).
 ///
-/// The break properties do not inherit, but books declare them on the wrapper far more often than
-/// on the block — `<div class="poem" style="page-break-before: always">`. Inheriting them would be
-/// wrong (one break before the poem, not one before every line of it), so they are *transferred*
-/// instead: the request lands on the edge of the run the container produced.
+/// `margin` and `page-break-*` do not inherit, but books declare them on the wrapper far more often
+/// than on the block — `<div class="poem" style="page-break-before: always">`, `blockquote { margin:
+/// 1em 0 }`. Inheriting them would be wrong (one break before the poem, not one before every line
+/// of it), so they are *transferred* instead: the request lands on the edge of the run the
+/// container produced, which is where a container with no border or padding puts it in CSS too —
+/// its margin collapses through to its first and last child.
 ///
-/// `page-break-inside: avoid` becomes `page-break-after: avoid` on every block but the last, which
-/// is what it means over a run — do not break *between* these — expressed in the vocabulary the
-/// pager already needs for `page-break-after: avoid` itself. Each block also keeps the request, so
-/// a block long enough to fill a page still asks not to be halved.
+/// `page-break-inside: avoid` becomes `page-break-after: avoid` between the blocks, which is what
+/// it means over a run: do not break *between* these. Each block also keeps the request itself,
+/// which is what makes a single-block container's `avoid` indivisible — with several blocks the run
+/// is already indivisible, and there the per-block copy is inert.
 ///
-/// A block that declared its own value keeps it: a container's request is the weaker one.
-fn apply_container_breaks(blocks: &mut [Block], container: &BlockStyle) {
+/// A block that declared its own value keeps it: a container's request is the weaker one. Every
+/// block kind can carry one, so a container whose run begins with an `<hr/>` or a plate is served
+/// like any other.
+fn apply_container_style(blocks: &mut [Block], container: &BlockStyle) {
     if blocks.is_empty() || container.is_empty() {
         return;
     }
     let last = blocks.len() - 1;
     let inside_avoid = container.break_inside == Some(PageBreak::Avoid);
     for (i, block) in blocks.iter_mut().enumerate() {
-        let Some(style) = block.style_mut() else {
-            continue;
-        };
-        if i == 0 && style.break_before.is_none() {
-            style.break_before = container.break_before;
+        let style = block.style_mut();
+        if i == 0 {
+            style.break_before = style.break_before.or(container.break_before);
+            style.margin_top = style.margin_top.or(container.margin_top);
         }
-        if i == last && style.break_after.is_none() {
-            style.break_after = container.break_after;
+        if i == last {
+            style.break_after = style.break_after.or(container.break_after);
+            style.margin_bottom = style.margin_bottom.or(container.margin_bottom);
         }
         if inside_avoid {
-            if style.break_inside.is_none() {
-                style.break_inside = Some(PageBreak::Avoid);
-            }
-            if i != last && style.break_after.is_none() {
-                style.break_after = Some(PageBreak::Avoid);
+            style.break_inside = style.break_inside.or(Some(PageBreak::Avoid));
+            if i != last {
+                style.break_after = style.break_after.or(Some(PageBreak::Avoid));
             }
         }
     }
@@ -415,7 +448,8 @@ fn apply_container_breaks(blocks: &mut [Block], container: &BlockStyle) {
 /// else. Reusing it is the point: a heading in a cell is styled by exactly the code that styles a
 /// heading in a chapter, rather than by a second, thinner implementation that drifts from it.
 ///
-/// `inherited` is the cell's own declared style, already overlaid on the row's.
+/// `own` is the cell's own declared style; like any container it passes down the inherited half and
+/// transfers the rest onto the run it produced.
 ///
 /// One thing does not carry in: inkread's first-line prose indent. That indent is inkread's
 /// typography, not the book's (CSS defaults `text-indent` to zero), and a table cell is a layout
@@ -425,17 +459,18 @@ fn apply_container_breaks(blocks: &mut [Block], container: &BlockStyle) {
 fn walk_cell(
     node: NodeRef<Node>,
     sheet: &simplecss::StyleSheet<'_>,
-    inherited: BlockStyle,
+    own: BlockStyle,
 ) -> Vec<Block> {
-    let inherited = BlockStyle {
+    let descends = BlockStyle {
         indent: Some(false),
         ..BlockStyle::default()
     }
-    .overlaid_with(&inherited);
+    .overlaid_with(&own.inherited_only());
     let mut out = Vec::new();
     let mut pending = Vec::new();
-    walk_blocks(node, &mut out, &mut pending, sheet, inherited);
-    flush_paragraph(&mut out, &mut pending, inherited);
+    walk_blocks(node, &mut out, &mut pending, sheet, descends);
+    flush_paragraph(&mut out, &mut pending, descends);
+    apply_container_style(&mut out, &own);
     out
 }
 
@@ -703,7 +738,7 @@ mod tests {
             panic!()
         };
         assert!(content.iter().any(|i| matches!(i, Inline::Break)));
-        assert!(matches!(b[1], Block::Rule));
+        assert!(matches!(b[1], Block::Rule { .. }));
     }
 
     #[test]
@@ -725,7 +760,7 @@ mod tests {
             panic!()
         };
         assert_eq!(run(content), "Tom & Jerry");
-        assert!(matches!(&b[1], Block::Image { src, alt } if src == "a.png" && alt == "pic"));
+        assert!(matches!(&b[1], Block::Image { src, alt, .. } if src == "a.png" && alt == "pic"));
     }
 
     #[test]
@@ -915,8 +950,8 @@ mod table_tests {
                 Block::Heading { content, .. }
                 | Block::Paragraph { content, .. }
                 | Block::ListItem { content, .. } => text_of(content),
-                Block::Row { cells } => cells.iter().map(|c| blocks_text(c)).collect(),
-                Block::Image { .. } | Block::Rule => String::new(),
+                Block::Row { cells, .. } => cells.iter().map(|c| blocks_text(c)).collect(),
+                Block::Image { .. } | Block::Rule { .. } => String::new(),
             })
             .collect::<Vec<_>>()
             .join(" ")
@@ -926,7 +961,7 @@ mod table_tests {
         parse_blocks(html)
             .into_iter()
             .filter_map(|b| match b {
-                Block::Row { cells } => Some(cells.iter().map(|c| blocks_text(c)).collect()),
+                Block::Row { cells, .. } => Some(cells.iter().map(|c| blocks_text(c)).collect()),
                 _ => None,
             })
             .collect()
@@ -1006,7 +1041,7 @@ mod table_tests {
     #[test]
     fn a_heading_in_a_cell_stays_a_heading() {
         let b = parse_blocks("<table><tr><td><h3>Canto I</h3><p>line</p></td></tr></table>");
-        let Some(Block::Row { cells }) = b.into_iter().next() else {
+        let Some(Block::Row { cells, .. }) = b.into_iter().next() else {
             panic!("expected a row");
         };
         assert!(
@@ -1025,7 +1060,7 @@ mod table_tests {
     #[test]
     fn a_cell_keeps_its_blocks_apart() {
         let b = parse_blocks("<table><tr><td><p>one</p><p>two</p></td></tr></table>");
-        let Some(Block::Row { cells }) = b.into_iter().next() else {
+        let Some(Block::Row { cells, .. }) = b.into_iter().next() else {
             panic!("expected a row");
         };
         assert_eq!(
@@ -1042,7 +1077,7 @@ mod table_tests {
     #[test]
     fn a_cell_lowers_lists_and_rules_like_any_container() {
         let b = parse_blocks("<table><tr><td><ul><li>a</li><li>b</li></ul><hr/></td></tr></table>");
-        let Some(Block::Row { cells }) = b.into_iter().next() else {
+        let Some(Block::Row { cells, .. }) = b.into_iter().next() else {
             panic!("expected a row");
         };
         assert!(
@@ -1051,7 +1086,7 @@ mod table_tests {
                 [
                     Block::ListItem { index: 1, .. },
                     Block::ListItem { index: 2, .. },
-                    Block::Rule
+                    Block::Rule { .. }
                 ]
             ),
             "{:?}",
@@ -1067,7 +1102,7 @@ mod table_tests {
             &body(r#"<table><tr><td class="verse"><p>x</p></td><td><p>y</p></td></tr></table>"#),
             &sheet,
         );
-        let Some(Block::Row { cells }) = b.into_iter().next() else {
+        let Some(Block::Row { cells, .. }) = b.into_iter().next() else {
             panic!("expected a row");
         };
         let align = |c: &Vec<Block>| match &c[0] {
@@ -1083,7 +1118,7 @@ mod table_tests {
     #[test]
     fn a_cell_drops_the_prose_indent_unless_the_book_asks_for_it() {
         let plain = parse_blocks("<table><tr><td><p>x</p></td></tr></table>");
-        let Some(Block::Row { cells }) = plain.into_iter().next() else {
+        let Some(Block::Row { cells, .. }) = plain.into_iter().next() else {
             panic!("expected a row");
         };
         let Block::Paragraph { style, .. } = &cells[0][0] else {
@@ -1093,7 +1128,7 @@ mod table_tests {
 
         let sheet = Stylesheet::parse("td p { text-indent: 1.5em }");
         let asked = parse_blocks_with(&body("<table><tr><td><p>x</p></td></tr></table>"), &sheet);
-        let Some(Block::Row { cells }) = asked.into_iter().next() else {
+        let Some(Block::Row { cells, .. }) = asked.into_iter().next() else {
             panic!("expected a row");
         };
         let Block::Paragraph { style, .. } = &cells[0][0] else {
@@ -1114,7 +1149,7 @@ mod table_tests {
         );
         assert_eq!(b.len(), 3);
         let br = |i: usize| {
-            let s = b[i].style().expect("a paragraph carries a style");
+            let s = b[i].style();
             (s.break_before, s.break_after)
         };
         assert_eq!(br(0).0, Some(PageBreak::Always), "before the first only");
@@ -1133,7 +1168,7 @@ mod table_tests {
             &body(r#"<div class="stanza"><p>a</p><p>b</p><p>c</p></div>"#),
             &sheet,
         );
-        let after: Vec<_> = b.iter().map(|x| x.style().unwrap().break_after).collect();
+        let after: Vec<_> = b.iter().map(|x| x.style().break_after).collect();
         assert_eq!(
             after,
             vec![Some(PageBreak::Avoid), Some(PageBreak::Avoid), None],
@@ -1141,7 +1176,7 @@ mod table_tests {
         );
         assert!(
             b.iter()
-                .all(|x| x.style().unwrap().break_inside == Some(PageBreak::Avoid)),
+                .all(|x| x.style().break_inside == Some(PageBreak::Avoid)),
             "each block also asks not to be halved on its own",
         );
     }
@@ -1157,7 +1192,7 @@ mod table_tests {
             &sheet,
         );
         assert_eq!(
-            b[0].style().unwrap().break_before,
+            b[0].style().break_before,
             Some(PageBreak::Auto),
             "the paragraph's own declaration stands",
         );
