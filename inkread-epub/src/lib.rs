@@ -635,3 +635,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "seam_tests.rs"]
+mod seam_tests;

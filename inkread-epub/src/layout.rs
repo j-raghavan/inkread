@@ -404,6 +404,69 @@ fn keep_run_end(blocks: &[Block], i: usize) -> usize {
     end
 }
 
+/// Cut a row's cells into the *stages* a forced break divides it into (#251).
+///
+/// A cell that forced a break came back already cut, but a cell that did not came back whole — and
+/// letting it run on while its neighbour started a new page is what loses the correspondence a
+/// parallel text is entirely about: the translation would sit beside the wrong original.
+///
+/// So a break in *any* cell breaks the row, and the cells that did not break are cut at the same
+/// vertical position. Where several cells break, the stage boundary is the tallest of their
+/// segments, so a canto whose translation runs longer still keeps its opposite number level with
+/// it rather than opening a near-empty page between them.
+///
+/// Only a segment a cell's *own* break ends pins a boundary; a cell whose content merely continues
+/// is carried across, never pinning one. Returns one `Vec` of per-cell flows per stage, each
+/// rebased to that stage's origin.
+fn row_stages(cells: Vec<Vec<Vec<LayoutLine>>>) -> Vec<Vec<Vec<LayoutLine>>> {
+    let count = cells.iter().map(Vec::len).max().unwrap_or(0);
+    if count <= 1 {
+        return if count == 0 {
+            Vec::new()
+        } else {
+            vec![cells.into_iter().flatten().collect()]
+        };
+    }
+    // Stage `s` is as tall as the tallest segment ended by a break — a cell's last segment ends at
+    // the row's end, not at a break, so it pins nothing.
+    let mut heights = vec![0.0f32; count];
+    for cell in &cells {
+        for (s, segment) in cell.iter().enumerate().take(cell.len().saturating_sub(1)) {
+            heights[s] = heights[s].max(flow_height(segment));
+        }
+    }
+
+    let mut stages: Vec<Vec<Vec<LayoutLine>>> = vec![Vec::new(); count];
+    for cell in cells {
+        let last = cell.len() - 1;
+        for (s, segment) in cell.into_iter().enumerate() {
+            if s < last {
+                stages[s].push(segment);
+                continue;
+            }
+            // The cell's trailing flow: carried across the remaining stage boundaries, so a cell
+            // with no break of its own still breaks where the row does.
+            let mut stage = s;
+            let mut base = 0.0;
+            let mut carried: Vec<Vec<LayoutLine>> = vec![Vec::new(); count - s];
+            for mut line in segment {
+                while stage + 1 < count && line.top - base >= heights[stage] {
+                    base += heights[stage];
+                    stage += 1;
+                }
+                line.top -= base;
+                carried[stage - s].push(line);
+            }
+            for (offset, lines) in carried.into_iter().enumerate() {
+                if !lines.is_empty() {
+                    stages[s + offset].push(lines);
+                }
+            }
+        }
+    }
+    stages
+}
+
 /// The height a flow occupies: the bottom of its lowest line. Gaps still pending at the flow's
 /// trailing edge are deliberately excluded — they belong to whatever comes next.
 fn flow_height(lines: &[LayoutLine]) -> f32 {
@@ -753,6 +816,10 @@ impl<'o> Pager<'o> {
         self.cursor_y = 0.0;
         // A margin that would have opened the next page collapses against the page edge.
         self.pending_gap = 0.0;
+        // Only an unpaged flow's *first* edge is not a page edge — it is wherever the caller ends
+        // up placing the flow, so a margin there is the caller's to collapse. Every edge after a
+        // break is a real one, and a margin at it collapses like any other.
+        self.collapse_at_top = true;
     }
 
     /// How many *whole* pages have been broken off so far (the in-progress one is not counted).
@@ -1116,19 +1183,19 @@ impl<'o> Pager<'o> {
             trailing_gap = trailing_gap.max(trailing);
             cells_segments.push(segments);
         }
-        // A cell that forced a break cut itself into segments; segment n of every cell is laid out
-        // together, with a real page break between one segment and the next. A juxtalinear text
-        // declares the break on both languages' headings, so the two stay paired across it.
-        let count = cells_segments.iter().map(Vec::len).max().unwrap_or(0);
-        for i in 0..count {
-            if i > 0 {
+        // A forced break inside any cell breaks the whole row there, so the cells stay level across
+        // it — that correspondence is the only reason a row is laid out side by side at all.
+        let stages = row_stages(cells_segments);
+        let mut placed = false;
+        for lines in stages {
+            let lines = merge_cell_flows(lines);
+            if lines.is_empty() {
+                continue;
+            }
+            if placed {
                 self.force_break();
             }
-            let flows: Vec<Vec<LayoutLine>> = cells_segments
-                .iter_mut()
-                .filter_map(|c| c.get_mut(i).map(std::mem::take))
-                .collect();
-            let lines = merge_cell_flows(flows);
+            placed = true;
             let tallest = flow_height(&lines);
             self.emit_flow(lines, tallest);
         }

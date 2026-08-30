@@ -2156,6 +2156,85 @@ mod css_to_page {
         }
     }
 
+    /// The correspondence a parallel text is about: when only ONE cell forces a break, the other
+    /// cell must be cut at the same vertical position, not run on past it.
+    #[test]
+    fn a_break_in_one_cell_cuts_the_whole_row() {
+        let p = pages(
+            ".pb { page-break-before: always }",
+            "<table><tr>\
+               <td><p>L1</p><h3 class=\"pb\">L2</h3><p>L3</p></td>\
+               <td><p>R1</p><p>R2</p><p>R3</p></td>\
+             </tr></table>",
+        );
+        let text = |i: usize| -> Vec<String> {
+            p[i].lines
+                .iter()
+                .flat_map(|l| l.runs.iter().map(|r| r.text.clone()))
+                .collect()
+        };
+        assert_eq!(p.len(), 2, "the break splits the row: {p:?}");
+        assert_eq!(text(0), ["L1", "R1"], "R2/R3 must not run past the break");
+        // The two cells are deliberately mismatched here — a heading opposite a paragraph — so
+        // they wrap to different line heights and do not pair up line for line. Pairing is what
+        // `matching_cells_stay_aligned_line_for_line` covers; what matters here is that everything
+        // below the break moved, and moved together.
+        let mut after = text(1);
+        after.sort();
+        assert_eq!(after, ["L2", "L3", "R2", "R3"]);
+    }
+
+    /// Where both cells break but their segments differ in height, the row's stage boundary is the
+    /// taller of the two — so the shorter language waits rather than opening a near-empty page.
+    #[test]
+    fn uneven_segments_break_once_at_the_taller_cell() {
+        let p = pages(
+            ".pb { page-break-before: always }",
+            "<table><tr>\
+               <td><p>L1</p><h3 class=\"pb\">L2</h3></td>\
+               <td><p>R1</p><p>R1b</p><p>R1c</p><h3 class=\"pb\">R2</h3></td>\
+             </tr></table>",
+        );
+        assert_eq!(p.len(), 2, "one break, not one per cell: {p:?}");
+        let last: Vec<String> = p[1]
+            .lines
+            .iter()
+            .flat_map(|l| l.runs.iter().map(|r| r.text.clone()))
+            .collect();
+        assert!(
+            last.contains(&"L2".to_string()) && last.contains(&"R2".to_string()),
+            "both second cantos land on the same page: {last:?}",
+        );
+    }
+
+    /// Several breaks in one row produce several stages, and nothing is lost or duplicated.
+    #[test]
+    fn a_row_with_several_breaks_places_every_line_once() {
+        let p = pages(
+            ".pb { page-break-before: always }",
+            "<table><tr>\
+               <td><p>a1</p><h3 class=\"pb\">a2</h3><p>a3</p><h3 class=\"pb\">a4</h3><p>a5</p></td>\
+               <td><p>b1</p><p>b2</p><p>b3</p><p>b4</p><p>b5</p></td>\
+             </tr></table>",
+        );
+        let mut all: Vec<String> = p
+            .iter()
+            .flat_map(|pg| {
+                pg.lines
+                    .iter()
+                    .flat_map(|l| l.runs.iter().map(|r| r.text.clone()))
+            })
+            .collect();
+        all.sort();
+        assert_eq!(
+            all,
+            ["a1", "a2", "a3", "a4", "a5", "b1", "b2", "b3", "b4", "b5"],
+            "every line placed exactly once across {} pages",
+            p.len(),
+        );
+        assert_eq!(p.len(), 3, "two breaks make three stages");
+    }
+
     /// A forced break must not leave a blank page when the row's first block declares it.
     #[test]
     fn a_forced_break_on_a_cells_first_block_does_not_blank_a_page() {
