@@ -23,6 +23,9 @@ number is given in parentheses.
   serves — document, display, ink, lasso, text, services — with the shared throw/handle/array
   helpers in `mod.rs`. All 79 exported symbols and their bodies are byte-identical, so the ABI the
   Kotlin side links against is unchanged.
+- `reader-core/src/session.rs` (1,630 lines, one `impl` with 102 methods) is split into a
+  `session/` module by what each method is for — open, render, view, navigate, ink, select — with
+  the struct, its lifecycle and the plain accessors in `mod.rs`.
 - `device-eink` and `reader-core` no longer name a vendor.
   `DeviceCapabilities::supernote_baseline` / `supernote_full` are now `flashing_epd` /
   `controllable_epd`, and `ResourceBudget::default_supernote` is `default_tablet_epd` — the

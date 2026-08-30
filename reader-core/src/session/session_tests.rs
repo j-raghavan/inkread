@@ -1519,7 +1519,7 @@ fn prefetch_warms_the_next_page_without_changing_the_displayed_one() {
 // These count paginations rather than timing them: the cost is what the reports are about, and a
 // wall clock would mean something different on every machine.
 
-const SAMPLE_EPUB: &[u8] = include_bytes!("../tests/fixtures/sample.epub");
+const SAMPLE_EPUB: &[u8] = include_bytes!("../../tests/fixtures/sample.epub");
 
 fn reading_typography() -> Typography {
     Typography {
