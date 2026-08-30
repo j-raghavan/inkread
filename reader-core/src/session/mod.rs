@@ -325,3 +325,11 @@ mod view_tests;
 #[cfg(test)]
 #[path = "open_tests.rs"]
 mod open_tests;
+
+#[cfg(test)]
+#[path = "navigate_tests.rs"]
+mod navigate_tests;
+
+#[cfg(test)]
+#[path = "select_tests.rs"]
+mod select_tests;
