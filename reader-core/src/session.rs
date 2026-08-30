@@ -1,4 +1,4 @@
-//! `ReaderSession` — the M0 open→render→gesture→commands round-trip (RR21, Amendment 6).
+//! `ReaderSession` — the open→render→gesture→commands round-trip (RR21, Amendment 6).
 //!
 //! Owns the open [`Document`], the current page position, the panel [`Viewport`], and the
 //! [`EinkRefreshPolicy`]. A gesture advances/retreats the position then **delegates to the

@@ -1,8 +1,12 @@
-//! The `Document` trait — the M0 subset every format implements (RR5-FR2).
+//! The `Document` trait — what every format implements (RR5-FR2).
 //!
-//! M0 needs only metadata + page count + render-page (Amendment 4 / scope fence): no
-//! `text_runs`/`toc`/`search`/`hint_page`/`page_hash` (those are M1+). The PDF backend
-//! ([`fixed::PdfBackend`]) is the one implementation in M0.
+//! Three required methods, so a new backend is cheap to add: `page_count`, `metadata`, and
+//! `render_page`. Everything a reader expects beyond that — `toc`, `search_page`, `hint_page`,
+//! text runs for selection — is a **defaulted** method, so a format opts into what it can support
+//! and inherits a sane no-op for the rest (Amendment 4).
+//!
+//! Four backends implement it: [`fixed::PdfBackend`] and [`fixed::CbzBackend`] for
+//! fixed-layout, [`reflow::EpubBackend`] and [`plain::PlainBackend`] for reflowable text.
 
 pub mod fixed;
 pub mod format;

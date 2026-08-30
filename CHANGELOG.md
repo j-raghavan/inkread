@@ -32,6 +32,11 @@ number is given in parentheses.
 
 ### Fixed
 
+- Module headers that still described the M0 milestone now describe the shipped code: the `Document`
+  trait has four backends and defaulted `toc`/`search`/`hint_page` rather than "the PDF backend is
+  the one implementation", the render pipeline has a cache and prefetch, the refresh policy has
+  scroll suppression and a night cadence, and `ReaderActivity` is no longer marked
+  `DEVICE-UNVERIFIED`.
 - Production `unwrap`/`expect` removed from the PDF backend, `PinPosition` serialization, text
   selection, and the PDF text-block splitter — paths the JNI bridge reaches, where an unwind would
   have violated RR21-FR3. A missing symbol-fallback face or hyphenation pattern set now degrades

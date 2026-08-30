@@ -42,7 +42,7 @@ import java.nio.ByteOrder
 import java.util.concurrent.Executors
 
 /**
- * The M0/M1a reader Activity (RR1-FR2, RR21) — **DEVICE-UNVERIFIED**.
+ * The reader Activity (RR1-FR2, RR21) — device-verified on the Supernote family.
  *
  * Owns the [SurfaceView], drives the JNI round-trip (init → open → render → blit), and on a
  * tap forwards a [Gesture] to the core, then hands the returned [RefreshCommand] stream to

@@ -1,6 +1,9 @@
 //! Rendering pipeline: borrowed [`PixelBuffer`], [`Viewport`], grayscale + dithering (RR4).
 //!
-//! M0 is the single-copy full-page render path (Fork 4); dirty-rect/cache/prefetch are M1b.
+//! A single-copy full-page render (Fork 4) into a bounded [`cache`], with the next page prefetched
+//! behind the current one so a page turn is usually a cache hit. Dirty-rect rendering is not here
+//! and will not be: the panel path a sideloaded app can reach refreshes full-screen only, so a
+//! partial render would still cost a full flash — see `docs/EINK-LIMITS.md`.
 
 pub mod cache;
 pub mod contrast;

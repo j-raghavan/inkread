@@ -125,8 +125,9 @@ pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeInit<'local
 
 // =====================================================================================
 // nativeOpenDocument(path, capsBytes, w, h, dpi) : long  — returns the opaque handle.
-// For M0 the shell passes a filesystem path and the core reads the bytes, keeping the
-// Kotlin side minimal; the SAF/scoped-storage byte path is RR22 (M1a, out of M0 scope).
+// The shell passes a filesystem path and the core reads the bytes. That is the shipped design, not
+// a stopgap: a SAF pick is copied into app storage by the shell first (RR22), so the core sees one
+// kind of input, stays IO-simple, and never learns about content URIs.
 // =====================================================================================
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeOpenDocument<'local>(
