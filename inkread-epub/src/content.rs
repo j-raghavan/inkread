@@ -142,6 +142,43 @@ struct Style {
 /// are reachable only when [`find_body`] finds no `<body>` and the walk starts at the document root.
 const NON_CONTENT_TAGS: &[&str] = &["style", "script", "template", "head", "title"];
 
+/// Tags that start a new line wherever they are met inside an inline run.
+///
+/// A `<li>` collects its content as inlines, so `<li><p>one</p><p>two</p></li>` would otherwise
+/// render as the single word `onetwo` — the paragraph boundary vanishing along with the block
+/// (#251). Emitting a break where a block was keeps the structure the reader can see, without a
+/// second block model inside every inline context.
+const BLOCK_TAGS: &[&str] = &[
+    "p",
+    "div",
+    "h1",
+    "h2",
+    "h3",
+    "h4",
+    "h5",
+    "h6",
+    "li",
+    "ul",
+    "ol",
+    "dl",
+    "dt",
+    "dd",
+    "blockquote",
+    "section",
+    "article",
+    "aside",
+    "header",
+    "footer",
+    "figure",
+    "figcaption",
+    "pre",
+    "address",
+    "tr",
+    "td",
+    "th",
+    "table",
+];
+
 /// Tags treated as inline emphasis/markup when encountered at block level (folded into the current
 /// anonymous paragraph rather than breaking it).
 const INLINE_TAGS: &[&str] = &[
@@ -387,7 +424,10 @@ fn walk_table(
                     .collect();
                 // A row of nothing but spacing cells is layout scaffolding, not content.
                 if !cells.is_empty() && !cells.iter().all(Vec::is_empty) {
-                    out.push(Block::Row { cells, style });
+                    out.push(Block::Row {
+                        style: hoist_edge_breaks(&cells, style),
+                        cells,
+                    });
                 }
             }
             _ => {}
@@ -467,6 +507,29 @@ fn walk_cell(
     flush_paragraph(&mut out, &mut pending, descends);
     apply_container_style(&mut out, &own);
     out
+}
+
+/// Lift a forced break declared at a cell's outer edge onto the row itself (#251).
+///
+/// A `page-break-before: always` on the first block *inside* a cell has nowhere to go: the cell's
+/// own flow has not started, so the break falls at its top edge and collapses, exactly as it would
+/// at the top of a page. The break the book asked for is against the row, and only the row can
+/// take it. `h3 { page-break-before: always }` on a poem laid out as a table — a canto per page —
+/// is the case that needs this, and it is the one the reporter of #251 named.
+///
+/// Only the outer edges lift. A break *between* two blocks of a cell is the row's business too, but
+/// a positional one: the layout cuts the row there, keeping the cells level (see `row_stages`).
+fn hoist_edge_breaks(cells: &[Vec<Block>], mut style: BlockStyle) -> BlockStyle {
+    let asked = |b: Option<&Block>, pick: fn(&BlockStyle) -> Option<PageBreak>| {
+        b.map(Block::style).and_then(pick) == Some(PageBreak::Always)
+    };
+    if style.break_before.is_none() && cells.iter().any(|c| asked(c.first(), |s| s.break_before)) {
+        style.break_before = Some(PageBreak::Always);
+    }
+    if style.break_after.is_none() && cells.iter().any(|c| asked(c.last(), |s| s.break_after)) {
+        style.break_after = Some(PageBreak::Always);
+    }
+    style
 }
 
 /// Emit each `<li>` of a list as a flattened [`Block::ListItem`]; `inherited` is the list's own
@@ -567,9 +630,30 @@ fn collect_element(
             }
         }
         _ if NON_CONTENT_TAGS.contains(&name) => {}
+        // A block met inside an inline run: keep the line break it stands for, so two paragraphs
+        // in a list item do not fuse into one word.
+        _ if BLOCK_TAGS.contains(&name) => {
+            push_block_break(out);
+            collect_inlines_into(node, style, href, out);
+            push_block_break(out);
+        }
         // span/code/sub/sup/… and any unknown inline wrapper: descend, keep style.
         _ => collect_inlines_into(node, style, href, out),
     }
+}
+
+/// A line break standing for a block boundary — never leading, never doubled, so an empty wrapper
+/// or a run of nested blocks costs no blank lines.
+fn push_block_break(out: &mut Vec<Inline>) {
+    if out.is_empty() || matches!(out.last(), Some(Inline::Break)) {
+        return;
+    }
+    if let Some(Inline::Run(r)) = out.last() {
+        if r.text.trim().is_empty() && out.len() == 1 {
+            return;
+        }
+    }
+    out.push(Inline::Break);
 }
 
 /// Append a whitespace-collapsed text run, merging into the previous run when its style/link match.

@@ -339,7 +339,7 @@ mod tests {
     /// A minimal store-only (no compression) ZIP writer — enough for rbook to open the fixture
     /// without pulling the `zip` crate into the test. Emits local-file headers + the central
     /// directory + end-of-central-directory, with a real CRC-32 per entry.
-    fn write_zip(out: &mut Vec<u8>, files: &[(&str, Vec<u8>)]) {
+    pub(crate) fn write_zip(out: &mut Vec<u8>, files: &[(&str, Vec<u8>)]) {
         struct Central {
             name: String,
             crc: u32,

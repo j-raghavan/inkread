@@ -315,6 +315,13 @@ pub struct LayoutLine {
     /// renderer has to assume the page's column width, which is wrong for any line laid out to a
     /// narrower measure — a `<hr/>` inside a table cell would run across its neighbours (#251).
     pub column_w: f32,
+    /// The page may not break between this line and the one above it: they are inside a block the
+    /// book marked `page-break-inside: avoid` (#251).
+    ///
+    /// The property is a *block* one, but a table row is merged into shared line boxes before it is
+    /// paged, and nothing of the blocks survives that merge. Carrying the request on the line is
+    /// what lets a stanza inside a cell stay whole — the pager has nothing else left to ask.
+    pub keep_with_prev: bool,
 }
 
 /// An illustration placed in the content box: where it sits and how big it is drawn, not its
@@ -438,7 +445,9 @@ fn row_stages(cells: Vec<Vec<Vec<LayoutLine>>>) -> Vec<Vec<Vec<LayoutLine>>> {
 
     let mut stages: Vec<Vec<Vec<LayoutLine>>> = vec![Vec::new(); count];
     for cell in cells {
-        let last = cell.len() - 1;
+        let Some(last) = cell.len().checked_sub(1) else {
+            continue;
+        };
         for (s, segment) in cell.into_iter().enumerate() {
             if s < last {
                 stages[s].push(segment);
@@ -490,13 +499,7 @@ fn flow_height(lines: &[LayoutLine]) -> f32 {
 /// genuinely sit at different positions, and stay in separate line boxes. That is the honest
 /// outcome: there is no shared line to share. It does mean such a row is not a single paging unit
 /// throughout, so a page break can fall between two lines the cells did not agree on anyway.
-fn merge_cell_flows(flows: Vec<Vec<LayoutLine>>) -> Vec<LayoutLine> {
-    /// Positions closer than this are the same line box. Cells that agree on their block structure
-    /// produce identical positions and would coalesce on exact equality alone; the tolerance is for
-    /// cells that differ only in a rounded font size, where a sub-pixel disagreement should not
-    /// split a line the reader sees as one.
-    const SAME_LINE_EPSILON: f32 = 0.5;
-
+fn merge_cell_flows(flows: Vec<Vec<LayoutLine>>, same_line: f32) -> Vec<LayoutLine> {
     let mut lines: Vec<LayoutLine> = flows.into_iter().flatten().collect();
     // Stable, so cells stay in source order within a line box and `x` runs left to right.
     lines.sort_by(|a, b| a.top.total_cmp(&b.top));
@@ -509,9 +512,11 @@ fn merge_cell_flows(flows: Vec<Vec<LayoutLine>>) -> Vec<LayoutLine> {
                 if plain
                     && !prev.rule
                     && prev.image.is_none()
-                    && (line.top - prev.top).abs() < SAME_LINE_EPSILON =>
+                    && (line.top - prev.top).abs() < same_line =>
             {
                 prev.height = prev.height.max(line.height);
+                // Either half of a shared line box can forbid the break above it.
+                prev.keep_with_prev |= line.keep_with_prev;
                 prev.runs.extend(line.runs);
             }
             _ => out.push(line),
@@ -606,11 +611,19 @@ pub fn paginate_upto(
         i += laid.max(1);
     }
     let columns = opts.effective_columns();
-    let laid = if complete {
+    let mut laid = if complete {
         pager.finish()
     } else {
         pager.into_finished_pages()
     };
+    if !complete {
+        // A single keep-run or table row can emit several columns before the budget is looked at
+        // again, so the pager may have overshot — and in two-column mode an odd column count would
+        // make `combine_columns` build a half page the full pass never produces. Trim to whole
+        // pages within the budget, so a partial pagination stays a true prefix.
+        let whole = laid.len().min(column_budget) / usize::from(columns) * usize::from(columns);
+        laid.truncate(whole);
+    }
     (combine_columns(laid, opts, columns), complete)
 }
 
@@ -674,6 +687,12 @@ struct Pager<'o> {
     /// Whether a gap at the top of this flow collapses away. True for a page (a page's own top
     /// margin must not be doubled); false for an unpaged flow, whose top edge is not a page edge.
     collapse_at_top: bool,
+    /// Set while laying out a block that asked not to be split, so the lines it emits carry the
+    /// request forward as [`LayoutLine::keep_with_prev`].
+    keep_lines: bool,
+    /// Whether such a block has emitted a line yet — the first line of a block is where a break is
+    /// allowed to fall, so only the ones after it are bound to what precedes them.
+    kept_one: bool,
 }
 
 impl<'o> Pager<'o> {
@@ -688,6 +707,8 @@ impl<'o> Pager<'o> {
             page_h: opts.content_h(),
             pending_gap: 0.0,
             collapse_at_top: true,
+            keep_lines: false,
+            kept_one: false,
         }
     }
 
@@ -708,6 +729,22 @@ impl<'o> Pager<'o> {
         }
     }
 
+    /// A pager for one table cell: unpaged and `measure` wide, but collapsing at its top edge.
+    ///
+    /// A cell differs from a keep-run in who owns that edge. A keep-run is placed *somewhere* by
+    /// its caller, which lifts the leading margin back out so it can collapse against whatever it
+    /// lands next to. A cell's top edge is the row's, and the row's is a page-edge candidate — so
+    /// the margin collapses here, as it would at the top of a page. Baking it into the cell's line
+    /// positions instead would leave two cells with different first-block margins sitting at
+    /// different heights, and a row whose halves no longer share a line box is not a parallel text
+    /// any more (#251).
+    fn cell(opts: &'o LayoutOpts, hyph: &'o dyn Hyphenator, measure: f32) -> Self {
+        Self {
+            collapse_at_top: true,
+            ..Self::unpaged(opts, hyph, measure)
+        }
+    }
+
     /// Place a line of `height`, breaking to a new page first if it would overflow a non-empty page.
     /// Run `x` is already content-relative; the line's vertical position is carried by `top`.
     fn emit(&mut self, runs: Vec<PlacedRun>, height: f32, rule: bool) {
@@ -724,7 +761,9 @@ impl<'o> Pager<'o> {
             image: None,
             column_x: 0.0,
             column_w: self.measure,
+            keep_with_prev: self.keep_lines && self.kept_one,
         });
+        self.kept_one = true;
         self.cursor_y += height;
     }
 
@@ -773,8 +812,23 @@ impl<'o> Pager<'o> {
         let mut base = self.cursor_y;
         for mut line in lines {
             if base + line.top + line.height > self.page_h && !self.current.is_empty() {
+                // A line bound to the one above takes that whole group with it, so a stanza the
+                // book asked to keep whole moves rather than being halved (#251). If the group
+                // would empty the page it is taller than any page and the request cannot be met —
+                // the break falls where it must, because losing text is worse.
+                let held = if line.keep_with_prev {
+                    self.take_kept_group()
+                } else {
+                    Vec::new()
+                };
+                let old_base = base;
                 self.break_page();
-                base = -line.top;
+                base = held.first().map_or(-line.top, |first| old_base - first.top);
+                for mut h in held {
+                    h.top = base + (h.top - old_base);
+                    self.cursor_y = h.top + h.height;
+                    self.current.push(h);
+                }
             }
             line.top += base;
             self.cursor_y = self.cursor_y.max(line.top + line.height);
@@ -807,6 +861,21 @@ impl<'o> Pager<'o> {
         if !self.current.is_empty() {
             self.break_page();
         }
+    }
+
+    /// Take back the trailing run of lines the page may not break inside, so the break can fall at
+    /// its head instead. Gives back nothing when the group would empty the page: a group taller
+    /// than a page cannot be kept whole, and moving it would only loop.
+    fn take_kept_group(&mut self) -> Vec<LayoutLine> {
+        let head = self
+            .current
+            .iter()
+            .rposition(|l| !l.keep_with_prev)
+            .unwrap_or(0);
+        if head == 0 {
+            return Vec::new();
+        }
+        self.current.split_off(head)
     }
 
     fn break_page(&mut self) {
@@ -864,6 +933,25 @@ impl<'o> Pager<'o> {
             Block::Image { .. } => (em * 0.4, em * 0.4),
             Block::Row { .. } => (0.0, self.opts.para_gap * 0.5),
             Block::Rule { .. } => (self.opts.para_gap, self.opts.para_gap),
+        }
+    }
+
+    /// Lay out a table cell's blocks, in keep-runs like a chapter's, so a cell honours the same
+    /// break properties as anything else. Every block anchors to the row: a cell is one source
+    /// block, and a source anchor taken inside one resolves to it (ADR-INKREAD-0012).
+    fn add_cell_blocks(
+        &mut self,
+        cell: &[Block],
+        row: usize,
+        cursor: &mut usize,
+        m: &dyn Metrics,
+        images: &dyn ImageSizer,
+    ) {
+        let mut k = 0;
+        while k < cell.len() {
+            let end = keep_run_end(cell, k);
+            let laid = self.add_keep_run(&cell[k..end], |_| row, cursor, m, images);
+            k += laid.max(1);
         }
     }
 
@@ -953,8 +1041,14 @@ impl<'o> Pager<'o> {
             Block::Heading { level, .. } => self.opts.font_px * heading_scale(*level),
             _ => self.opts.font_px,
         };
-        let (top, bottom) = self.default_margins(block);
-        self.gap(Self::resolve_margin(style.margin_top, top, size));
+        let (default_top, default_bottom) = self.default_margins(block);
+        self.gap(Self::resolve_margin(style.margin_top, default_top, size));
+        // `page-break-inside: avoid`, carried down to the lines this block is about to emit.
+        // `add_keep_run` covers the case where the block is paged on its own; this covers the case
+        // where it is not — merged into a table row, where only the lines survive.
+        let outer = (self.keep_lines, self.kept_one);
+        self.keep_lines = style.break_inside == Some(PageBreak::Avoid);
+        self.kept_one = false;
         match block {
             Block::Heading { content, .. } => {
                 // Headings are bold by default, but that is inkread's typography, not a rule: a
@@ -1036,45 +1130,50 @@ impl<'o> Pager<'o> {
                     // everything after it stay stable whether or not it resolves (ADR-INKREAD-0012).
                     *cursor += 1;
                     self.add_image(placed);
-                    self.gap(Self::resolve_margin(style.margin_bottom, bottom, size));
-                    return;
-                }
-                // Unresolvable (a dangling src, an unreadable codec): fall back to naming what is
-                // missing rather than dropping it silently.
-                let label = if alt.is_empty() {
-                    "[image]".to_string()
                 } else {
-                    format!("[image: {alt}]")
-                };
-                let run = vec![Inline::Run(crate::content::TextRun {
-                    text: label,
-                    bold: false,
-                    italic: true,
-                    href: None,
-                })];
-                // The label is synthetic, like a list item's marker: it must not consume source-
-                // character budget, or offsets after an image would depend on whether it resolved.
-                let at = *cursor;
-                self.add_paragraph(
-                    &run,
-                    self.opts.font_px,
-                    0.0,
-                    0.0,
-                    false,
-                    false,
-                    self.opts.align,
-                    block_index,
-                    cursor,
-                    m,
-                );
-                *cursor = at + 1;
+                    // Unresolvable (a dangling src, an unreadable codec): fall back to naming what
+                    // is missing rather than dropping it silently.
+                    let label = if alt.is_empty() {
+                        "[image]".to_string()
+                    } else {
+                        format!("[image: {alt}]")
+                    };
+                    let run = vec![Inline::Run(crate::content::TextRun {
+                        text: label,
+                        bold: false,
+                        italic: true,
+                        href: None,
+                    })];
+                    // The label is synthetic, like a list item's marker: it must not consume
+                    // source-character budget, or offsets after an image would depend on whether
+                    // it resolved.
+                    let at = *cursor;
+                    self.add_paragraph(
+                        &run,
+                        self.opts.font_px,
+                        0.0,
+                        0.0,
+                        false,
+                        false,
+                        self.opts.align,
+                        block_index,
+                        cursor,
+                        m,
+                    );
+                    *cursor = at + 1;
+                }
             }
             Block::Row { cells, .. } => {
                 self.add_row(cells, block_index, cursor, m, images);
             }
             Block::Rule { .. } => self.emit(Vec::new(), self.opts.para_gap.max(2.0), true),
         }
-        self.gap(Self::resolve_margin(style.margin_bottom, bottom, size));
+        (self.keep_lines, self.kept_one) = outer;
+        self.gap(Self::resolve_margin(
+            style.margin_bottom,
+            default_bottom,
+            size,
+        ));
     }
 
     /// Lay out a paragraph/heading: greedy-break its inlines to the content width and emit lines.
@@ -1147,9 +1246,7 @@ impl<'o> Pager<'o> {
         let cell_w = ((self.measure - gutter * (n - 1.0)) / n).max(1.0);
         if cell_w < MIN_CELL_EM * self.opts.font_px {
             for cell in cells {
-                for b in cell {
-                    self.add_block(b, block, cursor, m, images);
-                }
+                self.add_cell_blocks(cell, block, cursor, m, images);
             }
             return;
         }
@@ -1159,15 +1256,8 @@ impl<'o> Pager<'o> {
         let mut cells_segments: Vec<Vec<Vec<LayoutLine>>> = Vec::with_capacity(cells.len());
         let mut trailing_gap = 0.0f32;
         for (index, cell) in cells.iter().enumerate() {
-            let mut sub = Pager::unpaged(self.opts, self.hyph, cell_w);
-            // Walked in keep-runs like a chapter's blocks, so a cell honours the same break
-            // properties. Every block anchors to the row: a cell is one source block.
-            let mut k = 0;
-            while k < cell.len() {
-                let end = keep_run_end(cell, k);
-                let laid = sub.add_keep_run(&cell[k..end], |_| block, cursor, m, images);
-                k += laid.max(1);
-            }
+            let mut sub = Pager::cell(self.opts, self.hyph, cell_w);
+            sub.add_cell_blocks(cell, block, cursor, m, images);
             let (mut segments, trailing) = sub.into_segments();
             let dx = index as f32 * (cell_w + gutter);
             for line in segments.iter_mut().flatten() {
@@ -1188,7 +1278,9 @@ impl<'o> Pager<'o> {
         let stages = row_stages(cells_segments);
         let mut placed = false;
         for lines in stages {
-            let lines = merge_cell_flows(lines);
+            // Scaled to the text, not a fixed half-pixel: two cells can differ by a default block
+            // margin (a list item's, say) and still be the one line the reader sees.
+            let lines = merge_cell_flows(lines, self.opts.font_px * 0.25);
             if lines.is_empty() {
                 continue;
             }
@@ -1287,7 +1379,9 @@ impl<'o> Pager<'o> {
             image: Some(image),
             column_x: 0.0,
             column_w: self.measure,
+            keep_with_prev: self.keep_lines && self.kept_one,
         });
+        self.kept_one = true;
         self.cursor_y += height;
     }
 }

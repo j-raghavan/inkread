@@ -13,8 +13,10 @@
 //! to mean anything and there is no box here to measure (#251).
 //!
 //! Selector matching is [`simplecss`]'s, not ours: it handles descendant/child/sibling combinators,
-//! ids, attribute and pseudo-class selectors, and specificity ordering. What stays inkread's is the
-//! *policy* — which properties are honoured, which of them inherit, and what their values mean.
+//! ids, attribute selectors and specificity ordering. Pseudo-classes it delegates back to us, and
+//! we answer only `:first-child`, `:last-child`, `:only-child` and `:lang()`; anything else matches
+//! nothing. What stays inkread's is the *policy* — which properties are honoured, which of them
+//! inherit, and what their values mean.
 
 use ego_tree::NodeRef;
 use scraper::node::Node;
@@ -30,8 +32,13 @@ use crate::layout::Align;
 /// against the height or the font size would be a different length than the book asked for.
 #[derive(Debug, Clone, Copy)]
 pub enum Length {
-    /// A multiple of the **block's own** font size, as CSS resolves `em` (`rem` too — the root size
-    /// is the body size here), so a margin on a heading scales with the heading.
+    /// A multiple of the **block's own** font size, as CSS resolves `em`, so a margin on a heading
+    /// scales with the heading.
+    ///
+    /// `rem` should resolve against the root size and is resolved here like `em`. In a reflowed
+    /// book almost nothing sets a font size away from the body's, so the two coincide for all but
+    /// headings — where being wrong by the heading's own scale is the smaller error against
+    /// carrying a second size through layout.
     Em(f32),
     /// An absolute CSS pixel length.
     Px(f32),
@@ -182,7 +189,7 @@ impl BlockStyle {
         self.margin_top = higher.margin_top;
         self.margin_bottom = higher.margin_bottom;
         // Nor do the break properties. A container's are transferred onto the blocks it wraps by
-        // `content::apply_container_breaks`, which is a different thing from inheriting them: a
+        // `content::apply_container_style`, which is a different thing from inheriting them: a
         // `page-break-before` on a `<div>` means one break, not one before every block inside.
         self.break_before = higher.break_before;
         self.break_after = higher.break_after;
@@ -408,7 +415,10 @@ fn parse_length(value: &str) -> Option<Length> {
     // them to overlap, and honouring them would only eat the gap around them.
     let n = n.max(0.0);
     match unit {
-        "em" | "rem" | "ex" | "ch" => Some(Length::Em(n)),
+        "em" | "rem" => Some(Length::Em(n)),
+        // CSS puts `ex` at the x-height and `ch` at the width of a "0"; both are about half an em
+        // in a text face, which is nearer than treating them as a whole one.
+        "ex" | "ch" => Some(Length::Em(n * 0.5)),
         "px" => Some(Length::Px(n)),
         // A CSS absolute unit: convert at the reference 96 dpi rather than dropping the intent.
         "pt" => Some(Length::Px(n * 96.0 / 72.0)),
