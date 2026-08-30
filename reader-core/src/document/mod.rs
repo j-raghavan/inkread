@@ -691,6 +691,10 @@ pub trait Document {
 }
 
 #[cfg(test)]
+#[path = "default_impl_tests.rs"]
+mod default_impl_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
