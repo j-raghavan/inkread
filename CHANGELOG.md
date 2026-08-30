@@ -14,6 +14,11 @@ number is given in parentheses.
 
 ### Changed
 
+- Cleartext HTTP is no longer allowed to arbitrary hosts. `HttpFetch` permits it only when the host
+  is on the local network — a private/loopback/link-local IP literal, `localhost`, a reserved local
+  suffix, or a single-label name — which is what a calibre or Calibre-Web server on the LAN needs,
+  and refuses it everywhere else. A network security config additionally pins GitHub (the
+  self-updater) and Wiktionary to HTTPS at the platform level.
 - `device-eink` and `reader-core` no longer name a vendor.
   `DeviceCapabilities::supernote_baseline` / `supernote_full` are now `flashing_epd` /
   `controllable_epd`, and `ResourceBudget::default_supernote` is `default_tablet_epd` — the
