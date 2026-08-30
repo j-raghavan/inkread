@@ -164,6 +164,12 @@ impl ReaderSession {
     /// The render-cache key for the current page + view-settings (RR4-FR6). The pixel-pipeline axes
     /// (zoom/rotation/invert/dither/gamma) are at their non-magnified defaults — the cache is only
     /// consulted on the fit path — so only the page and the view-settings vary.
+    /// The cache key, for tests that assert a setting participates in it.
+    #[cfg(test)]
+    pub(super) fn render_cache_key_for_test(&self) -> crate::render::PageHash {
+        self.render_cache_key()
+    }
+
     fn render_cache_key(&self) -> crate::render::PageHash {
         crate::render::PageHash::new(
             self.page as u32,

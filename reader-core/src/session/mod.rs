@@ -333,3 +333,7 @@ mod navigate_tests;
 #[cfg(test)]
 #[path = "select_tests.rs"]
 mod select_tests;
+
+#[cfg(test)]
+#[path = "render_tests.rs"]
+mod render_tests;
