@@ -473,3 +473,338 @@ fn an_empty_stylesheet_is_empty_and_adding_blank_sources_keeps_it_so() {
     sheet.add("p { text-align: center }");
     assert!(!sheet.is_empty());
 }
+
+// ── margin (#251) ─────────────────────────────────────────────────────────────────────────────
+
+/// The only part of the box model honoured, because vertical space is how a book marks a stanza.
+#[test]
+fn the_margin_longhands_are_honoured() {
+    let st = styled(
+        "p { margin-top: 1.5em; margin-bottom: 12px }",
+        "<p data-t>x</p>",
+    );
+    assert_eq!(st.margin_top, Some(Length::Em(1.5)));
+    assert_eq!(st.margin_bottom, Some(Length::Px(12.0)));
+}
+
+/// CSS box order: 1 = all sides, 2 = vertical/horizontal, 3 = top/horizontal/bottom,
+/// 4 = top/right/bottom/left.
+#[test]
+fn the_margin_shorthand_follows_css_box_order() {
+    let one = styled("p { margin: 2em }", "<p data-t>x</p>");
+    assert_eq!(one.margin_top, Some(Length::Em(2.0)));
+    assert_eq!(one.margin_bottom, Some(Length::Em(2.0)));
+
+    let two = styled("p { margin: 1em 3em }", "<p data-t>x</p>");
+    assert_eq!(two.margin_top, Some(Length::Em(1.0)));
+    assert_eq!(two.margin_bottom, Some(Length::Em(1.0)));
+
+    let three = styled("p { margin: 1em 3em 2em }", "<p data-t>x</p>");
+    assert_eq!(three.margin_top, Some(Length::Em(1.0)));
+    assert_eq!(three.margin_bottom, Some(Length::Em(2.0)));
+
+    let four = styled("p { margin: 1em 3em 2em 4em }", "<p data-t>x</p>");
+    assert_eq!(four.margin_top, Some(Length::Em(1.0)));
+    assert_eq!(four.margin_bottom, Some(Length::Em(2.0)));
+}
+
+/// Zero is valid in any unit and is a real declaration — it says "no space here", which is not the
+/// same as saying nothing and letting inkread's own gap stand.
+#[test]
+fn a_zero_margin_is_a_declaration_not_a_silence() {
+    let st = styled("h2 { margin-top: 0 }", "<h2 data-t>x</h2>");
+    assert_eq!(st.margin_top, Some(Length::Px(0.0)));
+}
+
+/// A length inkread cannot resolve without a box model declares nothing, so its own typography
+/// stands rather than a guessed value replacing it.
+#[test]
+fn unresolvable_lengths_declare_nothing() {
+    for value in ["auto", "5%", "inherit", "3", "wibble"] {
+        let st = styled(&format!("p {{ margin-top: {value} }}"), "<p data-t>x</p>");
+        assert_eq!(st.margin_top, None, "{value} should declare nothing");
+    }
+}
+
+/// Without a box model there is nothing for a negative margin to overlap; clamping keeps it from
+/// eating the space around it instead.
+#[test]
+fn a_negative_margin_is_clamped_to_zero() {
+    let st = styled("p { margin-bottom: -2em }", "<p data-t>x</p>");
+    assert_eq!(st.margin_bottom, Some(Length::Em(0.0)));
+}
+
+/// Points are absolute; converting at the CSS reference 96 dpi keeps the book's intent.
+#[test]
+fn points_convert_at_the_css_reference_dpi() {
+    let st = styled("p { margin-top: 72pt }", "<p data-t>x</p>");
+    assert_eq!(st.margin_top, Some(Length::Px(96.0)));
+}
+
+/// `margin` does not inherit. A container's spacing must not become every wrapped block's spacing,
+/// which would put the container's margin between every line of a poem.
+#[test]
+fn margin_does_not_inherit_from_a_container() {
+    let container = BlockStyle {
+        margin_top: Some(Length::Em(4.0)),
+        align: Some(Align::Center),
+        ..BlockStyle::default()
+    };
+    let inner = container.overlaid_with(&BlockStyle::default());
+    assert_eq!(inner.margin_top, None, "margin must not descend");
+    assert_eq!(
+        inner.align,
+        Some(Align::Center),
+        "the inherited properties still descend"
+    );
+}
+
+/// A block's own margin survives the overlay that drops its container's.
+#[test]
+fn a_blocks_own_margin_survives_the_overlay() {
+    let own = BlockStyle {
+        margin_bottom: Some(Length::Em(1.0)),
+        ..BlockStyle::default()
+    };
+    assert_eq!(
+        BlockStyle::default().overlaid_with(&own).margin_bottom,
+        Some(Length::Em(1.0))
+    );
+}
+
+/// A margin alone is a declaration, so `is_empty` must not call the style silent.
+#[test]
+fn a_margin_only_style_is_not_empty() {
+    let st = BlockStyle {
+        margin_top: Some(Length::Em(1.0)),
+        ..BlockStyle::default()
+    };
+    assert!(!st.is_empty());
+}
+
+// ── page-break (#251) ─────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn the_page_break_properties_are_honoured() {
+    let st = styled(
+        "h3 { page-break-before: always; page-break-after: avoid; page-break-inside: avoid }",
+        "<h3 data-t>x</h3>",
+    );
+    assert_eq!(st.break_before, Some(PageBreak::Always));
+    assert_eq!(st.break_after, Some(PageBreak::Avoid));
+    assert_eq!(st.break_inside, Some(PageBreak::Avoid));
+}
+
+/// CSS3 renamed these; books in the wild use both spellings, sometimes in the same stylesheet.
+#[test]
+fn the_css3_break_spellings_mean_the_same() {
+    let st = styled(
+        "h3 { break-before: page; break-inside: avoid-page }",
+        "<h3 data-t>x</h3>",
+    );
+    assert_eq!(st.break_before, Some(PageBreak::Always));
+    assert_eq!(st.break_inside, Some(PageBreak::Avoid));
+}
+
+/// inkread has no left/right page parity, so a parity request is honoured as the break it asks for
+/// rather than dropped.
+#[test]
+fn page_side_keywords_still_force_a_break() {
+    for value in ["left", "right", "recto", "verso"] {
+        let st = styled(
+            &format!("h1 {{ page-break-before: {value} }}"),
+            "<h1 data-t>x</h1>",
+        );
+        assert_eq!(st.break_before, Some(PageBreak::Always), "{value}");
+    }
+}
+
+/// A break in a flow inkread does not have must not be promoted to a page break the book never
+/// asked for.
+#[test]
+fn column_and_region_breaks_request_nothing() {
+    let st = styled(
+        "p { break-before: column; break-inside: avoid-column }",
+        "<p data-t>x</p>",
+    );
+    assert_eq!(st.break_before, Some(PageBreak::Auto));
+    assert_eq!(st.break_inside, Some(PageBreak::Auto));
+}
+
+/// `auto` is a declaration, so a later rule can cancel an earlier one.
+#[test]
+fn auto_cancels_an_earlier_forced_break() {
+    let st = styled(
+        "h3 { page-break-before: always } h3.run-on { page-break-before: auto }",
+        r#"<h3 class="run-on" data-t>x</h3>"#,
+    );
+    assert_eq!(st.break_before, Some(PageBreak::Auto));
+}
+
+/// The break properties do not inherit: a container's request is transferred onto the run it wraps
+/// by `content`, which is a different thing.
+#[test]
+fn breaks_do_not_inherit_from_a_container() {
+    let container = BlockStyle {
+        break_before: Some(PageBreak::Always),
+        break_inside: Some(PageBreak::Avoid),
+        ..BlockStyle::default()
+    };
+    let inner = container.overlaid_with(&BlockStyle::default());
+    assert_eq!(inner.break_before, None);
+    assert_eq!(inner.break_inside, None);
+}
+
+// ── @media (#251) ─────────────────────────────────────────────────────────────────────────────
+
+/// A great deal of Calibre/KindleGen output wraps its body styling in `@media screen`. The selector
+/// engine skips at-rules, so before this the book declared nothing at all.
+#[test]
+fn rules_inside_a_screen_media_block_apply() {
+    let st = styled(
+        "@media screen { p { margin: 2em 0; text-align: center } }",
+        "<p data-t>x</p>",
+    );
+    assert_eq!(st.margin_top, Some(Length::Em(2.0)));
+    assert_eq!(st.align, Some(Align::Center));
+}
+
+#[test]
+fn a_media_block_for_another_medium_is_dropped() {
+    for medium in ["print", "speech", "amzn-kf8"] {
+        let st = styled(
+            &format!("@media {medium} {{ p {{ text-align: center }} }}"),
+            "<p data-t>x</p>",
+        );
+        assert_eq!(st.align, None, "{medium} is not our medium");
+    }
+}
+
+/// `all` and a bare feature query address us as much as `screen` does.
+#[test]
+fn all_and_feature_queries_apply() {
+    for query in ["all", "(min-width: 200px)", "screen and (min-width: 200px)"] {
+        let st = styled(
+            &format!("@media {query} {{ p {{ text-align: center }} }}"),
+            "<p data-t>x</p>",
+        );
+        assert_eq!(st.align, Some(Align::Center), "{query} should apply");
+    }
+}
+
+/// Rules on either side of a media block keep their place, and a later one still wins the tie.
+#[test]
+fn flattening_preserves_source_order() {
+    let st = styled(
+        "p { text-align: left } @media screen { p { text-align: center } } p { text-indent: 0 }",
+        "<p data-t>x</p>",
+    );
+    assert_eq!(st.align, Some(Align::Center), "the media rule came later");
+    assert_eq!(
+        st.indent,
+        Some(false),
+        "and the rule after it still applies"
+    );
+}
+
+/// A commented-out media block must not be flattened into live rules.
+#[test]
+fn a_commented_out_media_block_stays_dead() {
+    let st = styled(
+        "/* @media screen { p { text-align: center } } */ p { text-indent: 0 }",
+        "<p data-t>x</p>",
+    );
+    assert_eq!(st.align, None);
+    assert_eq!(st.indent, Some(false));
+}
+
+/// Other at-rules are none of this function's business and must survive it untouched.
+#[test]
+fn other_at_rules_pass_through() {
+    let st = styled(
+        "@font-face { font-family: X; src: url(x.ttf) } @media screen { p { text-align: right } }",
+        "<p data-t>x</p>",
+    );
+    assert_eq!(st.align, Some(Align::Right));
+}
+
+/// A truncated block must not panic or swallow the rest of the sheet's parseable prefix.
+#[test]
+fn a_truncated_media_block_is_survivable() {
+    let st = styled(
+        "p { text-indent: 0 } @media screen { p { text-align:",
+        "<p data-t>x</p>",
+    );
+    assert_eq!(st.indent, Some(false));
+}
+
+// ── font-size (#251) ──────────────────────────────────────────────────────────────────────────
+
+/// A book that sizes its own headings must get the size it asked for, not inkread's heading scale.
+/// The #251 reporter's book sets `h3 { font-size: 1.0em; font-weight: bold }` — a heading at body
+/// size, distinguished by weight alone.
+#[test]
+fn a_declared_font_size_is_honoured() {
+    assert_eq!(
+        styled("h3 { font-size: 1em }", "<h3 data-t>x</h3>").font_size,
+        Some(Length::Em(1.0)),
+    );
+    assert_eq!(
+        styled("h2 { font-size: 1.3em }", "<h2 data-t>x</h2>").font_size,
+        Some(Length::Em(1.3)),
+    );
+    assert_eq!(
+        styled("p { font-size: 12px }", "<p data-t>x</p>").font_size,
+        Some(Length::Px(12.0)),
+    );
+}
+
+/// A percentage font size is a fraction of the parent's size — a length this module has, unlike the
+/// containing block's width a percentage *margin* would need.
+#[test]
+fn a_percentage_font_size_is_a_fraction_of_the_body() {
+    assert_eq!(
+        styled("p { font-size: 120% }", "<p data-t>x</p>").font_size,
+        Some(Length::Em(1.2)),
+    );
+    assert_eq!(
+        styled("p { margin-top: 120% }", "<p data-t>x</p>").margin_top,
+        None,
+        "a percentage margin still declares nothing",
+    );
+}
+
+/// Nothing that would erase the text, and no keyword scale we would only be guessing at.
+#[test]
+fn unusable_font_sizes_declare_nothing() {
+    for value in ["0", "0em", "-2em", "larger", "x-large", "inherit"] {
+        assert_eq!(
+            styled(&format!("p {{ font-size: {value} }}"), "<p data-t>x</p>").font_size,
+            None,
+            "{value} should declare nothing",
+        );
+    }
+}
+
+/// `font-size` inherits, like the other text properties.
+#[test]
+fn font_size_inherits_from_a_container() {
+    let container = BlockStyle {
+        font_size: Some(Length::Em(1.4)),
+        ..BlockStyle::default()
+    };
+    assert_eq!(
+        container.overlaid_with(&BlockStyle::default()).font_size,
+        Some(Length::Em(1.4)),
+    );
+}
+
+/// `never` is not CSS, but books write it and mean `avoid` unmistakably — the #251 reporter's own
+/// stylesheet says `h3 { page-break-after: never }`.
+#[test]
+fn a_page_break_of_never_reads_as_avoid() {
+    assert_eq!(
+        styled("h3 { page-break-after: never }", "<h3 data-t>x</h3>").break_after,
+        Some(PageBreak::Avoid),
+    );
+}

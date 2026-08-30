@@ -18,7 +18,7 @@
 //! [`Page`]s into a `PixelBuffer`.
 
 use crate::content::{Block, Inline};
-use crate::css::BlockStyle;
+use crate::css::{BlockStyle, Length, PageBreak};
 
 /// Glyph-advance measurement for a font (Phase 4 supplies a real implementation; tests use a
 /// fixed-pitch fake). `bold`/`italic` may select a different face/metrics.
@@ -46,7 +46,6 @@ impl Hyphenator for NoHyphen {
     }
 }
 
-/// Viewport + typography for a layout pass (all pixels). Repagination on a font-size or margin
 /// Narrowest column worth setting, in ems of the body size (#194).
 ///
 /// A comfortable single-column measure is 45-75 characters, but newspaper columns are deliberately
@@ -113,6 +112,7 @@ fn effective_align(style: &BlockStyle, user: Align) -> Align {
     }
 }
 
+/// Viewport + typography for a layout pass (all pixels). Repagination on a font-size or margin
 /// change just reruns [`paginate`] with new opts.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LayoutOpts {
@@ -311,6 +311,17 @@ pub struct LayoutLine {
     /// `x`; this exists for the things that span a whole column rather than sitting at an `x` — the
     /// horizontal rule, which would otherwise run across both columns.
     pub column_x: f32,
+    /// Width of that column. A rule spans `column_x .. column_x + column_w`; without it the
+    /// renderer has to assume the page's column width, which is wrong for any line laid out to a
+    /// narrower measure — a `<hr/>` inside a table cell would run across its neighbours (#251).
+    pub column_w: f32,
+    /// The page may not break between this line and the one above it: they are inside a block the
+    /// book marked `page-break-inside: avoid` (#251).
+    ///
+    /// The property is a *block* one, but a table row is merged into shared line boxes before it is
+    /// paged, and nothing of the blocks survives that merge. Carrying the request on the line is
+    /// what lets a stanza inside a cell stay whole — the pager has nothing else left to ask.
+    pub keep_with_prev: bool,
 }
 
 /// An illustration placed in the content box: where it sits and how big it is drawn, not its
@@ -359,7 +370,8 @@ pub struct Page {
 fn fit_image(
     src: &str,
     alt: &str,
-    opts: &LayoutOpts,
+    content_w: f32,
+    content_h: f32,
     images: &dyn ImageSizer,
 ) -> Option<PlacedImage> {
     let (iw, ih) = images.size(src)?;
@@ -367,10 +379,9 @@ fn fit_image(
         return None;
     }
     let (fw, fh) = (iw as f32, ih as f32);
-    let content_w = opts.content_w();
     // The vertical budget is a whole page: `add_image` starts a new page when it will not fit on
     // this one, so an image capped at the content height always has somewhere to go.
-    let scale = (content_w / fw).min(opts.content_h() / fh).min(1.0);
+    let scale = (content_w / fw).min(content_h / fh).min(1.0);
     let width = (fw * scale).round().max(1.0);
     let height = (fh * scale).round().max(1.0);
     Some(PlacedImage {
@@ -380,6 +391,165 @@ fn fit_image(
         width: width as u32,
         height: height as u32,
     })
+}
+
+/// The end (exclusive) of the run of blocks starting at `i` that must stay on one page (#251).
+///
+/// A run grows while the block before it says `page-break-after: avoid` — which is both the
+/// property itself (keeping a heading with the text it introduces) and how a container's
+/// `page-break-inside: avoid` reaches the several blocks it wraps. An explicit
+/// `page-break-before: always` wins over an `avoid` beside it: a forced break is a stronger
+/// statement than a preference not to break.
+fn keep_run_end(blocks: &[Block], i: usize) -> usize {
+    let mut end = i + 1;
+    while end < blocks.len()
+        && blocks[end - 1].style().break_after == Some(PageBreak::Avoid)
+        && blocks[end].style().break_before != Some(PageBreak::Always)
+    {
+        end += 1;
+    }
+    end
+}
+
+/// A run of laid-out lines, positioned relative to its own origin.
+///
+/// Named because the row machinery below nests it two deep in two different orders — cells of
+/// segments going in, stages of cells coming out — and three anonymous `Vec` levels are a puzzle
+/// where two named ones are not.
+type Flow = Vec<LayoutLine>;
+
+/// Cut a row's cells into the *stages* a forced break divides it into (#251).
+///
+/// `cells[cell][segment]` in, `stages[stage][cell]` out.
+///
+/// A cell that forced a break came back already cut, but a cell that did not came back whole — and
+/// letting it run on while its neighbour started a new page is what loses the correspondence a
+/// parallel text is entirely about: the translation would sit beside the wrong original.
+///
+/// So a break in *any* cell breaks the row, and the cells that did not break are cut at the same
+/// vertical position. Where several cells break, the stage boundary is the tallest of their
+/// segments, so a canto whose translation runs longer still keeps its opposite number level with
+/// it rather than opening a near-empty page between them.
+///
+/// Worked example — two cells; A breaks after its first stanza at y=100, B runs straight through to
+/// y=180. `heights = [100]`: stage 0 is A's stanza beside B's lines above 100, and stage 1 is A's
+/// remainder beside B's lines from 100 on, each re-based to its own origin.
+fn row_stages(cells: Vec<Vec<Flow>>) -> Vec<Vec<Flow>> {
+    let count = cells.iter().map(Vec::len).max().unwrap_or(0);
+    if count <= 1 {
+        return if count == 0 {
+            Vec::new()
+        } else {
+            vec![cells.into_iter().flatten().collect()]
+        };
+    }
+    let heights = stage_heights(&cells, count);
+    let mut stages: Vec<Vec<Flow>> = vec![Vec::new(); count];
+    for cell in cells {
+        let Some(last) = cell.len().checked_sub(1) else {
+            continue;
+        };
+        for (s, segment) in cell.into_iter().enumerate() {
+            if s < last {
+                // Pinned by the cell's own break: it is this stage, whole.
+                stages[s].push(segment);
+            } else {
+                for (offset, lines) in carry_across(segment, &heights, s, count) {
+                    stages[offset].push(lines);
+                }
+            }
+        }
+    }
+    stages
+}
+
+/// How tall each stage is: the tallest segment a cell's *own* break ends there.
+///
+/// A cell's last segment ends at the row's end rather than at a break, so it pins nothing — it is
+/// carried across the boundaries the other cells set. That asymmetry is what makes the boundaries
+/// well defined instead of circular.
+fn stage_heights(cells: &[Vec<Flow>], count: usize) -> Vec<f32> {
+    let mut heights = vec![0.0f32; count];
+    for cell in cells {
+        for (s, segment) in cell.iter().enumerate().take(cell.len().saturating_sub(1)) {
+            heights[s] = heights[s].max(flow_height(segment));
+        }
+    }
+    heights
+}
+
+/// Cut a cell's trailing flow at the stage boundaries it did not itself ask for, so a cell with no
+/// break of its own still breaks where the row does. Yields `(stage, lines)`, each re-based to that
+/// stage's origin; empty stages are skipped.
+fn carry_across(segment: Flow, heights: &[f32], from: usize, count: usize) -> Vec<(usize, Flow)> {
+    let mut carried: Vec<Flow> = vec![Vec::new(); count - from];
+    let mut stage = from;
+    let mut base = 0.0;
+    for mut line in segment {
+        // A line starting at or past the boundary belongs to the next stage. `stage` strictly
+        // increases and is bounded by `count`, so this terminates even where a boundary is zero.
+        while stage + 1 < count && line.top - base >= heights[stage] {
+            base += heights[stage];
+            stage += 1;
+        }
+        line.top -= base;
+        carried[stage - from].push(line);
+    }
+    carried
+        .into_iter()
+        .enumerate()
+        .filter(|(_, lines)| !lines.is_empty())
+        .map(|(offset, lines)| (from + offset, lines))
+        .collect()
+}
+
+/// The height a flow occupies: the bottom of its lowest line. Gaps still pending at the flow's
+/// trailing edge are deliberately excluded — they belong to whatever comes next.
+fn flow_height(lines: &Flow) -> f32 {
+    lines.iter().map(|l| l.top + l.height).fold(0.0, f32::max)
+}
+
+/// Merge a table row's per-cell flows into one `top`-ordered stream, coalescing the lines that
+/// share a vertical position into a single line box (#251).
+///
+/// Cells are laid out independently, so each flow's `top` values are relative to the same row
+/// origin — sorting by `top` therefore restores reading order down the page while keeping cells
+/// that agree on a position side by side. Coalescing matters because the rest of the pipeline
+/// treats a line box as the paging unit: two cells' halves of one visual line must break to a new
+/// page together, and a caller counting lines must see the row's height, not the sum of its cells'.
+///
+/// Only plain text lines coalesce. A rule or an image spans its own cell (it carries a `column_x`
+/// and at most one image per line box), so those stay separate; they render at the same `top`
+/// regardless, which is all that side-by-side needs.
+///
+/// Cells that disagree on their block structure — a heading in one and body text in the other —
+/// genuinely sit at different positions, and stay in separate line boxes. That is the honest
+/// outcome: there is no shared line to share. It does mean such a row is not a single paging unit
+/// throughout, so a page break can fall between two lines the cells did not agree on anyway.
+fn merge_cell_flows(flows: Vec<Flow>, same_line: f32) -> Flow {
+    let mut lines: Flow = flows.into_iter().flatten().collect();
+    // Stable, so cells stay in source order within a line box and `x` runs left to right.
+    lines.sort_by(|a, b| a.top.total_cmp(&b.top));
+
+    let mut out: Flow = Vec::with_capacity(lines.len());
+    for line in lines {
+        let plain = !line.rule && line.image.is_none();
+        match out.last_mut() {
+            Some(prev)
+                if plain
+                    && !prev.rule
+                    && prev.image.is_none()
+                    && (line.top - prev.top).abs() < same_line =>
+            {
+                prev.height = prev.height.max(line.height);
+                // Either half of a shared line box can forbid the break above it.
+                prev.keep_with_prev |= line.keep_with_prev;
+                prev.runs.extend(line.runs);
+            }
+            _ => out.push(line),
+        }
+    }
+    out
 }
 
 /// Heading size multipliers by level (`h1`..`h6`).
@@ -449,167 +619,38 @@ pub fn paginate_upto(
     // Chapter-relative character cursor, advanced as source text is consumed in reading order, so
     // every placed run/glyph carries a font-invariant offset (ADR-INKREAD-0012).
     let mut cursor = 0usize;
-    // Book typography (KOReader/crengine epub.css model): paragraphs are set dense — a first-line
-    // indent of ~1.2em distinguishes them with NO blank line between (avoids the "too many white
-    // lines" web look). Headings are bold + scaled with a margin before (0.7em) and after (0.5em);
-    // the before-margin collapses at the top of a page.
-    let indent = opts.font_px * 1.2;
     let mut complete = true;
     // `max_pages` counts pages, but the pager is producing *columns* — a two-column page needs two
     // of them before it is whole.
     let column_budget = max_pages.saturating_mul(usize::from(opts.effective_columns()));
-    for (block_index, block) in blocks.iter().enumerate() {
-        // Checked before the block, not after: once enough whole pages exist, laying out one more
+    // Walked in keep-runs rather than block by block: `page-break-after: avoid` binds a block to
+    // the next one, so what may be split across a page is a run, not always a single block (#251).
+    let mut i = 0;
+    while i < blocks.len() {
+        // Checked before the run, not after: once enough whole pages exist, laying out one more
         // block is work the caller has said it does not need.
         if pager.finished_page_count() >= column_budget {
             complete = false;
             break;
         }
-        match block {
-            Block::Heading {
-                level,
-                content,
-                style,
-            } => {
-                pager.gap_before(opts.font_px * 0.7);
-                let size = opts.font_px * heading_scale(*level);
-                // Headings are bold by default, but that is inkread's typography, not a rule: a
-                // book that says `font-weight: normal` on its title gets a normal-weight title.
-                let bold = style.bold.unwrap_or(true);
-                pager.add_paragraph(
-                    content,
-                    size,
-                    0.0,
-                    0.0,
-                    bold,
-                    style.italic.unwrap_or(false),
-                    effective_align(style, opts.align),
-                    block_index,
-                    &mut cursor,
-                    m,
-                );
-                pager.gap(opts.font_px * 0.5);
-            }
-            Block::Paragraph { content, style } => {
-                // First line indented, the rest flush left, no trailing gap — dense and book-like.
-                // The indent is the *only* thing marking where one paragraph ends and the next
-                // begins, since this typography deliberately omits the blank line between them; an
-                // indent applied to every line would leave prose with no paragraph breaks at all
-                // (#163) and would also spend 1.2em of every line's width on nothing.
-                let align = effective_align(style, opts.align);
-                // Two ways a paragraph loses that indent (#188): the book zeroes `text-indent`, or
-                // the block is centred/right-aligned. The indent is inkread's own device for
-                // marking where prose paragraphs start — on a decorative centred line it marks
-                // nothing, and it would push the text off-centre by half the indent.
-                let centred = matches!(align, Align::Center | Align::Right);
-                let first_indent = if style.indent == Some(false) || centred {
-                    0.0
-                } else {
-                    indent
-                };
-                pager.add_paragraph(
-                    content,
-                    opts.font_px,
-                    first_indent,
-                    0.0,
-                    style.bold.unwrap_or(false),
-                    style.italic.unwrap_or(false),
-                    align,
-                    block_index,
-                    &mut cursor,
-                    m,
-                );
-            }
-            Block::ListItem {
-                ordered,
-                index,
-                content,
-                style,
-            } => {
-                let marker = if *ordered {
-                    format!("{index}.")
-                } else {
-                    "•".to_string()
-                };
-                // A list item keeps its flush-left hanging indent whatever the book declares:
-                // centring text that hangs off a marker has no sensible reading. Weight still
-                // applies.
-                pager.add_list_item(
-                    &marker,
-                    content,
-                    opts.font_px,
-                    style.bold.unwrap_or(false),
-                    style.italic.unwrap_or(false),
-                    block_index,
-                    &mut cursor,
-                    m,
-                );
-                pager.gap(opts.font_px * 0.15);
-            }
-            Block::Image { src, alt } => {
-                if let Some(placed) = fit_image(src, alt, opts, images) {
-                    // An image occupies one character position, as `<br>` does, so the offsets of
-                    // everything after it stay stable whether or not it resolves (ADR-INKREAD-0012).
-                    cursor += 1;
-                    pager.gap_before(opts.font_px * 0.4);
-                    pager.add_image(placed);
-                    pager.gap(opts.font_px * 0.4);
-                    continue;
-                }
-                // Unresolvable (a dangling src, an unreadable codec): fall back to naming what is
-                // missing rather than dropping it silently.
-                let label = if alt.is_empty() {
-                    "[image]".to_string()
-                } else {
-                    format!("[image: {alt}]")
-                };
-                let run = vec![Inline::Run(crate::content::TextRun {
-                    text: label,
-                    bold: false,
-                    italic: true,
-                    href: None,
-                })];
-                pager.gap_before(opts.font_px * 0.4);
-                // The label is synthetic, like a list item's marker: it must not consume source-
-                // character budget, or offsets after an image would depend on whether it resolved.
-                let at = cursor;
-                pager.add_paragraph(
-                    &run,
-                    opts.font_px,
-                    0.0,
-                    0.0,
-                    false,
-                    false,
-                    opts.align,
-                    block_index,
-                    &mut cursor,
-                    m,
-                );
-                cursor = at + 1;
-                pager.gap(opts.font_px * 0.4);
-            }
-            Block::Row { cells, style } => {
-                pager.add_row(
-                    cells,
-                    opts.font_px,
-                    style.bold.unwrap_or(false),
-                    style.italic.unwrap_or(false),
-                    effective_align(style, opts.align),
-                    block_index,
-                    &mut cursor,
-                    m,
-                );
-                pager.gap(opts.para_gap * 0.5);
-            }
-            Block::Rule => pager.add_rule(opts.para_gap),
-        }
+        let end = keep_run_end(blocks, i);
+        let laid = pager.add_keep_run(&blocks[i..end], |k| i + k, &mut cursor, m, images);
+        i += laid.max(1);
     }
     let columns = opts.effective_columns();
-    let laid = if complete {
+    let mut laid = if complete {
         pager.finish()
     } else {
         pager.into_finished_pages()
     };
+    if !complete {
+        // A single keep-run or table row can emit several columns before the budget is looked at
+        // again, so the pager may have overshot — and in two-column mode an odd column count would
+        // make `combine_columns` build a half page the full pass never produces. Trim to whole
+        // pages within the budget, so a partial pagination stays a true prefix.
+        let whole = laid.len().min(column_budget) / usize::from(columns) * usize::from(columns);
+        laid.truncate(whole);
+    }
     (combine_columns(laid, opts, columns), complete)
 }
 
@@ -652,12 +693,33 @@ fn combine_columns(pages: Vec<Page>, opts: &LayoutOpts, columns: u8) -> Vec<Page
 }
 
 /// Accumulates lines into pages, breaking when the content box is full.
+///
+/// `measure`/`page_h` are held rather than read off `opts` so the same pager can flow a *table cell*
+/// or a keep-run — a narrower measure, with no page budget of its own (#251).
 struct Pager<'o> {
     opts: &'o LayoutOpts,
     hyph: &'o dyn Hyphenator,
     pages: Vec<Page>,
     current: Vec<LayoutLine>,
     cursor_y: f32,
+    /// Line-breaking width for this flow.
+    measure: f32,
+    /// Vertical budget before a page break; infinite for a cell flow, which is paged by the row it
+    /// belongs to rather than on its own.
+    page_h: f32,
+    /// A block gap not yet spent. Held rather than added straight to `cursor_y` so that adjacent
+    /// margins **collapse to the larger** instead of summing, as CSS does (#251): a book that
+    /// declares `p { margin: 1em 0 }` means one em between stanzas, not two.
+    pending_gap: f32,
+    /// Whether a gap at the top of this flow collapses away. True for a page (a page's own top
+    /// margin must not be doubled); false for an unpaged flow, whose top edge is not a page edge.
+    collapse_at_top: bool,
+    /// Set while laying out a block that asked not to be split, so the lines it emits carry the
+    /// request forward as [`LayoutLine::keep_with_prev`].
+    keep_lines: bool,
+    /// Whether such a block has emitted a line yet — the first line of a block is where a break is
+    /// allowed to fall, so only the ones after it are bound to what precedes them.
+    kept_one: bool,
 }
 
 impl<'o> Pager<'o> {
@@ -668,13 +730,53 @@ impl<'o> Pager<'o> {
             pages: Vec::new(),
             current: Vec::new(),
             cursor_y: 0.0,
+            measure: opts.content_w(),
+            page_h: opts.content_h(),
+            pending_gap: 0.0,
+            collapse_at_top: true,
+            keep_lines: false,
+            kept_one: false,
+        }
+    }
+
+    /// A pager with no vertical budget, `measure` wide: it flows content without ever breaking a
+    /// page, so the caller can place the result as one unit. Used for a table cell and for a run of
+    /// blocks a book asked to keep together.
+    ///
+    /// It does *not* collapse the gap at its own top edge. That edge is not a page edge — it is
+    /// wherever the caller ends up placing the flow — so swallowing the first block's `margin-top`
+    /// here would lose it outright, which is what made `page-break-inside: avoid` silently delete
+    /// the margins of the very stanza it was keeping together.
+    fn unpaged(opts: &'o LayoutOpts, hyph: &'o dyn Hyphenator, measure: f32) -> Self {
+        Self {
+            measure,
+            page_h: f32::INFINITY,
+            collapse_at_top: false,
+            ..Self::new(opts, hyph)
+        }
+    }
+
+    /// A pager for one table cell: unpaged and `measure` wide, but collapsing at its top edge.
+    ///
+    /// A cell differs from a keep-run in who owns that edge. A keep-run is placed *somewhere* by
+    /// its caller, which lifts the leading margin back out so it can collapse against whatever it
+    /// lands next to. A cell's top edge is the row's, and the row's is a page-edge candidate — so
+    /// the margin collapses here, as it would at the top of a page. Baking it into the cell's line
+    /// positions instead would leave two cells with different first-block margins sitting at
+    /// different heights, and a row whose halves no longer share a line box is not a parallel text
+    /// any more (#251).
+    fn cell(opts: &'o LayoutOpts, hyph: &'o dyn Hyphenator, measure: f32) -> Self {
+        Self {
+            collapse_at_top: true,
+            ..Self::unpaged(opts, hyph, measure)
         }
     }
 
     /// Place a line of `height`, breaking to a new page first if it would overflow a non-empty page.
     /// Run `x` is already content-relative; the line's vertical position is carried by `top`.
     fn emit(&mut self, runs: Vec<PlacedRun>, height: f32, rule: bool) {
-        if self.cursor_y + height > self.opts.content_h() && !self.current.is_empty() {
+        self.flush_gap();
+        if self.cursor_y + height > self.page_h && !self.current.is_empty() {
             self.break_page();
         }
         let top = self.cursor_y;
@@ -685,21 +787,122 @@ impl<'o> Pager<'o> {
             rule,
             image: None,
             column_x: 0.0,
+            column_w: self.measure,
+            keep_with_prev: self.keep_lines && self.kept_one,
         });
+        self.kept_one = true;
         self.cursor_y += height;
     }
 
-    /// Advance the vertical cursor by a block gap (never itself forces a page break).
+    /// Ask for a block gap. Never itself forces a page break, and never sums with the gap already
+    /// waiting: two adjacent margins collapse to the larger, and the gap is spent by the next line
+    /// placed (see [`Self::flush_gap`]) — so one at the top of a page, or trailing at the bottom,
+    /// costs nothing. That is browser/crengine margin-collapse behaviour.
     fn gap(&mut self, dy: f32) {
-        self.cursor_y += dy;
+        self.pending_gap = self.pending_gap.max(dy);
     }
 
-    /// A gap inserted BEFORE a block (heading/image), collapsed to nothing at the top of a page so
-    /// the page's top margin isn't doubled (margin-collapse, matching browser/crengine behaviour).
-    fn gap_before(&mut self, dy: f32) {
-        if self.cursor_y > 0.0 {
-            self.cursor_y += dy;
+    /// Spend the waiting gap, dropping it at the top of a page so the page's own margin is not
+    /// doubled.
+    fn flush_gap(&mut self) {
+        if !self.current.is_empty() || !self.collapse_at_top {
+            self.cursor_y += self.pending_gap;
         }
+        self.pending_gap = 0.0;
+    }
+
+    /// Place a **pre-flowed** run of lines whose `top` values are relative to the flow's own origin,
+    /// preserving the gaps between them (#251).
+    ///
+    /// [`Self::emit`] cannot do this: it derives each line's `top` from the running cursor, so a
+    /// flow laid out elsewhere — a table row's cells, each measured to its own width — would lose
+    /// every inter-block gap on the way in, which is exactly the "no space between the paragraphs"
+    /// half of #251.
+    ///
+    /// The flow is kept whole when it fits on a page of its own; when it is taller than a page it
+    /// splits at a line boundary, and because all of a row's cells are merged into one `top`-ordered
+    /// stream before they get here, that split keeps the columns aligned.
+    fn emit_flow(&mut self, lines: Flow, total_h: f32) {
+        if lines.is_empty() {
+            self.cursor_y += total_h;
+            return;
+        }
+        self.flush_gap();
+        if !self.current.is_empty()
+            && self.cursor_y + total_h > self.page_h
+            && total_h <= self.page_h
+        {
+            self.break_page();
+        }
+        // Where `top == 0` of the flow sits on the current page. Re-based, not reset, when the flow
+        // spills: the lines below the break keep their spacing relative to each other.
+        let mut base = self.cursor_y;
+        for mut line in lines {
+            if base + line.top + line.height > self.page_h && !self.current.is_empty() {
+                // A line bound to the one above takes that whole group with it, so a stanza the
+                // book asked to keep whole moves rather than being halved (#251). If the group
+                // would empty the page it is taller than any page and the request cannot be met —
+                // the break falls where it must, because losing text is worse.
+                let held = if line.keep_with_prev {
+                    self.take_kept_group()
+                } else {
+                    Vec::new()
+                };
+                let old_base = base;
+                self.break_page();
+                base = held.first().map_or(-line.top, |first| old_base - first.top);
+                for mut h in held {
+                    h.top = base + (h.top - old_base);
+                    self.cursor_y = h.top + h.height;
+                    self.current.push(h);
+                }
+            }
+            line.top += base;
+            self.cursor_y = self.cursor_y.max(line.top + line.height);
+            self.current.push(line);
+        }
+        self.cursor_y = self.cursor_y.max(base + total_h);
+    }
+
+    /// Consume an unpaged pager, yielding its segments and the gap still pending at its trailing
+    /// edge.
+    ///
+    /// There is more than one segment only where the book forced a break inside the flow; an
+    /// unpaged pager never breaks on overflow, so ordinary content comes back as a single segment.
+    /// The trailing gap is handed back rather than folded into the height because it is the *next*
+    /// block's business: only there can it collapse against what actually follows, or a page edge.
+    fn into_segments(self) -> (Vec<Flow>, f32) {
+        let mut segments: Vec<Flow> = self.pages.into_iter().map(|p| p.lines).collect();
+        segments.push(self.current);
+        (segments, self.pending_gap)
+    }
+
+    /// Start a new page because the book asked to (`page-break-before/after: always`), rather than
+    /// because the current one filled up (#251).
+    ///
+    /// A no-op at the top of a page — a forced break must not leave a blank one. An unpaged flow
+    /// honours it too: it never breaks on *overflow*, having no budget to overflow, but a break the
+    /// book asked for cuts it into segments its caller places with a real page between them. That
+    /// is what lets a poem laid out in a table start each canto on a fresh page.
+    fn force_break(&mut self) {
+        if !self.current.is_empty() {
+            self.break_page();
+        }
+    }
+
+    /// Take back the trailing run of lines the page may not break inside, so the break can fall at
+    /// its head instead. Gives back nothing when the group would empty the page: a group taller
+    /// than a page cannot be kept whole, and moving it would only loop.
+    fn take_kept_group(&mut self) -> Flow {
+        let head = self
+            .current
+            .iter()
+            .rposition(|l| !l.keep_with_prev)
+            .unwrap_or(0);
+        if head == 0 {
+            return Vec::new();
+        }
+        self.current.split_off(head)
     }
 
     fn break_page(&mut self) {
@@ -707,6 +910,12 @@ impl<'o> Pager<'o> {
             lines: std::mem::take(&mut self.current),
         });
         self.cursor_y = 0.0;
+        // A margin that would have opened the next page collapses against the page edge.
+        self.pending_gap = 0.0;
+        // Only an unpaged flow's *first* edge is not a page edge — it is wherever the caller ends
+        // up placing the flow, so a margin there is the caller's to collapse. Every edge after a
+        // break is a real one, and a margin at it collapses like any other.
+        self.collapse_at_top = true;
     }
 
     /// How many *whole* pages have been broken off so far (the in-progress one is not counted).
@@ -726,6 +935,276 @@ impl<'o> Pager<'o> {
             });
         }
         self.pages
+    }
+
+    /// A declared vertical margin in pixels, or inkread's own `default_px` when the book declared
+    /// none (#251).
+    ///
+    /// `font_px` is the *block's* size, not the body's: CSS resolves an `em` against the element's
+    /// own font size, so `margin-top: 1em` on an `<h1>` is one h1-em, not one body-em.
+    fn resolve_margin(declared: Option<Length>, default_px: f32, font_px: f32) -> f32 {
+        declared.map_or(default_px, |l| l.px(font_px))
+    }
+
+    /// inkread's own spacing around a block, in pixels, for a book that declared none.
+    ///
+    /// Book typography (KOReader/crengine `epub.css` model): prose is set dense — a first-line
+    /// indent distinguishes a paragraph with NO blank line between (avoiding the "too many white
+    /// lines" web look) — while a heading, an illustration and a rule are set apart.
+    fn default_margins(&self, block: &Block) -> (f32, f32) {
+        let em = self.opts.font_px;
+        match block {
+            Block::Heading { .. } => (em * 0.7, em * 0.5),
+            Block::Paragraph { .. } => (0.0, 0.0),
+            Block::ListItem { .. } => (0.0, em * 0.15),
+            Block::Image { .. } => (em * 0.4, em * 0.4),
+            Block::Row { .. } => (0.0, self.opts.para_gap * 0.5),
+            Block::Rule { .. } => (self.opts.para_gap, self.opts.para_gap),
+        }
+    }
+
+    /// Lay out a table cell's blocks, in keep-runs like a chapter's, so a cell honours the same
+    /// break properties as anything else. Every block anchors to the row: a cell is one source
+    /// block, and a source anchor taken inside one resolves to it (ADR-INKREAD-0012).
+    fn add_cell_blocks(
+        &mut self,
+        cell: &[Block],
+        row: usize,
+        cursor: &mut usize,
+        m: &dyn Metrics,
+        images: &dyn ImageSizer,
+    ) {
+        let mut k = 0;
+        while k < cell.len() {
+            let end = keep_run_end(cell, k);
+            let laid = self.add_keep_run(&cell[k..end], |_| row, cursor, m, images);
+            k += laid.max(1);
+        }
+    }
+
+    /// Lay out one keep-run: the blocks between two places a page break is allowed (#251).
+    ///
+    /// `index_of` maps a position in the run to the source block it anchors to — successive blocks
+    /// for a chapter, the row itself for every block of a table cell.
+    ///
+    /// Returns how many of `blocks` it laid out. That is normally all of them, but a run is only
+    /// worth holding together while it could still fit a page: past that the `avoid` cannot be
+    /// honoured whatever we do, and continuing to accumulate would hold a whole chapter in memory
+    /// before emitting a single page — defeating the incremental pagination [`paginate_upto`]
+    /// exists for. The caller resumes at the returned offset, budget check and all.
+    ///
+    /// Most runs are a single block with nothing declared, and take the direct path: a chapter of
+    /// prose must still break wherever it fills the page. A run that asked not to be split is
+    /// flowed whole first and then placed by [`Self::emit_flow`], which moves it to the next page
+    /// when it does not fit here and still fits on a page of its own. A run too tall for any page
+    /// is split at a line boundary rather than dropped: honouring `avoid` is a preference, and
+    /// losing text is not an acceptable way to keep it.
+    fn add_keep_run(
+        &mut self,
+        blocks: &[Block],
+        index_of: impl Fn(usize) -> usize,
+        cursor: &mut usize,
+        m: &dyn Metrics,
+        images: &dyn ImageSizer,
+    ) -> usize {
+        let (Some(first), Some(last)) = (blocks.first(), blocks.last()) else {
+            return 0;
+        };
+        if first.style().break_before == Some(PageBreak::Always) {
+            self.force_break();
+        }
+        let indivisible = blocks.len() > 1
+            || blocks
+                .iter()
+                .any(|b| b.style().break_inside == Some(PageBreak::Avoid));
+        let laid = if indivisible {
+            let mut sub = Pager::unpaged(self.opts, self.hyph, self.measure);
+            let mut laid = 0;
+            for (k, b) in blocks.iter().enumerate() {
+                if sub.cursor_y > self.page_h {
+                    break;
+                }
+                sub.add_block(b, index_of(k), cursor, m, images);
+                laid = k + 1;
+            }
+            let (segments, trailing) = sub.into_segments();
+            for (i, mut lines) in segments.into_iter().enumerate() {
+                if i > 0 {
+                    self.force_break();
+                }
+                // The flow kept the gap at its own top edge (see `Pager::unpaged`). Lift it back
+                // out so it collapses against what precedes it on the page, or against a page edge.
+                let lead = lines.first().map_or(0.0, |l| l.top);
+                for line in &mut lines {
+                    line.top -= lead;
+                }
+                let height = flow_height(&lines);
+                self.gap(lead);
+                self.emit_flow(lines, height);
+            }
+            self.gap(trailing);
+            laid
+        } else {
+            self.add_block(first, index_of(0), cursor, m, images);
+            1
+        };
+        if laid == blocks.len() && last.style().break_after == Some(PageBreak::Always) {
+            self.force_break();
+        }
+        laid
+    }
+
+    fn add_block(
+        &mut self,
+        block: &Block,
+        block_index: usize,
+        cursor: &mut usize,
+        m: &dyn Metrics,
+        images: &dyn ImageSizer,
+    ) {
+        let indent = self.opts.font_px * 1.2;
+        let style = block.style();
+        // The book's own size if it declared one, else inkread's typography for the kind.
+        let size = style.font_size.map_or_else(
+            || match block {
+                Block::Heading { level, .. } => self.opts.font_px * heading_scale(*level),
+                _ => self.opts.font_px,
+            },
+            |l| l.px(self.opts.font_px),
+        );
+        let (default_top, default_bottom) = self.default_margins(block);
+        self.gap(Self::resolve_margin(style.margin_top, default_top, size));
+        // `page-break-inside: avoid`, carried down to the lines this block is about to emit.
+        // `add_keep_run` covers the case where the block is paged on its own; this covers the case
+        // where it is not — merged into a table row, where only the lines survive.
+        let outer = (self.keep_lines, self.kept_one);
+        self.keep_lines = style.break_inside == Some(PageBreak::Avoid);
+        self.kept_one = false;
+        match block {
+            Block::Heading { content, .. } => {
+                // Headings are bold by default, but that is inkread's typography, not a rule: a
+                // book that says `font-weight: normal` on its title gets a normal-weight title.
+                let bold = style.bold.unwrap_or(true);
+                self.add_paragraph(
+                    content,
+                    size,
+                    0.0,
+                    0.0,
+                    bold,
+                    style.italic.unwrap_or(false),
+                    effective_align(style, self.opts.align),
+                    block_index,
+                    cursor,
+                    m,
+                );
+            }
+            Block::Paragraph { content, style } => {
+                // First line indented, the rest flush left, no trailing gap — dense and book-like.
+                // The indent is the *only* thing marking where one paragraph ends and the next
+                // begins, since this typography deliberately omits the blank line between them; an
+                // indent applied to every line would leave prose with no paragraph breaks at all
+                // (#163) and would also spend 1.2em of every line's width on nothing.
+                let align = effective_align(style, self.opts.align);
+                // Two ways a paragraph loses that indent (#188): the book zeroes `text-indent`, or
+                // the block is centred/right-aligned. The indent is inkread's own device for
+                // marking where prose paragraphs start — on a decorative centred line it marks
+                // nothing, and it would push the text off-centre by half the indent.
+                let centred = matches!(align, Align::Center | Align::Right);
+                let first_indent = if style.indent == Some(false) || centred {
+                    0.0
+                } else {
+                    indent
+                };
+                self.add_paragraph(
+                    content,
+                    self.opts.font_px,
+                    first_indent,
+                    0.0,
+                    style.bold.unwrap_or(false),
+                    style.italic.unwrap_or(false),
+                    align,
+                    block_index,
+                    cursor,
+                    m,
+                );
+            }
+            Block::ListItem {
+                ordered,
+                index,
+                content,
+                style,
+            } => {
+                let marker = if *ordered {
+                    format!("{index}.")
+                } else {
+                    "•".to_string()
+                };
+                // A list item keeps its flush-left hanging indent whatever the book declares:
+                // centring text that hangs off a marker has no sensible reading. Weight still
+                // applies.
+                self.add_list_item(
+                    &marker,
+                    content,
+                    self.opts.font_px,
+                    style.bold.unwrap_or(false),
+                    style.italic.unwrap_or(false),
+                    block_index,
+                    cursor,
+                    m,
+                );
+            }
+            Block::Image { src, alt, .. } => {
+                if let Some(placed) =
+                    fit_image(src, alt, self.measure, self.opts.content_h(), images)
+                {
+                    // An image occupies one character position, as `<br>` does, so the offsets of
+                    // everything after it stay stable whether or not it resolves (ADR-INKREAD-0012).
+                    *cursor += 1;
+                    self.add_image(placed);
+                } else {
+                    // Unresolvable (a dangling src, an unreadable codec): fall back to naming what
+                    // is missing rather than dropping it silently.
+                    let label = if alt.is_empty() {
+                        "[image]".to_string()
+                    } else {
+                        format!("[image: {alt}]")
+                    };
+                    let run = vec![Inline::Run(crate::content::TextRun {
+                        text: label,
+                        bold: false,
+                        italic: true,
+                        href: None,
+                    })];
+                    // The label is synthetic, like a list item's marker: it must not consume
+                    // source-character budget, or offsets after an image would depend on whether
+                    // it resolved.
+                    let at = *cursor;
+                    self.add_paragraph(
+                        &run,
+                        self.opts.font_px,
+                        0.0,
+                        0.0,
+                        false,
+                        false,
+                        self.opts.align,
+                        block_index,
+                        cursor,
+                        m,
+                    );
+                    *cursor = at + 1;
+                }
+            }
+            Block::Row { cells, .. } => {
+                self.add_row(cells, block_index, cursor, m, images);
+            }
+            Block::Rule { .. } => self.emit(Vec::new(), self.opts.para_gap.max(2.0), true),
+        }
+        (self.keep_lines, self.kept_one) = outer;
+        self.gap(Self::resolve_margin(
+            style.margin_bottom,
+            default_bottom,
+            size,
+        ));
     }
 
     /// Lay out a paragraph/heading: greedy-break its inlines to the content width and emit lines.
@@ -749,7 +1228,7 @@ impl<'o> Pager<'o> {
             size,
             first_indent,
             rest_indent,
-            self.opts.content_w(),
+            self.measure,
             bold_all,
             italic_all,
             block,
@@ -760,79 +1239,90 @@ impl<'o> Pager<'o> {
         let line_h = size * self.opts.line_spacing;
         let n = lines.len();
         for (i, mut runs) in lines.into_iter().enumerate() {
-            align_line(&mut runs, align, self.opts.content_w(), i + 1 == n, m);
+            align_line(&mut runs, align, self.measure, i + 1 == n, m);
             self.emit(runs, line_h, false);
         }
     }
 
-    /// Lay out one table row: each cell broken to its own share of the measure, then the cells'
-    /// lines emitted side by side.
+    /// Lay out one table row: each cell flowed as a block container in its own share of the
+    /// measure, then the cells' lines merged into shared line boxes.
     ///
-    /// The cells are flowed independently and then zipped, so a row is as tall as its tallest cell
-    /// and short cells simply leave whitespace beneath them. That is what makes a parallel text
-    /// readable across: line *n* of the original and line *n* of the translation share a line box,
-    /// however differently the two languages wrap.
+    /// The cells are flowed independently and then merged by vertical position, so a row is as tall
+    /// as its tallest cell and short cells simply leave whitespace beneath them. That is what makes
+    /// a parallel text readable across: line *n* of the original and line *n* of the translation
+    /// share a line box, however differently the two languages wrap.
+    ///
+    /// Merging on `top` rather than on line *index* is what lets a cell keep its internal structure
+    /// (#251): a cell whose first block is a heading is taller at the top than its neighbour, and
+    /// zipping by index would silently pull the translation up to sit beside the wrong line.
     ///
     /// The character cursor advances cell by cell in source order, so a source anchor taken inside
     /// a row still maps back to the character it came from (ADR-INKREAD-0012).
-    ///
-    /// A row taller than the page splits at a line boundary like any other content, and because
-    /// every cell contributes to the same line boxes, the split keeps the columns aligned.
-    #[allow(clippy::too_many_arguments)]
     fn add_row(
         &mut self,
-        cells: &[Vec<Inline>],
-        size: f32,
-        bold_all: bool,
-        italic_all: bool,
-        align: Align,
+        cells: &[Vec<Block>],
         block: usize,
         cursor: &mut usize,
         m: &dyn Metrics,
+        images: &dyn ImageSizer,
     ) {
         if cells.is_empty() {
             return;
         }
         let n = cells.len() as f32;
         let gutter = self.opts.gutter();
-        let measure = self.opts.content_w();
         // Cells share the measure equally, the gutters coming out of it. A row of so many cells
         // that none has a usable measure is laid out as a single column instead: unreadably narrow
         // columns are worse than the interleaving this replaced.
-        let cell_w = ((measure - gutter * (n - 1.0)) / n).max(1.0);
-        if cell_w < MIN_CELL_EM * size {
+        let cell_w = ((self.measure - gutter * (n - 1.0)) / n).max(1.0);
+        if cell_w < MIN_CELL_EM * self.opts.font_px {
             for cell in cells {
-                self.add_paragraph(
-                    cell, size, 0.0, 0.0, bold_all, italic_all, align, block, cursor, m,
-                );
+                self.add_cell_blocks(cell, block, cursor, m, images);
             }
             return;
         }
-        let mut columns: Vec<Vec<Vec<PlacedRun>>> = Vec::with_capacity(cells.len());
+        // Cells lay out block by block rather than in keep-runs: the row already places each of
+        // its segments as one unit, which keeps together everything a run inside a cell could have
+        // asked for.
+        let mut cells_segments: Vec<Vec<Flow>> = Vec::with_capacity(cells.len());
+        let mut trailing_gap = 0.0f32;
         for (index, cell) in cells.iter().enumerate() {
-            let mut lines = break_lines(
-                cell, size, 0.0, 0.0, cell_w, bold_all, italic_all, block, cursor, m, self.hyph,
-            );
-            let last = lines.len();
+            let mut sub = Pager::cell(self.opts, self.hyph, cell_w);
+            sub.add_cell_blocks(cell, block, cursor, m, images);
+            let (mut segments, trailing) = sub.into_segments();
             let dx = index as f32 * (cell_w + gutter);
-            for (i, runs) in lines.iter_mut().enumerate() {
-                align_line(runs, align, cell_w, i + 1 == last, m);
-                for run in runs.iter_mut() {
+            for line in segments.iter_mut().flatten() {
+                for run in &mut line.runs {
                     run.x += dx;
                 }
+                if let Some(image) = &mut line.image {
+                    image.x += dx.round() as i32;
+                }
+                // A rule or an image inside a cell spans that cell, not the page.
+                line.column_x += dx;
             }
-            columns.push(lines);
+            trailing_gap = trailing_gap.max(trailing);
+            cells_segments.push(segments);
         }
-        let line_h = size * self.opts.line_spacing;
-        let rows = columns.iter().map(Vec::len).max().unwrap_or(0);
-        for i in 0..rows {
-            let runs: Vec<PlacedRun> = columns
-                .iter()
-                .filter_map(|c| c.get(i))
-                .flat_map(|l| l.iter().cloned())
-                .collect();
-            self.emit(runs, line_h, false);
+        // A forced break inside any cell breaks the whole row there, so the cells stay level across
+        // it — that correspondence is the only reason a row is laid out side by side at all.
+        let stages = row_stages(cells_segments);
+        let mut placed = false;
+        for lines in stages {
+            // Scaled to the text, not a fixed half-pixel: two cells can differ by a default block
+            // margin (a list item's, say) and still be the one line the reader sees.
+            let lines = merge_cell_flows(lines, self.opts.font_px * 0.25);
+            if lines.is_empty() {
+                continue;
+            }
+            if placed {
+                self.force_break();
+            }
+            placed = true;
+            let tallest = flow_height(&lines);
+            self.emit_flow(lines, tallest);
         }
+        self.gap(trailing_gap);
     }
 
     /// Lay out a list item with a hanging marker and indented body.
@@ -863,7 +1353,7 @@ impl<'o> Pager<'o> {
             size,
             indent,
             indent,
-            self.opts.content_w(),
+            self.measure,
             bold,
             italic,
             block,
@@ -906,8 +1396,9 @@ impl<'o> Pager<'o> {
 
     /// Emit an illustration as a line of its own.
     fn add_image(&mut self, image: PlacedImage) {
+        self.flush_gap();
         let height = image.height as f32;
-        if self.cursor_y + height > self.opts.content_h() && !self.current.is_empty() {
+        if self.cursor_y + height > self.page_h && !self.current.is_empty() {
             self.break_page();
         }
         let top = self.cursor_y;
@@ -918,15 +1409,11 @@ impl<'o> Pager<'o> {
             rule: false,
             image: Some(image),
             column_x: 0.0,
+            column_w: self.measure,
+            keep_with_prev: self.keep_lines && self.kept_one,
         });
+        self.kept_one = true;
         self.cursor_y += height;
-    }
-
-    /// Emit a horizontal-rule line occupying a small vertical slot.
-    fn add_rule(&mut self, gap: f32) {
-        self.gap(gap);
-        self.emit(Vec::new(), gap.max(2.0), true);
-        self.gap(gap);
     }
 }
 
@@ -1294,3 +1781,7 @@ fn hyphenate_fit<'w>(
 #[cfg(test)]
 #[path = "layout_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "style_layout_tests.rs"]
+mod style_tests;

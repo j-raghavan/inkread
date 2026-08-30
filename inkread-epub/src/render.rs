@@ -641,12 +641,13 @@ pub fn render_page_with_images(
             continue;
         }
         if line.rule {
-            // A hairline rule across the content width, vertically centred in the line slot. On a
-            // two-column page it spans only its own column (#194) — a rule running across the
-            // gutter would read as a divider between the columns rather than within one.
+            // A hairline rule across its own column, vertically centred in the line slot. The line
+            // carries both the column's origin and its width, so a rule spans one column of a
+            // two-column page (#194) and one cell of a table row (#251) — running it across the
+            // gutter would read as a divider between columns rather than within one.
             let y = (margin + line.top + line.height * 0.5).round() as i32;
             let x0 = (margin + line.column_x).round() as i32;
-            let x1 = (margin + line.column_x + opts.column_width()).round() as i32;
+            let x1 = (margin + line.column_x + line.column_w).round() as i32;
             for x in x0..x1 {
                 canvas.blend(x, y, 0.6);
             }
@@ -1467,6 +1468,7 @@ mod tests {
         let blocks = [Block::Image {
             src: "plate.png".into(),
             alt: String::new(),
+            style: crate::css::BlockStyle::default(),
         }];
         crate::layout::paginate_with_images(
             &blocks,

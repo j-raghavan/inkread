@@ -24,7 +24,7 @@ pub mod measure;
 pub mod render;
 mod transcode;
 pub use content::{parse_blocks, parse_blocks_with, Block, Inline, TextRun};
-pub use css::{BlockStyle, Stylesheet};
+pub use css::{BlockStyle, Length, PageBreak, Stylesheet};
 pub use img::ImageError;
 pub use layout::{
     paginate, paginate_upto, paginate_with, paginate_with_images, Align, Hyphenator, ImageSizer,
@@ -339,7 +339,7 @@ mod tests {
     /// A minimal store-only (no compression) ZIP writer — enough for rbook to open the fixture
     /// without pulling the `zip` crate into the test. Emits local-file headers + the central
     /// directory + end-of-central-directory, with a real CRC-32 per entry.
-    fn write_zip(out: &mut Vec<u8>, files: &[(&str, Vec<u8>)]) {
+    pub(crate) fn write_zip(out: &mut Vec<u8>, files: &[(&str, Vec<u8>)]) {
         struct Central {
             name: String,
             crc: u32,
@@ -635,3 +635,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "seam_tests.rs"]
+mod seam_tests;
