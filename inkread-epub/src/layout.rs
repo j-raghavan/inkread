@@ -1064,10 +1064,14 @@ impl<'o> Pager<'o> {
     ) {
         let indent = self.opts.font_px * 1.2;
         let style = block.style();
-        let size = match block {
-            Block::Heading { level, .. } => self.opts.font_px * heading_scale(*level),
-            _ => self.opts.font_px,
-        };
+        // The book's own size if it declared one, else inkread's typography for the kind.
+        let size = style.font_size.map_or_else(
+            || match block {
+                Block::Heading { level, .. } => self.opts.font_px * heading_scale(*level),
+                _ => self.opts.font_px,
+            },
+            |l| l.px(self.opts.font_px),
+        );
         let (default_top, default_bottom) = self.default_margins(block);
         self.gap(Self::resolve_margin(style.margin_top, default_top, size));
         // `page-break-inside: avoid`, carried down to the lines this block is about to emit.

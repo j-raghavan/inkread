@@ -724,3 +724,67 @@ mod css_to_page {
         );
     }
 }
+
+// ── A book's own heading size (#251) ──────────────────────────────────────────────────────────
+
+mod declared_font_size {
+    use super::*;
+
+    /// inkread scales a heading by level; a book that states a size overrides that, which is the
+    /// difference between a heading it designed and one we imposed.
+    #[test]
+    fn a_declared_size_beats_inkreads_heading_scale() {
+        let heading = |style: BlockStyle| {
+            let blocks = [Block::Heading {
+                level: 3,
+                content: vec![Inline::Run(TextRun {
+                    text: "H".to_string(),
+                    bold: false,
+                    italic: false,
+                    href: None,
+                })],
+                style,
+            }];
+            paginate(&blocks, &LayoutOpts::new(1200.0, 1600.0, 20.0), &Mono)[0].lines[0].runs[0]
+                .size_px
+        };
+        let scaled = heading(BlockStyle::default());
+        let declared = heading(BlockStyle {
+            font_size: Some(Length::Em(1.0)),
+            ..BlockStyle::default()
+        });
+        assert!(scaled > declared, "h3 defaults to 1.3x the body ({scaled})");
+        assert_eq!(declared, 20.0, "1em is the body size");
+    }
+
+    /// And a declared `em` margin on that block resolves against the size the book set, not the
+    /// size inkread would have chosen.
+    #[test]
+    fn a_margin_resolves_against_the_declared_size() {
+        let gap = |font_size: Option<Length>| {
+            let blocks = [
+                para("a", BlockStyle::default()),
+                Block::Heading {
+                    level: 3,
+                    content: vec![Inline::Run(TextRun {
+                        text: "H".to_string(),
+                        bold: false,
+                        italic: false,
+                        href: None,
+                    })],
+                    style: BlockStyle {
+                        font_size,
+                        margin_top: Some(Length::Em(1.0)),
+                        ..BlockStyle::default()
+                    },
+                },
+            ];
+            let t = line_tops(&blocks, &LayoutOpts::new(1200.0, 1600.0, 20.0));
+            t[1] - t[0]
+        };
+        assert!(
+            gap(None) > gap(Some(Length::Em(1.0))),
+            "1em against a 1.3x heading is more than 1em against a body-sized one",
+        );
+    }
+}

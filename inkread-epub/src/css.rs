@@ -104,6 +104,17 @@ pub struct BlockStyle {
     /// `font-weight`: `Some(true)` for bold-ish (`bold`/`bolder`/`600`+), `Some(false)` for
     /// normal-ish (`normal`/`lighter`/`500`-).
     pub bold: Option<bool>,
+    /// `font-size`, resolved against the body size (#251).
+    ///
+    /// A book that sizes its own headings — `h3 { font-size: 1em }` for a heading set at body size,
+    /// bold only — was rendered at inkread's own heading scale instead, which is the difference
+    /// between a heading it designed and one we imposed.
+    ///
+    /// Inherited, like the other text properties, but *not compounded*: a nested `em` resolves
+    /// against the body size rather than its parent's computed size. Compounding would need a
+    /// resolved size threaded down the walk, which is the box tree ADR-INKREAD-0007 declined; books
+    /// size headings directly far more often than they nest scales.
+    pub font_size: Option<Length>,
     /// `font-style`: `Some(true)` for `italic`/`oblique`, `Some(false)` for `normal` (#170).
     ///
     /// Italic already rendered from `<i>`, `<em>` and `<cite>`; what was missing was the CSS. A book
@@ -141,6 +152,7 @@ impl BlockStyle {
             && self.indent.is_none()
             && self.bold.is_none()
             && self.italic.is_none()
+            && self.font_size.is_none()
             && self.margin_top.is_none()
             && self.margin_bottom.is_none()
             && self.break_before.is_none()
@@ -162,6 +174,7 @@ impl BlockStyle {
             indent: self.indent,
             bold: self.bold,
             italic: self.italic,
+            font_size: self.font_size,
             ..BlockStyle::default()
         }
     }
@@ -184,6 +197,9 @@ impl BlockStyle {
         }
         if higher.italic.is_some() {
             self.italic = higher.italic;
+        }
+        if higher.font_size.is_some() {
+            self.font_size = higher.font_size;
         }
         // `margin` is not an inherited property. Taking the container's would give every block it
         // wraps the container's own spacing — a `<div style="margin: 2em">` around a poem would put
@@ -215,6 +231,7 @@ impl BlockStyle {
             "text-indent" => self.indent = Some(!is_zero_length(&value)),
             "font-weight" => self.bold = parse_font_weight(&value).or(self.bold),
             "font-style" => self.italic = parse_font_style(&value).or(self.italic),
+            "font-size" => self.font_size = parse_font_size(&value).or(self.font_size),
             "margin-top" => self.margin_top = parse_length(&value).or(self.margin_top),
             "margin-bottom" => self.margin_bottom = parse_length(&value).or(self.margin_bottom),
             "page-break-before" | "break-before" => {
@@ -516,8 +533,30 @@ fn parse_length(value: &str) -> Option<Length> {
 fn parse_page_break(value: &str) -> Option<PageBreak> {
     match value {
         "always" | "page" | "left" | "right" | "recto" | "verso" => Some(PageBreak::Always),
-        "avoid" | "avoid-page" => Some(PageBreak::Avoid),
+        // `never` is not CSS — the valid keywords are `auto`/`always`/`avoid` and the page sides —
+        // but books write it, meaning `avoid` unmistakably, and reading it that way costs nothing.
+        "avoid" | "avoid-page" | "never" => Some(PageBreak::Avoid),
         "auto" | "column" | "region" | "avoid-column" | "avoid-region" => Some(PageBreak::Auto),
+        _ => None,
+    }
+}
+
+/// `font-size` → a [`Length`] against the body size (#251).
+///
+/// Percentages are accepted here though [`parse_length`] rejects them: a percentage font size is a
+/// fraction of the parent's size, which is a length this module *has*, unlike the containing
+/// block's width a percentage margin would need. The absolute keywords (`small`, `x-large`, …) and
+/// the relative ones (`larger`, `smaller`) are not honoured — a book that uses them is asking for a
+/// scale inkread's own typography already supplies.
+fn parse_font_size(value: &str) -> Option<Length> {
+    if let Some(pct) = value.strip_suffix('%') {
+        let n: f32 = pct.trim().parse().ok()?;
+        return (n.is_finite() && n > 0.0).then_some(Length::Em(n / 100.0));
+    }
+    match parse_length(value) {
+        // A zero font size would erase the text; the book cannot mean that.
+        Some(Length::Em(n)) if n > 0.0 => Some(Length::Em(n)),
+        Some(Length::Px(n)) if n > 0.0 => Some(Length::Px(n)),
         _ => None,
     }
 }

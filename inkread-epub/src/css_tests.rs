@@ -737,3 +737,74 @@ fn a_truncated_media_block_is_survivable() {
     );
     assert_eq!(st.indent, Some(false));
 }
+
+// ── font-size (#251) ──────────────────────────────────────────────────────────────────────────
+
+/// A book that sizes its own headings must get the size it asked for, not inkread's heading scale.
+/// The #251 reporter's book sets `h3 { font-size: 1.0em; font-weight: bold }` — a heading at body
+/// size, distinguished by weight alone.
+#[test]
+fn a_declared_font_size_is_honoured() {
+    assert_eq!(
+        styled("h3 { font-size: 1em }", "<h3 data-t>x</h3>").font_size,
+        Some(Length::Em(1.0)),
+    );
+    assert_eq!(
+        styled("h2 { font-size: 1.3em }", "<h2 data-t>x</h2>").font_size,
+        Some(Length::Em(1.3)),
+    );
+    assert_eq!(
+        styled("p { font-size: 12px }", "<p data-t>x</p>").font_size,
+        Some(Length::Px(12.0)),
+    );
+}
+
+/// A percentage font size is a fraction of the parent's size — a length this module has, unlike the
+/// containing block's width a percentage *margin* would need.
+#[test]
+fn a_percentage_font_size_is_a_fraction_of_the_body() {
+    assert_eq!(
+        styled("p { font-size: 120% }", "<p data-t>x</p>").font_size,
+        Some(Length::Em(1.2)),
+    );
+    assert_eq!(
+        styled("p { margin-top: 120% }", "<p data-t>x</p>").margin_top,
+        None,
+        "a percentage margin still declares nothing",
+    );
+}
+
+/// Nothing that would erase the text, and no keyword scale we would only be guessing at.
+#[test]
+fn unusable_font_sizes_declare_nothing() {
+    for value in ["0", "0em", "-2em", "larger", "x-large", "inherit"] {
+        assert_eq!(
+            styled(&format!("p {{ font-size: {value} }}"), "<p data-t>x</p>").font_size,
+            None,
+            "{value} should declare nothing",
+        );
+    }
+}
+
+/// `font-size` inherits, like the other text properties.
+#[test]
+fn font_size_inherits_from_a_container() {
+    let container = BlockStyle {
+        font_size: Some(Length::Em(1.4)),
+        ..BlockStyle::default()
+    };
+    assert_eq!(
+        container.overlaid_with(&BlockStyle::default()).font_size,
+        Some(Length::Em(1.4)),
+    );
+}
+
+/// `never` is not CSS, but books write it and mean `avoid` unmistakably — the #251 reporter's own
+/// stylesheet says `h3 { page-break-after: never }`.
+#[test]
+fn a_page_break_of_never_reads_as_avoid() {
+    assert_eq!(
+        styled("h3 { page-break-after: never }", "<h3 data-t>x</h3>").break_after,
+        Some(PageBreak::Avoid),
+    );
+}
