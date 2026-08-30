@@ -14,9 +14,11 @@
 //!
 //! Selector matching is [`simplecss`]'s, not ours: it handles descendant/child/sibling combinators,
 //! ids, attribute selectors and specificity ordering. Pseudo-classes it delegates back to us, and
-//! we answer only `:first-child`, `:last-child`, `:only-child` and `:lang()`; anything else matches
-//! nothing. What stays inkread's is the *policy* — which properties are honoured, which of them
-//! inherit, and what their values mean.
+//! of those it can express we answer `:first-child` and `:lang()`; the rest are interaction states
+//! with no meaning in a paginated reader. `:last-child` and `:nth-child()` it cannot express at
+//! all, so a rule using one is dropped — a real gap, and the reason a book's last-stanza spacing
+//! may not arrive. What stays inkread's is the *policy* — which properties are honoured, which of
+//! them inherit, and what their values mean.
 
 use ego_tree::NodeRef;
 use scraper::node::Node;
@@ -262,13 +264,14 @@ impl Stylesheet {
 
     /// Append another source after this one, so later sources win ties at equal specificity.
     pub fn add(&mut self, css: &str) {
+        let css = flatten_media(css);
         if css.trim().is_empty() {
             return;
         }
         if !self.css.is_empty() {
             self.css.push('\n');
         }
-        self.css.push_str(css);
+        self.css.push_str(&css);
     }
 
     /// True when the book declared no CSS at all.
@@ -282,6 +285,82 @@ impl Stylesheet {
     pub(crate) fn source(&self) -> &str {
         &self.css
     }
+}
+
+/// Lift the rules inside a screen-applicable `@media` block out to the top level, and drop the ones
+/// meant for another medium (#251).
+///
+/// The selector engine skips at-rules wholesale, so a book that wraps its body styling in
+/// `@media screen { … }` — which a great deal of Calibre and KindleGen output does — declared
+/// nothing at all. Flattening beats teaching the engine media queries: inkread renders to exactly
+/// one medium, so a query is not a condition to evaluate but a question of whether the block is
+/// addressed to us.
+///
+/// A query naming `print`, `speech`, or a vendor medium (`amzn-kf8`, `amzn-mobi`) is not; anything
+/// else — `screen`, `all`, a bare feature query, no query at all — is. Other at-rules
+/// (`@font-face`, `@page`, `@import`) pass through untouched for the engine to skip as before.
+fn flatten_media(css: &str) -> String {
+    if !css.contains("@media") {
+        return css.to_string();
+    }
+    // Comments are stripped first so a commented-out `@media` cannot be flattened into live rules.
+    let source = strip_comments(css);
+    let mut out = String::with_capacity(source.len());
+    let mut rest = source.as_str();
+    while let Some(at) = rest.find("@media") {
+        out.push_str(&rest[..at]);
+        let after = &rest[at + "@media".len()..];
+        let Some(open) = after.find('{') else {
+            break; // Truncated at-rule: nothing left to lift.
+        };
+        let query = &after[..open];
+        let body = &after[open + 1..];
+        let Some(end) = matching_brace(body) else {
+            break;
+        };
+        if media_applies(query) {
+            out.push_str(&body[..end]);
+        }
+        rest = &body[end + 1..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Offset of the `}` closing a block whose opening `{` has already been consumed.
+fn matching_brace(body: &str) -> Option<usize> {
+    let mut depth = 0usize;
+    for (i, c) in body.char_indices() {
+        match c {
+            '{' => depth += 1,
+            '}' if depth == 0 => return Some(i),
+            '}' => depth -= 1,
+            _ => {}
+        }
+    }
+    None
+}
+
+/// True when a media query addresses a reflowing screen reader.
+fn media_applies(query: &str) -> bool {
+    const NOT_OURS: &[&str] = &["print", "speech", "aural", "braille", "embossed", "amzn-"];
+    let q = query.to_ascii_lowercase();
+    !NOT_OURS.iter().any(|m| q.contains(m))
+}
+
+/// Remove `/* … */` comments. Unterminated comments run to the end, as CSS says.
+fn strip_comments(css: &str) -> String {
+    let mut out = String::with_capacity(css.len());
+    let mut rest = css;
+    while let Some(start) = rest.find("/*") {
+        out.push_str(&rest[..start]);
+        match rest[start + 2..].find("*/") {
+            Some(end) => rest = &rest[start + 2 + end + 2..],
+            None => return out,
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 /// Resolve the declared style for `el`: every matching rule folded in specificity order, then the

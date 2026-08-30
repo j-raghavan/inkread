@@ -411,7 +411,16 @@ fn keep_run_end(blocks: &[Block], i: usize) -> usize {
     end
 }
 
+/// A run of laid-out lines, positioned relative to its own origin.
+///
+/// Named because the row machinery below nests it two deep in two different orders — cells of
+/// segments going in, stages of cells coming out — and three anonymous `Vec` levels are a puzzle
+/// where two named ones are not.
+type Flow = Vec<LayoutLine>;
+
 /// Cut a row's cells into the *stages* a forced break divides it into (#251).
+///
+/// `cells[cell][segment]` in, `stages[stage][cell]` out.
 ///
 /// A cell that forced a break came back already cut, but a cell that did not came back whole — and
 /// letting it run on while its neighbour started a new page is what loses the correspondence a
@@ -422,10 +431,10 @@ fn keep_run_end(blocks: &[Block], i: usize) -> usize {
 /// segments, so a canto whose translation runs longer still keeps its opposite number level with
 /// it rather than opening a near-empty page between them.
 ///
-/// Only a segment a cell's *own* break ends pins a boundary; a cell whose content merely continues
-/// is carried across, never pinning one. Returns one `Vec` of per-cell flows per stage, each
-/// rebased to that stage's origin.
-fn row_stages(cells: Vec<Vec<Vec<LayoutLine>>>) -> Vec<Vec<Vec<LayoutLine>>> {
+/// Worked example — two cells; A breaks after its first stanza at y=100, B runs straight through to
+/// y=180. `heights = [100]`: stage 0 is A's stanza beside B's lines above 100, and stage 1 is A's
+/// remainder beside B's lines from 100 on, each re-based to its own origin.
+fn row_stages(cells: Vec<Vec<Flow>>) -> Vec<Vec<Flow>> {
     let count = cells.iter().map(Vec::len).max().unwrap_or(0);
     if count <= 1 {
         return if count == 0 {
@@ -434,41 +443,19 @@ fn row_stages(cells: Vec<Vec<Vec<LayoutLine>>>) -> Vec<Vec<Vec<LayoutLine>>> {
             vec![cells.into_iter().flatten().collect()]
         };
     }
-    // Stage `s` is as tall as the tallest segment ended by a break — a cell's last segment ends at
-    // the row's end, not at a break, so it pins nothing.
-    let mut heights = vec![0.0f32; count];
-    for cell in &cells {
-        for (s, segment) in cell.iter().enumerate().take(cell.len().saturating_sub(1)) {
-            heights[s] = heights[s].max(flow_height(segment));
-        }
-    }
-
-    let mut stages: Vec<Vec<Vec<LayoutLine>>> = vec![Vec::new(); count];
+    let heights = stage_heights(&cells, count);
+    let mut stages: Vec<Vec<Flow>> = vec![Vec::new(); count];
     for cell in cells {
         let Some(last) = cell.len().checked_sub(1) else {
             continue;
         };
         for (s, segment) in cell.into_iter().enumerate() {
             if s < last {
+                // Pinned by the cell's own break: it is this stage, whole.
                 stages[s].push(segment);
-                continue;
-            }
-            // The cell's trailing flow: carried across the remaining stage boundaries, so a cell
-            // with no break of its own still breaks where the row does.
-            let mut stage = s;
-            let mut base = 0.0;
-            let mut carried: Vec<Vec<LayoutLine>> = vec![Vec::new(); count - s];
-            for mut line in segment {
-                while stage + 1 < count && line.top - base >= heights[stage] {
-                    base += heights[stage];
-                    stage += 1;
-                }
-                line.top -= base;
-                carried[stage - s].push(line);
-            }
-            for (offset, lines) in carried.into_iter().enumerate() {
-                if !lines.is_empty() {
-                    stages[s + offset].push(lines);
+            } else {
+                for (offset, lines) in carry_across(segment, &heights, s, count) {
+                    stages[offset].push(lines);
                 }
             }
         }
@@ -476,9 +463,49 @@ fn row_stages(cells: Vec<Vec<Vec<LayoutLine>>>) -> Vec<Vec<Vec<LayoutLine>>> {
     stages
 }
 
+/// How tall each stage is: the tallest segment a cell's *own* break ends there.
+///
+/// A cell's last segment ends at the row's end rather than at a break, so it pins nothing — it is
+/// carried across the boundaries the other cells set. That asymmetry is what makes the boundaries
+/// well defined instead of circular.
+fn stage_heights(cells: &[Vec<Flow>], count: usize) -> Vec<f32> {
+    let mut heights = vec![0.0f32; count];
+    for cell in cells {
+        for (s, segment) in cell.iter().enumerate().take(cell.len().saturating_sub(1)) {
+            heights[s] = heights[s].max(flow_height(segment));
+        }
+    }
+    heights
+}
+
+/// Cut a cell's trailing flow at the stage boundaries it did not itself ask for, so a cell with no
+/// break of its own still breaks where the row does. Yields `(stage, lines)`, each re-based to that
+/// stage's origin; empty stages are skipped.
+fn carry_across(segment: Flow, heights: &[f32], from: usize, count: usize) -> Vec<(usize, Flow)> {
+    let mut carried: Vec<Flow> = vec![Vec::new(); count - from];
+    let mut stage = from;
+    let mut base = 0.0;
+    for mut line in segment {
+        // A line starting at or past the boundary belongs to the next stage. `stage` strictly
+        // increases and is bounded by `count`, so this terminates even where a boundary is zero.
+        while stage + 1 < count && line.top - base >= heights[stage] {
+            base += heights[stage];
+            stage += 1;
+        }
+        line.top -= base;
+        carried[stage - from].push(line);
+    }
+    carried
+        .into_iter()
+        .enumerate()
+        .filter(|(_, lines)| !lines.is_empty())
+        .map(|(offset, lines)| (from + offset, lines))
+        .collect()
+}
+
 /// The height a flow occupies: the bottom of its lowest line. Gaps still pending at the flow's
 /// trailing edge are deliberately excluded — they belong to whatever comes next.
-fn flow_height(lines: &[LayoutLine]) -> f32 {
+fn flow_height(lines: &Flow) -> f32 {
     lines.iter().map(|l| l.top + l.height).fold(0.0, f32::max)
 }
 
@@ -499,12 +526,12 @@ fn flow_height(lines: &[LayoutLine]) -> f32 {
 /// genuinely sit at different positions, and stay in separate line boxes. That is the honest
 /// outcome: there is no shared line to share. It does mean such a row is not a single paging unit
 /// throughout, so a page break can fall between two lines the cells did not agree on anyway.
-fn merge_cell_flows(flows: Vec<Vec<LayoutLine>>, same_line: f32) -> Vec<LayoutLine> {
-    let mut lines: Vec<LayoutLine> = flows.into_iter().flatten().collect();
+fn merge_cell_flows(flows: Vec<Flow>, same_line: f32) -> Flow {
+    let mut lines: Flow = flows.into_iter().flatten().collect();
     // Stable, so cells stay in source order within a line box and `x` runs left to right.
     lines.sort_by(|a, b| a.top.total_cmp(&b.top));
 
-    let mut out: Vec<LayoutLine> = Vec::with_capacity(lines.len());
+    let mut out: Flow = Vec::with_capacity(lines.len());
     for line in lines {
         let plain = !line.rule && line.image.is_none();
         match out.last_mut() {
@@ -795,7 +822,7 @@ impl<'o> Pager<'o> {
     /// The flow is kept whole when it fits on a page of its own; when it is taller than a page it
     /// splits at a line boundary, and because all of a row's cells are merged into one `top`-ordered
     /// stream before they get here, that split keeps the columns aligned.
-    fn emit_flow(&mut self, lines: Vec<LayoutLine>, total_h: f32) {
+    fn emit_flow(&mut self, lines: Flow, total_h: f32) {
         if lines.is_empty() {
             self.cursor_y += total_h;
             return;
@@ -844,8 +871,8 @@ impl<'o> Pager<'o> {
     /// unpaged pager never breaks on overflow, so ordinary content comes back as a single segment.
     /// The trailing gap is handed back rather than folded into the height because it is the *next*
     /// block's business: only there can it collapse against what actually follows, or a page edge.
-    fn into_segments(self) -> (Vec<Vec<LayoutLine>>, f32) {
-        let mut segments: Vec<Vec<LayoutLine>> = self.pages.into_iter().map(|p| p.lines).collect();
+    fn into_segments(self) -> (Vec<Flow>, f32) {
+        let mut segments: Vec<Flow> = self.pages.into_iter().map(|p| p.lines).collect();
         segments.push(self.current);
         (segments, self.pending_gap)
     }
@@ -866,7 +893,7 @@ impl<'o> Pager<'o> {
     /// Take back the trailing run of lines the page may not break inside, so the break can fall at
     /// its head instead. Gives back nothing when the group would empty the page: a group taller
     /// than a page cannot be kept whole, and moving it would only loop.
-    fn take_kept_group(&mut self) -> Vec<LayoutLine> {
+    fn take_kept_group(&mut self) -> Flow {
         let head = self
             .current
             .iter()
@@ -1253,7 +1280,7 @@ impl<'o> Pager<'o> {
         // Cells lay out block by block rather than in keep-runs: the row already places each of
         // its segments as one unit, which keeps together everything a run inside a cell could have
         // asked for.
-        let mut cells_segments: Vec<Vec<Vec<LayoutLine>>> = Vec::with_capacity(cells.len());
+        let mut cells_segments: Vec<Vec<Flow>> = Vec::with_capacity(cells.len());
         let mut trailing_gap = 0.0f32;
         for (index, cell) in cells.iter().enumerate() {
             let mut sub = Pager::cell(self.opts, self.hyph, cell_w);
@@ -1750,3 +1777,7 @@ fn hyphenate_fit<'w>(
 #[cfg(test)]
 #[path = "layout_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "style_layout_tests.rs"]
+mod style_tests;

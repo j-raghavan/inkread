@@ -654,3 +654,86 @@ fn breaks_do_not_inherit_from_a_container() {
     assert_eq!(inner.break_before, None);
     assert_eq!(inner.break_inside, None);
 }
+
+// ── @media (#251) ─────────────────────────────────────────────────────────────────────────────
+
+/// A great deal of Calibre/KindleGen output wraps its body styling in `@media screen`. The selector
+/// engine skips at-rules, so before this the book declared nothing at all.
+#[test]
+fn rules_inside_a_screen_media_block_apply() {
+    let st = styled(
+        "@media screen { p { margin: 2em 0; text-align: center } }",
+        "<p data-t>x</p>",
+    );
+    assert_eq!(st.margin_top, Some(Length::Em(2.0)));
+    assert_eq!(st.align, Some(Align::Center));
+}
+
+#[test]
+fn a_media_block_for_another_medium_is_dropped() {
+    for medium in ["print", "speech", "amzn-kf8"] {
+        let st = styled(
+            &format!("@media {medium} {{ p {{ text-align: center }} }}"),
+            "<p data-t>x</p>",
+        );
+        assert_eq!(st.align, None, "{medium} is not our medium");
+    }
+}
+
+/// `all` and a bare feature query address us as much as `screen` does.
+#[test]
+fn all_and_feature_queries_apply() {
+    for query in ["all", "(min-width: 200px)", "screen and (min-width: 200px)"] {
+        let st = styled(
+            &format!("@media {query} {{ p {{ text-align: center }} }}"),
+            "<p data-t>x</p>",
+        );
+        assert_eq!(st.align, Some(Align::Center), "{query} should apply");
+    }
+}
+
+/// Rules on either side of a media block keep their place, and a later one still wins the tie.
+#[test]
+fn flattening_preserves_source_order() {
+    let st = styled(
+        "p { text-align: left } @media screen { p { text-align: center } } p { text-indent: 0 }",
+        "<p data-t>x</p>",
+    );
+    assert_eq!(st.align, Some(Align::Center), "the media rule came later");
+    assert_eq!(
+        st.indent,
+        Some(false),
+        "and the rule after it still applies"
+    );
+}
+
+/// A commented-out media block must not be flattened into live rules.
+#[test]
+fn a_commented_out_media_block_stays_dead() {
+    let st = styled(
+        "/* @media screen { p { text-align: center } } */ p { text-indent: 0 }",
+        "<p data-t>x</p>",
+    );
+    assert_eq!(st.align, None);
+    assert_eq!(st.indent, Some(false));
+}
+
+/// Other at-rules are none of this function's business and must survive it untouched.
+#[test]
+fn other_at_rules_pass_through() {
+    let st = styled(
+        "@font-face { font-family: X; src: url(x.ttf) } @media screen { p { text-align: right } }",
+        "<p data-t>x</p>",
+    );
+    assert_eq!(st.align, Some(Align::Right));
+}
+
+/// A truncated block must not panic or swallow the rest of the sheet's parseable prefix.
+#[test]
+fn a_truncated_media_block_is_survivable() {
+    let st = styled(
+        "p { text-indent: 0 } @media screen { p { text-align:",
+        "<p data-t>x</p>",
+    );
+    assert_eq!(st.indent, Some(false));
+}
