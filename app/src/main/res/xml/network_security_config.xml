@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Network security policy.
+
+  The base config keeps cleartext permitted, and has to: a calibre content server or a Calibre-Web
+  instance on the LAN is `http://192.168.1.20:8080`, and self-signed TLS on a home server is worse
+  than none. This file cannot narrow that to the private ranges — `<domain>` matches a name or an
+  exact literal, and there is no way to write "RFC 1918" in it — so the actual rule ("cleartext only
+  to a local host") lives in `HttpFetch.isCleartextAllowed`, where an address can be classified, and
+  is covered by `CleartextPolicyTest`.
+
+  What this file *can* do is pin the hosts inkread ships, so they are HTTPS-only by platform
+  enforcement rather than by our own predicate being correct. `api.github.com` is the self-updater
+  (ADR-INKREAD-0014), which installs a signed APK — the one request where a downgrade would be worth
+  mounting. `en.wiktionary.org` is the opt-in dictionary fallback (RR12 / D4).
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true" />
+
+    <domain-config cleartextTrafficPermitted="false">
+        <domain includeSubdomains="true">github.com</domain>
+        <domain includeSubdomains="true">githubusercontent.com</domain>
+        <domain includeSubdomains="true">wiktionary.org</domain>
+    </domain-config>
+</network-security-config>

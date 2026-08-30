@@ -208,6 +208,10 @@ impl<'a> Cursor<'a> {
 }
 
 #[cfg(test)]
+#[path = "codec_property_tests.rs"]
+mod property_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 

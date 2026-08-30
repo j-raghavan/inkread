@@ -31,6 +31,23 @@ run "fmt --check"      cargo fmt --all --check
 run "clippy -D warnings" cargo clippy --all -- -D warnings
 run "test --workspace" cargo test --workspace
 
+# The pdfium render tests SKIP when no libpdfium is bound, and a skip still passes — so a green
+# suite can silently be missing a thousand-line file. Harmless for `cargo test`; not harmless for
+# `cargo llvm-cov`, where it drops the workspace figure by ~5 points and looks like a real
+# regression. Warn rather than fail: a contributor without the library is expected (CONTRIBUTING).
+# 2>&1, not 2>/dev/null: the skip notices are `eprintln!`, so they arrive on stderr — the
+# obvious redirect discards exactly the lines being counted and reports a clean run.
+skips=$(cargo test -p reader-core document::fixed::pdf -- --nocapture 2>&1 | grep -c "SKIP" || true)
+if [ "${skips:-0}" -gt 0 ]; then
+  printf '── pdfium render tests\n'
+  printf '   ! %s pdfium test(s) SKIPPED — set PDFIUM_DYNAMIC_LIB_PATH to exercise the render path.\n' "$skips"
+  printf '     Coverage measured now will read far below CI. See CONTRIBUTING.md.\n'
+else
+  printf '── pdfium render tests\n   ✓ executing (no skips)\n'
+fi
+run "IR-7 vendor-neutral core" ./scripts/check-vendor-neutral.sh
+run "dependency licenses"      ./scripts/check-licenses.sh
+
 if [ "${1:-}" != "--fast" ]; then
   NDK=$(ls -d "$HOME"/Library/Android/sdk/ndk/* 2>/dev/null | sort -V | tail -1)
   if [ -n "$NDK" ]; then

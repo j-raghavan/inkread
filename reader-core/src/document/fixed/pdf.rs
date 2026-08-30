@@ -1,4 +1,4 @@
-//! `PdfBackend` — the M0 fixed-layout PDF [`Document`] over `pdfium-render` (RR5, Amendment 4).
+//! `PdfBackend` — the fixed-layout PDF [`Document`] over `pdfium-render` (RR5, Amendment 4).
 //!
 //! ## Single-copy render with explicit channel order (Fork 4 / Amendment 3)
 //! The page is rendered **directly into the borrowed [`PixelBuffer`]**: a `PdfBitmap` wraps
@@ -67,7 +67,12 @@ fn pdfium() -> CoreResult<&'static Pdfium> {
     let for_bitmap = bind_pdfium()?;
     let _ = PDFIUM.set(Pdfium::new(for_pdfium));
     let _ = BINDINGS.set(Box::leak(for_bitmap));
-    Ok(PDFIUM.get().expect("pdfium set above"))
+    // `set` returns Err only if a racing thread won, in which case `get` is Some either way, so
+    // this is not a reachable failure. It is still a typed error rather than an `expect`: this
+    // path is reachable from the JNI bridge, and RR21-FR3 says nothing unwinds across it.
+    PDFIUM
+        .get()
+        .ok_or_else(|| CoreError::BackendUnavailable("pdfium global init failed".into()))
 }
 
 /// The `&'static dyn PdfiumLibraryBindings` for the single-copy bitmap wrap (Fork 4).
@@ -126,12 +131,15 @@ fn simplify(points: &[(f32, f32)], min_dist: f32) -> Vec<(f32, f32)> {
         return points.to_vec();
     }
     let md2 = min_dist * min_dist;
-    let mut out = vec![points[0]];
+    // `last` is carried rather than re-read off the tail of `out`, which drops an infallible
+    // `unwrap` and one bounds check per point on a stroke that can run to thousands.
+    let mut last = points[0];
+    let mut out = vec![last];
     for &p in &points[1..points.len() - 1] {
-        let last = *out.last().unwrap();
         let (dx, dy) = (p.0 - last.0, p.1 - last.1);
         if dx * dx + dy * dy >= md2 {
             out.push(p);
+            last = p;
         }
     }
     out.push(points[points.len() - 1]);
@@ -153,7 +161,7 @@ fn chaikin(points: &[(f32, f32)], iterations: u8) -> Vec<(f32, f32)> {
             out.push((0.75 * p.0 + 0.25 * q.0, 0.75 * p.1 + 0.25 * q.1));
             out.push((0.25 * p.0 + 0.75 * q.0, 0.25 * p.1 + 0.75 * q.1));
         }
-        out.push(*pts.last().unwrap());
+        out.push(pts[pts.len() - 1]); // `pts.len() >= 3` guaranteed by the guard above
         pts = out;
     }
     pts

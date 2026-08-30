@@ -34,9 +34,12 @@ Closes #
 - [ ] `cargo test --workspace` — passes
 - [ ] `cargo llvm-cov --workspace` — coverage holds the RR17 gate
 - [ ] `./scripts/check-licenses.sh` — no new/unvetted dependency licenses
+- [ ] [`CHANGELOG.md`](../CHANGELOG.md) has an `Unreleased` line, if a user would notice this
+      (internal refactors and test-only changes don't need one)
 - [ ] The Rust core still builds **host-only** — no Android types leaked into `reader-core`,
       and `jni` is absent from its default dependency graph (RR1-AC3 / IR-7)
-- [ ] The core names **no vendor** — device/EPD/pen specifics stay in `app/` + the JNI bridge (IR-7)
+- [ ] `./scripts/check-vendor-neutral.sh` — the core names **no vendor**; device/EPD/pen
+      specifics stay in `app/` + the JNI bridge (IR-7)
 - [ ] Commits follow Conventional Commits (`type(scope): subject`) with **no AI/Co-Authored-By
       attribution**
 - [ ] No secrets, signing keys, `.env`, or private research material (decompiled APK/`.so`/jadx)

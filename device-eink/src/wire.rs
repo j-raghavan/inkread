@@ -194,15 +194,19 @@ pub fn decode_commands(bytes: &[u8]) -> Result<Vec<RefreshCommand>, WireError> {
 }
 
 #[cfg(test)]
+#[path = "wire_property_tests.rs"]
+mod property_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
     // ---------- Fork 3: capabilities ----------
 
     #[test]
-    fn caps_golden_bytes_supernote_baseline() {
+    fn caps_golden_bytes_flashing_epd() {
         // 12 flags, declaration order. baseline: eink=1, eink_full=0, ..., needs_resume=1.
-        let caps = DeviceCapabilities::supernote_baseline();
+        let caps = DeviceCapabilities::flashing_epd();
         let bytes = encode_capabilities(&caps);
         assert_eq!(
             bytes,
@@ -218,8 +222,8 @@ mod tests {
     #[test]
     fn caps_round_trip_all_profiles() {
         for caps in [
-            DeviceCapabilities::supernote_baseline(),
-            DeviceCapabilities::supernote_full(),
+            DeviceCapabilities::flashing_epd(),
+            DeviceCapabilities::controllable_epd(),
             DeviceCapabilities::desktop_mock(),
         ] {
             let bytes = encode_capabilities(&caps);
@@ -237,12 +241,12 @@ mod tests {
 
     #[test]
     fn caps_decode_ignores_trailing_bytes() {
-        let mut bytes = encode_capabilities(&DeviceCapabilities::supernote_full());
+        let mut bytes = encode_capabilities(&DeviceCapabilities::controllable_epd());
         bytes.push(0xFF); // unrecognized trailing byte beyond nflags
                           // Decoder reads only nflags flags, so trailing is ignored.
         assert_eq!(
             decode_capabilities(&bytes).unwrap(),
-            DeviceCapabilities::supernote_full()
+            DeviceCapabilities::controllable_epd()
         );
     }
 

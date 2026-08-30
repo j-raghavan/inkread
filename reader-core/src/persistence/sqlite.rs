@@ -316,7 +316,7 @@ mod tests {
         assert_eq!(store.load_position(&b).unwrap().unwrap().page_index, 5);
     }
 
-    // A resume_blob round-trips intact (the reserved M2 slot is wired end-to-end now).
+    // A resume_blob round-trips intact — the slot is wired end-to-end.
     #[test]
     fn resume_blob_round_trips() {
         let store = SqliteStore::open_in_memory().unwrap();

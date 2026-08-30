@@ -60,6 +60,11 @@ jobs:
           if cargo tree -p reader-core -e normal | grep -qw jni; then
             echo "::error::jni leaked into reader-core's default dependency graph"; exit 1
           fi
+      # The other half of IR-7: the core must not NAME a vendor either. The dependency check
+      # above catches `jni` leaking in; this catches a device assumption arriving as a comment
+      # or an API name, which is how `supernote_baseline` got onto the public API.
+      - name: Assert the core names no vendor (IR-7)
+        run: ./scripts/check-vendor-neutral.sh
 
   coverage:
     name: coverage (cargo-llvm-cov → Codecov)

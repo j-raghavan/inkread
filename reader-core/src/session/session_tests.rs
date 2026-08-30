@@ -59,7 +59,7 @@ fn gesture_code_round_trips() {
 
 #[test]
 fn next_and_prev_advance_and_clamp() {
-    let mut s = session(3, DeviceCapabilities::supernote_full());
+    let mut s = session(3, DeviceCapabilities::controllable_epd());
     assert_eq!(s.current_page(), 0);
     s.on_gesture(Gesture::PrevPage); // clamp at 0
     assert_eq!(s.current_page(), 0);
@@ -76,7 +76,7 @@ fn next_and_prev_advance_and_clamp() {
 fn page_turn_preserves_zoom_and_column_when_magnified() {
     // #52: a zoomed-in (fixed-layout) view keeps its zoom + horizontal column across a page turn,
     // landing at the TOP of the new page — instead of snapping to fit and forcing a re-zoom.
-    let mut s = session(3, DeviceCapabilities::supernote_full());
+    let mut s = session(3, DeviceCapabilities::controllable_epd());
     s.set_zoom(2.0, 0.5, 0.7); // 2× zoom, right-ish column, scrolled down
     s.on_gesture(Gesture::NextPage);
     assert_eq!(s.zoom(), 2.0, "zoom preserved across the turn");
@@ -88,7 +88,7 @@ fn page_turn_preserves_zoom_and_column_when_magnified() {
 fn page_turn_from_fit_resets_the_view() {
     // The fit case (zoom 1) keeps the clean reset: a stray pan is cleared so a non-magnified turn
     // always lands on a plain full-page fit.
-    let mut s = session(3, DeviceCapabilities::supernote_full());
+    let mut s = session(3, DeviceCapabilities::controllable_epd());
     s.set_zoom(1.0, 0.3, 0.3);
     s.on_gesture(Gesture::NextPage);
     assert_eq!(s.zoom(), 1.0);
@@ -138,7 +138,7 @@ fn reflow_toggle_drops_a_magnified_view_to_fit() {
     // fit render path (the magnified branch is uncached).
     let mut s = ReaderSession::with_document(
         Box::new(ReflowStub { pages: 3 }),
-        DeviceCapabilities::supernote_full(),
+        DeviceCapabilities::controllable_epd(),
         Viewport::new(100, 120, 226),
     );
     s.set_zoom(2.0, 0.5, 0.5);
@@ -151,7 +151,7 @@ fn reflow_toggle_drops_a_magnified_view_to_fit() {
 // Amendment 6 + RR3-AC1: gestures delegate to the policy so the promotion is consistent.
 #[test]
 fn gestures_drive_the_policy_promotion() {
-    let caps = DeviceCapabilities::supernote_full();
+    let caps = DeviceCapabilities::controllable_epd();
     let mut s = session(100, caps);
     let mut rec = MockDeviceRecorder::with_profile(caps);
     // Six forward turns => 5 Partial + (WaitForLast, Full).
@@ -174,7 +174,7 @@ fn gestures_drive_the_policy_promotion() {
 // drives the policy like a page turn.
 #[test]
 fn jump_to_page_clamps_and_drives_policy() {
-    let caps = DeviceCapabilities::supernote_full();
+    let caps = DeviceCapabilities::controllable_epd();
     let mut s = session(5, caps);
     let cmds = s.jump_to_page(3);
     assert_eq!(s.current_page(), 3);
@@ -196,7 +196,7 @@ fn jump_to_page_clamps_and_drives_policy() {
 // RR11-FR2: toc() passes through to the document.
 #[test]
 fn toc_passthrough() {
-    let s = session(3, DeviceCapabilities::supernote_full());
+    let s = session(3, DeviceCapabilities::controllable_epd());
     let toc = s.toc();
     assert_eq!(toc.len(), 1);
     assert_eq!(toc[0].title, "Stub Chapter");
@@ -205,7 +205,7 @@ fn toc_passthrough() {
 // RR11-AC1: jump_to_toc lands on a resolved target; an unresolved entry doesn't move.
 #[test]
 fn jump_to_toc_lands_on_target_or_stays() {
-    let caps = DeviceCapabilities::supernote_full();
+    let caps = DeviceCapabilities::controllable_epd();
     let mut s = session(10, caps);
     let entry = TocEntry {
         title: "Ch".into(),
@@ -228,7 +228,7 @@ fn jump_to_toc_lands_on_target_or_stays() {
 fn store_session(pages: usize, store: Arc<dyn ReaderStore>, book: BookId) -> ReaderSession {
     ReaderSession::with_document_and_store(
         Box::new(StubDoc { pages }),
-        DeviceCapabilities::supernote_full(),
+        DeviceCapabilities::controllable_epd(),
         Viewport::new(100, 120, 226),
         store,
         book,
@@ -323,7 +323,7 @@ impl Document for PinStub {
 fn pin_store_session(pages: usize, store: Arc<dyn ReaderStore>, book: BookId) -> ReaderSession {
     ReaderSession::with_document_and_store(
         Box::new(PinStub { pages }),
-        DeviceCapabilities::supernote_full(),
+        DeviceCapabilities::controllable_epd(),
         Viewport::new(100, 120, 226),
         store,
         book,
@@ -380,10 +380,10 @@ fn fixed_layout_position_stores_no_pin_and_resumes_by_page() {
     );
 }
 
-// A store-less session: saving is a no-op (M0 path stays green).
+// A store-less session: saving is a no-op.
 #[test]
 fn store_less_save_is_noop() {
-    let s = session(3, DeviceCapabilities::supernote_full());
+    let s = session(3, DeviceCapabilities::controllable_epd());
     assert!(s.save_position().is_ok());
 }
 
@@ -505,7 +505,7 @@ fn session_with_refresh_settings(settings: &[(SettingKey, SettingValue)]) -> Rea
 // RR24-FR3: the session's onTrimMemory hook trims the caches.
 #[test]
 fn on_trim_memory_clears_caches() {
-    let mut s = session(3, DeviceCapabilities::supernote_full());
+    let mut s = session(3, DeviceCapabilities::controllable_epd());
     s.caches()
         .cover()
         .insert(BookId::new("a").unwrap(), vec![0; 100]);
@@ -516,7 +516,7 @@ fn on_trim_memory_clears_caches() {
 
 #[test]
 fn render_rejects_mismatched_buffer() {
-    let mut s = session(1, DeviceCapabilities::supernote_full());
+    let mut s = session(1, DeviceCapabilities::controllable_epd());
     let mut wrong = vec![0u8; 10 * 10 * 4];
     let mut pb = PixelBuffer::from_rgba(&mut wrong, 10, 10).unwrap();
     assert!(matches!(
@@ -527,7 +527,7 @@ fn render_rejects_mismatched_buffer() {
 
 #[test]
 fn render_current_into_matching_buffer_ok() {
-    let mut s = session(1, DeviceCapabilities::supernote_full());
+    let mut s = session(1, DeviceCapabilities::controllable_epd());
     let mut buf = vec![0u8; 100 * 120 * 4];
     let mut pb = PixelBuffer::from_rgba(&mut buf, 100, 120).unwrap();
     assert!(s.render_current(&mut pb).is_ok());
@@ -584,7 +584,7 @@ fn text_selection_boxes_are_mapped_page_to_viewport() {
 
     let s = ReaderSession::with_document(
         Box::new(LetterboxDoc),
-        DeviceCapabilities::supernote_full(),
+        DeviceCapabilities::controllable_epd(),
         Viewport::new(1920, 2560, 226),
     );
     let sel = s.text_line_span(0, (0.1, 0.2), (0.8, 0.24));
@@ -640,7 +640,7 @@ fn render_cache_serves_revisits_and_invalidates_on_change() {
             pages: 3,
             renders: renders.clone(),
         }),
-        DeviceCapabilities::supernote_full(),
+        DeviceCapabilities::controllable_epd(),
         Viewport::new(100, 120, 226),
     );
     let mut buf = vec![0u8; 100 * 120 * 4];
@@ -696,7 +696,7 @@ fn render_cache_serves_revisits_and_invalidates_on_change() {
 
 #[test]
 fn basic_panel_session_collapses_to_full() {
-    let caps = DeviceCapabilities::supernote_baseline();
+    let caps = DeviceCapabilities::flashing_epd();
     let mut s = session(10, caps);
     let cmds = s.on_gesture(Gesture::NextPage);
     assert!(matches!(
@@ -827,13 +827,13 @@ fn draw(s: &mut ReaderSession, pts: &[(f32, f32)]) {
 fn ink_saves_and_reloads_across_sessions() {
     // RR7-AC1: a stroke written on a page reappears after reopen.
     let store: Arc<dyn InkStore> = Arc::new(MemInkStore::new());
-    let mut s = session(2, DeviceCapabilities::supernote_full());
+    let mut s = session(2, DeviceCapabilities::controllable_epd());
     s.attach_ink_store(Arc::clone(&store)).unwrap();
     draw(&mut s, &[(0.1, 0.1), (0.2, 0.2)]);
     assert_eq!(s.ink_strokes().len(), 1);
 
     // A fresh session over the same sidecar reloads the stroke.
-    let mut reopened = session(2, DeviceCapabilities::supernote_full());
+    let mut reopened = session(2, DeviceCapabilities::controllable_epd());
     reopened.attach_ink_store(store).unwrap();
     assert_eq!(reopened.ink_strokes().len(), 1, "stroke reloaded on reopen");
 }
@@ -842,7 +842,7 @@ fn ink_saves_and_reloads_across_sessions() {
 fn ink_pages_lists_inked_pages_sorted() {
     // Drives the annotations list: ink on pages 0, 3, 1 (out of order) → sorted [0, 1, 3].
     let store: Arc<dyn InkStore> = Arc::new(MemInkStore::new());
-    let mut s = session(5, DeviceCapabilities::supernote_full());
+    let mut s = session(5, DeviceCapabilities::controllable_epd());
     s.attach_ink_store(store).unwrap();
     assert!(s.ink_pages().unwrap().is_empty(), "no ink yet");
 
@@ -858,7 +858,7 @@ fn ink_pages_lists_inked_pages_sorted() {
 #[test]
 fn ink_undo_redo_autosaves_to_store() {
     let store: Arc<dyn InkStore> = Arc::new(MemInkStore::new());
-    let mut s = session(1, DeviceCapabilities::supernote_full());
+    let mut s = session(1, DeviceCapabilities::controllable_epd());
     s.attach_ink_store(Arc::clone(&store)).unwrap();
     draw(&mut s, &[(0.1, 0.1), (0.2, 0.2)]);
     assert_eq!(store.pages_with_ink().unwrap(), vec![0]);
@@ -879,7 +879,7 @@ fn ink_undo_redo_autosaves_to_store() {
 #[test]
 fn page_turn_loads_each_pages_own_ink() {
     let store: Arc<dyn InkStore> = Arc::new(MemInkStore::new());
-    let mut s = session(3, DeviceCapabilities::supernote_full());
+    let mut s = session(3, DeviceCapabilities::controllable_epd());
     s.attach_ink_store(store).unwrap();
     draw(&mut s, &[(0.1, 0.1), (0.2, 0.2)]); // page 0
 
@@ -898,7 +898,7 @@ fn page_turn_commits_an_in_progress_stroke() {
     // #50: a page turn taken mid-stroke (pen still down) used to drop the pending stroke. It must
     // instead be committed to the OUTGOING page and persisted, then reload on return.
     let store: Arc<dyn InkStore> = Arc::new(MemInkStore::new());
-    let mut s = session(2, DeviceCapabilities::supernote_full());
+    let mut s = session(2, DeviceCapabilities::controllable_epd());
     s.attach_ink_store(Arc::clone(&store)).unwrap();
 
     begin_pending(&mut s, &[(0.1, 0.1), (0.2, 0.2)]); // pen down on page 0, not finished
@@ -933,7 +933,7 @@ fn page_turn_commits_an_in_progress_erase() {
     // #50 (eraser parity): an erase applied but not yet ended (ink_end_stroke) is the symmetric
     // "disappearing edit" — a page turn must persist it, not let the erased stroke reappear.
     let store: Arc<dyn InkStore> = Arc::new(MemInkStore::new());
-    let mut s = session(2, DeviceCapabilities::supernote_full());
+    let mut s = session(2, DeviceCapabilities::controllable_epd());
     s.attach_ink_store(Arc::clone(&store)).unwrap();
     draw(&mut s, &[(0.10, 0.10), (0.20, 0.10)]); // page 0: a committed stroke
     assert_eq!(store.pages_with_ink().unwrap(), vec![0]);
@@ -966,7 +966,7 @@ fn page_turn_proceeds_when_flush_exhausts_its_retries() {
     // #50 / RR20 degrade-safely: if every retry fails (e.g. ENOSPC), navigation must still proceed
     // — never block, never panic — even though the outgoing page's ink is lost.
     let store = Arc::new(FlakyStore::new(u64::MAX)); // never succeeds
-    let mut s = session(2, DeviceCapabilities::supernote_full());
+    let mut s = session(2, DeviceCapabilities::controllable_epd());
     s.attach_ink_store(Arc::clone(&store) as Arc<dyn InkStore>)
         .unwrap();
 
@@ -988,7 +988,7 @@ fn deferred_mode_page_turn_flush_retries_transient_io() {
     // AC#3: in DEFERRED mode the outgoing page's pending edits are flushed on the turn, riding out
     // transient IO with the retry (the immediate-mode retry is covered separately).
     let store = Arc::new(FlakyStore::new(2)); // first 2 saves fail, 3rd (in budget) succeeds
-    let mut s = session(2, DeviceCapabilities::supernote_full());
+    let mut s = session(2, DeviceCapabilities::controllable_epd());
     s.attach_ink_store(Arc::clone(&store) as Arc<dyn InkStore>)
         .unwrap();
     s.set_autosave_deferred(true).unwrap();
@@ -1009,7 +1009,7 @@ fn clean_page_turn_does_not_resave_immediate_mode() {
     // A page turn with no pending stroke and no in-progress erase must not rewrite the outgoing page
     // (immediate mode already saved it per stroke-end) — avoids a needless e-ink-relevant write.
     let store = Arc::new(FlakyStore::new(0)); // never fails; counts save_page calls
-    let mut s = session(2, DeviceCapabilities::supernote_full());
+    let mut s = session(2, DeviceCapabilities::controllable_epd());
     s.attach_ink_store(Arc::clone(&store) as Arc<dyn InkStore>)
         .unwrap();
     draw(&mut s, &[(0.1, 0.1), (0.2, 0.2)]); // exactly one save (immediate stroke-end)
@@ -1027,7 +1027,7 @@ fn clean_page_turn_does_not_resave_immediate_mode() {
 fn page_turn_commits_an_in_progress_highlighter_stroke() {
     // Highlighter is_ink()==true, so it shares the pen commit-on-turn path — pin it explicitly.
     let store: Arc<dyn InkStore> = Arc::new(MemInkStore::new());
-    let mut s = session(2, DeviceCapabilities::supernote_full());
+    let mut s = session(2, DeviceCapabilities::controllable_epd());
     s.attach_ink_store(Arc::clone(&store)).unwrap();
     s.ink_begin_stroke(Tool::Highlighter, InkColor::BLACK, 0.03, 0)
         .unwrap();
@@ -1047,7 +1047,7 @@ fn page_turn_commits_an_in_progress_highlighter_stroke() {
 fn page_turn_preserves_committed_strokes_plus_the_pending_one() {
     // A page with several committed strokes AND a pending one must reload ALL of them.
     let store: Arc<dyn InkStore> = Arc::new(MemInkStore::new());
-    let mut s = session(2, DeviceCapabilities::supernote_full());
+    let mut s = session(2, DeviceCapabilities::controllable_epd());
     s.attach_ink_store(Arc::clone(&store)).unwrap();
     draw(&mut s, &[(0.1, 0.1), (0.2, 0.2)]);
     draw(&mut s, &[(0.3, 0.3), (0.4, 0.4)]);
@@ -1070,12 +1070,12 @@ fn committed_stroke_survives_a_simulated_crash() {
     let tmp = TempDir::new();
     let doc = tmp.path.join("book.pdf");
 
-    let mut s = session(1, DeviceCapabilities::supernote_full());
+    let mut s = session(1, DeviceCapabilities::controllable_epd());
     s.attach_ink_store(fs_ink(&doc)).unwrap();
     draw(&mut s, &[(0.1, 0.1), (0.2, 0.2)]);
     drop(s); // ReaderSession has no Drop/flush, so this is exactly a hard kill: nothing flushed here
 
-    let mut reopened = session(1, DeviceCapabilities::supernote_full());
+    let mut reopened = session(1, DeviceCapabilities::controllable_epd());
     reopened.attach_ink_store(fs_ink(&doc)).unwrap();
     assert_eq!(
         reopened.ink_strokes().len(),
@@ -1089,7 +1089,7 @@ fn page_turn_flush_retries_transient_io() {
     // #50: the outgoing-page flush retries a transient IO error so a momentary hiccup doesn't drop
     // the stroke. FlakyStore fails the first 2 saves; the 3rd (within the retry budget) persists.
     let store = Arc::new(FlakyStore::new(2));
-    let mut s = session(2, DeviceCapabilities::supernote_full());
+    let mut s = session(2, DeviceCapabilities::controllable_epd());
     s.attach_ink_store(Arc::clone(&store) as Arc<dyn InkStore>)
         .unwrap();
 
@@ -1106,7 +1106,7 @@ fn page_turn_flush_retries_transient_io() {
 #[test]
 fn eraser_removes_strokes_and_autosaves() {
     let store: Arc<dyn InkStore> = Arc::new(MemInkStore::new());
-    let mut s = session(1, DeviceCapabilities::supernote_full());
+    let mut s = session(1, DeviceCapabilities::controllable_epd());
     s.attach_ink_store(Arc::clone(&store)).unwrap();
     draw(&mut s, &[(0.10, 0.10), (0.20, 0.10)]);
 
@@ -1126,7 +1126,7 @@ fn deferred_autosave_holds_writes_until_an_explicit_flush() {
     // The power knob: in deferred mode a stroke is held in memory and not fsynced on stroke-end;
     // the shell's debounced save_ink flushes it. (Default immediate mode is covered above.)
     let store: Arc<dyn InkStore> = Arc::new(MemInkStore::new());
-    let mut s = session(1, DeviceCapabilities::supernote_full());
+    let mut s = session(1, DeviceCapabilities::controllable_epd());
     s.attach_ink_store(Arc::clone(&store)).unwrap();
     s.set_autosave_deferred(true).unwrap();
 
@@ -1150,7 +1150,7 @@ fn deferred_autosave_flushes_before_a_page_turn() {
     // A page turn must flush the outgoing page's pending edits, or deferred ink would be lost when
     // the layer is swapped for the new page.
     let store: Arc<dyn InkStore> = Arc::new(MemInkStore::new());
-    let mut s = session(2, DeviceCapabilities::supernote_full());
+    let mut s = session(2, DeviceCapabilities::controllable_epd());
     s.attach_ink_store(Arc::clone(&store)).unwrap();
     s.set_autosave_deferred(true).unwrap();
 
@@ -1169,7 +1169,7 @@ fn deferred_autosave_flushes_before_a_page_turn() {
 #[test]
 fn disabling_deferred_autosave_flushes_pending_edits() {
     let store: Arc<dyn InkStore> = Arc::new(MemInkStore::new());
-    let mut s = session(1, DeviceCapabilities::supernote_full());
+    let mut s = session(1, DeviceCapabilities::controllable_epd());
     s.attach_ink_store(Arc::clone(&store)).unwrap();
     s.set_autosave_deferred(true).unwrap();
     draw(&mut s, &[(0.1, 0.1), (0.2, 0.2)]);
@@ -1181,7 +1181,7 @@ fn disabling_deferred_autosave_flushes_pending_edits() {
 
 #[test]
 fn ink_add_points_batches_a_whole_stroke() {
-    let mut s = session(1, DeviceCapabilities::supernote_full());
+    let mut s = session(1, DeviceCapabilities::controllable_epd());
     s.ink_begin_stroke(Tool::Pen, InkColor::BLACK, 0.01, 0)
         .unwrap();
     // Packed [x0,y0,x1,y1,x2,y2]; the trailing odd float is ignored.
@@ -1209,7 +1209,7 @@ fn validate_export_path_contains_the_write_target() {
 #[test]
 fn ink_works_in_memory_without_a_store() {
     // A store-less session still captures and edits ink (just no persistence) — no panic.
-    let mut s = session(1, DeviceCapabilities::supernote_full());
+    let mut s = session(1, DeviceCapabilities::controllable_epd());
     draw(&mut s, &[(0.1, 0.1), (0.2, 0.2)]);
     assert_eq!(s.ink_strokes().len(), 1);
     assert!(s.ink_undo().unwrap());
@@ -1222,11 +1222,11 @@ fn ink_works_in_memory_without_a_store() {
 fn ink_round_trips_through_fsinkstore_on_a_virgin_path() {
     let tmp = TempDir::new();
     let doc = tmp.path.join("book.pdf"); // nothing exists beside it
-    let mut s = session(2, DeviceCapabilities::supernote_full());
+    let mut s = session(2, DeviceCapabilities::controllable_epd());
     s.attach_ink_store(fs_ink(&doc)).unwrap();
     draw(&mut s, &[(0.1, 0.1), (0.2, 0.2)]);
 
-    let mut reopened = session(2, DeviceCapabilities::supernote_full());
+    let mut reopened = session(2, DeviceCapabilities::controllable_epd());
     reopened.attach_ink_store(fs_ink(&doc)).unwrap();
     assert_eq!(
         reopened.ink_strokes().len(),
@@ -1243,13 +1243,13 @@ fn corrupt_landing_page_still_opens_and_quarantines() {
     let doc = tmp.path.join("book.pdf");
     let paths = SidecarPaths::for_document(&doc);
     {
-        let mut s = session(2, DeviceCapabilities::supernote_full());
+        let mut s = session(2, DeviceCapabilities::controllable_epd());
         s.attach_ink_store(fs_ink(&doc)).unwrap();
         draw(&mut s, &[(0.1, 0.1), (0.2, 0.2)]);
     }
     std::fs::write(paths.page_file(0), b"NOTINKBIN").unwrap(); // corrupt page 0
 
-    let mut reopened = session(2, DeviceCapabilities::supernote_full());
+    let mut reopened = session(2, DeviceCapabilities::controllable_epd());
     assert!(
         reopened.attach_ink_store(fs_ink(&doc)).is_ok(),
         "document still opens despite a corrupt page"
@@ -1260,7 +1260,7 @@ fn corrupt_landing_page_still_opens_and_quarantines() {
 // RR20-FR1: a failed autosave surfaces an error but must NOT lose the in-memory stroke (retryable).
 #[test]
 fn autosave_failure_surfaces_but_keeps_strokes_in_memory() {
-    let mut s = session(1, DeviceCapabilities::supernote_full());
+    let mut s = session(1, DeviceCapabilities::controllable_epd());
     s.attach_ink_store(Arc::new(FailingStore)).unwrap();
     s.ink_begin_stroke(Tool::Pen, InkColor::BLACK, 0.01, 0)
         .unwrap();
@@ -1276,7 +1276,7 @@ fn autosave_failure_surfaces_but_keeps_strokes_in_memory() {
 // RR10-FR6/AC3 wiring: attach stamps the sidecar with the document's identity.
 #[test]
 fn attach_stamps_and_matches_document_identity() {
-    let mut s = session(3, DeviceCapabilities::supernote_full());
+    let mut s = session(3, DeviceCapabilities::controllable_epd());
     let id = DocIdentity::from_bytes(b"the-doc-bytes", &DocumentMetadata::default());
     s.identity = Some(id.clone()); // (test reaches into the private field; open_pdf sets it for real)
     let store: Arc<dyn InkStore> = Arc::new(MemInkStore::new());
@@ -1292,7 +1292,7 @@ fn attach_stamps_and_matches_document_identity() {
 #[test]
 fn empty_erase_does_not_rewrite_the_page() {
     let store: Arc<dyn InkStore> = Arc::new(MemInkStore::new());
-    let mut s = session(1, DeviceCapabilities::supernote_full());
+    let mut s = session(1, DeviceCapabilities::controllable_epd());
     s.attach_ink_store(Arc::clone(&store)).unwrap();
     draw(&mut s, &[(0.1, 0.1), (0.2, 0.1)]);
     // an eraser gesture that hits nothing must not rewrite/remove the page
@@ -1306,7 +1306,7 @@ fn empty_erase_does_not_rewrite_the_page() {
 
 #[test]
 fn eraser_rejects_non_positive_radius() {
-    let mut s = session(1, DeviceCapabilities::supernote_full());
+    let mut s = session(1, DeviceCapabilities::controllable_epd());
     assert!(s
         .ink_begin_stroke(Tool::Eraser, InkColor::BLACK, 0.0, 0)
         .is_err());
@@ -1325,7 +1325,7 @@ fn centre_box() -> Vec<(f32, f32)> {
 #[test]
 fn lasso_select_and_move_persists_and_undoes() {
     let store: Arc<dyn InkStore> = Arc::new(MemInkStore::new());
-    let mut s = session(1, DeviceCapabilities::supernote_full());
+    let mut s = session(1, DeviceCapabilities::controllable_epd());
     s.attach_ink_store(Arc::clone(&store)).unwrap();
     draw(&mut s, &[(0.45, 0.45), (0.55, 0.55)]);
     let sel = s.ink_select_in_polygon(&centre_box(), 0).unwrap(); // Smart
@@ -1343,7 +1343,7 @@ fn lasso_select_and_move_persists_and_undoes() {
 #[test]
 fn lasso_delete_persists_and_leaves_others() {
     let store: Arc<dyn InkStore> = Arc::new(MemInkStore::new());
-    let mut s = session(1, DeviceCapabilities::supernote_full());
+    let mut s = session(1, DeviceCapabilities::controllable_epd());
     s.attach_ink_store(Arc::clone(&store)).unwrap();
     draw(&mut s, &[(0.45, 0.45), (0.55, 0.55)]); // inside the box
     draw(&mut s, &[(0.05, 0.05), (0.08, 0.08)]); // outside
@@ -1359,7 +1359,7 @@ fn lasso_delete_persists_and_leaves_others() {
 
 #[test]
 fn lasso_copy_paste_duplicates_on_the_same_page() {
-    let mut s = session(1, DeviceCapabilities::supernote_full());
+    let mut s = session(1, DeviceCapabilities::controllable_epd());
     s.attach_ink_store(Arc::new(MemInkStore::new())).unwrap();
     draw(&mut s, &[(0.45, 0.45), (0.55, 0.55)]);
     let sel = s.ink_select_all();
@@ -1374,7 +1374,7 @@ fn lasso_copy_paste_duplicates_on_the_same_page() {
 fn lasso_cut_then_paste_moves_strokes_across_pages() {
     // NeoReader's cross-page clipboard: cut on page 0, paste on page 1.
     let store: Arc<dyn InkStore> = Arc::new(MemInkStore::new());
-    let mut s = session(2, DeviceCapabilities::supernote_full());
+    let mut s = session(2, DeviceCapabilities::controllable_epd());
     s.attach_ink_store(Arc::clone(&store)).unwrap();
     draw(&mut s, &[(0.45, 0.45), (0.55, 0.55)]); // page 0
     let sel = s.ink_select_all();
@@ -1396,7 +1396,7 @@ fn lasso_cut_then_paste_moves_strokes_across_pages() {
 
 #[test]
 fn lasso_rejects_an_unknown_mode_code() {
-    let s = session(1, DeviceCapabilities::supernote_full());
+    let s = session(1, DeviceCapabilities::controllable_epd());
     assert!(s.ink_select_in_polygon(&centre_box(), 9).is_err());
 }
 
@@ -1423,7 +1423,7 @@ impl Document for GrayDoc {
 
 #[test]
 fn contrast_step_clamps_and_round_trips() {
-    let mut s = session(1, DeviceCapabilities::supernote_full());
+    let mut s = session(1, DeviceCapabilities::controllable_epd());
     assert_eq!(s.contrast(), 0);
     s.set_contrast(99); // clamps to MAX
     assert_eq!(s.contrast(), crate::render::contrast::MAX_CONTRAST_STEP);
@@ -1435,7 +1435,7 @@ fn contrast_step_clamps_and_round_trips() {
 fn contrast_darkens_a_gray_page_after_render() {
     let mut s = ReaderSession::with_document(
         Box::new(GrayDoc(80)), // below mid-gray → contrast pushes it darker
-        DeviceCapabilities::supernote_full(),
+        DeviceCapabilities::controllable_epd(),
         Viewport::new(8, 8, 226),
     );
     let mut bytes = vec![0u8; 8 * 8 * 4];
@@ -1464,7 +1464,7 @@ fn contrast_darkens_a_gray_page_after_render() {
 fn night_mode_inverts_the_page() {
     let mut s = ReaderSession::with_document(
         Box::new(GrayDoc(80)),
-        DeviceCapabilities::supernote_full(),
+        DeviceCapabilities::controllable_epd(),
         Viewport::new(8, 8, 226),
     );
     let mut bytes = vec![0u8; 8 * 8 * 4];
@@ -1485,7 +1485,7 @@ fn night_mode_inverts_the_page() {
 
 #[test]
 fn prefetch_warms_the_next_page_without_changing_the_displayed_one() {
-    let mut s = session(3, DeviceCapabilities::supernote_full());
+    let mut s = session(3, DeviceCapabilities::controllable_epd());
     let mut bytes = vec![0u8; 100 * 120 * 4];
     {
         let mut buf = PixelBuffer::from_rgba(&mut bytes, 100, 120).unwrap();
@@ -1519,7 +1519,7 @@ fn prefetch_warms_the_next_page_without_changing_the_displayed_one() {
 // These count paginations rather than timing them: the cost is what the reports are about, and a
 // wall clock would mean something different on every machine.
 
-const SAMPLE_EPUB: &[u8] = include_bytes!("../tests/fixtures/sample.epub");
+const SAMPLE_EPUB: &[u8] = include_bytes!("../../tests/fixtures/sample.epub");
 
 fn reading_typography() -> Typography {
     Typography {
@@ -1535,7 +1535,7 @@ fn reading_typography() -> Typography {
 fn open_sample(store: Arc<dyn ReaderStore>, book: BookId, typography: Typography) -> ReaderSession {
     ReaderSession::open_epub_with_store(
         SAMPLE_EPUB.to_vec(),
-        DeviceCapabilities::supernote_full(),
+        DeviceCapabilities::controllable_epd(),
         Viewport {
             width: 400,
             height: 600,
@@ -1569,7 +1569,7 @@ fn setting_the_margin_repaginates_an_epub_through_the_session() {
 // nothing happened rather than pretending it did.
 #[test]
 fn setting_the_margin_reports_no_reflow_on_a_fixed_document() {
-    let mut s = session(3, DeviceCapabilities::supernote_full());
+    let mut s = session(3, DeviceCapabilities::controllable_epd());
     assert!(!s.set_margin(2));
 }
 
@@ -1690,7 +1690,7 @@ fn replacing_the_file_behind_a_book_id_invalidates_its_pagination() {
             bytes.extend_from_slice(b"\n<!-- different content -->");
             bytes
         },
-        DeviceCapabilities::supernote_full(),
+        DeviceCapabilities::controllable_epd(),
         Viewport {
             width: 400,
             height: 600,

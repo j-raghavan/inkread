@@ -1,8 +1,12 @@
-//! The `Document` trait — the M0 subset every format implements (RR5-FR2).
+//! The `Document` trait — what every format implements (RR5-FR2).
 //!
-//! M0 needs only metadata + page count + render-page (Amendment 4 / scope fence): no
-//! `text_runs`/`toc`/`search`/`hint_page`/`page_hash` (those are M1+). The PDF backend
-//! ([`fixed::PdfBackend`]) is the one implementation in M0.
+//! Three required methods, so a new backend is cheap to add: `page_count`, `metadata`, and
+//! `render_page`. Everything a reader expects beyond that — `toc`, `search_page`, `hint_page`,
+//! text runs for selection — is a **defaulted** method, so a format opts into what it can support
+//! and inherits a sane no-op for the rest (Amendment 4).
+//!
+//! Four backends implement it: [`fixed::PdfBackend`] and [`fixed::CbzBackend`] for
+//! fixed-layout, [`reflow::EpubBackend`] and [`plain::PlainBackend`] for reflowable text.
 
 pub mod fixed;
 pub mod format;
@@ -124,7 +128,7 @@ impl Default for Typography {
     }
 }
 
-/// Document metadata (title/author) — the M0 subset (RR5-FR2).
+/// Document metadata (title/author) (RR5-FR2).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DocumentMetadata {
     /// Document title, if present.
@@ -305,7 +309,7 @@ pub fn encode_search_wire(matches: &[SearchMatch]) -> Vec<u8> {
     out
 }
 
-/// The core trait every format implements (M0 subset).
+/// The core trait every format implements.
 ///
 /// Render targets a borrowed [`PixelBuffer`] (Fork 4); the backend white-fills before
 /// rasterizing (RR4-FR3) and resolves the channel order so the buffer ends up RGBA
@@ -685,6 +689,10 @@ pub trait Document {
         ))
     }
 }
+
+#[cfg(test)]
+#[path = "default_impl_tests.rs"]
+mod default_impl_tests;
 
 #[cfg(test)]
 mod tests {

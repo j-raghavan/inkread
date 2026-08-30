@@ -30,12 +30,6 @@ data class DeviceCapabilities(
 
     companion object {
         /**
-         * The honest Supernote M0 baseline: an e-ink panel without full refresh control
-         * (`einkFull = false`) — the core collapses to periodic full-screen refreshes
-         * (RR2-FR2 / RR3-AC3). M0 advertises this until the RR19-FR4b spike proves the
-         * fast path, at which point the adapter can advertise the fuller profile.
-         */
-        /**
          * An ordinary backlit display — no e-ink anywhere (#220).
          *
          * `eink = false` is the whole point: the core's refresh policy exists to hide EPD ghosting
@@ -59,6 +53,17 @@ data class DeviceCapabilities(
             needsRefreshAfterResume = false,
         )
 
+        /**
+         * The honest Supernote profile: an e-ink panel **without** refresh control
+         * (`einkFull = false`), so the core's policy collapses to periodic full-screen refreshes
+         * (RR2-FR2 / RR3-AC3).
+         *
+         * This is a settled fact about the platform, not a placeholder waiting on a spike. The
+         * RR19-FR4b spike ran and concluded that waveform selection and dirty-rect refresh are
+         * unreachable from a sideloaded app on this SoC — see `docs/EINK-LIMITS.md` and
+         * [dev.jraghavan.inkread.eink.SupernoteEinkAdapter]. Advertising anything fuller here would
+         * make the policy emit commands the adapter cannot honour.
+         */
         fun supernoteBaseline(): DeviceCapabilities = DeviceCapabilities(
             eink = true,
             einkFull = false,

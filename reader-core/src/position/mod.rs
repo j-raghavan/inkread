@@ -1,4 +1,4 @@
-//! `PinPosition` + `PageRange` — the reflow-stable position locator (RR6, M2).
+//! `PinPosition` + `PageRange` — the reflow-stable position locator (RR6).
 //!
 //! A reflowable document has no fixed page number: the same word lands on a different rendered page
 //! when the font size, margins, or viewport change. A [`PinPosition`] anchors to **content**, not
@@ -120,10 +120,19 @@ impl PinPosition {
         key
     }
 
-    /// Serialize to JSON (RR6-FR4). Infallible for this primitive-only shape.
+    /// Serialize to JSON (RR6-FR4).
+    ///
+    /// `serde_json` fails only on a `Serialize` impl that errors or a map with non-string keys.
+    /// This is a derived struct of integers, a `String` and a `Vec<i32>`, so neither is reachable
+    /// — the round-trip property test pins that across arbitrary values (RR6-AC1).
+    ///
+    /// It degrades rather than asserting, because the one production caller writes the result into
+    /// a book's `resume_blob` across the JNI bridge, and RR21-FR3 says nothing unwinds across it.
+    /// `{}` is not a position: [`Self::from_json`] rejects it as a corrupt locator, so the reader
+    /// opens at the start of the book instead of taking the process down.
     #[must_use]
     pub fn to_json(&self) -> String {
-        serde_json::to_string(self).expect("PinPosition serializes infallibly")
+        serde_json::to_string(self).unwrap_or_else(|_| "{}".to_string())
     }
 
     /// Parse from JSON, validating at the boundary (RR21-FR3): a malformed locator blob (e.g. a
@@ -187,6 +196,10 @@ fn pad_int(v: i32) -> String {
 fn pad_i64(v: i64) -> String {
     format!("{:0width$}", v + PIN_INT64_BIAS, width = PIN_INT64_WIDTH)
 }
+
+#[cfg(test)]
+#[path = "property_tests.rs"]
+mod property_tests;
 
 #[cfg(test)]
 mod tests {

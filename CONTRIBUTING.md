@@ -135,6 +135,7 @@ cargo clippy --all -- -D warnings    # lint — warnings are errors
 cargo test --workspace               # unit + property + golden-image tests (host)
 cargo llvm-cov --workspace           # coverage — must hold the RR17 gate
 ./scripts/check-licenses.sh          # every dep's SPDX license is AGPL-compatible
+./scripts/check-vendor-neutral.sh    # IR-7: the Rust core names no vendor
 ```
 
 Building the actual Android APK (only needed for device-facing changes):
@@ -150,10 +151,34 @@ sha256-verifies the pinned vendored `libpdfium.so`, stages the dictionary corpus
 
 ### A note on the PDF render tests
 
-The pdfium render tests **skip** unless `PDFIUM_DYNAMIC_LIB_PATH` points at a `libpdfium.so`. CI
-fetches the BSD bblanchon prebuilt and re-runs them for real, so the render path actually executes.
-Locally they skip cleanly — that's expected, not a failure. To run them yourself, set the env var to
-a downloaded `libpdfium.so`.
+The pdfium render tests **skip** unless `PDFIUM_DYNAMIC_LIB_PATH` points at a real pdfium library.
+CI fetches the BSD bblanchon prebuilt and re-runs them for real, so the render path actually
+executes. Locally they skip cleanly — that's expected for `cargo test`, not a failure.
+
+> **It is not harmless under `cargo llvm-cov`.** A skipped test still *passes*, so nothing tells you
+> it did not run, and `document/fixed/pdf.rs` is over a thousand lines — measuring coverage with the
+> library absent reads it at ~1% and drops the whole-workspace figure by about five points. If your
+> local coverage number is far below CI's, this is why. `scripts/gate.sh` warns when the tests are
+> skipping.
+
+To run them for real, download the prebuilt CI pins and point the variable at the **library file**:
+
+```bash
+ver=chromium/7881   # keep in step with .github/workflows/ci.yml
+# macOS arm64; use pdfium-linux-x64.tgz on Linux
+curl -sSL -o /tmp/pdfium.tgz \
+  "https://github.com/bblanchon/pdfium-binaries/releases/download/$ver/pdfium-mac-arm64.tgz"
+mkdir -p /tmp/pdfium && tar -xzf /tmp/pdfium.tgz -C /tmp/pdfium
+export PDFIUM_DYNAMIC_LIB_PATH=/tmp/pdfium/lib/libpdfium.dylib
+```
+
+Use that build specifically. A `libpdfium.dylib` from elsewhere — pypdfium2's Python wheel, for
+instance — can be the right architecture and still fail to bind, and the failure surfaces only as
+the same silent skip.
+
+Coverage also builds into its **own** target directory, `target/llvm-cov-target`. `cargo clean -p
+<crate>` cleans `target/debug` and leaves it untouched, so a stale report can list files that no
+longer exist. `cargo llvm-cov clean --workspace` is the one to use.
 
 ---
 
@@ -168,6 +193,10 @@ These come straight from [`CLAUDE.md`](./CLAUDE.md) and they're applied in revie
 - **Do what's asked — nothing more, nothing less.** Scope creep gets split into its own PR.
 - **Validate at the boundary; never panic across JNI** (RR21-FR3). The bridge catches panics and
   converts them to Java exceptions — keep `panic = "unwind"`.
+- **The core names no vendor** (IR-7). `reader-core` and `device-eink` speak capabilities and
+  `RefreshIntent`/`RefreshCommand`; device, EPD, and pen specifics live in the Kotlin adapter.
+  Say what the panel *can do*, not who made it — `scripts/check-vendor-neutral.sh` enforces it, and
+  a genuinely necessary mention is exempted with `IR-7-ALLOW` on the line.
 
 ---
 
@@ -180,6 +209,10 @@ These come straight from [`CLAUDE.md`](./CLAUDE.md) and they're applied in revie
 - Public items get doc comments. Reference the requirement they satisfy where it helps
   (`// RR5-FR1: …`).
 - New behaviour ships with a test. A bug fix ships with a regression test that fails before the fix.
+- A codec, a serializer, or an ordering gets a **property test** (`proptest`, a dev-dependency)
+  alongside its examples: round-trip losslessness, order totality, and — for anything decoding
+  bytes from disk or across JNI — totality over arbitrary and truncated input. See
+  `reader-core/src/position/property_tests.rs` for the house shape.
 - Prefer total functions and explicit error types at the system boundary; no `unwrap()` on
   untrusted input.
 
@@ -220,7 +253,10 @@ fix(reflow): clamp column width so RTL pages don't overflow
    [Commit Criteria](./CLAUDE.md#commit-criteria): no format errors, no clippy warnings, no type
    errors, tests pass, coverage holds, and the core still builds **host-only**.
 5. Reference the issue (`Closes #123`) and any requirement IDs (`RR…` / `ADR-…`) you implemented.
-6. CI runs the host gate, cross-checks the JNI bridge for the device target, lints commits, and
+6. Add a line to the **`## [Unreleased]`** section of [`CHANGELOG.md`](./CHANGELOG.md) for anything a
+   user would notice — a feature, a fix, a behaviour change. Internal refactors and test-only
+   changes don't need one.
+7. CI runs the host gate, cross-checks the JNI bridge for the device target, lints commits, and
    verifies the license manifest. Green CI + one maintainer approval merges.
 
 Small, well-scoped PRs get reviewed *fast*. A 2,000-line PR sits for a week — please don't.

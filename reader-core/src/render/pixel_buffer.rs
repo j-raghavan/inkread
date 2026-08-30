@@ -15,9 +15,9 @@
 //! order ([`CHANNEL_ORDER`]). This is the single source of truth for the BGRA↔RGBA
 //! mismatch and is pinned by a golden-image test.
 //!
-//! NOTE: when α<255 overlays land (M1b+ ink), the Android-locked bitmap is **premultiplied**
+//! NOTE: if α<255 overlays are ever composited here, the Android-locked bitmap is **premultiplied**
 //! alpha — compositing must account for that (tiny-skia expects premultiplied; pdfium emits
-//! straight alpha). M0 white-fills first (RR4-FR3) so α is always 255 and the distinction
+//! straight alpha). The render path white-fills first (RR4-FR3) so α is always 255 and the distinction
 //! is moot here.
 
 use crate::error::{CoreError, CoreResult};

@@ -2,7 +2,7 @@
 //!
 //! Revisiting a page at the same params (or redrawing after an overlay change) serves the
 //! stored buffer instead of re-rasterizing. The cache is a pure, host-tested data structure;
-//! its budget is governed by the session's `ResourceBudget` (RR24, M1a.5). Eviction is
+//! its budget is governed by the session's `ResourceBudget` (RR24). Eviction is
 //! **deterministic** — the least-recently-used entry goes first, with no dependence on
 //! `HashMap` iteration order (every access stamps a unique monotonic tick).
 

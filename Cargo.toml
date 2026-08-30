@@ -67,6 +67,12 @@ encoding_rs = "0.8"
 # inkread-update (ADR-INKREAD-0014): semver comparison of the installed version against the GitHub
 # release tag. Pure Rust, MIT/Apache (AGPL-compatible → auto-passes check-licenses.sh).
 semver = "1"
+# Property-based testing (RR6-AC1, RR17-FR3). A dev-dependency only — it never enters the cdylib.
+# MIT/Apache-2.0, as is its whole tree, so check-licenses.sh passes it. `default-features = false`
+# drops `rusty-fork`/`tempfile`: fork-per-case exists to survive a panicking case, and every
+# property here is over pure functions that return errors instead, so the forking harness would
+# only cost host test time.
+proptest = { version = "1", default-features = false, features = ["std"] }
 
 [profile.release]
 # A reader on a battery e-ink device: optimize for size + speed, strip symbols.

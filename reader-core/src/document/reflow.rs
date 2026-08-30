@@ -6,9 +6,12 @@
 //! behind a [`RefCell`] so the trait's `&self` render path can repaginate lazily. Each spine chapter
 //! starts a new page (book convention), which also anchors TOC targets to page indices.
 //!
-//! Supports open → paginate → render → navigate → TOC → **font-size** ([`Document::set_text_scale`]
-//! repaginates, preserving the chapter). `word_at`/`text_in_rect` (dictionary + selection on reflow
-//! text) remain follow-ups.
+//! Supports open → paginate → render → navigate → TOC → **font-size**
+//! ([`Document::set_text_scale`] repaginates, preserving the chapter), and the full text surface:
+//! [`Document::word_at`] for a dictionary tap, [`Document::text_in_rect`] and
+//! [`Document::text_line_span`] for selection, and [`Document::search_page`] for in-document search.
+//! All four resolve against the *reflowed* glyph positions, so they follow the text across a
+//! font-size or margin change rather than against the source layout.
 
 use std::cell::{Cell, Ref, RefCell};
 use std::collections::HashMap;
@@ -29,7 +32,7 @@ use crate::persistence::{PaginationCache, PaginationProgress};
 use crate::position::PinPosition;
 use crate::render::PixelBuffer;
 
-/// Base body font size in device pixels at scale `1.0` (Supernote-class panel). The user's text
+/// Base body font size in device pixels at scale `1.0` (tablet-class e-ink panel). The user's text
 /// scale multiplies this (RR2-FR5 font-size control).
 const BASE_FONT_PX: f32 = 56.0;
 

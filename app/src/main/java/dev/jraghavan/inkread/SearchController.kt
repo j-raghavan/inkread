@@ -3,7 +3,6 @@ package dev.jraghavan.inkread
 import android.app.Activity
 import android.app.AlertDialog
 import android.app.Dialog
-import android.graphics.Color
 import android.text.InputType
 import android.util.Log
 import android.view.Gravity

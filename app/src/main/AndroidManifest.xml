@@ -1,6 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- inkread M0 Android shell (RR1-FR2). Storage permission per RR22 (M1a) is intentionally
-     not requested yet for the M0 bring-up; M0 opens a path the user places on-device. -->
+<!-- The inkread Android shell (RR1-FR2): the UI, the EPD adapter, and the pen/touch path. All
+     device, panel, and vendor specifics live on this side of the JNI bridge — the Rust core never
+     names a vendor (IR-7), which `scripts/check-vendor-neutral.sh` enforces. -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <!-- Opt-in online dictionary fallback (Wiktionary) for non-bundled languages (RR12 / D4). -->
@@ -34,6 +35,11 @@
     </queries>
 
 
+    <!-- Cleartext is enabled for one reason: a calibre / Calibre-Web server on the LAN speaks http
+         (ADR-INKREAD-0016). The flag is application-wide and res/xml/network_security_config cannot
+         narrow it to the private ranges, so the real rule — cleartext only to a local host — is
+         enforced in HttpFetch.isCleartextAllowed and covered by CleartextPolicyTest. The config
+         pins the hosts we ship (GitHub for the updater, Wiktionary) to HTTPS. -->
     <application
         android:allowBackup="false"
         android:icon="@mipmap/ic_launcher"
@@ -41,6 +47,7 @@
         android:label="InkRead"
         android:supportsRtl="true"
         android:usesCleartextTraffic="true"
+        android:networkSecurityConfig="@xml/network_security_config"
         android:theme="@style/InkRead">
 
         <!-- Home screen + launcher: brand and entry points (Open / Library / Continue). -->

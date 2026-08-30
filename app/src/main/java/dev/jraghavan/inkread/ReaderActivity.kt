@@ -5,13 +5,10 @@ import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
-import android.graphics.drawable.GradientDrawable
 import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.Typeface
-import android.graphics.drawable.ColorDrawable
 import android.net.Uri
-import android.os.Environment
 import android.provider.Settings
 import android.os.Bundle
 import kotlin.math.ceil
@@ -26,14 +23,10 @@ import android.widget.Toast
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
-import android.view.Window
 import android.widget.FrameLayout
-import android.widget.LinearLayout
 import android.widget.TextView
 import dev.jraghavan.inkread.eink.EinkAdapter
-import java.net.HttpURLConnection
 import java.net.URL
-import org.json.JSONObject
 import dev.jraghavan.inkread.eink.DisplayAdapters
 import dev.jraghavan.inkread.eink.SupernoteInk
 import java.io.File
@@ -42,7 +35,7 @@ import java.nio.ByteOrder
 import java.util.concurrent.Executors
 
 /**
- * The M0/M1a reader Activity (RR1-FR2, RR21) — **DEVICE-UNVERIFIED**.
+ * The reader Activity (RR1-FR2, RR21) — device-verified on the Supernote family.
  *
  * Owns the [SurfaceView], drives the JNI round-trip (init → open → render → blit), and on a
  * tap forwards a [Gesture] to the core, then hands the returned [RefreshCommand] stream to
@@ -372,35 +365,30 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
     @Volatile private var currentDocPath: String? = null
     @Volatile private var requestedId: String? = null
 
-    private val bookmarkPaint = Paint().apply { color = Color.BLACK; style = Paint.Style.FILL; isAntiAlias = true }
-    private val bookmarkOutlinePaint = Paint().apply { color = Color.parseColor("#9E9E9E"); style = Paint.Style.STROKE; strokeWidth = 2f; isAntiAlias = true }
-    /** White halo drawn under the ribbon so it stays visible over a dark page region (e.g. a black
-     *  title band) — without it a black/gray ribbon vanishes on dark backgrounds. */
-    private val bookmarkHaloPaint = Paint().apply { color = Color.WHITE; style = Paint.Style.STROKE; strokeWidth = 5f; isAntiAlias = true }
-    /** Dashed box around the active lasso selection (ADR-INKREAD-0010). */
-    private val selectionPaint = Paint().apply {
-        color = Color.BLACK
-        style = Paint.Style.STROKE
-        strokeWidth = 2f
-        isAntiAlias = true
-        pathEffect = android.graphics.DashPathEffect(floatArrayOf(12f, 8f), 0f)
-    }
-    /** Filled square handles at the selection box corners (NeoReader frame 132). */
-    private val selectionHandlePaint = Paint().apply { color = Color.BLACK; style = Paint.Style.FILL; isAntiAlias = true }
-    /** Search-hit highlight: a light translucent fill so the matched text stays readable on e-ink. */
-    private val searchFillPaint = Paint().apply { color = Color.parseColor("#33000000"); style = Paint.Style.FILL; isAntiAlias = true }
-    /** A crisp outline around the active search hit (the one the reader is parked on). */
-    private val searchBoxPaint = Paint().apply { color = Color.BLACK; style = Paint.Style.STROKE; strokeWidth = 2f; isAntiAlias = true }
-    /** Small full-page thumbnail (from the fit render) for the zoom minimap; null until first render. */
-    private var fitThumb: Bitmap? = null
-    private var minimapActive = false
-    private var minimapThumbDrag = false
-    private val minimapBgPaint = Paint().apply { color = Color.WHITE; style = Paint.Style.FILL; isAntiAlias = true }
-    private val minimapCardStroke = Paint().apply { color = Color.parseColor("#BDBDBD"); style = Paint.Style.STROKE; strokeWidth = 1.5f; isAntiAlias = true }
-    private val minimapThumbStroke = Paint().apply { color = Color.parseColor("#E0E0E0"); style = Paint.Style.STROKE; strokeWidth = 1f; isAntiAlias = true }
-    private val minimapViewportFill = Paint().apply { color = Color.parseColor("#22000000"); style = Paint.Style.FILL; isAntiAlias = true }
-    private val minimapViewportPaint = Paint().apply { color = Color.BLACK; style = Paint.Style.STROKE; strokeWidth = 3f; isAntiAlias = true }
-    private val minimapGlyphPaint = Paint().apply { color = Color.BLACK; style = Paint.Style.STROKE; strokeWidth = 3f; strokeCap = Paint.Cap.ROUND; isAntiAlias = true }
+    /** Chrome painted onto the page bitmap: bookmark ribbon, selection box, search highlight. */
+    private val overlays = PageOverlays(object : PageOverlays.Host {
+        override fun nToVx(nx: Float) = this@ReaderActivity.nToVx(nx)
+        override fun nToVy(ny: Float) = this@ReaderActivity.nToVy(ny)
+        override val viewW get() = this@ReaderActivity.viewW
+    })
+
+    /** The zoom minimap (#60) — the top-right page thumbnail and its −/+ buttons. */
+    private val minimap = MinimapController(object : MinimapController.Host {
+        override val viewW get() = this@ReaderActivity.viewW
+        override val viewH get() = this@ReaderActivity.viewH
+        override val zoom get() = this@ReaderActivity.zoom
+        override val panX get() = this@ReaderActivity.panX
+        override val panY get() = this@ReaderActivity.panY
+        // Qualified: bare `panX` would resolve to this object's own override, not the reader's.
+        override fun setPan(x: Float, y: Float) {
+            this@ReaderActivity.panX = x
+            this@ReaderActivity.panY = y
+        }
+        override fun applyZoom() = this@ReaderActivity.applyZoom()
+        override fun zoomBy(factor: Float) = this@ReaderActivity.zoomBy(factor)
+        override fun throttledPreview(block: () -> Unit) = this@ReaderActivity.throttledPreview(block)
+        override fun dpInt(v: Int) = this@ReaderActivity.dpInt(v)
+    })
     private val loadingBg = Paint().apply { color = Color.WHITE }
     private val loadingText = Paint().apply {
         color = Color.DKGRAY
@@ -491,9 +479,9 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
                     scaleDetector.onTouchEvent(cancel)
                     cancel.recycle()
                     // Likewise drop any in-flight minimap interaction: its latches are reset ONLY
-                    // inside handleMinimapTouch's UP path, which we bypass here — leaving them stuck
-                    // would make handleMinimapTouch swallow the next finger gesture once the pen idles.
-                    minimapActive = false; minimapThumbDrag = false
+                    // inside MinimapController's UP path, which we bypass here — leaving them stuck
+                    // would make the minimap swallow the next finger gesture once the pen idles.
+                    minimap.cancelTouch()
                     mainHandler.removeCallbacks(fingerLongPress) // the writing hand, not a tap
                     fingerMoved = true
                 } else {
@@ -510,7 +498,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
                     if (!scaleDetector.isInProgress && event.pointerCount == 1) {
                         // The zoom minimap (when shown) is an interactive navigator + zoom control;
                         // it claims touches over its panel before the page gesture logic runs.
-                        if (!handleMinimapTouch(event)) when (event.actionMasked) {
+                        if (!minimap.onTouch(event)) when (event.actionMasked) {
                             MotionEvent.ACTION_DOWN -> onFingerDown(event)
                             MotionEvent.ACTION_MOVE -> onFingerMove(event)
                             MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> onFingerUp(event)
@@ -1065,16 +1053,16 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         val cv = Canvas(bmp)
         for (s in pageStrokes) stylus.drawStroke(cv, s)
         // The active lasso selection's bounding box (ADR-INKREAD-0010).
-        if (lasso.hasSelection && lasso.selectionBounds.size == 4) drawSelectionBox(cv)
+        if (lasso.hasSelection) overlays.drawSelectionBox(cv, lasso.selectionBounds)
         // The active in-document search hit's highlight boxes (RR2), if it lives on this page.
         val searchHl = search.highlightForPage(currentPage)
-        if (searchHl.isNotEmpty()) drawSearchHighlight(cv, searchHl)
+        if (searchHl.isNotEmpty()) overlays.drawSearchHighlight(cv, searchHl)
         // Zoom minimap (top-right): full page + the current viewport window (RR5-FR3). The fit
         // thumbnail it draws is captured lazily when zoom is first engaged (captureFitThumb), not on
         // every fit-page turn — so ordinary reading pays no per-flip scale + alloc.
-        if (zoom > 1f) drawZoomMinimap(cv)
+        if (zoom > 1f) minimap.draw(cv)
         // A top-right dog-ear: faint outline (tap-to-bookmark affordance) / solid when bookmarked.
-        drawBookmarkCorner(cv)
+        overlays.drawBookmark(cv, marked = bookmarks?.has(currentPage) == true)
         // Cache the first page as the book's thumbnail, once (RR17-FR5).
         if (currentPage == 0 && currentBookId.isNotEmpty() && !Books.thumbFile(this, currentBookId).exists()) {
             Books.saveThumbnail(this, currentBookId, bmp)
@@ -1092,8 +1080,8 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         // Read-ahead: warm the next page (in the direction of travel) into the core's render cache,
         // off the critical path — the next turn then hits the cache (core≈0), attacking the render's
         // biggest cost. Deduped so chrome repaints of the same page don't re-enqueue.
-        val ahead = currentPage + lastTurnDir
-        if (zoom <= 1f && ahead in 0 until pageCount && ahead != lastPrefetchedPage) {
+        val ahead = PrefetchPolicy.nextPage(currentPage, lastTurnDir, pageCount, zoom, lastPrefetchedPage)
+        if (ahead != null) {
             lastPrefetchedPage = ahead
             engine.execute {
                 val h = docHandle
@@ -1172,155 +1160,6 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
     // ---- input (UI thread) → engine ----
 
     /**
-     * Route a tap: a tapped link wins (RR11-FR3), else tap zones (RR25-FR3 — left third = prev,
-     * right third = next, center = contents). The page fills the viewport (stretched render), so
-     * the hit-test is the normalized tap `(x/w, y/h)` against the link rects.
-     */
-    /** Refresh the cached full-page thumbnail from a fit render [src] (drives the zoom minimap). */
-    private fun updateFitThumb(src: Bitmap) {
-        val tw = viewW / 5; val th = viewH / 5
-        if (tw < 8 || th < 8) return
-        val old = fitThumb
-        fitThumb = Bitmap.createScaledBitmap(src, tw, th, true)
-        if (old != null && old != fitThumb) old.recycle()
-    }
-
-    /** Snapshot the current fit page for the zoom minimap — called once when zoom is engaged from
-     *  fit (not on every flip). At that point [bitmap] still holds the fit render (a pinch only
-     *  transforms it on the surface, never overwrites it). */
-    private fun captureFitThumb() {
-        if (zoom <= 1f) bitmap?.let { updateFitThumb(it) }
-    }
-
-    /** Minimap panel geometry (thumbnail + the −/+ zoom buttons below it). Deterministic from the
-     *  viewport so the renderer and the touch hit-test agree. Null if the view isn't sized yet. */
-    private class MmGeom(
-        val left: Float, val top: Float, val tw: Float, val th: Float,
-        val minus: android.graphics.RectF, val plus: android.graphics.RectF,
-    )
-    private fun minimapGeometry(): MmGeom? {
-        if (viewW == 0 || viewH == 0) return null
-        val tw = (viewW / 5).toFloat(); val th = (viewH / 5).toFloat()
-        val m = dpInt(8).toFloat()
-        val left = viewW - tw - m; val top = m
-        val barTop = top + th + dpInt(6)
-        val barH = dpInt(48).toFloat(); val half = tw / 2f
-        val minus = android.graphics.RectF(left, barTop, left + half, barTop + barH)
-        val plus = android.graphics.RectF(left + half, barTop, left + tw, barTop + barH)
-        return MmGeom(left, top, tw, th, minus, plus)
-    }
-
-    /** Draw the zoom minimap (top-right): a rounded card with the full-page thumb, the visible
-     *  window highlighted, and clean −/+ zoom buttons below a divider. */
-    private fun drawZoomMinimap(canvas: Canvas) {
-        val thumb = fitThumb ?: return
-        val g = minimapGeometry() ?: return
-        val pad = dpInt(6).toFloat(); val rad = dpInt(10).toFloat()
-        val cardL = g.left - pad; val cardT = g.top - pad
-        val cardR = g.left + g.tw + pad; val cardB = g.plus.bottom + pad
-        // Rounded white card + subtle border.
-        canvas.drawRoundRect(cardL, cardT, cardR, cardB, rad, rad, minimapBgPaint)
-        canvas.drawRoundRect(cardL, cardT, cardR, cardB, rad, rad, minimapCardStroke)
-        // Thumbnail with a light frame.
-        canvas.drawBitmap(thumb, g.left, g.top, null)
-        canvas.drawRect(g.left, g.top, g.left + g.tw, g.top + g.th, minimapThumbStroke)
-        // Visible-window rectangle: translucent fill + solid border = clear "you are here".
-        val z = zoom
-        val vx0 = panX * (z - 1f) / z; val vy0 = panY * (z - 1f) / z; val v = 1f / z
-        val vl = g.left + vx0 * g.tw; val vt = g.top + vy0 * g.th
-        val vr = g.left + (vx0 + v) * g.tw; val vb = g.top + (vy0 + v) * g.th
-        canvas.drawRect(vl, vt, vr, vb, minimapViewportFill)
-        canvas.drawRect(vl, vt, vr, vb, minimapViewportPaint)
-        // Divider above the button row, then a vertical split between − and +.
-        canvas.drawLine(cardL + pad, g.minus.top, cardR - pad, g.minus.top, minimapThumbStroke)
-        canvas.drawLine(g.plus.left, g.minus.top + dpInt(4), g.plus.left, g.minus.bottom - dpInt(4), minimapThumbStroke)
-        // − / + glyphs.
-        val r = dpInt(8).toFloat()
-        canvas.drawLine(g.minus.centerX() - r, g.minus.centerY(), g.minus.centerX() + r, g.minus.centerY(), minimapGlyphPaint)
-        canvas.drawLine(g.plus.centerX() - r, g.plus.centerY(), g.plus.centerX() + r, g.plus.centerY(), minimapGlyphPaint)
-        canvas.drawLine(g.plus.centerX(), g.plus.centerY() - r, g.plus.centerX(), g.plus.centerY() + r, minimapGlyphPaint)
-    }
-
-    /** Center the zoom viewport on a point tapped/dragged inside the minimap thumbnail. */
-    private fun navigateMinimap(x: Float, y: Float, g: MmGeom) {
-        val z = zoom
-        if (z <= 1f) return
-        val tnx = ((x - g.left) / g.tw).coerceIn(0f, 1f) // page-normalized target center
-        val tny = ((y - g.top) / g.th).coerceIn(0f, 1f)
-        panX = ((tnx * z - 0.5f) / (z - 1f)).coerceIn(0f, 1f)
-        panY = ((tny * z - 0.5f) / (z - 1f)).coerceIn(0f, 1f)
-    }
-
-    /** Handle a finger touch on the minimap panel (navigate / zoom buttons). Returns true if it
-     *  consumed the event so the page's tap/pan/long-press logic is skipped. */
-    private fun handleMinimapTouch(e: MotionEvent): Boolean {
-        if (zoom <= 1f) return false
-        val g = minimapGeometry() ?: return false
-        val x = e.x; val y = e.y
-        val inThumb = x >= g.left && x <= g.left + g.tw && y >= g.top && y <= g.top + g.th
-        when (e.actionMasked) {
-            MotionEvent.ACTION_DOWN -> {
-                when {
-                    g.minus.contains(x, y) -> { minimapActive = true; zoomBy(1f / ZOOM_STEP); return true }
-                    g.plus.contains(x, y) -> { minimapActive = true; zoomBy(ZOOM_STEP); return true }
-                    inThumb -> { minimapActive = true; minimapThumbDrag = true; navigateMinimap(x, y, g); applyZoom(); return true }
-                }
-            }
-            MotionEvent.ACTION_MOVE -> if (minimapThumbDrag && inThumb) {
-                navigateMinimap(x, y, g); throttledPreview { applyZoom() }; return true
-            } else if (minimapActive) return true
-            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> if (minimapActive) {
-                if (minimapThumbDrag) applyZoom()
-                minimapActive = false; minimapThumbDrag = false; return true
-            }
-        }
-        return minimapActive
-    }
-
-    /** Draw the active lasso selection's dashed bounding box + square corner handles (frame 132). */
-    private fun drawSelectionBox(canvas: Canvas) {
-        val b = lasso.selectionBounds
-        val l = nToVx(b[0]); val t = nToVy(b[1]); val r = nToVx(b[2]); val btm = nToVy(b[3])
-        canvas.drawRect(l, t, r, btm, selectionPaint)
-        val hs = SELECTION_HANDLE_PX
-        for (cx in floatArrayOf(l, r)) for (cy in floatArrayOf(t, btm)) {
-            canvas.drawRect(cx - hs, cy - hs, cx + hs, cy + hs, selectionHandlePaint)
-        }
-    }
-
-    /** A small filled dog-ear in the top-right corner marking a bookmarked page (RR16). */
-    /** Top-right **ribbon bookmark** (swallowtail): a faint outline always (the tappable affordance)
-     *  that fills solid when the page is bookmarked. Tapping the top-right corner toggles it. */
-    private fun drawBookmarkCorner(canvas: Canvas) {
-        val w = viewW.toFloat()
-        val rw = viewW * 0.035f                 // ribbon width
-        val len = rw * 2.1f                      // ribbon length
-        val notch = rw * 0.45f                   // depth of the swallowtail notch
-        val right = w - rw * 1.4f                // inset from the right edge
-        val left = right - rw
-        val path = Path().apply {
-            moveTo(left, 0f)
-            lineTo(right, 0f)
-            lineTo(right, len)
-            lineTo((left + right) / 2f, len - notch) // swallowtail
-            lineTo(left, len)
-            close()
-        }
-        // A white halo first so the ribbon reads on any background (e.g. a black title band).
-        canvas.drawPath(path, bookmarkHaloPaint)
-        if (bookmarks?.has(currentPage) == true) {
-            canvas.drawPath(path, bookmarkPaint)
-        } else {
-            canvas.drawPath(path, bookmarkOutlinePaint)
-        }
-    }
-
-    /**
-     * Finger DOWN: reject obvious palms (multi-touch, large contact, a recent/in-progress stylus, an
-     * active stroke); otherwise arm the long-press → lookup timer. The tap itself is decided on UP
-     * (the panel delivers finger UP reliably), so "rest the hand, then write" never turns a page.
-     */
-    /**
      * Heuristic palm / stray-touch test shared by the reading surface AND the chrome dialogs
      * (RR19 palm rejection): a **finger** touch is treated as a palm when it is multi-pointer, lands
      * within [PALM_REJECT_MS] of pen activity, arrives mid-stroke, or has a large contact major
@@ -1374,6 +1213,11 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             addView(content, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
         }
 
+    /**
+     * Finger DOWN: reject obvious palms (multi-touch, large contact, a recent/in-progress stylus, an
+     * active stroke); otherwise arm the long-press → lookup timer. The tap itself is decided on UP
+     * (the panel delivers finger UP reliably), so "rest the hand, then write" never turns a page.
+     */
     private fun onFingerDown(e: MotionEvent) {
         if (isPalmTouch(e)) {
             diag { "DIAG palm-reject down pc=${e.pointerCount} major=${e.getTouchMajor(0)}" }
@@ -1434,12 +1278,11 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         if (fingerIsPalm && !penActiveForPinch() && !gestureWasMultiTouch && zoom <= 1f) {
             val dx = e.x - fingerDownX
             val dy = e.y - fingerDownY
-            val w = surfaceView.width.toFloat()
-            val minDist = (w * 0.10f).coerceAtLeast(140f)
-            if (kotlin.math.abs(dx) > minDist && kotlin.math.abs(dx) > kotlin.math.abs(dy) * 2.0f) {
-                fingerIsPalm = false; fitThumb = null
+            val dir = ReaderGestures.swipeDelta(dx, dy, surfaceView.width.toFloat(), strict = true)
+            if (dir != null) {
+                fingerIsPalm = false; minimap.invalidateThumb()
                 diag { "DIAG palm-swipe recovered dx=$dx dy=$dy" }
-                queuePageTurn(if (dx < 0f) +1 else -1)
+                queuePageTurn(dir)
                 return
             }
         }
@@ -1454,9 +1297,8 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         // stays a no-op while zoomed (it's content, not the menu).
         if (zoom > 1f) {
             if (fingerMoved) {
-                val overX = viewW * (zoom - 1f); val overY = viewH * (zoom - 1f)
-                if (overX > 0f) panX = (panX - (e.x - fingerDownX) / overX).coerceIn(0f, 1f)
-                if (overY > 0f) panY = (panY - (e.y - fingerDownY) / overY).coerceIn(0f, 1f)
+                val (px, py) = transform.panAfterDrag(e.x - fingerDownX, e.y - fingerDownY)
+                panX = px; panY = py
                 applyZoom()
             } else {
                 val w = surfaceView.width.toFloat()
@@ -1467,12 +1309,18 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
                     if (link != null) { followLink(link); return }
                     // The minimap thumbnail is the OLD page's; drop it so the turn doesn't leave the
                     // wrong page on screen (it re-captures on the next return to fit) (#52 review).
-                    val third = w / 3f
-                    if (fingerDownX < third) { panY = 0f; fitThumb = null; queuePageTurn(-1) }
-                    else if (fingerDownX > 2f * third) { panY = 0f; fitThumb = null; queuePageTurn(+1) }
-                    // Centre double-tap while zoomed → restore fit (#54); a single centre tap records
-                    // for double-tap detection but otherwise does nothing while zoomed.
-                    else if (isCentreDoubleTap(fingerDownX, fingerDownY)) doubleTapZoom(fingerDownX, fingerDownY)
+                    when (ReaderGestures.zoneFor(fingerDownX, w)) {
+                        ReaderGestures.Zone.PREV ->
+                            { panY = 0f; minimap.invalidateThumb(); queuePageTurn(-1) }
+                        ReaderGestures.Zone.NEXT ->
+                            { panY = 0f; minimap.invalidateThumb(); queuePageTurn(+1) }
+                        // Centre double-tap while zoomed → restore fit (#54); a single centre tap
+                        // records for double-tap detection but otherwise does nothing while zoomed.
+                        ReaderGestures.Zone.CENTRE ->
+                            if (isCentreDoubleTap(fingerDownX, fingerDownY)) {
+                                doubleTapZoom(fingerDownX, fingerDownY)
+                            }
+                    }
                 }
             }
             return
@@ -1483,13 +1331,11 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             // a more-vertical or short drag does nothing. Tap zones still work for precise turns.
             val dx = e.x - fingerDownX
             val dy = e.y - fingerDownY
-            val w = surfaceView.width.toFloat()
-            val minDist = (w * 0.06f).coerceAtLeast(90f) // a comfortable flick, not a screen-width drag
-            val horizontal = kotlin.math.abs(dx) > minDist && kotlin.math.abs(dx) > kotlin.math.abs(dy) * 1.2f
-            diag { "DIAG finger swipe dx=$dx dy=$dy min=$minDist horizontal=$horizontal" }
-            if (horizontal) {
-                fitThumb = null
-                queuePageTurn(if (dx < 0f) +1 else -1)
+            val dir = ReaderGestures.swipeDelta(dx, dy, surfaceView.width.toFloat())
+            diag { "DIAG finger swipe dx=$dx dy=$dy dir=$dir" }
+            if (dir != null) {
+                minimap.invalidateThumb()
+                queuePageTurn(dir)
             }
             return // a swipe (handled above) or rejected palm — not a tap
         }
@@ -1500,6 +1346,11 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         }
     }
 
+    /**
+     * Route a tap: a tapped link wins (RR11-FR3), else tap zones (RR25-FR3 — left third = prev,
+     * right third = next, center = contents). The page fills the viewport (stretched render), so
+     * the hit-test is the normalized tap `(x/w, y/h)` against the link rects.
+     */
     private fun handleTap(x: Float, y: Float) {
         val w = surfaceView.width.toFloat()
         val h = surfaceView.height.toFloat()
@@ -1512,20 +1363,19 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             }
         }
         // Top-right corner → toggle the bookmark dog-ear (Kindle/KOReader convention).
-        if (w > 0f && h > 0f && x > w * (1f - BOOKMARK_ZONE_W) && y < h * BOOKMARK_ZONE_H) {
+        if (ReaderGestures.isBookmarkCorner(x, y, w, h)) {
             bottomBar.toggleBookmark()
             return
         }
-        val third = w / 3f
-        val zone = if (x < third) "PREV" else if (x > 2 * third) "NEXT" else "TOC"
+        val zone = ReaderGestures.zoneFor(x, w)
         diag { "DIAG handleTap x=$x w=$w -> $zone (${currentLinks.size} links, no hit)" }
         // An edge tap breaks any centre double-tap chain (so centre→edge→centre within the window
         // isn't read as a double-tap-zoom) (#54).
-        if (zone != "TOC") lastCentreTapMs = 0L
+        if (zone != ReaderGestures.Zone.CENTRE) lastCentreTapMs = 0L
         when (zone) {
-            "PREV" -> queuePageTurn(-1)
-            "NEXT" -> queuePageTurn(+1)
-            else -> {
+            ReaderGestures.Zone.PREV -> queuePageTurn(-1)
+            ReaderGestures.Zone.NEXT -> queuePageTurn(+1)
+            ReaderGestures.Zone.CENTRE -> {
                 // Centre: a double-tap zooms toward the point (#54); a single tap opens the menu,
                 // deferred [DOUBLE_TAP_MS] so the first tap of a double-tap doesn't flash the bar open.
                 // (Edge page turns above stay immediate — no double-tap latency on navigation.)
@@ -1561,10 +1411,9 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
      *  on completion). Snaps to the document bounds; a no-op at the edges. */
     private fun flushPageTurns() {
         if (turnInFlight || pendingPageDelta == 0) return
-        val last = pageCount.coerceAtLeast(1) - 1
-        val target = (currentPage + pendingPageDelta).coerceIn(0, last)
+        val target = ReaderGestures.jumpTarget(currentPage, pendingPageDelta, pageCount)
         pendingPageDelta = 0
-        if (target == currentPage) return
+        if (target == null) return
         turnInFlight = true
         postJump(target) { runOnUiThread { turnInFlight = false; flushPageTurns() } }
     }
@@ -1626,31 +1475,15 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
     }
 
 
-    // ---- in-document search (RR2) ----
-
-    /** Draw the search hit's highlight [boxes] on the page (a light fill + crisp outline). The
-     *  active boxes for the current page come from [SearchController.highlightForPage]. */
-    private fun drawSearchHighlight(canvas: Canvas, boxes: List<SelBox>) {
-        for (b in boxes) {
-            val l = nToVx(b.x0); val t = nToVy(b.y0); val r = nToVx(b.x1); val btm = nToVy(b.y1)
-            canvas.drawRect(l, t, r, btm, searchFillPaint)
-            canvas.drawRect(l, t, r, btm, searchBoxPaint)
-        }
-    }
-
     // ===== Tool model (ADR-INKREAD-0010) =====
 
     /**
      * Switch the active annotation tool (from the floating palette). [Tool.PEN] re-claims firmware
      * ink; every other tool releases it so the stylus selects/erases instead (the firmware-ink
-     * toggle IS the mode). Highlighter/Lasso are P2 — not yet wired, so they're vetoed (return
-     * false) and the active tool is unchanged. Returns true when the switch is committed.
+     * toggle IS the mode). Returns true when the switch is committed — a re-tap of the active tool
+     * can still decline it, in favour of toggling that tool's own sub-mode or options.
      */
     private fun onToolChosen(chosen: Tool): Boolean {
-        if (chosen.phase2) {
-            Toast.makeText(this, "${chosen.label} is coming soon", Toast.LENGTH_SHORT).show()
-            return false
-        }
         // Re-tapping the active Lasso toggles its sub-mode (NeoReader: Smart ↔ Freehand).
         if (chosen == Tool.LASSO && tool == Tool.LASSO) {
             val name = lasso.cycleLassoMode()
@@ -1762,12 +1595,17 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
     @Volatile private var zoom = 1f
     @Volatile private var panX = 0f
     @Volatile private var panY = 0f
-    private fun nToVx(nx: Float) = nx * viewW * zoom - panX * viewW * (zoom - 1f)
-    private fun nToVy(ny: Float) = ny * viewH * zoom - panY * viewH * (zoom - 1f)
-    private fun vToNx(vx: Float) = ((vx + panX * viewW * (zoom - 1f)) / (viewW * zoom)).coerceIn(0f, 1f)
-    private fun vToNy(vy: Float) = ((vy + panY * viewH * (zoom - 1f)) / (viewH * zoom)).coerceIn(0f, 1f)
+    /** The current page↔view map (RR5-FR3). Rebuilt from the live zoom/pan on every read, so a
+     *  gesture can never see it half-updated; the maths itself lives in [ViewTransform]. */
+    private val transform: ViewTransform get() = ViewTransform(viewW, viewH, zoom, panX, panY)
+
+    private fun nToVx(nx: Float) = transform.nToVx(nx)
+    private fun nToVy(ny: Float) = transform.nToVy(ny)
+    private fun vToNx(vx: Float) = transform.vToNx(vx)
+    private fun vToNy(vy: Float) = transform.vToNy(vy)
+
     /** Convert an on-screen length (px) to normalized page units at the current zoom. */
-    private fun lenToNorm(px: Float) = px / (viewW * zoom)
+    private fun lenToNorm(px: Float) = transform.lenToNorm(px)
     /** Push the current zoom/pan to the core and re-render (engine thread). */
     private fun applyZoom() {
         // Any zoom/pan change (pinch, +/- buttons, double-tap, pan) cancels a deferred centre menu so
@@ -1814,11 +1652,12 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             Log.i(TAG, "zoom ignored: this document is not magnifiable (reflowed view)")
             return
         }
-        val next = (zoom * factor).coerceIn(1f, MAX_ZOOM_UI)
-        if (zoom <= 1f && next > 1f) captureFitThumb() // grab the fit thumb before leaving fit
         val from = zoom
+        val next = ZoomPolicy.stepped(zoom, factor, MAX_ZOOM_UI)
+        // The fit thumb must be grabbed while the fit render is still on screen (see ZoomPolicy).
+        if (ZoomPolicy.leavingFit(from, next)) minimap.captureFitThumb(bitmap)
         zoom = next
-        if (zoom <= 1.01f) { zoom = 1f; panX = 0f; panY = 0f }
+        if (ZoomPolicy.isFit(zoom)) { panX = 0f; panY = 0f }
         Log.i(TAG, "zoom: $from → $zoom" + if (from == zoom) " (at the limit)" else "")
         applyZoom()
     }
@@ -1835,12 +1674,13 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             applyZoom()
             return
         }
-        captureFitThumb() // grab the fit thumb before leaving fit (for the zoom minimap)
+        minimap.captureFitThumb(bitmap) // grab the fit thumb before leaving fit (for the zoom minimap)
         val nx = vToNx(fx); val ny = vToNy(fy) // page point under the tap, at the current (fit) factor
-        zoom = DOUBLE_TAP_ZOOM.coerceIn(1f, MAX_ZOOM_UI)
-        val overX = viewW * (zoom - 1f); val overY = viewH * (zoom - 1f)
-        panX = if (overX > 0f) ((nx * viewW * zoom - fx) / overX).coerceIn(0f, 1f) else 0f
-        panY = if (overY > 0f) ((ny * viewH * zoom - fy) / overY).coerceIn(0f, 1f) else 0f
+        zoom = ZoomPolicy.doubleTapTarget(zoom, DOUBLE_TAP_ZOOM, MAX_ZOOM_UI)
+        // The same anchoring a pinch-end uses, so a double-tap and a pinch put the same content
+        // under the same finger — one implementation, in [ViewTransform.panAnchoring].
+        val (px, py) = transform.panAnchoring(nx, ny, fx, fy)
+        panX = px; panY = py
         applyZoom()
     }
 
@@ -1848,9 +1688,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
      *  [DOUBLE_TAP_SLOP_PX] of the last centre tap). Records the tap as the potential first of a pair. */
     private fun isCentreDoubleTap(x: Float, y: Float): Boolean {
         val now = SystemClock.uptimeMillis()
-        val near = kotlin.math.hypot(x - lastCentreTapX, y - lastCentreTapY) < DOUBLE_TAP_SLOP_PX
-        val quick = now - lastCentreTapMs <= DOUBLE_TAP_MS
-        if (quick && near) {
+        if (ReaderGestures.isDoubleTap(x, y, lastCentreTapX, lastCentreTapY, now - lastCentreTapMs)) {
             lastCentreTapMs = 0L // consume — a third tap doesn't chain
             return true
         }
@@ -1911,17 +1749,17 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
                     if (target != cur) adjust.applyReflowScale(target, announce = true)
                     return
                 }
-                val newZoom = (gestureStartZoom * liveScale).coerceIn(1f, MAX_ZOOM_UI)
-                if (gestureStartZoom <= 1f && newZoom > 1f) captureFitThumb() // zoom field still ≤1 here
-                if (newZoom <= 1.01f) {
+                val newZoom = ZoomPolicy.stepped(gestureStartZoom, liveScale, MAX_ZOOM_UI)
+                // `zoom` is still the pre-gesture value here, so the fit thumb is still valid.
+                if (ZoomPolicy.leavingFit(gestureStartZoom, newZoom)) minimap.captureFitThumb(bitmap)
+                if (ZoomPolicy.isFit(newZoom)) {
                     zoom = 1f; panX = 0f; panY = 0f
                 } else {
                     // Anchor the pinched point: keep the content under the focal point fixed.
                     val nx = vToNx(focusX); val ny = vToNy(focusY) // uses the pre-zoom factor
                     zoom = newZoom
-                    val overX = viewW * (zoom - 1f); val overY = viewH * (zoom - 1f)
-                    panX = if (overX > 0f) ((nx * viewW * zoom - focusX) / overX).coerceIn(0f, 1f) else 0f
-                    panY = if (overY > 0f) ((ny * viewH * zoom - focusY) / overY).coerceIn(0f, 1f) else 0f
+                    val (px, py) = transform.panAnchoring(nx, ny, focusX, focusY)
+                    panX = px; panY = py
                 }
                 applyZoom()
             }
