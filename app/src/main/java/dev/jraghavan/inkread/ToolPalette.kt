@@ -17,12 +17,12 @@ import android.widget.LinearLayout
  * gesture tricks don't transfer. We disambiguate "ink" / "erase" / "lasso" / "define" by an
  * **explicit selected tool**, never by guessing a gesture — the reMarkable/Boox/Scribe modal family.
  */
-enum class Tool(val label: String, val iconRes: Int, val phase2: Boolean) {
-    PEN("Pen", R.drawable.ic_tool_pen, false),
-    HIGHLIGHTER("Highlight", R.drawable.ic_tool_highlighter, false),
-    ERASER("Eraser", R.drawable.ic_tool_eraser, false),
-    LASSO("Lasso", R.drawable.ic_tool_lasso, false),
-    DEFINE("Define", R.drawable.ic_menu_dict, false),
+enum class Tool(val label: String, val iconRes: Int) {
+    PEN("Pen", R.drawable.ic_tool_pen),
+    HIGHLIGHTER("Highlight", R.drawable.ic_tool_highlighter),
+    ERASER("Eraser", R.drawable.ic_tool_eraser),
+    LASSO("Lasso", R.drawable.ic_tool_lasso),
+    DEFINE("Define", R.drawable.ic_menu_dict),
     ;
 
     companion object {
@@ -455,7 +455,7 @@ class ToolPalette(
         setImageResource(tool.iconRes)
         val active = tool == current
         setColorFilter(if (active) Ink.paper else Ink.ink)
-        alpha = if (tool.phase2) 0.35f else 1f
+        alpha = 1f
         val pad = insetPx()
         setPadding(pad, pad, pad, pad)
         val side = boxPx()

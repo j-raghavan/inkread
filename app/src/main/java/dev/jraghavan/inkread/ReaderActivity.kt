@@ -5,13 +5,10 @@ import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
-import android.graphics.drawable.GradientDrawable
 import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.Typeface
-import android.graphics.drawable.ColorDrawable
 import android.net.Uri
-import android.os.Environment
 import android.provider.Settings
 import android.os.Bundle
 import kotlin.math.ceil
@@ -26,14 +23,10 @@ import android.widget.Toast
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
-import android.view.Window
 import android.widget.FrameLayout
-import android.widget.LinearLayout
 import android.widget.TextView
 import dev.jraghavan.inkread.eink.EinkAdapter
-import java.net.HttpURLConnection
 import java.net.URL
-import org.json.JSONObject
 import dev.jraghavan.inkread.eink.DisplayAdapters
 import dev.jraghavan.inkread.eink.SupernoteInk
 import java.io.File
@@ -1487,14 +1480,10 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
     /**
      * Switch the active annotation tool (from the floating palette). [Tool.PEN] re-claims firmware
      * ink; every other tool releases it so the stylus selects/erases instead (the firmware-ink
-     * toggle IS the mode). Highlighter/Lasso are P2 — not yet wired, so they're vetoed (return
-     * false) and the active tool is unchanged. Returns true when the switch is committed.
+     * toggle IS the mode). Returns true when the switch is committed — a re-tap of the active tool
+     * can still decline it, in favour of toggling that tool's own sub-mode or options.
      */
     private fun onToolChosen(chosen: Tool): Boolean {
-        if (chosen.phase2) {
-            Toast.makeText(this, "${chosen.label} is coming soon", Toast.LENGTH_SHORT).show()
-            return false
-        }
         // Re-tapping the active Lasso toggles its sub-mode (NeoReader: Smart ↔ Freehand).
         if (chosen == Tool.LASSO && tool == Tool.LASSO) {
             val name = lasso.cycleLassoMode()

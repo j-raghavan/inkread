@@ -77,6 +77,10 @@ number is given in parentheses.
   locator rather than being "always `None`"; and `ReaderActivity` is no longer marked
   `DEVICE-UNVERIFIED`. The settings registry's typesetting and pen keys are still genuinely
   unconsumed, and now say so in those terms instead of naming a milestone.
+- The `Tool.phase2` flag and its two branches are removed: every tool declares `false`, so the
+  "coming soon" veto in `onToolChosen` and the dimmed-icon alpha in `ToolPalette` were both
+  unreachable, and the KDoc still described Highlighter and Lasso as unwired. Eight unused imports
+  dropped across `ReaderActivity` and `SearchController`.
 - Four orphaned KDoc blocks in `ReaderActivity` — a comment sitting above another comment, which
   Kotlin drops — are reattached to the functions they describe, including the tap-zone contract on
   `handleTap` and the palm-rejection note on `onFingerDown`, both of which had no doc at all.
