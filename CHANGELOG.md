@@ -26,6 +26,9 @@ number is given in parentheses.
 - `reader-core/src/session.rs` (1,630 lines, one `impl` with 102 methods) is split into a
   `session/` module by what each method is for — open, render, view, navigate, ink, select — with
   the struct, its lifecycle and the plain accessors in `mod.rs`.
+- `reader-core/src/document/text_select.rs` (1,634 lines) is split into a `text_select/` module by
+  what a query is — search, word, columns, span — with the geometry types and shared predicates in
+  `mod.rs`. The module's public surface is unchanged.
 - `device-eink` and `reader-core` no longer name a vendor.
   `DeviceCapabilities::supernote_baseline` / `supernote_full` are now `flashing_epd` /
   `controllable_epd`, and `ResourceBudget::default_supernote` is `default_tablet_epd` — the
