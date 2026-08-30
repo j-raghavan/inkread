@@ -1,4 +1,4 @@
-//! `PinPosition` + `PageRange` — the reflow-stable position locator (RR6, M2).
+//! `PinPosition` + `PageRange` — the reflow-stable position locator (RR6).
 //!
 //! A reflowable document has no fixed page number: the same word lands on a different rendered page
 //! when the font size, margins, or viewport change. A [`PinPosition`] anchors to **content**, not

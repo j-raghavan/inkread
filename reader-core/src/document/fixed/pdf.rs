@@ -1,4 +1,4 @@
-//! `PdfBackend` — the M0 fixed-layout PDF [`Document`] over `pdfium-render` (RR5, Amendment 4).
+//! `PdfBackend` — the fixed-layout PDF [`Document`] over `pdfium-render` (RR5, Amendment 4).
 //!
 //! ## Single-copy render with explicit channel order (Fork 4 / Amendment 3)
 //! The page is rendered **directly into the borrowed [`PixelBuffer`]**: a `PdfBitmap` wraps

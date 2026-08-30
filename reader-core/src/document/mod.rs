@@ -128,7 +128,7 @@ impl Default for Typography {
     }
 }
 
-/// Document metadata (title/author) — the M0 subset (RR5-FR2).
+/// Document metadata (title/author) (RR5-FR2).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DocumentMetadata {
     /// Document title, if present.
@@ -309,7 +309,7 @@ pub fn encode_search_wire(matches: &[SearchMatch]) -> Vec<u8> {
     out
 }
 
-/// The core trait every format implements (M0 subset).
+/// The core trait every format implements.
 ///
 /// Render targets a borrowed [`PixelBuffer`] (Fork 4); the backend white-fills before
 /// rasterizing (RR4-FR3) and resolves the channel order so the buffer ends up RGBA

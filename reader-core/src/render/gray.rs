@@ -129,7 +129,7 @@ fn floyd_steinberg(buf: &mut PixelBuffer<'_>, levels: u16) {
 /// Invert luminance in place for night mode on a device without `hw_invert` (RR4-FR8).
 ///
 /// Each gray channel becomes `255 - value`; α is left untouched. Applied as a separate pass
-/// after [`to_grayscale`] so the grayscale signature stays stable for M0 callers. Idempotent
+/// after [`to_grayscale`] so the grayscale signature stays stable for its callers. Idempotent
 /// in pairs (inverting twice restores the original).
 pub fn invert_in_place(buf: &mut PixelBuffer<'_>) {
     let order: ChannelOrder = CHANNEL_ORDER;
@@ -332,8 +332,9 @@ mod tests {
     }
 
     // RR17-FR1: golden regression guard for the deterministic dither pipeline — a change to the
-    // gray/dither output flips the committed hash. (Full PDF-page PNG goldens are M1b, when the
-    // pdfium render path itself is golden-tested; the host suite here stays pdfium-free.)
+    // gray/dither output flips the committed hash. (Full PDF-page PNG goldens are still deferred;
+    // the host suite here stays pdfium-free, and `pdf_tests` covers the render path where a
+    // libpdfium is available.)
     #[test]
     fn golden_floyd_steinberg_gradient() {
         let mut buf = gradient_rgba(64, 8);

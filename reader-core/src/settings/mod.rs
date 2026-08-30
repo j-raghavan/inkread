@@ -7,8 +7,12 @@
 //! missing or type-mismatched value never panics — it falls back to the registered default
 //! (RR23-FR3).
 //!
-//! Some keys (EPUB typesetting, pen) are **registered but inert** in M1a — stored so migrations
-//! stay forward-compatible, consumed in M2/M1c.
+//! The typesetting and pen keys are **registered but not yet read by the core**: they are stored
+//! so migrations stay forward-compatible, but the shipped font-size, typeface, spacing and pen-width
+//! controls reach the core through their own JNI setters rather than through this registry.
+//! [`crate::session::ReaderSession::apply_settings`] consumes the three e-ink policy keys and
+//! nothing else. Wiring the rest through here would make the two paths one; until then, this is the
+//! forward-compatible half.
 
 use std::collections::HashMap;
 
@@ -94,20 +98,20 @@ pub enum SettingKey {
     DefaultViewMode, // 0 = paged, 1 = scroll
     TapZones,        // discriminant for the tap-zone map
     PageAnimation,   // 0 = none, 1 = slide
-    // E-ink (RR3/RR16) — consumed by the policy in M1a
+    // E-ink (RR3/RR16) — the keys `apply_settings` actually reads
     FlashInterval,
     NightFlashInterval,
     AvoidFlashing,
     NightMode,
     DitherMode, // 0 = none, 1 = ordered, 2 = floyd-steinberg
-    // Typesetting (RR9, per-book, EPUB) — registered but inert until M2
+    // Typesetting (RR9, per-book, EPUB) — registered; the shipped controls use their own setters
     FontSize,
     FontFamily,
     LineSpacing,
     Margin,
     Alignment,
     Hyphenation,
-    // Pen (RR19) — registered but inert until M1c
+    // Pen (RR19) — registered; the shipped pen width uses its own setter
     DefaultTool,
     PenColor,
     PenWidth,

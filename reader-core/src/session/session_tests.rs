@@ -380,7 +380,7 @@ fn fixed_layout_position_stores_no_pin_and_resumes_by_page() {
     );
 }
 
-// A store-less session: saving is a no-op (M0 path stays green).
+// A store-less session: saving is a no-op.
 #[test]
 fn store_less_save_is_noop() {
     let s = session(3, DeviceCapabilities::controllable_epd());

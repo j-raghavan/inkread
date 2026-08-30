@@ -91,7 +91,8 @@ pub struct ReaderSession {
     policy: EinkRefreshPolicy,
     viewport: Viewport,
     page: usize,
-    /// Persistence store (RR12-FR3); `None` for a store-less session (M0 / tests).
+    /// Persistence store (RR12-FR3); `None` for a store-less session (tests, and any open that
+    /// asks for no persistence).
     store: Option<Arc<dyn ReaderStore>>,
     /// The book identity this session persists under (set with the store).
     book: Option<BookId>,

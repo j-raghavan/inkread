@@ -1,7 +1,8 @@
 //! Resource budget + bounded caches (RR24).
 //!
-//! M1a bounds the **render** and **cover** caches (the pagination cache is reflow-only — M2)
-//! and caps the per-page render scale so a very large page can't OOM. The session is
+//! Bounds the **render** and **cover** caches — the reflow pagination cache is separate, on disk,
+//! and governed by `persistence::PaginationCache` — and caps the per-page render scale so a very
+//! large page can't OOM. The session is
 //! parameterized by a [`ResourceBudget`] and exposes a back-pressure trim hook the shell calls
 //! on `onTrimMemory`. All pure logic, host-tested; the wall-clock latency targets (RR24-FR4)
 //! are device-measured and out of scope here.

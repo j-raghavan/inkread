@@ -63,11 +63,13 @@ number is given in parentheses.
 - `DeviceCapabilities.supernoteBaseline`'s KDoc had been orphaned above `genericDisplay`'s own
   KDoc by #220, so it documented nothing and `supernoteBaseline` was undocumented. Reattached, and
   it no longer says the profile is provisional "until the RR19-FR4b spike" — that spike concluded.
-- Module headers that still described the M0 milestone now describe the shipped code: the `Document`
+- Comments that still described the code by milestone now describe what it does. The `Document`
   trait has four backends and defaulted `toc`/`search`/`hint_page` rather than "the PDF backend is
-  the one implementation", the render pipeline has a cache and prefetch, the refresh policy has
-  scroll suppression and a night cadence, and `ReaderActivity` is no longer marked
-  `DEVICE-UNVERIFIED`.
+  the one implementation"; the render pipeline has a cache and prefetch; the refresh policy has
+  scroll suppression and a night cadence; `ReadingPosition::resume_blob` carries the reflow-stable
+  locator rather than being "always `None`"; and `ReaderActivity` is no longer marked
+  `DEVICE-UNVERIFIED`. The settings registry's typesetting and pen keys are still genuinely
+  unconsumed, and now say so in those terms instead of naming a milestone.
 - `ADR-INKREAD-0016` (the calibre/OPDS library) is cited from ten call sites and had no row in
   `docs/SPEC-INDEX.md`; the README now links that index too.
 - `scripts/gate.sh` claimed to mirror CI but ran neither script gate. It now runs both.

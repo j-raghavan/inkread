@@ -1,4 +1,4 @@
-//! `EinkRefreshPolicy` — the M0 content-aware refresh state machine (RR3).
+//! `EinkRefreshPolicy` — the content-aware refresh state machine (RR3).
 //!
 //! Pure Rust: given an interaction and the device's [`DeviceCapabilities`], it returns the
 //! `Vec<RefreshCommand>` the adapter should execute, mutating only its own counter. It

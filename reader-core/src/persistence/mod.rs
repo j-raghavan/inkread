@@ -4,8 +4,9 @@
 //! logic is testable against an in-memory adapter, and `reader-core` stays free of any IO
 //! assumption at the type level (RR1-AC3). The production adapter is [`sqlite::SqliteStore`].
 //!
-//! M1a persists only the **integer-page reading position** (RR12-FR3) — fixed-layout PDF has no
-//! `PinPosition`; the [`ReadingPosition::resume_blob`] slot is reserved for the M2 reflow locator.
+//! A fixed-layout PDF persists only its **integer-page reading position** (RR12-FR3), since it has
+//! no `PinPosition`; a reflowable document also stores its reflow-stable locator in
+//! [`ReadingPosition::resume_blob`], so the next open re-anchors across a typography change.
 
 pub mod identity;
 pub mod ink_store;
@@ -58,15 +59,17 @@ impl BookId {
 
 /// A reading position for a fixed-layout document (RR12-FR3).
 ///
-/// `page_index` is zero-based; `total` is the page count at save time. `resume_blob` is an
-/// opaque, reserved slot the M2 reflow locator (PinPosition JSON) will use — `None` in M1a.
+/// `page_index` is zero-based; `total` is the page count at save time. `resume_blob` carries the
+/// reflow-stable [`crate::position::PinPosition`] as JSON for a reflowable document, so the next
+/// open re-anchors to the same words across a font or margin change; a fixed-layout PDF stores the
+/// integer page alone and leaves it `None`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReadingPosition {
     /// Zero-based current page.
     pub page_index: usize,
     /// Page count when the position was saved.
     pub total: usize,
-    /// Reserved opaque resume token (M2 PinPosition); always `None` in M1a.
+    /// The reflow-stable resume token (a `PinPosition` as JSON), or `None` for fixed layout.
     pub resume_blob: Option<Vec<u8>>,
 }
 
@@ -105,8 +108,8 @@ impl ReadingPosition {
 /// rusqlite; `Send + Sync` so the store can be shared (`Arc`) across the session and the engine
 /// worker thread (RR21). The sole adapter, [`sqlite::SqliteStore`], is `Sync` via its `Mutex`.
 ///
-/// M1a exposes the reading-position + schema-version surface; the settings surface (RR23) is
-/// added in the settings module.
+/// This trait is the reading-position + schema-version surface; the settings surface (RR23) lives
+/// in the settings module.
 pub trait ReaderStore: Send + Sync {
     /// Load the saved reading position for `book`, or `None` if none was stored.
     fn load_position(&self, book: &BookId) -> CoreResult<Option<ReadingPosition>>;
