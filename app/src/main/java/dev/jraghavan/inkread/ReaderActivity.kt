@@ -1285,12 +1285,11 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         if (fingerIsPalm && !penActiveForPinch() && !gestureWasMultiTouch && zoom <= 1f) {
             val dx = e.x - fingerDownX
             val dy = e.y - fingerDownY
-            val w = surfaceView.width.toFloat()
-            val minDist = (w * 0.10f).coerceAtLeast(140f)
-            if (kotlin.math.abs(dx) > minDist && kotlin.math.abs(dx) > kotlin.math.abs(dy) * 2.0f) {
+            val dir = ReaderGestures.swipeDelta(dx, dy, surfaceView.width.toFloat(), strict = true)
+            if (dir != null) {
                 fingerIsPalm = false; minimap.invalidateThumb()
                 diag { "DIAG palm-swipe recovered dx=$dx dy=$dy" }
-                queuePageTurn(if (dx < 0f) +1 else -1)
+                queuePageTurn(dir)
                 return
             }
         }
@@ -1305,9 +1304,8 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         // stays a no-op while zoomed (it's content, not the menu).
         if (zoom > 1f) {
             if (fingerMoved) {
-                val overX = viewW * (zoom - 1f); val overY = viewH * (zoom - 1f)
-                if (overX > 0f) panX = (panX - (e.x - fingerDownX) / overX).coerceIn(0f, 1f)
-                if (overY > 0f) panY = (panY - (e.y - fingerDownY) / overY).coerceIn(0f, 1f)
+                val (px, py) = transform.panAfterDrag(e.x - fingerDownX, e.y - fingerDownY)
+                panX = px; panY = py
                 applyZoom()
             } else {
                 val w = surfaceView.width.toFloat()
@@ -1318,12 +1316,18 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
                     if (link != null) { followLink(link); return }
                     // The minimap thumbnail is the OLD page's; drop it so the turn doesn't leave the
                     // wrong page on screen (it re-captures on the next return to fit) (#52 review).
-                    val third = w / 3f
-                    if (fingerDownX < third) { panY = 0f; minimap.invalidateThumb(); queuePageTurn(-1) }
-                    else if (fingerDownX > 2f * third) { panY = 0f; minimap.invalidateThumb(); queuePageTurn(+1) }
-                    // Centre double-tap while zoomed → restore fit (#54); a single centre tap records
-                    // for double-tap detection but otherwise does nothing while zoomed.
-                    else if (isCentreDoubleTap(fingerDownX, fingerDownY)) doubleTapZoom(fingerDownX, fingerDownY)
+                    when (ReaderGestures.zoneFor(fingerDownX, w)) {
+                        ReaderGestures.Zone.PREV ->
+                            { panY = 0f; minimap.invalidateThumb(); queuePageTurn(-1) }
+                        ReaderGestures.Zone.NEXT ->
+                            { panY = 0f; minimap.invalidateThumb(); queuePageTurn(+1) }
+                        // Centre double-tap while zoomed → restore fit (#54); a single centre tap
+                        // records for double-tap detection but otherwise does nothing while zoomed.
+                        ReaderGestures.Zone.CENTRE ->
+                            if (isCentreDoubleTap(fingerDownX, fingerDownY)) {
+                                doubleTapZoom(fingerDownX, fingerDownY)
+                            }
+                    }
                 }
             }
             return
@@ -1334,13 +1338,11 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             // a more-vertical or short drag does nothing. Tap zones still work for precise turns.
             val dx = e.x - fingerDownX
             val dy = e.y - fingerDownY
-            val w = surfaceView.width.toFloat()
-            val minDist = (w * 0.06f).coerceAtLeast(90f) // a comfortable flick, not a screen-width drag
-            val horizontal = kotlin.math.abs(dx) > minDist && kotlin.math.abs(dx) > kotlin.math.abs(dy) * 1.2f
-            diag { "DIAG finger swipe dx=$dx dy=$dy min=$minDist horizontal=$horizontal" }
-            if (horizontal) {
+            val dir = ReaderGestures.swipeDelta(dx, dy, surfaceView.width.toFloat())
+            diag { "DIAG finger swipe dx=$dx dy=$dy dir=$dir" }
+            if (dir != null) {
                 minimap.invalidateThumb()
-                queuePageTurn(if (dx < 0f) +1 else -1)
+                queuePageTurn(dir)
             }
             return // a swipe (handled above) or rejected palm — not a tap
         }
@@ -1368,20 +1370,19 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             }
         }
         // Top-right corner → toggle the bookmark dog-ear (Kindle/KOReader convention).
-        if (w > 0f && h > 0f && x > w * (1f - BOOKMARK_ZONE_W) && y < h * BOOKMARK_ZONE_H) {
+        if (ReaderGestures.isBookmarkCorner(x, y, w, h)) {
             bottomBar.toggleBookmark()
             return
         }
-        val third = w / 3f
-        val zone = if (x < third) "PREV" else if (x > 2 * third) "NEXT" else "TOC"
+        val zone = ReaderGestures.zoneFor(x, w)
         diag { "DIAG handleTap x=$x w=$w -> $zone (${currentLinks.size} links, no hit)" }
         // An edge tap breaks any centre double-tap chain (so centre→edge→centre within the window
         // isn't read as a double-tap-zoom) (#54).
-        if (zone != "TOC") lastCentreTapMs = 0L
+        if (zone != ReaderGestures.Zone.CENTRE) lastCentreTapMs = 0L
         when (zone) {
-            "PREV" -> queuePageTurn(-1)
-            "NEXT" -> queuePageTurn(+1)
-            else -> {
+            ReaderGestures.Zone.PREV -> queuePageTurn(-1)
+            ReaderGestures.Zone.NEXT -> queuePageTurn(+1)
+            ReaderGestures.Zone.CENTRE -> {
                 // Centre: a double-tap zooms toward the point (#54); a single tap opens the menu,
                 // deferred [DOUBLE_TAP_MS] so the first tap of a double-tap doesn't flash the bar open.
                 // (Edge page turns above stay immediate — no double-tap latency on navigation.)
@@ -1417,10 +1418,9 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
      *  on completion). Snaps to the document bounds; a no-op at the edges. */
     private fun flushPageTurns() {
         if (turnInFlight || pendingPageDelta == 0) return
-        val last = pageCount.coerceAtLeast(1) - 1
-        val target = (currentPage + pendingPageDelta).coerceIn(0, last)
+        val target = ReaderGestures.jumpTarget(currentPage, pendingPageDelta, pageCount)
         pendingPageDelta = 0
-        if (target == currentPage) return
+        if (target == null) return
         turnInFlight = true
         postJump(target) { runOnUiThread { turnInFlight = false; flushPageTurns() } }
     }
@@ -1606,12 +1606,17 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
     @Volatile private var zoom = 1f
     @Volatile private var panX = 0f
     @Volatile private var panY = 0f
-    private fun nToVx(nx: Float) = nx * viewW * zoom - panX * viewW * (zoom - 1f)
-    private fun nToVy(ny: Float) = ny * viewH * zoom - panY * viewH * (zoom - 1f)
-    private fun vToNx(vx: Float) = ((vx + panX * viewW * (zoom - 1f)) / (viewW * zoom)).coerceIn(0f, 1f)
-    private fun vToNy(vy: Float) = ((vy + panY * viewH * (zoom - 1f)) / (viewH * zoom)).coerceIn(0f, 1f)
+    /** The current page↔view map (RR5-FR3). Rebuilt from the live zoom/pan on every read, so a
+     *  gesture can never see it half-updated; the maths itself lives in [ViewTransform]. */
+    private val transform: ViewTransform get() = ViewTransform(viewW, viewH, zoom, panX, panY)
+
+    private fun nToVx(nx: Float) = transform.nToVx(nx)
+    private fun nToVy(ny: Float) = transform.nToVy(ny)
+    private fun vToNx(vx: Float) = transform.vToNx(vx)
+    private fun vToNy(vy: Float) = transform.vToNy(vy)
+
     /** Convert an on-screen length (px) to normalized page units at the current zoom. */
-    private fun lenToNorm(px: Float) = px / (viewW * zoom)
+    private fun lenToNorm(px: Float) = transform.lenToNorm(px)
     /** Push the current zoom/pan to the core and re-render (engine thread). */
     private fun applyZoom() {
         // Any zoom/pan change (pinch, +/- buttons, double-tap, pan) cancels a deferred centre menu so
@@ -1682,9 +1687,10 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         minimap.captureFitThumb(bitmap) // grab the fit thumb before leaving fit (for the zoom minimap)
         val nx = vToNx(fx); val ny = vToNy(fy) // page point under the tap, at the current (fit) factor
         zoom = DOUBLE_TAP_ZOOM.coerceIn(1f, MAX_ZOOM_UI)
-        val overX = viewW * (zoom - 1f); val overY = viewH * (zoom - 1f)
-        panX = if (overX > 0f) ((nx * viewW * zoom - fx) / overX).coerceIn(0f, 1f) else 0f
-        panY = if (overY > 0f) ((ny * viewH * zoom - fy) / overY).coerceIn(0f, 1f) else 0f
+        // The same anchoring a pinch-end uses, so a double-tap and a pinch put the same content
+        // under the same finger — one implementation, in [ViewTransform.panAnchoring].
+        val (px, py) = transform.panAnchoring(nx, ny, fx, fy)
+        panX = px; panY = py
         applyZoom()
     }
 
@@ -1692,9 +1698,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
      *  [DOUBLE_TAP_SLOP_PX] of the last centre tap). Records the tap as the potential first of a pair. */
     private fun isCentreDoubleTap(x: Float, y: Float): Boolean {
         val now = SystemClock.uptimeMillis()
-        val near = kotlin.math.hypot(x - lastCentreTapX, y - lastCentreTapY) < DOUBLE_TAP_SLOP_PX
-        val quick = now - lastCentreTapMs <= DOUBLE_TAP_MS
-        if (quick && near) {
+        if (ReaderGestures.isDoubleTap(x, y, lastCentreTapX, lastCentreTapY, now - lastCentreTapMs)) {
             lastCentreTapMs = 0L // consume — a third tap doesn't chain
             return true
         }
@@ -1763,9 +1767,8 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
                     // Anchor the pinched point: keep the content under the focal point fixed.
                     val nx = vToNx(focusX); val ny = vToNy(focusY) // uses the pre-zoom factor
                     zoom = newZoom
-                    val overX = viewW * (zoom - 1f); val overY = viewH * (zoom - 1f)
-                    panX = if (overX > 0f) ((nx * viewW * zoom - focusX) / overX).coerceIn(0f, 1f) else 0f
-                    panY = if (overY > 0f) ((ny * viewH * zoom - focusY) / overY).coerceIn(0f, 1f) else 0f
+                    val (px, py) = transform.panAnchoring(nx, ny, focusX, focusY)
+                    panX = px; panY = py
                 }
                 applyZoom()
             }
