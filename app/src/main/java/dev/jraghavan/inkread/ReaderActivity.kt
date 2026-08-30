@@ -1087,8 +1087,8 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         // Read-ahead: warm the next page (in the direction of travel) into the core's render cache,
         // off the critical path — the next turn then hits the cache (core≈0), attacking the render's
         // biggest cost. Deduped so chrome repaints of the same page don't re-enqueue.
-        val ahead = currentPage + lastTurnDir
-        if (zoom <= 1f && ahead in 0 until pageCount && ahead != lastPrefetchedPage) {
+        val ahead = PrefetchPolicy.nextPage(currentPage, lastTurnDir, pageCount, zoom, lastPrefetchedPage)
+        if (ahead != null) {
             lastPrefetchedPage = ahead
             engine.execute {
                 val h = docHandle
@@ -1663,11 +1663,12 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             Log.i(TAG, "zoom ignored: this document is not magnifiable (reflowed view)")
             return
         }
-        val next = (zoom * factor).coerceIn(1f, MAX_ZOOM_UI)
-        if (zoom <= 1f && next > 1f) minimap.captureFitThumb(bitmap) // grab the fit thumb before leaving fit
         val from = zoom
+        val next = ZoomPolicy.stepped(zoom, factor, MAX_ZOOM_UI)
+        // The fit thumb must be grabbed while the fit render is still on screen (see ZoomPolicy).
+        if (ZoomPolicy.leavingFit(from, next)) minimap.captureFitThumb(bitmap)
         zoom = next
-        if (zoom <= 1.01f) { zoom = 1f; panX = 0f; panY = 0f }
+        if (ZoomPolicy.isFit(zoom)) { panX = 0f; panY = 0f }
         Log.i(TAG, "zoom: $from → $zoom" + if (from == zoom) " (at the limit)" else "")
         applyZoom()
     }
@@ -1686,7 +1687,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         }
         minimap.captureFitThumb(bitmap) // grab the fit thumb before leaving fit (for the zoom minimap)
         val nx = vToNx(fx); val ny = vToNy(fy) // page point under the tap, at the current (fit) factor
-        zoom = DOUBLE_TAP_ZOOM.coerceIn(1f, MAX_ZOOM_UI)
+        zoom = ZoomPolicy.doubleTapTarget(zoom, DOUBLE_TAP_ZOOM, MAX_ZOOM_UI)
         // The same anchoring a pinch-end uses, so a double-tap and a pinch put the same content
         // under the same finger — one implementation, in [ViewTransform.panAnchoring].
         val (px, py) = transform.panAnchoring(nx, ny, fx, fy)
@@ -1759,9 +1760,10 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
                     if (target != cur) adjust.applyReflowScale(target, announce = true)
                     return
                 }
-                val newZoom = (gestureStartZoom * liveScale).coerceIn(1f, MAX_ZOOM_UI)
-                if (gestureStartZoom <= 1f && newZoom > 1f) minimap.captureFitThumb(bitmap) // zoom field still ≤1 here
-                if (newZoom <= 1.01f) {
+                val newZoom = ZoomPolicy.stepped(gestureStartZoom, liveScale, MAX_ZOOM_UI)
+                // `zoom` is still the pre-gesture value here, so the fit thumb is still valid.
+                if (ZoomPolicy.leavingFit(gestureStartZoom, newZoom)) minimap.captureFitThumb(bitmap)
+                if (ZoomPolicy.isFit(newZoom)) {
                     zoom = 1f; panX = 0f; panY = 0f
                 } else {
                     // Anchor the pinched point: keep the content under the focal point fixed.

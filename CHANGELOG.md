@@ -46,8 +46,9 @@ number is given in parentheses.
 - `ReaderActivity`'s coordinate map and gesture rules are extracted as pure, fully-tested types:
   `ViewTransform` (the page↔view map, previously restated as four lambdas in five places, with the
   focal-anchor maths that pinch-end and double-tap-zoom had duplicated verbatim) and
-  `ReaderGestures` (tap zones, swipe thresholds, page-turn coalescing, double-tap). Both at 100%
-  line coverage.
+  `ReaderGestures` (tap zones, swipe thresholds, page-turn coalescing, double-tap), `ZoomPolicy`
+  (the clamp, the snap back to fit, the double-tap toggle) and `PrefetchPolicy` (read-ahead and every
+  condition that suppresses it). All at 100% line coverage.
 - Four oversized modules are split by domain, with no behaviour change:
   `reader-core/src/jni.rs` (1,927 lines) into a `jni/` module — all 79 exported symbols and their
   bodies byte-identical, so the ABI the Kotlin side links against is unchanged;
