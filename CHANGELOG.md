@@ -12,47 +12,54 @@ number is given in parentheses.
 
 ## [Unreleased]
 
+### Added
+
+- `CHANGELOG.md` (this file), reconstructed from the tags, and an Unreleased line is now part of the
+  PR checklist in `CONTRIBUTING.md`.
+- Property-based tests (`proptest`) for `PinPosition` round-trip and ordering totality, the
+  `device-eink` capability and command wire codecs, and the `.inkbin` stroke codec — the RR6-AC1 /
+  RR17-FR3 acceptance criteria, and what `CONTRIBUTING.md` already claimed the suite had.
+- `scripts/check-vendor-neutral.sh`, which enforces IR-7 ("the core names no vendor") in CI beside
+  the existing check that `jni` stays out of the host dependency graph.
+- Ten host tests for the zoom minimap's geometry and pan maths, which had none.
+
 ### Changed
 
+- The README states the plugin story as roadmap rather than as a shipped feature. `inkread-lua`
+  embeds a working Lua 5.4 VM but ships only `inkread.log` and is not wired into `reader-core`, and
+  no `.koplugin` shim exists, so the comparison table now points at a new **Roadmap** section
+  listing the six things that are specified or partly built but not shipped.
 - Cleartext HTTP is no longer allowed to arbitrary hosts. `HttpFetch` permits it only when the host
   is on the local network — a private/loopback/link-local IP literal, `localhost`, a reserved local
   suffix, or a single-label name — which is what a calibre or Calibre-Web server on the LAN needs,
   and refuses it everywhere else. A network security config additionally pins GitHub (the
   self-updater) and Wiktionary to HTTPS at the platform level.
-- `reader-core/src/jni.rs` (1,927 lines) is split into a `jni/` module by the domain each export
-  serves — document, display, ink, lasso, text, services — with the shared throw/handle/array
-  helpers in `mod.rs`. All 79 exported symbols and their bodies are byte-identical, so the ABI the
-  Kotlin side links against is unchanged.
-- `reader-core/src/session.rs` (1,630 lines, one `impl` with 102 methods) is split into a
-  `session/` module by what each method is for — open, render, view, navigate, ink, select — with
-  the struct, its lifecycle and the plain accessors in `mod.rs`.
-- `reader-core/src/document/text_select.rs` (1,634 lines) is split into a `text_select/` module by
-  what a query is — search, word, columns, span — with the geometry types and shared predicates in
-  `mod.rs`. The module's public surface is unchanged.
-- The zoom minimap is extracted from `ReaderActivity` (2,134 lines) into `MinimapController`, with
-  its geometry and pan maths as pure values and 10 host tests that code never had.
 - `device-eink` and `reader-core` no longer name a vendor.
   `DeviceCapabilities::supernote_baseline` / `supernote_full` are now `flashing_epd` /
   `controllable_epd`, and `ResourceBudget::default_supernote` is `default_tablet_epd` — the
-  capability, not the manufacturer. `scripts/check-vendor-neutral.sh` now enforces IR-7 in CI.
-
-### Added
-
-- Property-based tests (`proptest`) for `PinPosition` round-trip and ordering totality, the
-  `device-eink` capability and command wire codecs, and the `.inkbin` stroke codec — the RR6-AC1 /
-  RR17-FR3 acceptance criteria, and what `CONTRIBUTING.md` already claimed the suite had.
+  capability, not the manufacturer.
+- Four oversized modules are split by domain, with no behaviour change:
+  `reader-core/src/jni.rs` (1,927 lines) into a `jni/` module — all 79 exported symbols and their
+  bodies byte-identical, so the ABI the Kotlin side links against is unchanged;
+  `reader-core/src/session.rs` (1,630 lines, one `impl` with 102 methods) into a `session/` module;
+  `reader-core/src/document/text_select.rs` (1,634 lines) into a `text_select/` module, with its
+  public surface unchanged; and the zoom minimap out of `ReaderActivity` (2,134 lines) into
+  `MinimapController`.
 
 ### Fixed
 
+- Production `unwrap`/`expect` removed from the PDF backend, `PinPosition` serialization, text
+  selection, and the PDF text-block splitter — paths the JNI bridge reaches, where an unwind would
+  have violated RR21-FR3. A missing symbol-fallback face or hyphenation pattern set now degrades
+  (lost glyph coverage, whole-word wrapping) instead of taking the reader down.
 - Module headers that still described the M0 milestone now describe the shipped code: the `Document`
   trait has four backends and defaulted `toc`/`search`/`hint_page` rather than "the PDF backend is
   the one implementation", the render pipeline has a cache and prefetch, the refresh policy has
   scroll suppression and a night cadence, and `ReaderActivity` is no longer marked
   `DEVICE-UNVERIFIED`.
-- Production `unwrap`/`expect` removed from the PDF backend, `PinPosition` serialization, text
-  selection, and the PDF text-block splitter — paths the JNI bridge reaches, where an unwind would
-  have violated RR21-FR3. A missing symbol-fallback face or hyphenation pattern set now degrades
-  (lost glyph coverage, whole-word wrapping) instead of taking the reader down.
+- `ADR-INKREAD-0016` (the calibre/OPDS library) is cited from ten call sites and had no row in
+  `docs/SPEC-INDEX.md`; the README now links that index too.
+- `scripts/gate.sh` claimed to mirror CI but ran neither script gate. It now runs both.
 
 ## [1.3.2] — 2026-08-29
 
