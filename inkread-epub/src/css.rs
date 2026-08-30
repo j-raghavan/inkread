@@ -17,6 +17,33 @@ use simplecss::{AttributeOperator, DeclarationTokenizer, Element as CssElement, 
 
 use crate::layout::Align;
 
+/// A declared vertical length, kept in its own unit until layout knows the font size (#251).
+///
+/// Only the units a vertical margin can be resolved from without a box model are represented.
+/// `%` is deliberately absent: a percentage margin resolves against the *containing block's width*,
+/// which is a box-model measurement inkread does not have (ADR-INKREAD-0007), and guessing it
+/// against the height or the font size would be a different length than the book asked for.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Length {
+    /// A multiple of the font size (`em`, and `rem` — the root size is the body size here).
+    Em(f32),
+    /// An absolute CSS pixel length.
+    Px(f32),
+}
+
+impl Eq for Length {}
+
+impl Length {
+    /// Resolve to pixels against a font size.
+    #[must_use]
+    pub fn px(self, font_px: f32) -> f32 {
+        match self {
+            Length::Em(v) => v * font_px,
+            Length::Px(v) => v,
+        }
+    }
+}
+
 /// The block-level properties a book may declare that inkread honours.
 ///
 /// Every field is `Option` so "the book said nothing" stays distinguishable from "the book asked
@@ -38,6 +65,15 @@ pub struct BlockStyle {
     /// Italic already rendered from `<i>`, `<em>` and `<cite>`; what was missing was the CSS. A book
     /// that italicises through its stylesheet rather than a tag rendered upright.
     pub italic: Option<bool>,
+    /// `margin-top`, from the longhand or the `margin` shorthand (#251).
+    ///
+    /// Unlike the four above, margins do **not** inherit — see [`BlockStyle::overlaid_with`]. When
+    /// declared it replaces inkread's own gap before the block; when absent inkread's typography
+    /// stands. This is the only part of the box model honoured: vertical separation is what a book
+    /// uses to mark a stanza or set a heading apart, and dropping it renders poetry as prose.
+    pub margin_top: Option<Length>,
+    /// `margin-bottom`, from the longhand or the `margin` shorthand (#251).
+    pub margin_bottom: Option<Length>,
 }
 
 impl BlockStyle {
@@ -48,6 +84,8 @@ impl BlockStyle {
             && self.indent.is_none()
             && self.bold.is_none()
             && self.italic.is_none()
+            && self.margin_top.is_none()
+            && self.margin_bottom.is_none()
     }
 
     /// Return `self` with every property `higher` declares overridden — the inheritance step, used
@@ -66,6 +104,11 @@ impl BlockStyle {
         if higher.italic.is_some() {
             self.italic = higher.italic;
         }
+        // `margin` is not an inherited property. Taking the container's would give every block it
+        // wraps the container's own spacing — a `<div style="margin: 2em">` around a poem would put
+        // two ems between every line of it.
+        self.margin_top = higher.margin_top;
+        self.margin_bottom = higher.margin_bottom;
         self
     }
 
@@ -94,6 +137,13 @@ impl BlockStyle {
                 if let Some(i) = parse_font_style(&value) {
                     self.italic = Some(i);
                 }
+            }
+            "margin-top" => self.margin_top = parse_length(&value).or(self.margin_top),
+            "margin-bottom" => self.margin_bottom = parse_length(&value).or(self.margin_bottom),
+            "margin" => {
+                let (top, bottom) = parse_margin_shorthand(&value);
+                self.margin_top = top.or(self.margin_top);
+                self.margin_bottom = bottom.or(self.margin_bottom);
             }
             _ => {}
         }
@@ -256,6 +306,55 @@ fn is_zero_length(value: &str) -> bool {
         .take_while(|c| c.is_ascii_digit() || *c == '.' || *c == '-' || *c == '+')
         .collect();
     num.parse::<f32>().is_ok_and(|n| n == 0.0)
+}
+
+/// A CSS length → [`Length`], for the vertical margins inkread honours (#251).
+///
+/// `None` for anything that cannot be resolved without a box model — `auto`, a percentage, an
+/// unrecognised keyword, a unitless non-zero (invalid CSS) — so the book declares nothing and
+/// inkread's own typography stands rather than a guessed length replacing it. A bare `0` is valid
+/// in any unit and means zero.
+fn parse_length(value: &str) -> Option<Length> {
+    let value = value.trim();
+    let digits: String = value
+        .chars()
+        .take_while(|c| c.is_ascii_digit() || matches!(c, '.' | '-' | '+'))
+        .collect();
+    let n: f32 = digits.parse().ok()?;
+    if !n.is_finite() {
+        return None;
+    }
+    // Negative margins pull content into its neighbour; without a box model there is nothing for
+    // them to overlap, and honouring them would only eat the gap around them.
+    let n = n.max(0.0);
+    match value[digits.len()..].trim() {
+        "em" | "rem" | "ex" | "ch" => Some(Length::Em(n)),
+        "px" => Some(Length::Px(n)),
+        // A CSS absolute unit: convert at the reference 96 dpi rather than dropping the intent.
+        "pt" => Some(Length::Px(n * 96.0 / 72.0)),
+        "" if n == 0.0 => Some(Length::Px(0.0)),
+        _ => None,
+    }
+}
+
+/// The `margin` shorthand → its top and bottom components.
+///
+/// CSS box order: one value is all four sides, two are `vertical horizontal`, three are
+/// `top horizontal bottom`, four are `top right bottom left`.
+fn parse_margin_shorthand(value: &str) -> (Option<Length>, Option<Length>) {
+    let parts: Vec<&str> = value.split_whitespace().collect();
+    match parts.as_slice() {
+        [all] => {
+            let l = parse_length(all);
+            (l, l)
+        }
+        [v, _] => {
+            let l = parse_length(v);
+            (l, l)
+        }
+        [t, _, b] | [t, _, b, _] => (parse_length(t), parse_length(b)),
+        _ => (None, None),
+    }
 }
 
 /// `font-style` → italic or upright (#170).

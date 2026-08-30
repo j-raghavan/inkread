@@ -473,3 +473,111 @@ fn an_empty_stylesheet_is_empty_and_adding_blank_sources_keeps_it_so() {
     sheet.add("p { text-align: center }");
     assert!(!sheet.is_empty());
 }
+
+// ── margin (#251) ─────────────────────────────────────────────────────────────────────────────
+
+/// The only part of the box model honoured, because vertical space is how a book marks a stanza.
+#[test]
+fn the_margin_longhands_are_honoured() {
+    let st = styled(
+        "p { margin-top: 1.5em; margin-bottom: 12px }",
+        "<p data-t>x</p>",
+    );
+    assert_eq!(st.margin_top, Some(Length::Em(1.5)));
+    assert_eq!(st.margin_bottom, Some(Length::Px(12.0)));
+}
+
+/// CSS box order: 1 = all sides, 2 = vertical/horizontal, 3 = top/horizontal/bottom,
+/// 4 = top/right/bottom/left.
+#[test]
+fn the_margin_shorthand_follows_css_box_order() {
+    let one = styled("p { margin: 2em }", "<p data-t>x</p>");
+    assert_eq!(one.margin_top, Some(Length::Em(2.0)));
+    assert_eq!(one.margin_bottom, Some(Length::Em(2.0)));
+
+    let two = styled("p { margin: 1em 3em }", "<p data-t>x</p>");
+    assert_eq!(two.margin_top, Some(Length::Em(1.0)));
+    assert_eq!(two.margin_bottom, Some(Length::Em(1.0)));
+
+    let three = styled("p { margin: 1em 3em 2em }", "<p data-t>x</p>");
+    assert_eq!(three.margin_top, Some(Length::Em(1.0)));
+    assert_eq!(three.margin_bottom, Some(Length::Em(2.0)));
+
+    let four = styled("p { margin: 1em 3em 2em 4em }", "<p data-t>x</p>");
+    assert_eq!(four.margin_top, Some(Length::Em(1.0)));
+    assert_eq!(four.margin_bottom, Some(Length::Em(2.0)));
+}
+
+/// Zero is valid in any unit and is a real declaration — it says "no space here", which is not the
+/// same as saying nothing and letting inkread's own gap stand.
+#[test]
+fn a_zero_margin_is_a_declaration_not_a_silence() {
+    let st = styled("h2 { margin-top: 0 }", "<h2 data-t>x</h2>");
+    assert_eq!(st.margin_top, Some(Length::Px(0.0)));
+}
+
+/// A length inkread cannot resolve without a box model declares nothing, so its own typography
+/// stands rather than a guessed value replacing it.
+#[test]
+fn unresolvable_lengths_declare_nothing() {
+    for value in ["auto", "5%", "inherit", "3", "wibble"] {
+        let st = styled(&format!("p {{ margin-top: {value} }}"), "<p data-t>x</p>");
+        assert_eq!(st.margin_top, None, "{value} should declare nothing");
+    }
+}
+
+/// Without a box model there is nothing for a negative margin to overlap; clamping keeps it from
+/// eating the space around it instead.
+#[test]
+fn a_negative_margin_is_clamped_to_zero() {
+    let st = styled("p { margin-bottom: -2em }", "<p data-t>x</p>");
+    assert_eq!(st.margin_bottom, Some(Length::Em(0.0)));
+}
+
+/// Points are absolute; converting at the CSS reference 96 dpi keeps the book's intent.
+#[test]
+fn points_convert_at_the_css_reference_dpi() {
+    let st = styled("p { margin-top: 72pt }", "<p data-t>x</p>");
+    assert_eq!(st.margin_top, Some(Length::Px(96.0)));
+}
+
+/// `margin` does not inherit. A container's spacing must not become every wrapped block's spacing,
+/// which would put the container's margin between every line of a poem.
+#[test]
+fn margin_does_not_inherit_from_a_container() {
+    let container = BlockStyle {
+        margin_top: Some(Length::Em(4.0)),
+        align: Some(Align::Center),
+        ..BlockStyle::default()
+    };
+    let inner = container.overlaid_with(&BlockStyle::default());
+    assert_eq!(inner.margin_top, None, "margin must not descend");
+    assert_eq!(
+        inner.align,
+        Some(Align::Center),
+        "the inherited properties still descend"
+    );
+}
+
+/// A block's own margin survives the overlay that drops its container's.
+#[test]
+fn a_blocks_own_margin_survives_the_overlay() {
+    let own = BlockStyle {
+        margin_bottom: Some(Length::Em(1.0)),
+        ..BlockStyle::default()
+    };
+    assert_eq!(
+        BlockStyle::default().overlaid_with(&own).margin_bottom,
+        Some(Length::Em(1.0))
+    );
+}
+
+/// A margin alone is a declaration, so `is_empty` must not call the style silent.
+#[test]
+fn a_margin_only_style_is_not_empty() {
+    let st = BlockStyle {
+        margin_top: Some(Length::Em(1.0)),
+        ..BlockStyle::default()
+    };
+    assert!(!st.is_empty());
+}

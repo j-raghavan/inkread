@@ -18,7 +18,7 @@
 //! [`Page`]s into a `PixelBuffer`.
 
 use crate::content::{Block, Inline};
-use crate::css::BlockStyle;
+use crate::css::{BlockStyle, Length};
 
 /// Glyph-advance measurement for a font (Phase 4 supplies a real implementation; tests use a
 /// fixed-pitch fake). `bold`/`italic` may select a different face/metrics.
@@ -567,6 +567,10 @@ struct Pager<'o> {
     /// Vertical budget before a page break; infinite for a cell flow, which is paged by the row it
     /// belongs to rather than on its own.
     page_h: f32,
+    /// A block gap not yet spent. Held rather than added straight to `cursor_y` so that adjacent
+    /// margins **collapse to the larger** instead of summing, as CSS does (#251): a book that
+    /// declares `p { margin: 1em 0 }` means one em between stanzas, not two.
+    pending_gap: f32,
 }
 
 impl<'o> Pager<'o> {
@@ -579,6 +583,7 @@ impl<'o> Pager<'o> {
             cursor_y: 0.0,
             measure: opts.content_w(),
             page_h: opts.content_h(),
+            pending_gap: 0.0,
         }
     }
 
@@ -594,6 +599,7 @@ impl<'o> Pager<'o> {
     /// Place a line of `height`, breaking to a new page first if it would overflow a non-empty page.
     /// Run `x` is already content-relative; the line's vertical position is carried by `top`.
     fn emit(&mut self, runs: Vec<PlacedRun>, height: f32, rule: bool) {
+        self.flush_gap();
         if self.cursor_y + height > self.page_h && !self.current.is_empty() {
             self.break_page();
         }
@@ -609,17 +615,21 @@ impl<'o> Pager<'o> {
         self.cursor_y += height;
     }
 
-    /// Advance the vertical cursor by a block gap (never itself forces a page break).
+    /// Ask for a block gap. Never itself forces a page break, and never sums with the gap already
+    /// waiting: two adjacent margins collapse to the larger, and the gap is spent by the next line
+    /// placed (see [`Self::flush_gap`]) — so one at the top of a page, or trailing at the bottom,
+    /// costs nothing. That is browser/crengine margin-collapse behaviour.
     fn gap(&mut self, dy: f32) {
-        self.cursor_y += dy;
+        self.pending_gap = self.pending_gap.max(dy);
     }
 
-    /// A gap inserted BEFORE a block (heading/image), collapsed to nothing at the top of a page so
-    /// the page's top margin isn't doubled (margin-collapse, matching browser/crengine behaviour).
-    fn gap_before(&mut self, dy: f32) {
-        if self.cursor_y > 0.0 {
-            self.cursor_y += dy;
+    /// Spend the waiting gap, dropping it at the top of a page so the page's own margin is not
+    /// doubled.
+    fn flush_gap(&mut self) {
+        if !self.current.is_empty() {
+            self.cursor_y += self.pending_gap;
         }
+        self.pending_gap = 0.0;
     }
 
     /// Place a **pre-flowed** run of lines whose `top` values are relative to the flow's own origin,
@@ -638,6 +648,7 @@ impl<'o> Pager<'o> {
             self.cursor_y += total_h;
             return;
         }
+        self.flush_gap();
         if !self.current.is_empty()
             && self.cursor_y + total_h > self.page_h
             && total_h <= self.page_h
@@ -673,6 +684,8 @@ impl<'o> Pager<'o> {
             lines: std::mem::take(&mut self.current),
         });
         self.cursor_y = 0.0;
+        // A margin that would have opened the next page collapses against the page edge.
+        self.pending_gap = 0.0;
     }
 
     /// How many *whole* pages have been broken off so far (the in-progress one is not counted).
@@ -692,6 +705,12 @@ impl<'o> Pager<'o> {
             });
         }
         self.pages
+    }
+
+    /// A declared vertical margin in pixels, or `default_em` of inkread's own typography when the
+    /// book declared none (#251).
+    fn margin(&self, declared: Option<Length>, default_em: f32) -> f32 {
+        declared.map_or(self.opts.font_px * default_em, |l| l.px(self.opts.font_px))
     }
 
     /// Lay out one block. The single place a [`Block`] becomes lines — a chapter's blocks and a
@@ -717,7 +736,7 @@ impl<'o> Pager<'o> {
                 content,
                 style,
             } => {
-                self.gap_before(self.opts.font_px * 0.7);
+                self.gap(self.margin(style.margin_top, 0.7));
                 let size = self.opts.font_px * heading_scale(*level);
                 // Headings are bold by default, but that is inkread's typography, not a rule: a
                 // book that says `font-weight: normal` on its title gets a normal-weight title.
@@ -734,9 +753,13 @@ impl<'o> Pager<'o> {
                     cursor,
                     m,
                 );
-                self.gap(self.opts.font_px * 0.5);
+                self.gap(self.margin(style.margin_bottom, 0.5));
             }
             Block::Paragraph { content, style } => {
+                // Prose is set dense by default — no gap either side — so a declared margin is the
+                // only thing that separates one paragraph from the next by space rather than by
+                // indent. That is how a book marks off a stanza (#251).
+                self.gap(self.margin(style.margin_top, 0.0));
                 // First line indented, the rest flush left, no trailing gap — dense and book-like.
                 // The indent is the *only* thing marking where one paragraph ends and the next
                 // begins, since this typography deliberately omits the blank line between them; an
@@ -765,6 +788,7 @@ impl<'o> Pager<'o> {
                     cursor,
                     m,
                 );
+                self.gap(self.margin(style.margin_bottom, 0.0));
             }
             Block::ListItem {
                 ordered,
@@ -772,6 +796,7 @@ impl<'o> Pager<'o> {
                 content,
                 style,
             } => {
+                self.gap(self.margin(style.margin_top, 0.0));
                 let marker = if *ordered {
                     format!("{index}.")
                 } else {
@@ -790,14 +815,14 @@ impl<'o> Pager<'o> {
                     cursor,
                     m,
                 );
-                self.gap(self.opts.font_px * 0.15);
+                self.gap(self.margin(style.margin_bottom, 0.15));
             }
             Block::Image { src, alt } => {
                 if let Some(placed) = fit_image(src, alt, self.measure, self.page_h, images) {
                     // An image occupies one character position, as `<br>` does, so the offsets of
                     // everything after it stay stable whether or not it resolves (ADR-INKREAD-0012).
                     *cursor += 1;
-                    self.gap_before(self.opts.font_px * 0.4);
+                    self.gap(self.opts.font_px * 0.4);
                     self.add_image(placed);
                     self.gap(self.opts.font_px * 0.4);
                     return;
@@ -815,7 +840,7 @@ impl<'o> Pager<'o> {
                     italic: true,
                     href: None,
                 })];
-                self.gap_before(self.opts.font_px * 0.4);
+                self.gap(self.opts.font_px * 0.4);
                 // The label is synthetic, like a list item's marker: it must not consume source-
                 // character budget, or offsets after an image would depend on whether it resolved.
                 let at = *cursor;
@@ -1014,6 +1039,7 @@ impl<'o> Pager<'o> {
 
     /// Emit an illustration as a line of its own.
     fn add_image(&mut self, image: PlacedImage) {
+        self.flush_gap();
         let height = image.height as f32;
         if self.cursor_y + height > self.page_h && !self.current.is_empty() {
             self.break_page();

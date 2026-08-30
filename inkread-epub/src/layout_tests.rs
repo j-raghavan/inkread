@@ -1563,3 +1563,141 @@ mod row_layout {
         );
     }
 }
+
+// ── Declared vertical margins (#251) ──────────────────────────────────────────────────────────
+
+mod margins {
+    use super::*;
+
+    fn p(text: &str, style: BlockStyle) -> Block {
+        Block::Paragraph {
+            content: vec![Inline::Run(TextRun {
+                text: text.to_string(),
+                bold: false,
+                italic: false,
+                href: None,
+            })],
+            style,
+        }
+    }
+
+    fn tops(blocks: &[Block]) -> Vec<f32> {
+        let o = LayoutOpts::new(1200.0, 1600.0, 20.0);
+        paginate(blocks, &o, &Mono)
+            .into_iter()
+            .flat_map(|pg| pg.lines)
+            .map(|l| l.top)
+            .collect()
+    }
+
+    /// #251(3): prose is set dense, so without this a book's stanza spacing vanished entirely.
+    #[test]
+    fn a_declared_margin_separates_paragraphs_that_would_otherwise_be_dense() {
+        let dense = tops(&[p("a", BlockStyle::default()), p("b", BlockStyle::default())]);
+        let spaced = tops(&[
+            p("a", BlockStyle::default()),
+            p(
+                "b",
+                BlockStyle {
+                    margin_top: Some(Length::Em(2.0)),
+                    ..BlockStyle::default()
+                },
+            ),
+        ]);
+        assert!(
+            spaced[1] - spaced[0] > dense[1] - dense[0] + 30.0,
+            "a 2em margin should open a real gap ({:?} vs {:?})",
+            spaced,
+            dense,
+        );
+    }
+
+    /// Adjacent margins collapse to the larger, as CSS does — otherwise a book that declares both
+    /// `margin-bottom` and `margin-top` on its paragraphs gets twice the space it asked for.
+    #[test]
+    fn adjacent_margins_collapse_to_the_larger() {
+        let both = |a: f32, b: f32| {
+            tops(&[
+                p(
+                    "a",
+                    BlockStyle {
+                        margin_bottom: Some(Length::Em(a)),
+                        ..BlockStyle::default()
+                    },
+                ),
+                p(
+                    "b",
+                    BlockStyle {
+                        margin_top: Some(Length::Em(b)),
+                        ..BlockStyle::default()
+                    },
+                ),
+            ])
+        };
+        let collapsed = both(2.0, 1.0);
+        let alone = both(2.0, 0.0);
+        assert_eq!(
+            collapsed[1] - collapsed[0],
+            alone[1] - alone[0],
+            "1em against 2em must collapse to 2em, not sum to 3em",
+        );
+    }
+
+    /// A margin at the top of a page collapses against the page edge; otherwise the page's own top
+    /// margin is silently doubled whenever a break lands before a spaced block.
+    #[test]
+    fn a_margin_at_the_top_of_a_page_is_dropped() {
+        // Two lines fit; the third starts a page, and it is the one carrying the margin.
+        let short = LayoutOpts::new(1200.0, 100.0, 20.0);
+        let blocks = [
+            p("a", BlockStyle::default()),
+            p("b", BlockStyle::default()),
+            p(
+                "c",
+                BlockStyle {
+                    margin_top: Some(Length::Em(3.0)),
+                    ..BlockStyle::default()
+                },
+            ),
+        ];
+        let pages = paginate(&blocks, &short, &Mono);
+        assert!(pages.len() > 1, "the fixture must actually break");
+        assert_eq!(
+            pages.last().unwrap().lines[0].top,
+            0.0,
+            "the first line of a page sits at the content origin",
+        );
+    }
+
+    /// A book that zeroes a heading's margin gets a heading with no space around it, rather than
+    /// inkread's default reasserting itself.
+    #[test]
+    fn a_zeroed_margin_overrides_inkreads_own_gap() {
+        let heading = |style: BlockStyle| {
+            tops(&[
+                p("a", BlockStyle::default()),
+                Block::Heading {
+                    level: 2,
+                    content: vec![Inline::Run(TextRun {
+                        text: "h".to_string(),
+                        bold: false,
+                        italic: false,
+                        href: None,
+                    })],
+                    style,
+                },
+            ])
+        };
+        let default = heading(BlockStyle::default());
+        let zeroed = heading(BlockStyle {
+            margin_top: Some(Length::Px(0.0)),
+            ..BlockStyle::default()
+        });
+        assert!(
+            zeroed[1] - zeroed[0] < default[1] - default[0],
+            "a declared zero must beat the 0.7em default ({:?} vs {:?})",
+            zeroed,
+            default,
+        );
+    }
+}
