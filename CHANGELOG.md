@@ -19,6 +19,10 @@ number is given in parentheses.
   suffix, or a single-label name — which is what a calibre or Calibre-Web server on the LAN needs,
   and refuses it everywhere else. A network security config additionally pins GitHub (the
   self-updater) and Wiktionary to HTTPS at the platform level.
+- `reader-core/src/jni.rs` (1,927 lines) is split into a `jni/` module by the domain each export
+  serves — document, display, ink, lasso, text, services — with the shared throw/handle/array
+  helpers in `mod.rs`. All 79 exported symbols and their bodies are byte-identical, so the ABI the
+  Kotlin side links against is unchanged.
 - `device-eink` and `reader-core` no longer name a vendor.
   `DeviceCapabilities::supernote_baseline` / `supernote_full` are now `flashing_epd` /
   `controllable_epd`, and `ResourceBudget::default_supernote` is `default_tablet_epd` — the
