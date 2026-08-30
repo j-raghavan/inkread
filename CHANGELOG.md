@@ -21,7 +21,11 @@ number is given in parentheses.
   RR17-FR3 acceptance criteria, and what `CONTRIBUTING.md` already claimed the suite had.
 - `scripts/check-vendor-neutral.sh`, which enforces IR-7 ("the core names no vendor") in CI beside
   the existing check that `jni` stays out of the host dependency graph.
-- Ten host tests for the zoom minimap's geometry and pan maths, which had none.
+- Eleven host tests for the zoom minimap's geometry and pan maths, which had none — including a
+  regression pin replaying the touch coordinates and resolved regions from a device session on a
+  Manta.
+- `MinimapController` logs one line per touch-down while zoomed, naming the region hit and the card's
+  bounds, so "this button does nothing" is answerable from a logcat.
 
 ### Changed
 

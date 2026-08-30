@@ -4,6 +4,7 @@ import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
+import android.util.Log
 import android.view.MotionEvent
 
 /**
@@ -238,6 +239,23 @@ class MinimapController(private val host: Host) {
         val inThumb = g.inThumb(x, y)
         when (e.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
+                // One line per press, the same cadence as the reader's `zoom:` line. It exists for
+                // the same reason as "zoom ignored: not magnifiable" (#212): when someone reports
+                // that a button on this card does nothing, the answer should be in a logcat rather
+                // than in a guess about where the card was drawn.
+                Log.i(
+                    TAG,
+                    "down (%.0f,%.0f) -> %s | card x %.0f..%.0f split %.0f row y %.0f..%.0f".format(
+                        x, y,
+                        when {
+                            g.inMinus(x, y) -> "MINUS"
+                            g.inPlus(x, y) -> "PLUS"
+                            inThumb -> "THUMB"
+                            else -> "miss"
+                        },
+                        g.left, g.left + g.tw, g.split, g.buttonTop, g.buttonBottom,
+                    ),
+                )
                 when {
                     g.inMinus(x, y) -> { active = true; host.zoomBy(1f / ReaderActivity.ZOOM_STEP); return true }
                     g.inPlus(x, y) -> { active = true; host.zoomBy(ReaderActivity.ZOOM_STEP); return true }
@@ -253,5 +271,9 @@ class MinimapController(private val host: Host) {
             }
         }
         return active
+    }
+
+    private companion object {
+        const val TAG = "Minimap"
     }
 }

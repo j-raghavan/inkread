@@ -42,6 +42,49 @@ class MinimapGeometryTest {
 
     private fun host(block: FakeHost.() -> Unit = {}) = FakeHost().apply(block)
 
+    /** A Manta as it actually reports itself: 1920x2560 at 300dpi, so 1dp = 1.875px. */
+    private fun manta() = object : MinimapController.Host by FakeHost() {
+        override fun dpInt(v: Int) = (v * 300 / 160.0).toInt()
+    }
+
+    // ---- the real panel ----
+
+    /**
+     * Regression pin from a device session on a Manta (1920x2560 @ 300dpi), replaying the exact
+     * touch coordinates and the region each one resolved to on the hardware.
+     *
+     * These four points are worth keeping because they are not the ones a test author would invent.
+     * `(1804, 505)` is 33px above the button row and reads as thumbnail, which is the boundary the
+     * geometry is most likely to get wrong; `(1789, 604)` and `(1802, 565)` are real taps on `+`,
+     * one near each end of the row's height; and the two page taps confirm the card declines
+     * touches outside it rather than swallowing the reader's own gestures.
+     */
+    @Test
+    fun theRegionsMatchWhatTheDeviceReported() {
+        val g = MinimapController(manta()).geometry()!!
+        assertEquals(1521f, g.left, 0.5f)
+        assertEquals(1905f, g.left + g.tw, 0.5f)
+        assertEquals(1713f, g.split, 0.5f)
+        assertEquals(538f, g.buttonTop, 0.5f)
+        assertEquals(628f, g.buttonBottom, 0.5f)
+
+        // (x, y) -> the region the device logged.
+        assertTrue("(1804,505) is above the row, so thumbnail", g.inThumb(1804f, 505f))
+        assertFalse(g.inPlus(1804f, 505f))
+
+        assertTrue("(1789,604) is +", g.inPlus(1789f, 604f))
+        assertFalse(g.inThumb(1789f, 604f))
+
+        assertTrue("(1802,565) is +", g.inPlus(1802f, 565f))
+
+        for (miss in listOf(705f to 1764f, 977f to 1371f)) {
+            val (x, y) = miss
+            assertFalse("($x,$y) is on the page, not the card", g.inThumb(x, y))
+            assertFalse("($x,$y) is on the page, not the card", g.inMinus(x, y))
+            assertFalse("($x,$y) is on the page, not the card", g.inPlus(x, y))
+        }
+    }
+
     // ---- geometry ----
 
     @Test
