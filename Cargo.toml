@@ -55,7 +55,7 @@ zip = { version = "8", default-features = false, features = ["deflate"] }
 jpeg-decoder = { version = "0.3", default-features = false }
 png = "0.17"
 # inkread-daily (#66): RSS/Atom feed parsing. Pure-Rust pull parser, MIT/Apache, cross-compiles clean.
-quick-xml = "0.41"
+quick-xml = "0.42"
 # RSS/Atom/JSON-feed model shared by inkread-daily (#66) and inkread-opds (ADR-INKREAD-0016) — OPDS
 # is Atom plus link relations, and feed-rs already carries each link's rel, media type and length.
 feed-rs = "2.3.1"
