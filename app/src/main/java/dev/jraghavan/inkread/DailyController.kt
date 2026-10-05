@@ -418,6 +418,22 @@ class DailyController(private val context: Context) {
         fun clampLimit(n: Int): Int = n.coerceIn(MIN_PER_SOURCE, MAX_PER_SOURCE)
 
         /**
+         * [list] with [item] moved [by] places (negative = towards the front), for reordering
+         * sources (#267). Places are counted among the elements that are not [hidden] — a removed
+         * row is still in the staged order but no longer on screen, and one tap must move a row past
+         * the neighbour the reader can see. Hidden elements go to the end, where Save drops them.
+         * Clamped at the ends, so ▲ on the first row or ▼ on the last changes nothing; an [item] not
+         * in the visible list leaves it unchanged.
+         */
+        fun <T> moved(list: List<T>, item: T, by: Int, hidden: (T) -> Boolean = { false }): List<T> {
+            val visible = list.filterNot(hidden).toMutableList()
+            val from = visible.indexOf(item)
+            if (from < 0) return list
+            visible.add((from + by).coerceIn(0, visible.lastIndex), visible.removeAt(from))
+            return visible + list.filter(hidden)
+        }
+
+        /**
          * Round-robin the sources: every source's 1st article, then every source's 2nd, and so on.
          * Source order decides ties, so the reading order stays stable and predictable.
          *
