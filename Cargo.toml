@@ -58,7 +58,7 @@ png = "0.17"
 quick-xml = "0.42"
 # RSS/Atom/JSON-feed model shared by inkread-daily (#66) and inkread-opds (ADR-INKREAD-0016) — OPDS
 # is Atom plus link relations, and feed-rs already carries each link's rel, media type and length.
-feed-rs = "2.3.1"
+feed-rs = "3.0.0"
 # Legacy text encodings (#159): a great many Russian EPUBs are windows-1251 or koi8-r, and rbook
 # refuses any non-UTF-8 resource outright. encoding_rs is the browser-grade decoder (the one Firefox
 # ships), so this also covers Shift-JIS/Big5/EUC-KR books rather than just the reported one.
