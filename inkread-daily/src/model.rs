@@ -94,7 +94,7 @@ fn strip_markup(html: &str) -> String {
 /// Cut `text` to at most `max_chars` **characters**, breaking at a word boundary and marking the
 /// cut with an ellipsis. Counting characters rather than bytes is what keeps this from splitting a
 /// multi-byte character — a feed summary is arbitrary text, and half a character renders as a box.
-fn truncate_on_word(text: &str, max_chars: usize) -> String {
+pub(crate) fn truncate_on_word(text: &str, max_chars: usize) -> String {
     if text.chars().count() <= max_chars {
         return text.to_string();
     }

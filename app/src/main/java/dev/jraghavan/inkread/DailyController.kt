@@ -69,28 +69,48 @@ class DailyController(private val context: Context) {
     fun addSource(url: String) {
         val u = url.trim()
         if (u.isEmpty()) return
-        val updated = sources().filterNot { it.url == u } + Source(bylineFor(u), u)
-        save(updated)
+        update { cur -> cur.filterNot { it.url == u } + Source(bylineFor(u), u) }
     }
 
-    fun removeSource(url: String) = save(sources().filterNot { it.url == url })
+    /**
+     * Name a just-added source from its feed's own title (#268), off the UI thread. Fetches the
+     * feed once; [onDone] runs on a worker thread whether or not a name was found, so the caller
+     * can redraw. A compile would name it anyway — this only saves the reader seeing the host
+     * until then.
+     */
+    fun nameFromFeed(url: String, onDone: () -> Unit) {
+        Executors.newSingleThreadExecutor().execute {
+            try {
+                fetchFeed(url.trim(), booleanArrayOf(false)).title?.let { adoptFeedTitles(mapOf(url.trim() to it)) }
+            } catch (e: Exception) {
+                Log.w(TAG, "naming $url from its feed failed", e)
+            }
+            onDone()
+        }
+    }
+
+    fun removeSource(url: String) = update { cur -> cur.filterNot { it.url == url } }
 
     /** Mute/unmute a source without removing it (the Sources checklist). */
     fun setSourceEnabled(url: String, enabled: Boolean) =
-        save(sources().map { if (it.url == url) it.copy(enabled = enabled) else it })
+        update { cur -> cur.map { if (it.url == url) it.copy(enabled = enabled) else it } }
 
-    /** Persist an edited source list wholesale (enable/disable + removals from the Sources editor). */
-    fun setSources(list: List<Source>) = save(list)
+    /**
+     * Persist the Sources editor's list wholesale (order, edits, mutes, removals). [opened] is the
+     * list the editor started from: a compile may have named a source from its feed while the
+     * editor was open, and writing back the editor's stale host name would undo that
+     * ([keepAdoptedNames]).
+     */
+    fun setSources(list: List<Source>, opened: List<Source>) =
+        update { stored -> keepAdoptedNames(list, opened, stored) }
 
 
     /** The sources a compile actually fetches (muted ones excluded). */
     fun enabledSources(): List<Source> = sources().filter { it.enabled }
 
     /** Bulk-add sources (the suggested-feeds picker), de-duped against what's already followed. */
-    fun addSources(list: List<Source>) {
-        val cur = sources()
-        save(cur + list.filterNot { s -> cur.any { it.url == s.url } })
-    }
+    fun addSources(list: List<Source>) =
+        update { cur -> cur + list.filterNot { s -> cur.any { it.url == s.url } } }
 
     /** A small curated catalog of well-known feeds, so a new user can start with one tap instead of
      *  hunting for feed URLs. Shown as a default-on checklist. */
@@ -101,11 +121,19 @@ class DailyController(private val context: Context) {
     fun ensureSeeded() {
         val p = prefs()
         if (p.getBoolean("seeded", false)) return
-        if (sources().isEmpty()) save(SUGGESTED)
+        update { cur -> cur.ifEmpty { SUGGESTED } }
         p.edit().putBoolean("seeded", true).apply()
     }
 
-    private fun save(list: List<Source>) = synchronized(SOURCES_LOCK) {
+    /** Read-modify-write the stored source list under [SOURCES_LOCK], so a background compile
+     *  naming sources and the reader editing them cannot drop each other's change. */
+    private fun update(f: (List<Source>) -> List<Source>) = synchronized(SOURCES_LOCK) {
+        val cur = sources()
+        val next = f(cur)
+        if (next != cur) save(next)
+    }
+
+    private fun save(list: List<Source>) {
         val arr = JSONArray()
         list.forEach {
             arr.put(
@@ -306,7 +334,7 @@ class DailyController(private val context: Context) {
      * `reached[0]` is set true if any URL responded (to distinguish "no network" from "not a feed").
      */
     private fun fetchFeed(url: String, reached: BooleanArray): Feed {
-        val body = fetch(url) ?: return Feed.NONE
+        val body = fetch(url) ?: return Feed(null, JSONArray())
         reached[0] = true
         parseFeed(body)?.let { if (it.items.length() > 0) return it }
         // Not a feed — discover one from the page, then fall back to common paths.
@@ -324,15 +352,11 @@ class DailyController(private val context: Context) {
                 }
             }
         }
-        return Feed.NONE
+        return Feed(null, JSONArray())
     }
 
     /** A parsed feed: its own title (null when it gives none) and its entries. */
-    private class Feed(val title: String?, val items: JSONArray) {
-        companion object {
-            val NONE = Feed(null, JSONArray())
-        }
-    }
+    private class Feed(val title: String?, val items: JSONArray)
 
     private fun parseFeed(xml: String): Feed? =
         runCatching {
@@ -349,16 +373,11 @@ class DailyController(private val context: Context) {
      * so a feed added as `rss.elpais.com` reads "EL PAÍS" from then on — including feeds added before
      * feeds could name themselves. Names the reader typed and curated names are left alone ([named]).
      *
-     * Re-reads the list under [SOURCES_LOCK] rather than writing back the list the compile started
-     * from, which may be minutes old: the reader can reorder, mute or remove sources meanwhile.
+     * Applied to the stored list, not the one the compile started from, which may be minutes old.
      */
     private fun adoptFeedTitles(titles: Map<String, String>) {
         if (titles.isEmpty()) return
-        synchronized(SOURCES_LOCK) {
-            val cur = sources()
-            val updated = cur.map { s -> titles[s.url]?.let { named(s, it) } ?: s }
-            if (updated != cur) save(updated)
-        }
+        update { cur -> cur.map { s -> titles[s.url]?.let { named(s, it) } ?: s } }
     }
 
     /** Find a feed URL advertised in a page's `<link rel="alternate" type="…rss/atom+xml" href="…">`. */
@@ -417,8 +436,7 @@ class DailyController(private val context: Context) {
         fun withUrl(source: Source, newUrl: String): Source {
             val u = newUrl.trim()
             if (u.isEmpty() || u == source.url) return source
-            val wasDerived = source.name == bylineFor(source.url)
-            return source.copy(name = if (wasDerived) bylineFor(u) else source.name, url = u)
+            return source.copy(name = if (isHostNamed(source)) bylineFor(u) else source.name, url = u)
         }
 
         /**
@@ -429,6 +447,10 @@ class DailyController(private val context: Context) {
         fun bylineFor(url: String): String =
             runCatching { URL(url).host.removePrefix("www.") }.getOrDefault(url).ifBlank { url }
 
+        /** Whether [source] still carries the default byline derived from its URL — the one name
+         *  the app may replace on the reader's behalf ([withUrl], [named]). */
+        fun isHostNamed(source: Source): Boolean = source.name == bylineFor(source.url)
+
         /**
          * [source] renamed to its feed's own [feedTitle] (#268) — but only while its name is still the
          * host-derived default. A curated byline ("BBC News") and a name the reader typed are theirs to
@@ -437,7 +459,7 @@ class DailyController(private val context: Context) {
          */
         fun named(source: Source, feedTitle: String?): Source {
             val t = feedTitle?.trim().orEmpty()
-            if (t.isEmpty() || source.name != bylineFor(source.url)) return source
+            if (t.isEmpty() || !isHostNamed(source)) return source
             return source.copy(name = t)
         }
 
@@ -452,8 +474,25 @@ class DailyController(private val context: Context) {
             return if (n.isEmpty() || n == source.name) moved else moved.copy(name = n)
         }
 
-        /** Serialises read-modify-write of the stored source list across controller instances (the
-         *  activity's and the background compile's). */
+        /**
+         * The Sources editor's [edited] list, keeping names a compile adopted from feeds while the
+         * editor was open (#268). A row the editor left host-named, whose row in [opened] was
+         * host-named too, but which [stored] now names otherwise, was renamed by its feed in the
+         * meantime — take the stored name. A name the reader typed is never touched.
+         */
+        fun keepAdoptedNames(edited: List<Source>, opened: List<Source>, stored: List<Source>): List<Source> =
+            edited.map { e ->
+                val was = opened.find { it.url == e.url }
+                val now = stored.find { it.url == e.url }
+                if (isHostNamed(e) && was != null && isHostNamed(was) && now != null && !isHostNamed(now)) {
+                    e.copy(name = now.name)
+                } else {
+                    e
+                }
+            }
+
+        /** Serialises read-modify-write of the stored source list ([update]) across controller
+         *  instances — the activity's and the background compile's. */
         private val SOURCES_LOCK = Any()
 
         val SUGGESTED = listOf(

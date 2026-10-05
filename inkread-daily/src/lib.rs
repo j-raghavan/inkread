@@ -16,16 +16,16 @@ pub mod quote;
 
 pub use epub::assemble_epub;
 pub use extract::extract_readable;
-pub use feed::{parse_feed, parse_feed_doc, FeedItem, ParsedFeed};
+pub use feed::{parse_feed, FeedItem, ParsedFeed};
 pub use model::{Article, Issue, Source};
 
 use serde::Deserialize;
 
 /// Parse a feed and return `{"title": …, "items": [...]}` (the JNI-friendly form of
-/// [`parse_feed_doc`]); `title` is `null` when the feed has none.
+/// [`parse_feed`]); `title` is `null` when the feed has none.
 #[must_use]
 pub fn parse_feed_json(xml: &str) -> String {
-    serde_json::to_string(&parse_feed_doc(xml))
+    serde_json::to_string(&parse_feed(xml))
         .unwrap_or_else(|_| r#"{"title":null,"items":[]}"#.to_string())
 }
 

@@ -33,16 +33,10 @@ pub struct ParsedFeed {
     pub items: Vec<FeedItem>,
 }
 
-/// Parse an RSS / Atom / JSON feed into its entries, in document order. Tolerant of malformed input.
+/// Parse an RSS / Atom / JSON feed into its title and entries (in document order). Malformed input
+/// yields an empty [`ParsedFeed`] rather than an error (RR21-FR3).
 #[must_use]
-pub fn parse_feed(xml: &str) -> Vec<FeedItem> {
-    parse_feed_doc(xml).items
-}
-
-/// Parse an RSS / Atom / JSON feed into its title and entries. Malformed input yields an empty
-/// [`ParsedFeed`] rather than an error (RR21-FR3).
-#[must_use]
-pub fn parse_feed_doc(xml: &str) -> ParsedFeed {
+pub fn parse_feed(xml: &str) -> ParsedFeed {
     let feed = match feed_rs::parser::parse(xml.as_bytes()) {
         Ok(f) => f,
         Err(_) => return ParsedFeed::default(),
@@ -81,23 +75,28 @@ pub fn parse_feed_doc(xml: &str) -> ParsedFeed {
 
 /// The longest feed title kept as a byline. It is shown on a Sources row, the front page and every
 /// article's byline, so a publisher's paragraph-length `<title>` must not become one.
-const FEED_TITLE_CHARS: usize = 80;
+const FEED_TITLE_CHARS: usize = 60;
+
+/// Separators publishers put between their name and a tagline or section: "EL PAÍS: el periódico
+/// global", "Ars Technica - All content", "BBC News | Home". The name is the part before.
+const TAGLINE_SEPARATORS: [&str; 5] = [": ", " - ", " – ", " — ", " | "];
 
 /// Clean a feed's title for use as a byline: decode the entities feed-rs leaves behind (the same
-/// double-encoding as entry titles), collapse runs of whitespace (titles often carry the feed's own
-/// line breaks and indentation), and cap the length on a character boundary.
+/// double-encoding as entry titles), collapse whitespace, drop a trailing tagline, and cap the length.
 fn feed_title(raw: &str) -> String {
-    let decoded = crate::extract::decode_entities(raw);
-    let collapsed = decoded.split_whitespace().collect::<Vec<_>>().join(" ");
-    if collapsed.chars().count() <= FEED_TITLE_CHARS {
-        return collapsed;
-    }
-    collapsed
-        .chars()
-        .take(FEED_TITLE_CHARS)
-        .collect::<String>()
-        .trim_end()
-        .to_string()
+    let title = crate::extract::collapse_ws(&crate::extract::decode_entities(raw));
+    let name = TAGLINE_SEPARATORS
+        .iter()
+        .filter_map(|sep| title.find(sep))
+        .min()
+        .map_or(title.as_str(), |at| title[..at].trim());
+    // A title that *starts* with a separator has no name before it; keep the whole thing.
+    let name = if name.is_empty() {
+        title.as_str()
+    } else {
+        name
+    };
+    crate::model::truncate_on_word(name, FEED_TITLE_CHARS)
 }
 
 /// The article URL for an entry: prefer the `alternate` link (the readable page), else the first
@@ -122,7 +121,7 @@ mod tests {
             <item><title>Hello World</title><link>https://x.test/a</link>
             <pubDate>Wed, 25 Jun 2026 18:33:54 +0000</pubDate></item>
             </channel></rss>"#;
-        let items = parse_feed(xml);
+        let items = parse_feed(xml).items;
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].title, "Hello World");
         assert_eq!(items[0].url, "https://x.test/a");
@@ -138,7 +137,7 @@ mod tests {
             <link href="https://x.test/b"/>
             <author><name>Sheena Vasani</name></author>
             <updated>2026-06-25T18:00:00Z</updated></entry></feed>"#;
-        let items = parse_feed(xml);
+        let items = parse_feed(xml).items;
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].url, "https://x.test/b");
         assert!(!items[0].url.contains("Sheena"));
@@ -151,7 +150,7 @@ mod tests {
             <link rel="self" href="https://x.test/feed"/>
             <link rel="alternate" href="https://x.test/article"/>
             </entry></feed>"#;
-        let items = parse_feed(xml);
+        let items = parse_feed(xml).items;
         assert_eq!(items[0].url, "https://x.test/article");
     }
 
@@ -160,7 +159,7 @@ mod tests {
         let xml = r#"<?xml version="1.0"?><rss version="2.0"><channel>
             <item><title>Tom &amp; Jerry&#x27;s day</title><link>https://x.test/c</link></item>
             </channel></rss>"#;
-        let items = parse_feed(xml);
+        let items = parse_feed(xml).items;
         assert_eq!(items[0].title, "Tom & Jerry's day");
     }
 
@@ -171,7 +170,7 @@ mod tests {
         let xml = r#"<?xml version="1.0"?><rss version="2.0"><channel>
             <item><title>Guardian&amp;#8217;s phone</title><link>https://x.test/v</link></item>
             </channel></rss>"#;
-        let items = parse_feed(xml);
+        let items = parse_feed(xml).items;
         assert_eq!(items[0].title, "Guardian\u{2019}s phone");
     }
 
@@ -181,7 +180,7 @@ mod tests {
         let json = r#"{"version":"https://jsonfeed.org/version/1","title":"Site",
             "items":[{"id":"1","url":"https://x.test/j","title":"JSON Item",
             "date_published":"2026-06-25T18:00:00Z"}]}"#;
-        let items = parse_feed(json);
+        let items = parse_feed(json).items;
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].title, "JSON Item");
         assert_eq!(items[0].url, "https://x.test/j");
@@ -189,18 +188,21 @@ mod tests {
 
     #[test]
     fn malformed_input_yields_empty_not_panic() {
-        assert!(parse_feed("<not a feed").is_empty());
-        assert!(parse_feed("").is_empty());
-        assert!(parse_feed("plain text, definitely not a feed").is_empty());
-        assert_eq!(parse_feed_doc("<not a feed"), ParsedFeed::default());
+        assert!(parse_feed("<not a feed").items.is_empty());
+        assert!(parse_feed("").items.is_empty());
+        assert!(parse_feed("plain text, definitely not a feed")
+            .items
+            .is_empty());
+        assert_eq!(parse_feed("<not a feed"), ParsedFeed::default());
     }
 
-    /// The reported case: a feed added as `rss.elpais.com` names itself "El País".
+    /// The reported case: a feed added as `rss.elpais.com` names itself by its channel title, with
+    /// the publisher's tagline dropped (the live feed's title is "EL PAÍS: el periódico global").
     #[test]
     fn rss_channel_title_is_the_feed_title() {
-        let xml = r#"<?xml version="1.0"?><rss version="2.0"><channel><title>EL PA&#205;S</title>
+        let xml = r#"<?xml version="1.0"?><rss version="2.0"><channel><title>EL PA&#205;S: el peri&#243;dico global</title>
             <item><title>A</title><link>https://x.test/a</link></item></channel></rss>"#;
-        let feed = parse_feed_doc(xml);
+        let feed = parse_feed(xml);
         assert_eq!(feed.title.as_deref(), Some("EL PAÍS"));
         assert_eq!(
             feed.items.len(),
@@ -215,13 +217,13 @@ mod tests {
         let xml = r#"<?xml version="1.0"?><feed xmlns="http://www.w3.org/2005/Atom">
             <title>Atom Site</title>
             <entry><title>Entry One</title><link href="https://x.test/1"/></entry></feed>"#;
-        assert_eq!(parse_feed_doc(xml).title.as_deref(), Some("Atom Site"));
+        assert_eq!(parse_feed(xml).title.as_deref(), Some("Atom Site"));
     }
 
     #[test]
     fn json_feed_title_is_read() {
         let json = r#"{"version":"https://jsonfeed.org/version/1","title":"Site","items":[]}"#;
-        assert_eq!(parse_feed_doc(json).title.as_deref(), Some("Site"));
+        assert_eq!(parse_feed(json).title.as_deref(), Some("Site"));
     }
 
     /// No title, or only whitespace, is `None` — the shell keeps its host-derived byline rather
@@ -232,8 +234,8 @@ mod tests {
             <item><title>A</title><link>https://x.test/a</link></item></channel></rss>"#;
         let blank = r#"<rss version="2.0"><channel><title>
               </title><item><title>A</title><link>https://x.test/a</link></item></channel></rss>"#;
-        assert_eq!(parse_feed_doc(none).title, None);
-        assert_eq!(parse_feed_doc(blank).title, None);
+        assert_eq!(parse_feed(none).title, None);
+        assert_eq!(parse_feed(blank).title, None);
     }
 
     /// Line breaks and indentation inside `<title>` collapse; a double-encoded entity decodes.
@@ -243,7 +245,7 @@ mod tests {
               The  Guardian&amp;#8217;s
               Feed </title></channel></rss>"#;
         assert_eq!(
-            parse_feed_doc(xml).title.as_deref(),
+            parse_feed(xml).title.as_deref(),
             Some("The Guardian\u{2019}s Feed")
         );
     }
@@ -253,8 +255,31 @@ mod tests {
     fn a_long_title_is_capped_without_splitting_a_character() {
         let long = "é".repeat(200);
         let xml = format!(r#"<rss version="2.0"><channel><title>{long}</title></channel></rss>"#);
-        let title = parse_feed_doc(&xml).title.unwrap();
-        assert_eq!(title.chars().count(), FEED_TITLE_CHARS);
-        assert!(title.chars().all(|c| c == 'é'));
+        let title = parse_feed(&xml).title.unwrap();
+        assert!(title.chars().count() <= FEED_TITLE_CHARS + 1, "{title}");
+        assert!(title.ends_with('…'), "{title}");
+        assert!(title.trim_end_matches('…').chars().all(|c| c == 'é'));
+    }
+
+    #[test]
+    fn a_tagline_after_the_name_is_dropped() {
+        for (raw, want) in [
+            ("Ars Technica - All content", "Ars Technica"),
+            ("BBC News | Home", "BBC News"),
+            ("The Verge – All Posts", "The Verge"),
+            ("Quanta Magazine", "Quanta Magazine"),
+            // Hyphens without spaces are part of a name, not a separator.
+            ("Hacker-News Digest", "Hacker-News Digest"),
+            // The earliest separator wins: the name is what comes before any of them.
+            ("Site: News - World", "Site"),
+        ] {
+            assert_eq!(feed_title(raw), want, "{raw}");
+        }
+    }
+
+    /// No name before the separator: keep the title rather than byline the source with nothing.
+    #[test]
+    fn a_title_that_starts_with_a_separator_is_kept_whole() {
+        assert_eq!(feed_title("- Weekly"), "- Weekly");
     }
 }

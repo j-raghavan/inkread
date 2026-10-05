@@ -134,4 +134,47 @@ class DailyFeedUrlTest {
         val renamed = DailyController.edited(added("https://rss.elpais.com/feed.xml"), "El País", "https://rss.elpais.com/feed.xml")
         assertEquals("El País", DailyController.named(renamed, "EL PAÍS").name)
     }
+
+    /**
+     * Two URL edits in one Sources session, name untouched: the editor applies each edit to the row
+     * as it stands, so the byline follows the URL both times and stays host-derived — still free to
+     * take the feed's own name on the next compile.
+     */
+    @Test
+    fun twoUrlEditsInOneSessionKeepTheBylineFollowingTheUrl() {
+        var row = added("https://example.com/feed")
+        row = DailyController.edited(row, row.name, "https://other.org/rss")
+        row = DailyController.edited(row, row.name, "https://third.net/rss")
+        assertEquals("third.net", row.name)
+        assertEquals("EL PAÍS", DailyController.named(row, "EL PAÍS").name)
+    }
+
+    // ── Saving the editor over a compile that named a feed meanwhile ──────────────────────────────
+
+    private val host = added("https://rss.elpais.com/feed.xml")
+    private val adopted = host.copy(name = "EL PAÍS")
+
+    /** The editor opened before the compile named the feed; its stale host name must not win. */
+    @Test
+    fun anAdoptedNameSurvivesSavingAnEditorOpenedBeforeIt() {
+        val out = DailyController.keepAdoptedNames(listOf(host.copy(limit = 9)), listOf(host), listOf(adopted))
+        assertEquals("EL PAÍS", out.single().name)
+        assertEquals("the editor's other edits still apply", 9, out.single().limit)
+    }
+
+    /** A name the reader typed in the editor beats the feed's. */
+    @Test
+    fun aTypedNameBeatsAnAdoptedOne() {
+        val typed = host.copy(name = "El País")
+        assertEquals(typed, DailyController.keepAdoptedNames(listOf(typed), listOf(host), listOf(adopted)).single())
+    }
+
+    /** Nothing adopted meanwhile, or a source the editor re-pointed: the editor's list goes in as is. */
+    @Test
+    fun withoutAnAdoptionTheEditedListIsKept() {
+        val edited = listOf(host)
+        assertEquals(edited, DailyController.keepAdoptedNames(edited, listOf(host), listOf(host)))
+        val moved = DailyController.withUrl(host, "https://feeds.elpais.com/rss")
+        assertEquals(listOf(moved), DailyController.keepAdoptedNames(listOf(moved), listOf(host), listOf(adopted)))
+    }
 }

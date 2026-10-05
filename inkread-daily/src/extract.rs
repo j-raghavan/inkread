@@ -314,7 +314,7 @@ fn is_diagram_source(t: &str) -> bool {
 }
 
 /// Collapse runs of whitespace to single spaces and trim.
-fn collapse_ws(s: &str) -> String {
+pub(crate) fn collapse_ws(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 

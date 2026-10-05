@@ -486,8 +486,11 @@ class DailyActivity : Activity() {
             .setMessage("Paste an RSS or Atom feed URL.")
             .setView(input)
             .setPositiveButton("Add") { _, _ ->
-                daily.addSource(input.text.toString())
+                val url = input.text.toString()
+                daily.addSource(url)
                 setContentView(buildView())
+                // Swap the host byline for the feed's own name once it has been fetched (#268).
+                daily.nameFromFeed(url) { runOnUiThread { if (!isFinishing) setContentView(buildView()) } }
             }
             .setNegativeButton("Cancel", null)
             .show()
@@ -553,11 +556,11 @@ class DailyActivity : Activity() {
         val enabled = sources.map { it.enabled }.toBooleanArray()
         val removed = BooleanArray(sources.size)
         val limits = sources.map { it.limit }.toIntArray()
-        // Edited URLs are staged like the limits and mutes, and committed by the same Save, so the
-        // dialog keeps one way of working rather than a per-row action that writes behind the
-        // reader's back while their other edits are still pending (#166).
-        val urls = sources.map { it.url }.toTypedArray()
-        val names = sources.map { it.name }.toTypedArray()
+        // Name and URL edits are staged like the limits and mutes, and committed by the same Save, so
+        // the dialog keeps one way of working rather than a per-row action that writes behind the
+        // reader's back while their other edits are still pending (#166, #268). Each edit applies to
+        // the row as it now stands, so a second edit sees the first's result.
+        val staged = sources.toTypedArray()
         // The order is staged too (#267): positions into `sources`, so the per-row arrays above keep
         // their indices while rows move. Source order decides which source leads the front page and
         // breaks ties in the issue's round-robin, so it is the reader's to set.
@@ -593,13 +596,10 @@ class DailyActivity : Activity() {
                 text = "Edit"; setTextColor(ink); textSize = fs(11f); typeface = mono
                 letterSpacing = 0.1f; setPadding(dim(12), dim(6), dim(2), dim(6)); isClickable = true
                 setOnClickListener {
-                    // Pre-fill what the row shows: after a URL-only edit a host-derived name has
-                    // already moved with the URL, and the field must not offer the old host back.
-                    val shown = DailyController.edited(s, names[i], urls[i]).name
-                    editSourceDialog(shown, urls[i], others = urls.filterIndexed { j, _ -> j != i }) { n, u ->
-                        names[i] = n
-                        urls[i] = u
-                        info.text = "${DailyController.edited(s, n, u).name}\n$u"
+                    val others = staged.filterIndexed { j, _ -> j != i && !removed[j] }.map { it.url }
+                    editSourceDialog(staged[i].name, staged[i].url, others) { n, u ->
+                        staged[i] = DailyController.edited(staged[i], n, u)
+                        info.text = "${staged[i].name}\n${staged[i].url}"
                     }
                 }
             }
@@ -623,14 +623,18 @@ class DailyActivity : Activity() {
             addView(list)
         }
         AlertDialog.Builder(this, R.style.InkDialog)
-            .setTitle("Sources — ▲▼ reorders, uncheck to mute, ± sets articles per issue, Edit renames or changes the URL")
+            .setTitle("Sources")
+            .setMessage(
+                "▲▼ reorders, uncheck to mute, ± sets articles per issue, Edit renames or changes the URL. " +
+                    "Order and names apply from the next issue.",
+            )
             .setView(scroll)
             .setPositiveButton("Save") { _, _ ->
                 val updated = order.mapNotNull { i ->
                     if (removed[i]) null
-                    else DailyController.edited(sources[i], names[i], urls[i]).copy(enabled = enabled[i], limit = limits[i])
+                    else staged[i].copy(enabled = enabled[i], limit = limits[i])
                 }
-                daily.setSources(updated)
+                daily.setSources(updated, opened = sources)
                 setContentView(buildView())
             }
             .setNeutralButton("Add") { _, _ -> suggestedSourcesDialog() }
