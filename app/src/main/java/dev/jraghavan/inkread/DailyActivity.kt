@@ -218,19 +218,20 @@ class DailyActivity : Activity() {
     /** The front page as the design wants it: headlines **grouped by source** into sections, laid
      *  out in two columns (a newspaper index). Tapping any headline opens the issue. */
     private fun headlinesBlock(headlines: List<DailyController.Headline>, issue: File): View {
-        // Group preserving first-seen source order.
-        val groups = LinkedHashMap<String, MutableList<DailyController.Headline>>()
-        headlines.forEach { groups.getOrPut(it.source) { mutableListOf() }.add(it) }
+        // Group by source, sections in the reader's source order (#267).
+        val bySource = LinkedHashMap<String, MutableList<DailyController.Headline>>()
+        headlines.forEach { bySource.getOrPut(it.source) { mutableListOf() }.add(it) }
+        val groups = DailyController.inSourceOrder(bySource.keys.toList(), daily.sources().map { it.name })
+            .associateWith { bySource.getValue(it) }
 
         val left = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         val right = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        // Distribute sections across the two columns, roughly balancing by headline count.
-        var leftCount = 0
-        var rightCount = 0
-        groups.forEach { (source, list) ->
-            val target = if (leftCount <= rightCount) left else right
-            target.addView(sourceSection(source, list, issue))
-            if (target === left) leftCount += list.size + 2 else rightCount += list.size + 2
+        // Fill the left column, then the right, splitting near the middle by headline count — so the
+        // sections read in source order down the columns, as a newspaper index does (#267).
+        val weights = groups.values.map { it.size + 2 } // a section head costs about two headlines
+        val split = DailyController.columnSplit(weights)
+        groups.entries.forEachIndexed { k, (source, list) ->
+            (if (k < split) left else right).addView(sourceSection(source, list, issue))
         }
         return LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -626,7 +627,7 @@ class DailyActivity : Activity() {
             .setTitle("Sources")
             .setMessage(
                 "▲▼ reorders, uncheck to mute, ± sets articles per issue, Edit renames or changes the URL. " +
-                    "Order and names apply from the next issue.",
+                    "New names apply from the next issue.",
             )
             .setView(scroll)
             .setPositiveButton("Save") { _, _ ->

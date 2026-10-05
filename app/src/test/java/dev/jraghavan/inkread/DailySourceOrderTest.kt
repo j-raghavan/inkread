@@ -56,4 +56,50 @@ class DailySourceOrderTest {
     fun aHiddenItemDoesNotMove() {
         assertEquals(abcd, DailyController.moved(abcd, "b", -1) { it == "b" })
     }
+
+    // ── Front page sections ───────────────────────────────────────────────────────────────────────
+
+    /** The reported case: TechCrunch moved to the top leads the front page. */
+    @Test
+    fun sectionsFollowTheReadersSourceOrder() {
+        val firstSeen = listOf("Lobsters", "The Verge", "TechCrunch", "BBC News")
+        val order = listOf("TechCrunch", "Lobsters", "BBC News", "The Verge")
+        assertEquals(order, DailyController.inSourceOrder(firstSeen, order))
+    }
+
+    /** A source whose first article failed to fetch appears late in the issue, but not on the page. */
+    @Test
+    fun aLateFirstAppearanceDoesNotSinkASource() {
+        val firstSeen = listOf("Lobsters", "The Verge", "Ars Technica")
+        val order = listOf("Lobsters", "Ars Technica", "The Verge")
+        assertEquals(order, DailyController.inSourceOrder(firstSeen, order))
+    }
+
+    /** A section renamed since the issue was compiled keeps its first-seen place after the rest. */
+    @Test
+    fun anUnknownSectionGoesAfterTheKnownOnesInFirstSeenOrder() {
+        val firstSeen = listOf("old.example", "Lobsters", "rss.elpais.com", "BBC News")
+        val order = listOf("BBC News", "EL PAÍS", "Lobsters")
+        assertEquals(
+            listOf("BBC News", "Lobsters", "old.example", "rss.elpais.com"),
+            DailyController.inSourceOrder(firstSeen, order),
+        )
+    }
+
+    /** Muted or removed sources in [order] that have no section are simply absent. */
+    @Test
+    fun sourcesWithoutASectionAreIgnored() {
+        assertEquals(listOf("B"), DailyController.inSourceOrder(listOf("B"), listOf("A", "B", "C")))
+    }
+
+    /** Sections fill the left column first, so they read in order down the columns. */
+    @Test
+    fun columnsSplitNearTheMiddleInOrder() {
+        assertEquals(2, DailyController.columnSplit(listOf(7, 7, 7, 7)))
+        assertEquals(3, DailyController.columnSplit(listOf(7, 7, 7, 7, 7)))
+        // A heavy first section takes the left column on its own.
+        assertEquals(1, DailyController.columnSplit(listOf(22, 3, 3, 3)))
+        assertEquals(1, DailyController.columnSplit(listOf(5)))
+        assertEquals(0, DailyController.columnSplit(emptyList()))
+    }
 }

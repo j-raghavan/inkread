@@ -522,6 +522,33 @@ class DailyController(private val context: Context) {
         fun clampLimit(n: Int): Int = n.coerceIn(MIN_PER_SOURCE, MAX_PER_SOURCE)
 
         /**
+         * The front page's source sections ([sections], as first seen in the issue) put in the
+         * reader's source order ([order], source names) (#267). First-seen order is not enough: the
+         * issue round-robins sources and drops articles that failed to fetch, so a source whose first
+         * article failed would sink below sources the reader put after it — and a reorder would not
+         * show until the next compile. A section matching no current source (renamed since the issue
+         * was compiled) keeps its first-seen place after the known ones.
+         */
+        fun inSourceOrder(sections: List<String>, order: List<String>): List<String> =
+            sections.sortedBy { order.indexOf(it).let { i -> if (i < 0) Int.MAX_VALUE else i } }
+
+        /**
+         * How many of the front page's sections (by [weights], in order) go in the left column: the
+         * first split that leaves the left column at least half the total, so the columns come out
+         * close to even while the sections stay in order down them. Always at least one section on
+         * the left when there is any.
+         */
+        fun columnSplit(weights: List<Int>): Int {
+            val half = (weights.sum() + 1) / 2
+            var acc = 0
+            weights.forEachIndexed { k, w ->
+                acc += w
+                if (acc >= half) return k + 1
+            }
+            return weights.size
+        }
+
+        /**
          * [list] with [item] moved [by] places (negative = towards the front), for reordering
          * sources (#267). Places are counted among the elements that are not [hidden] — a removed
          * row is still in the staged order but no longer on screen, and one tap must move a row past
