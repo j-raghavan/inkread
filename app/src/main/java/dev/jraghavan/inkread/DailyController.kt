@@ -12,6 +12,7 @@ import java.util.Locale
 import java.util.concurrent.Callable
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
+import kotlin.concurrent.thread
 
 /**
  * inkread-daily orchestration (#66): the Android shell's half of the daily pipeline. Stores the
@@ -65,35 +66,30 @@ class DailyController(private val context: Context) {
             }
         }.getOrDefault(emptyList())
 
-    /** Add a source from a pasted feed URL; derives a byline from the host. No-op on a blank URL. */
-    fun addSource(url: String) {
+    /** Add a source from a pasted feed URL; derives a byline from the host. Returns the stored URL,
+     *  or null on a blank one. */
+    fun addSource(url: String): String? {
         val u = url.trim()
-        if (u.isEmpty()) return
+        if (u.isEmpty()) return null
         update { cur -> cur.filterNot { it.url == u } + Source(bylineFor(u), u) }
+        return u
     }
 
     /**
-     * Name a just-added source from its feed's own title (#268), off the UI thread. Fetches the
-     * feed once; [onDone] runs on a worker thread whether or not a name was found, so the caller
-     * can redraw. A compile would name it anyway — this only saves the reader seeing the host
-     * until then.
+     * Name a just-added source from its feed's own title (#268), off the UI thread, so the reader
+     * does not see the host until the next compile. [onNamed] runs on a worker thread, and only if
+     * the name changed.
      */
-    fun nameFromFeed(url: String, onDone: () -> Unit) {
-        Executors.newSingleThreadExecutor().execute {
+    fun nameFromFeed(url: String, onNamed: () -> Unit) {
+        thread(name = "daily-name") {
             try {
-                fetchFeed(url.trim(), booleanArrayOf(false)).title?.let { adoptFeedTitles(mapOf(url.trim() to it)) }
+                val title = fetchFeed(url, booleanArrayOf(false)).title
+                if (title != null && adoptFeedTitles(mapOf(url to title))) onNamed()
             } catch (e: Exception) {
                 Log.w(TAG, "naming $url from its feed failed", e)
             }
-            onDone()
         }
     }
-
-    fun removeSource(url: String) = update { cur -> cur.filterNot { it.url == url } }
-
-    /** Mute/unmute a source without removing it (the Sources checklist). */
-    fun setSourceEnabled(url: String, enabled: Boolean) =
-        update { cur -> cur.map { if (it.url == url) it.copy(enabled = enabled) else it } }
 
     /**
      * Persist the Sources editor's list wholesale (order, edits, mutes, removals). [opened] is the
@@ -103,7 +99,6 @@ class DailyController(private val context: Context) {
      */
     fun setSources(list: List<Source>, opened: List<Source>) =
         update { stored -> keepAdoptedNames(list, opened, stored) }
-
 
     /** The sources a compile actually fetches (muted ones excluded). */
     fun enabledSources(): List<Source> = sources().filter { it.enabled }
@@ -127,10 +122,11 @@ class DailyController(private val context: Context) {
 
     /** Read-modify-write the stored source list under [SOURCES_LOCK], so a background compile
      *  naming sources and the reader editing them cannot drop each other's change. */
-    private fun update(f: (List<Source>) -> List<Source>) = synchronized(SOURCES_LOCK) {
+    private fun update(f: (List<Source>) -> List<Source>): Boolean = synchronized(SOURCES_LOCK) {
         val cur = sources()
         val next = f(cur)
         if (next != cur) save(next)
+        next != cur
     }
 
     private fun save(list: List<Source>) {
@@ -188,16 +184,15 @@ class DailyController(private val context: Context) {
         // HEADLINES_SHOWN headlines — so a newly added feed could compile into the issue yet never
         // appear on the front page. Round-robin gives every source front-of-issue presence.
         val perSource = mutableListOf<List<JSONObject>>()
-        val feedTitles = mutableMapOf<String, String>()
         try {
             for (src in active) {
                 val reached = booleanArrayOf(false)
                 val feed = fetchFeed(src.url, reached)
                 val items = feed.items
-                // The byline this issue prints: the feed's own title for a source still named after
-                // its host (#268), so the very compile that learns the name already uses it.
-                val name = named(src, feed.title).name
-                feed.title?.let { feedTitles[src.url] = it }
+                // Name a source still called after its host from its feed (#268) before building its
+                // articles, so the very compile that learns the name already prints it.
+                feed.title?.let { adoptFeedTitles(mapOf(src.url to it)) }
+                val name = sources().find { it.url == src.url }?.name ?: src.name
                 if (reached[0]) feedsReached++
                 itemsFound += items.length()
                 val take = minOf(items.length(), clampLimit(src.limit))
@@ -225,7 +220,6 @@ class DailyController(private val context: Context) {
             pool.shutdown()
             pool.awaitTermination(2, TimeUnit.SECONDS)
         }
-        adoptFeedTitles(feedTitles)
         // Interleave: every source's 1st article, then every source's 2nd, … Source order still
         // decides ties, so the issue keeps a stable, predictable reading order.
         interleaveByRank(perSource).forEach { articles.put(it) }
@@ -334,7 +328,7 @@ class DailyController(private val context: Context) {
      * `reached[0]` is set true if any URL responded (to distinguish "no network" from "not a feed").
      */
     private fun fetchFeed(url: String, reached: BooleanArray): Feed {
-        val body = fetch(url) ?: return Feed(null, JSONArray())
+        val body = fetch(url) ?: return noFeed()
         reached[0] = true
         parseFeed(body)?.let { if (it.items.length() > 0) return it }
         // Not a feed — discover one from the page, then fall back to common paths.
@@ -352,11 +346,14 @@ class DailyController(private val context: Context) {
                 }
             }
         }
-        return Feed(null, JSONArray())
+        return noFeed()
     }
 
     /** A parsed feed: its own title (null when it gives none) and its entries. */
     private class Feed(val title: String?, val items: JSONArray)
+
+    /** A fresh empty [Feed] each time: `JSONArray` is mutable, so a shared instance is a hazard. */
+    private fun noFeed() = Feed(null, JSONArray())
 
     private fun parseFeed(xml: String): Feed? =
         runCatching {
@@ -373,12 +370,11 @@ class DailyController(private val context: Context) {
      * so a feed added as `rss.elpais.com` reads "EL PAÍS" from then on — including feeds added before
      * feeds could name themselves. Names the reader typed and curated names are left alone ([named]).
      *
-     * Applied to the stored list, not the one the compile started from, which may be minutes old.
+     * Applied to the stored list, not the one the compile started from. Returns whether a name
+     * changed.
      */
-    private fun adoptFeedTitles(titles: Map<String, String>) {
-        if (titles.isEmpty()) return
-        update { cur -> cur.map { s -> titles[s.url]?.let { named(s, it) } ?: s } }
-    }
+    private fun adoptFeedTitles(titles: Map<String, String>): Boolean =
+        titles.isNotEmpty() && update { cur -> adoptTitles(cur, titles) }
 
     /** Find a feed URL advertised in a page's `<link rel="alternate" type="…rss/atom+xml" href="…">`. */
     private fun discoverFeedUrl(html: String, base: String): String? {
@@ -475,10 +471,25 @@ class DailyController(private val context: Context) {
         }
 
         /**
-         * The Sources editor's [edited] list, keeping names a compile adopted from feeds while the
-         * editor was open (#268). A row the editor left host-named, whose row in [opened] was
-         * host-named too, but which [stored] now names otherwise, was renamed by its feed in the
-         * meantime — take the stored name. A name the reader typed is never touched.
+         * [sources] with each host-named source renamed to its feed's title in [titles] (by URL) via
+         * [named] — unless another source already goes by that name. The front page groups headlines
+         * by name, so two feeds sharing one would merge into a single section.
+         */
+        fun adoptTitles(sources: List<Source>, titles: Map<String, String>): List<Source> {
+            val out = sources.toMutableList()
+            out.indices.forEach { i ->
+                val title = titles[out[i].url] ?: return@forEach
+                val renamed = named(out[i], title)
+                val taken = out.withIndex().any { (j, o) -> j != i && o.name.equals(renamed.name, ignoreCase = true) }
+                if (!taken) out[i] = renamed
+            }
+            return out
+        }
+
+        /**
+         * The Sources editor's [edited] list, keeping a name a compile adopted while the editor was
+         * open (#268): a row host-named both when the editor opened and on Save, but named otherwise
+         * in [stored], takes the stored name.
          */
         fun keepAdoptedNames(edited: List<Source>, opened: List<Source>, stored: List<Source>): List<Source> =
             edited.map { e ->
@@ -534,18 +545,21 @@ class DailyController(private val context: Context) {
 
         /**
          * How many of the front page's sections (by [weights], in order) go in the left column: the
-         * first split that leaves the left column at least half the total, so the columns come out
-         * close to even while the sections stay in order down them. Always at least one section on
-         * the left when there is any.
+         * split that brings the two columns closest to even, so the sections stay in order down them.
+         * Always at least one section on the left when there is any.
          */
         fun columnSplit(weights: List<Int>): Int {
-            val half = (weights.sum() + 1) / 2
-            var acc = 0
-            weights.forEachIndexed { k, w ->
-                acc += w
-                if (acc >= half) return k + 1
+            if (weights.isEmpty()) return 0
+            val total = weights.sum()
+            var left = 0
+            var best = 1
+            var bestGap = Int.MAX_VALUE
+            for (k in 1..weights.size) {
+                left += weights[k - 1]
+                val gap = kotlin.math.abs(total - 2 * left)
+                if (gap <= bestGap) { best = k; bestGap = gap } // a tie goes to the longer left column
             }
-            return weights.size
+            return best
         }
 
         /**

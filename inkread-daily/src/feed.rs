@@ -73,29 +73,48 @@ pub fn parse_feed(xml: &str) -> ParsedFeed {
     ParsedFeed { title, items }
 }
 
-/// The longest feed title kept as a byline. It is shown on a Sources row, the front page and every
-/// article's byline, so a publisher's paragraph-length `<title>` must not become one.
+/// Where a feed title is cut for use as a byline. It is shown on a Sources row, the front page and
+/// every article's byline, so a publisher's paragraph-length `<title>` must not become one; a cut
+/// title ends in "…".
 const FEED_TITLE_CHARS: usize = 60;
 
-/// Separators publishers put between their name and a tagline or section: "EL PAÍS: el periódico
-/// global", "Ars Technica - All content", "BBC News | Home". The name is the part before.
+/// Separators between a feed's name and what follows it ("Ars Technica - All content").
 const TAGLINE_SEPARATORS: [&str; 5] = [": ", " - ", " – ", " — ", " | "];
 
+/// What follows a separator when it only says "this is the feed" — dropped from the byline. Anything
+/// else is kept: "BBC News - Technology" must not collapse into another feed's "BBC News", and in
+/// "World news | The Guardian" the publisher is the part *after* the separator.
+const GENERIC_TAILS: [&str; 12] = [
+    "home",
+    "homepage",
+    "front page",
+    "all content",
+    "all posts",
+    "all stories",
+    "all articles",
+    "latest",
+    "latest news",
+    "top stories",
+    "rss",
+    "feed",
+];
+
 /// Clean a feed's title for use as a byline: decode the entities feed-rs leaves behind (the same
-/// double-encoding as entry titles), collapse whitespace, drop a trailing tagline, and cap the length.
+/// double-encoding as entry titles), collapse whitespace, drop a generic trailing part, and cut it
+/// to length.
 fn feed_title(raw: &str) -> String {
     let title = crate::extract::collapse_ws(&crate::extract::decode_entities(raw));
     let name = TAGLINE_SEPARATORS
         .iter()
-        .filter_map(|sep| title.find(sep))
-        .min()
-        .map_or(title.as_str(), |at| title[..at].trim());
-    // A title that *starts* with a separator has no name before it; keep the whole thing.
-    let name = if name.is_empty() {
-        title.as_str()
-    } else {
-        name
-    };
+        .filter_map(|sep| title.rfind(sep).map(|at| (at, sep.len())))
+        .max()
+        .filter(|&(at, len)| {
+            let tail = title[at + len..].trim().to_lowercase();
+            GENERIC_TAILS.contains(&tail.as_str())
+        })
+        .map(|(at, _)| title[..at].trim())
+        .filter(|n| !n.is_empty())
+        .unwrap_or(&title);
     crate::model::truncate_on_word(name, FEED_TITLE_CHARS)
 }
 
@@ -196,14 +215,14 @@ mod tests {
         assert_eq!(parse_feed("<not a feed"), ParsedFeed::default());
     }
 
-    /// The reported case: a feed added as `rss.elpais.com` names itself by its channel title, with
-    /// the publisher's tagline dropped (the live feed's title is "EL PAÍS: el periódico global").
+    /// The reported case: a feed added as `rss.elpais.com` names itself by its channel title (the
+    /// live feed's title, tagline included — the reader can shorten it with Edit).
     #[test]
     fn rss_channel_title_is_the_feed_title() {
         let xml = r#"<?xml version="1.0"?><rss version="2.0"><channel><title>EL PA&#205;S: el peri&#243;dico global</title>
             <item><title>A</title><link>https://x.test/a</link></item></channel></rss>"#;
         let feed = parse_feed(xml);
-        assert_eq!(feed.title.as_deref(), Some("EL PAÍS"));
+        assert_eq!(feed.title.as_deref(), Some("EL PAÍS: el periódico global"));
         assert_eq!(
             feed.items.len(),
             1,
@@ -262,24 +281,52 @@ mod tests {
     }
 
     #[test]
-    fn a_tagline_after_the_name_is_dropped() {
+    fn a_generic_tail_is_dropped() {
         for (raw, want) in [
             ("Ars Technica - All content", "Ars Technica"),
             ("BBC News | Home", "BBC News"),
             ("The Verge – All Posts", "The Verge"),
+            ("NYT: Top Stories", "NYT"),
             ("Quanta Magazine", "Quanta Magazine"),
-            // Hyphens without spaces are part of a name, not a separator.
-            ("Hacker-News Digest", "Hacker-News Digest"),
-            // The earliest separator wins: the name is what comes before any of them.
-            ("Site: News - World", "Site"),
         ] {
             assert_eq!(feed_title(raw), want, "{raw}");
         }
     }
 
-    /// No name before the separator: keep the title rather than byline the source with nothing.
+    /// Only a generic tail goes. A section name, a tagline, or a publisher placed last is part of
+    /// what tells this feed apart.
     #[test]
-    fn a_title_that_starts_with_a_separator_is_kept_whole() {
-        assert_eq!(feed_title("- Weekly"), "- Weekly");
+    fn a_meaningful_tail_is_kept() {
+        for raw in [
+            "BBC News - Technology",
+            "BBC News - World",
+            "World news | The Guardian",
+            "EL PAÍS: el periódico global",
+            "Comments on: A Post",
+            "Hacker-News Digest",
+        ] {
+            assert_eq!(feed_title(raw), raw);
+        }
+    }
+
+    /// Two feeds from one publisher keep distinct names.
+    #[test]
+    fn two_sections_of_one_publisher_stay_distinct() {
+        assert_ne!(
+            feed_title("BBC News - Technology"),
+            feed_title("BBC News - Science")
+        );
+    }
+
+    /// The last separator decides: "Site: News - Home" drops only "Home".
+    #[test]
+    fn only_the_last_part_is_considered() {
+        assert_eq!(feed_title("Site: News - Home"), "Site: News");
+    }
+
+    /// Nothing before the separator: keep the title rather than byline the source with nothing.
+    #[test]
+    fn a_title_that_is_only_a_generic_tail_is_kept_whole() {
+        assert_eq!(feed_title("- Home"), "- Home");
     }
 }

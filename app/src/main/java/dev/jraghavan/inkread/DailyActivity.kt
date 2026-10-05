@@ -487,11 +487,12 @@ class DailyActivity : Activity() {
             .setMessage("Paste an RSS or Atom feed URL.")
             .setView(input)
             .setPositiveButton("Add") { _, _ ->
-                val url = input.text.toString()
-                daily.addSource(url)
+                val url = daily.addSource(input.text.toString())
                 setContentView(buildView())
                 // Swap the host byline for the feed's own name once it has been fetched (#268).
-                daily.nameFromFeed(url) { runOnUiThread { if (!isFinishing) setContentView(buildView()) } }
+                if (url != null) daily.nameFromFeed(url) {
+                    runOnUiThread { if (!isFinishing && !isDestroyed) setContentView(buildView()) }
+                }
             }
             .setNegativeButton("Cancel", null)
             .show()

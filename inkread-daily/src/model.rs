@@ -55,7 +55,7 @@ impl Article {
             .map(strip_markup)
             .filter(|s| !s.trim().is_empty())
             .unwrap_or_else(|| strip_markup(&self.body_html));
-        let text = source.split_whitespace().collect::<Vec<_>>().join(" ");
+        let text = crate::extract::collapse_ws(&source);
         if text.is_empty() {
             return None;
         }

@@ -177,4 +177,35 @@ class DailyFeedUrlTest {
         val moved = DailyController.withUrl(host, "https://feeds.elpais.com/rss")
         assertEquals(listOf(moved), DailyController.keepAdoptedNames(listOf(moved), listOf(host), listOf(adopted)))
     }
+
+    // ── Adopting feed titles across the source list ───────────────────────────────────────────────
+
+    @Test
+    fun aFeedTitleIsAdoptedByUrl() {
+        val a = added("https://rss.elpais.com/feed.xml")
+        val b = DailyController.Source("BBC News", "https://feeds.bbci.co.uk/news/rss.xml")
+        val out = DailyController.adoptTitles(listOf(a, b), mapOf(a.url to "EL PAÍS", b.url to "BBC News - Home"))
+        assertEquals(listOf("EL PAÍS", "BBC News"), out.map { it.name })
+    }
+
+    /**
+     * A title another source already goes by is not adopted: the front page groups by name, so the
+     * two feeds would merge into one section.
+     */
+    @Test
+    fun aTitleAlreadyInUseIsNotAdopted() {
+        val curated = DailyController.Source("BBC News", "https://feeds.bbci.co.uk/news/rss.xml")
+        val world = added("https://feeds.bbci.co.uk/news/world/rss.xml")
+        val out = DailyController.adoptTitles(listOf(curated, world), mapOf(world.url to "bbc news"))
+        assertEquals(world, out[1])
+    }
+
+    /** Two host-named feeds offering one title in the same pass: the first takes it, not both. */
+    @Test
+    fun twoFeedsOfferingOneTitleDoNotBothTakeIt() {
+        val a = added("https://a.example/rss")
+        val b = added("https://b.example/rss")
+        val out = DailyController.adoptTitles(listOf(a, b), mapOf(a.url to "Same", b.url to "Same"))
+        assertEquals(listOf("Same", "b.example"), out.map { it.name })
+    }
 }

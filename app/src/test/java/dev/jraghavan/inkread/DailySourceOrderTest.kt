@@ -102,4 +102,11 @@ class DailySourceOrderTest {
         assertEquals(1, DailyController.columnSplit(listOf(5)))
         assertEquals(0, DailyController.columnSplit(emptyList()))
     }
+
+    /** A heavy section late in the order must not leave the right column empty. */
+    @Test
+    fun aHeavyLastSectionGetsTheRightColumn() {
+        assertEquals(2, DailyController.columnSplit(listOf(3, 3, 22)))
+        assertEquals(1, DailyController.columnSplit(listOf(3, 22)))
+    }
 }
