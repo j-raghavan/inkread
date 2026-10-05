@@ -105,7 +105,7 @@ class DailyController(private val context: Context) {
         p.edit().putBoolean("seeded", true).apply()
     }
 
-    private fun save(list: List<Source>) {
+    private fun save(list: List<Source>) = synchronized(SOURCES_LOCK) {
         val arr = JSONArray()
         list.forEach {
             arr.put(
@@ -160,10 +160,16 @@ class DailyController(private val context: Context) {
         // HEADLINES_SHOWN headlines — so a newly added feed could compile into the issue yet never
         // appear on the front page. Round-robin gives every source front-of-issue presence.
         val perSource = mutableListOf<List<JSONObject>>()
+        val feedTitles = mutableMapOf<String, String>()
         try {
             for (src in active) {
                 val reached = booleanArrayOf(false)
-                val items = fetchFeedItems(src.url, reached)
+                val feed = fetchFeed(src.url, reached)
+                val items = feed.items
+                // The byline this issue prints: the feed's own title for a source still named after
+                // its host (#268), so the very compile that learns the name already uses it.
+                val name = named(src, feed.title).name
+                feed.title?.let { feedTitles[src.url] = it }
                 if (reached[0]) feedsReached++
                 itemsFound += items.length()
                 val take = minOf(items.length(), clampLimit(src.limit))
@@ -176,7 +182,7 @@ class DailyController(private val context: Context) {
                         if (html.isBlank()) null
                         else JSONObject()
                             .put("title", item.optString("title"))
-                            .put("source", src.name)
+                            .put("source", name)
                             .put("url", item.optString("url"))
                             .put("published", item.optString("published"))
                             // The feed's own description, for the contents page (#198). Absent on
@@ -191,6 +197,7 @@ class DailyController(private val context: Context) {
             pool.shutdown()
             pool.awaitTermination(2, TimeUnit.SECONDS)
         }
+        adoptFeedTitles(feedTitles)
         // Interleave: every source's 1st article, then every source's 2nd, … Source order still
         // decides ties, so the issue keeps a stable, predictable reading order.
         interleaveByRank(perSource).forEach { articles.put(it) }
@@ -298,10 +305,10 @@ class DailyController(private val context: Context) {
      * try common feed paths (`/feed`, `/rss`, …) — so a user can paste a site, not just a feed.
      * `reached[0]` is set true if any URL responded (to distinguish "no network" from "not a feed").
      */
-    private fun fetchFeedItems(url: String, reached: BooleanArray): JSONArray {
-        val body = fetch(url) ?: return JSONArray()
+    private fun fetchFeed(url: String, reached: BooleanArray): Feed {
+        val body = fetch(url) ?: return Feed.NONE
         reached[0] = true
-        parseFeed(body)?.let { if (it.length() > 0) return it }
+        parseFeed(body)?.let { if (it.items.length() > 0) return it }
         // Not a feed — discover one from the page, then fall back to common paths.
         val candidates = buildList {
             discoverFeedUrl(body, url)?.let { add(it) }
@@ -311,17 +318,48 @@ class DailyController(private val context: Context) {
             if (c == url) continue
             val b = fetch(c) ?: continue
             parseFeed(b)?.let {
-                if (it.length() > 0) {
-                    Log.i(TAG, "discovered feed for $url -> $c (${it.length()} items)")
+                if (it.items.length() > 0) {
+                    Log.i(TAG, "discovered feed for $url -> $c (${it.items.length()} items)")
                     return it
                 }
             }
         }
-        return JSONArray()
+        return Feed.NONE
     }
 
-    private fun parseFeed(xml: String): JSONArray? =
-        runCatching { JSONArray(NativeBridge.nativeDailyParseFeed(xml)) }.getOrNull()
+    /** A parsed feed: its own title (null when it gives none) and its entries. */
+    private class Feed(val title: String?, val items: JSONArray) {
+        companion object {
+            val NONE = Feed(null, JSONArray())
+        }
+    }
+
+    private fun parseFeed(xml: String): Feed? =
+        runCatching {
+            val o = JSONObject(NativeBridge.nativeDailyParseFeed(xml))
+            Feed(
+                // optString would turn JSON null into the string "null" — a source named "null".
+                if (o.isNull("title")) null else o.getString("title"),
+                o.optJSONArray("items") ?: JSONArray(),
+            )
+        }.getOrNull()
+
+    /**
+     * Rename every source still named after its host to the title its feed gave this compile (#268),
+     * so a feed added as `rss.elpais.com` reads "EL PAÍS" from then on — including feeds added before
+     * feeds could name themselves. Names the reader typed and curated names are left alone ([named]).
+     *
+     * Re-reads the list under [SOURCES_LOCK] rather than writing back the list the compile started
+     * from, which may be minutes old: the reader can reorder, mute or remove sources meanwhile.
+     */
+    private fun adoptFeedTitles(titles: Map<String, String>) {
+        if (titles.isEmpty()) return
+        synchronized(SOURCES_LOCK) {
+            val cur = sources()
+            val updated = cur.map { s -> titles[s.url]?.let { named(s, it) } ?: s }
+            if (updated != cur) save(updated)
+        }
+    }
 
     /** Find a feed URL advertised in a page's `<link rel="alternate" type="…rss/atom+xml" href="…">`. */
     private fun discoverFeedUrl(html: String, base: String): String? {
@@ -390,6 +428,33 @@ class DailyController(private val context: Context) {
          */
         fun bylineFor(url: String): String =
             runCatching { URL(url).host.removePrefix("www.") }.getOrDefault(url).ifBlank { url }
+
+        /**
+         * [source] renamed to its feed's own [feedTitle] (#268) — but only while its name is still the
+         * host-derived default. A curated byline ("BBC News") and a name the reader typed are theirs to
+         * keep; a feed must not overwrite either on every compile. A blank or missing title changes
+         * nothing.
+         */
+        fun named(source: Source, feedTitle: String?): Source {
+            val t = feedTitle?.trim().orEmpty()
+            if (t.isEmpty() || source.name != bylineFor(source.url)) return source
+            return source.copy(name = t)
+        }
+
+        /**
+         * [source] after the Sources editor's Edit (#166, #268): re-pointed at [newUrl] via [withUrl],
+         * then named [newName] if the reader changed it. A name left as it was lets [withUrl] move a
+         * host-derived byline with the URL; a blank name is a slip and keeps the current one.
+         */
+        fun edited(source: Source, newName: String, newUrl: String): Source {
+            val moved = withUrl(source, newUrl)
+            val n = newName.trim()
+            return if (n.isEmpty() || n == source.name) moved else moved.copy(name = n)
+        }
+
+        /** Serialises read-modify-write of the stored source list across controller instances (the
+         *  activity's and the background compile's). */
+        private val SOURCES_LOCK = Any()
 
         val SUGGESTED = listOf(
             Source("Hacker News", "https://hnrss.org/frontpage"),

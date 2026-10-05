@@ -7,9 +7,10 @@
 
 use super::*;
 
-// nativeDailyParseFeed(xml) : String — parse an RSS/Atom feed into a JSON array of
-// {title, url, published} (inkread-daily #66). Standalone (no document handle): the shell fetches
-// the feed, the core parses it. Returns "[]" on junk input; never panics.
+// nativeDailyParseFeed(xml) : String — parse an RSS/Atom feed into JSON
+// {title, items:[{title, url, published, summary}]} (inkread-daily #66; feed title #268). Standalone
+// (no document handle): the shell fetches the feed, the core parses it. Junk input gives a null
+// title and no items; never panics.
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeDailyParseFeed<'local>(
     mut env: EnvUnowned<'local>,

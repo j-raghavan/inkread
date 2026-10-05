@@ -23,14 +23,36 @@ pub struct FeedItem {
     pub summary: Option<String>,
 }
 
+/// A parsed feed: its own title and its entries.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct ParsedFeed {
+    /// The feed's own name (RSS `<channel><title>`, Atom `<feed><title>`, JSON Feed `title`), cleaned
+    /// for use as a byline (#268); `None` when the feed gives none or only whitespace.
+    pub title: Option<String>,
+    /// Entries in document order.
+    pub items: Vec<FeedItem>,
+}
+
 /// Parse an RSS / Atom / JSON feed into its entries, in document order. Tolerant of malformed input.
 #[must_use]
 pub fn parse_feed(xml: &str) -> Vec<FeedItem> {
+    parse_feed_doc(xml).items
+}
+
+/// Parse an RSS / Atom / JSON feed into its title and entries. Malformed input yields an empty
+/// [`ParsedFeed`] rather than an error (RR21-FR3).
+#[must_use]
+pub fn parse_feed_doc(xml: &str) -> ParsedFeed {
     let feed = match feed_rs::parser::parse(xml.as_bytes()) {
         Ok(f) => f,
-        Err(_) => return Vec::new(),
+        Err(_) => return ParsedFeed::default(),
     };
-    feed.entries
+    let title = feed
+        .title
+        .map(|t| feed_title(&t.content))
+        .filter(|t| !t.is_empty());
+    let items = feed
+        .entries
         .into_iter()
         .map(|e| FeedItem {
             // feed-rs does one XML entity decode; some feeds double-encode (e.g. The Verge ships
@@ -53,7 +75,29 @@ pub fn parse_feed(xml: &str) -> Vec<FeedItem> {
                 .map(|t| crate::extract::decode_entities(t.content.trim()))
                 .filter(|t| !t.is_empty()),
         })
-        .collect()
+        .collect();
+    ParsedFeed { title, items }
+}
+
+/// The longest feed title kept as a byline. It is shown on a Sources row, the front page and every
+/// article's byline, so a publisher's paragraph-length `<title>` must not become one.
+const FEED_TITLE_CHARS: usize = 80;
+
+/// Clean a feed's title for use as a byline: decode the entities feed-rs leaves behind (the same
+/// double-encoding as entry titles), collapse runs of whitespace (titles often carry the feed's own
+/// line breaks and indentation), and cap the length on a character boundary.
+fn feed_title(raw: &str) -> String {
+    let decoded = crate::extract::decode_entities(raw);
+    let collapsed = decoded.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.chars().count() <= FEED_TITLE_CHARS {
+        return collapsed;
+    }
+    collapsed
+        .chars()
+        .take(FEED_TITLE_CHARS)
+        .collect::<String>()
+        .trim_end()
+        .to_string()
 }
 
 /// The article URL for an entry: prefer the `alternate` link (the readable page), else the first
@@ -148,5 +192,69 @@ mod tests {
         assert!(parse_feed("<not a feed").is_empty());
         assert!(parse_feed("").is_empty());
         assert!(parse_feed("plain text, definitely not a feed").is_empty());
+        assert_eq!(parse_feed_doc("<not a feed"), ParsedFeed::default());
+    }
+
+    /// The reported case: a feed added as `rss.elpais.com` names itself "El País".
+    #[test]
+    fn rss_channel_title_is_the_feed_title() {
+        let xml = r#"<?xml version="1.0"?><rss version="2.0"><channel><title>EL PA&#205;S</title>
+            <item><title>A</title><link>https://x.test/a</link></item></channel></rss>"#;
+        let feed = parse_feed_doc(xml);
+        assert_eq!(feed.title.as_deref(), Some("EL PAÍS"));
+        assert_eq!(
+            feed.items.len(),
+            1,
+            "entries still parse alongside the title"
+        );
+    }
+
+    /// The feed's title, not the first entry's: Atom puts both in `<title>` elements.
+    #[test]
+    fn atom_feed_title_is_not_an_entry_title() {
+        let xml = r#"<?xml version="1.0"?><feed xmlns="http://www.w3.org/2005/Atom">
+            <title>Atom Site</title>
+            <entry><title>Entry One</title><link href="https://x.test/1"/></entry></feed>"#;
+        assert_eq!(parse_feed_doc(xml).title.as_deref(), Some("Atom Site"));
+    }
+
+    #[test]
+    fn json_feed_title_is_read() {
+        let json = r#"{"version":"https://jsonfeed.org/version/1","title":"Site","items":[]}"#;
+        assert_eq!(parse_feed_doc(json).title.as_deref(), Some("Site"));
+    }
+
+    /// No title, or only whitespace, is `None` — the shell keeps its host-derived byline rather
+    /// than renaming a source to nothing.
+    #[test]
+    fn a_missing_or_blank_title_is_none() {
+        let none = r#"<rss version="2.0"><channel>
+            <item><title>A</title><link>https://x.test/a</link></item></channel></rss>"#;
+        let blank = r#"<rss version="2.0"><channel><title>
+              </title><item><title>A</title><link>https://x.test/a</link></item></channel></rss>"#;
+        assert_eq!(parse_feed_doc(none).title, None);
+        assert_eq!(parse_feed_doc(blank).title, None);
+    }
+
+    /// Line breaks and indentation inside `<title>` collapse; a double-encoded entity decodes.
+    #[test]
+    fn a_title_is_cleaned_for_use_as_a_byline() {
+        let xml = r#"<rss version="2.0"><channel><title>
+              The  Guardian&amp;#8217;s
+              Feed </title></channel></rss>"#;
+        assert_eq!(
+            parse_feed_doc(xml).title.as_deref(),
+            Some("The Guardian\u{2019}s Feed")
+        );
+    }
+
+    /// A paragraph-length title is capped on a character boundary — multi-byte text included.
+    #[test]
+    fn a_long_title_is_capped_without_splitting_a_character() {
+        let long = "é".repeat(200);
+        let xml = format!(r#"<rss version="2.0"><channel><title>{long}</title></channel></rss>"#);
+        let title = parse_feed_doc(&xml).title.unwrap();
+        assert_eq!(title.chars().count(), FEED_TITLE_CHARS);
+        assert!(title.chars().all(|c| c == 'é'));
     }
 }

@@ -494,30 +494,47 @@ class DailyActivity : Activity() {
     }
 
     /**
-     * Prompt for a replacement feed URL, pre-filled with the current one (#166).
+     * Prompt for a source's name and feed URL, pre-filled with the current ones (#166, #268).
      *
      * A feed URL could be added and removed but never corrected, so a typo or a publisher moving
      * their feed meant losing the row and its per-source article limit and re-adding it from
-     * scratch. [onAccept] receives the new URL only when it is worth applying: blank input is a
-     * slip rather than an instruction, and a URL already followed by another row would otherwise
-     * produce two entries fetching the same feed.
+     * scratch; and a feed added by URL was stuck with its host as its byline. [onAccept] receives
+     * the pair only when the URL is worth applying: a blank URL is a slip rather than an
+     * instruction, and a URL already followed by another row would otherwise produce two entries
+     * fetching the same feed. A blank name keeps the current one ([DailyController.edited]).
      */
-    private fun editSourceUrlDialog(current: String, others: List<String>, onAccept: (String) -> Unit) {
-        val input = EditText(this).apply {
-            setText(current)
-            setSelection(current.length)
+    private fun editSourceDialog(
+        currentName: String,
+        currentUrl: String,
+        others: List<String>,
+        onAccept: (name: String, url: String) -> Unit,
+    ) {
+        fun field(value: String, hint: String) = EditText(this).apply {
+            setText(value)
+            setSelection(value.length)
+            this.hint = hint
             setSingleLine()
         }
+        val name = field(currentName, "Name")
+        val url = field(currentUrl, "https://example.com/feed.xml")
+        val form = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dim(20), dim(8), dim(20), 0)
+            addView(label("Name", 10f, 0.1f))
+            addView(name)
+            addView(gap(dim(10)))
+            addView(label("Feed URL", 10f, 0.1f))
+            addView(url)
+        }
         AlertDialog.Builder(this, R.style.InkDialog)
-            .setTitle("Edit feed URL")
-            .setMessage("The byline follows the address when it was taken from one.")
-            .setView(input)
+            .setTitle("Edit source")
+            .setView(form)
             .setPositiveButton("Save") { _, _ ->
-                val u = input.text.toString().trim()
+                val u = url.text.toString().trim()
                 when {
                     u.isEmpty() -> Unit
                     u in others -> Toast.makeText(this, "Already following that feed", Toast.LENGTH_SHORT).show()
-                    else -> onAccept(u)
+                    else -> onAccept(name.text.toString(), u)
                 }
             }
             .setNegativeButton("Cancel", null)
@@ -525,8 +542,8 @@ class DailyActivity : Activity() {
     }
 
     /** Edit sources: a checklist (uncheck a row to mute it without losing it — e.g. disable NPR) with
-     *  per-row ▲/▼ to reorder it, Edit to correct its URL and Remove to drop it entirely. Saving
-     *  applies the order, URL edits, mutes and removals in one pass. */
+     *  per-row ▲/▼ to reorder it, Edit to rename it or correct its URL and Remove to drop it
+     *  entirely. Saving applies the order, edits, mutes and removals in one pass. */
     private fun sourcesDialog() {
         val sources = daily.sources()
         if (sources.isEmpty()) {
@@ -540,6 +557,7 @@ class DailyActivity : Activity() {
         // dialog keeps one way of working rather than a per-row action that writes behind the
         // reader's back while their other edits are still pending (#166).
         val urls = sources.map { it.url }.toTypedArray()
+        val names = sources.map { it.name }.toTypedArray()
         // The order is staged too (#267): positions into `sources`, so the per-row arrays above keep
         // their indices while rows move. Source order decides which source leads the front page and
         // breaks ties in the issue's round-robin, so it is the reader's to set.
@@ -575,9 +593,13 @@ class DailyActivity : Activity() {
                 text = "Edit"; setTextColor(ink); textSize = fs(11f); typeface = mono
                 letterSpacing = 0.1f; setPadding(dim(12), dim(6), dim(2), dim(6)); isClickable = true
                 setOnClickListener {
-                    editSourceUrlDialog(urls[i], others = urls.filterIndexed { j, _ -> j != i }) { u ->
+                    // Pre-fill what the row shows: after a URL-only edit a host-derived name has
+                    // already moved with the URL, and the field must not offer the old host back.
+                    val shown = DailyController.edited(s, names[i], urls[i]).name
+                    editSourceDialog(shown, urls[i], others = urls.filterIndexed { j, _ -> j != i }) { n, u ->
+                        names[i] = n
                         urls[i] = u
-                        info.text = "${s.name}\n$u"
+                        info.text = "${DailyController.edited(s, n, u).name}\n$u"
                     }
                 }
             }
@@ -601,12 +623,12 @@ class DailyActivity : Activity() {
             addView(list)
         }
         AlertDialog.Builder(this, R.style.InkDialog)
-            .setTitle("Sources — ▲▼ reorders, uncheck to mute, ± sets articles per issue, Edit changes the URL")
+            .setTitle("Sources — ▲▼ reorders, uncheck to mute, ± sets articles per issue, Edit renames or changes the URL")
             .setView(scroll)
             .setPositiveButton("Save") { _, _ ->
                 val updated = order.mapNotNull { i ->
                     if (removed[i]) null
-                    else DailyController.withUrl(sources[i], urls[i]).copy(enabled = enabled[i], limit = limits[i])
+                    else DailyController.edited(sources[i], names[i], urls[i]).copy(enabled = enabled[i], limit = limits[i])
                 }
                 daily.setSources(updated)
                 setContentView(buildView())

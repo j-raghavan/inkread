@@ -64,4 +64,74 @@ class DailyFeedUrlTest {
         val s = added("https://example.com/feed.xml")
         assertEquals(s, DailyController.withUrl(s, "https://example.com/feed.xml"))
     }
+
+    // ── Names (#268) ──────────────────────────────────────────────────────────────────────────────
+
+    /** The reported case: a feed added as `rss.elpais.com` takes the name its feed gives. */
+    @Test
+    fun aHostNamedSourceTakesItsFeedTitle() {
+        val s = added("https://rss.elpais.com/feed.xml")
+        assertEquals("EL PAÍS", DailyController.named(s, "EL PAÍS").name)
+    }
+
+    /** A feed must not overwrite a curated byline or a name the reader typed, on any compile. */
+    @Test
+    fun aCuratedOrTypedNameIsNeverReplacedByTheFeed() {
+        val bbc = DailyController.Source("BBC News", "https://feeds.bbci.co.uk/news/rss.xml")
+        assertEquals(bbc, DailyController.named(bbc, "BBC News - Home"))
+        val typed = DailyController.Source("El País", "https://rss.elpais.com/feed.xml")
+        assertEquals(typed, DailyController.named(typed, "EL PAÍS"))
+    }
+
+    @Test
+    fun aMissingOrBlankFeedTitleChangesNothing() {
+        val s = added("https://example.com/feed.xml")
+        assertEquals(s, DailyController.named(s, null))
+        assertEquals(s, DailyController.named(s, "   "))
+    }
+
+    /** Once named from its feed, a later URL fix keeps the name (it is no longer the host). */
+    @Test
+    fun aFeedTitleSurvivesAUrlEdit() {
+        val s = DailyController.named(added("https://rss.elpais.com/feed.xml"), "EL PAÍS")
+        assertEquals("EL PAÍS", DailyController.withUrl(s, "https://feeds.elpais.com/rss").name)
+    }
+
+    @Test
+    fun aRenameIsApplied() {
+        val s = added("https://rss.elpais.com/feed.xml")
+        val out = DailyController.edited(s, "  El País  ", s.url)
+        assertEquals("El País", out.name)
+        assertEquals(s.url, out.url)
+    }
+
+    /** Rename and URL change in one edit: the typed name wins over the host the URL would derive. */
+    @Test
+    fun aRenameAndAUrlEditTogetherKeepTheTypedName() {
+        val s = added("https://rss.elpais.com/feed.xml")
+        val out = DailyController.edited(s, "El País", "https://feeds.elpais.com/rss")
+        assertEquals("El País", out.name)
+        assertEquals("https://feeds.elpais.com/rss", out.url)
+    }
+
+    /** A name left untouched lets a host-derived byline follow the URL, as before #268. */
+    @Test
+    fun anUntouchedNameStillFollowsTheUrl() {
+        val s = added("https://example.com/feed.xml")
+        assertEquals("other.org", DailyController.edited(s, s.name, "https://other.org/rss").name)
+    }
+
+    /** An emptied name field is a slip: the current name stays, and a feed title can still adopt it. */
+    @Test
+    fun aBlankNameKeepsTheCurrentOne() {
+        val s = added("https://example.com/feed.xml")
+        assertEquals("example.com", DailyController.edited(s, "  ", s.url).name)
+    }
+
+    /** A typed name survives the next compile's feed title. */
+    @Test
+    fun aRenamedSourceIsNotRenamedBackByItsFeed() {
+        val renamed = DailyController.edited(added("https://rss.elpais.com/feed.xml"), "El País", "https://rss.elpais.com/feed.xml")
+        assertEquals("El País", DailyController.named(renamed, "EL PAÍS").name)
+    }
 }
