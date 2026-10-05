@@ -44,7 +44,8 @@ pub fn parse_feed(xml: &str) -> ParsedFeed {
     let title = feed
         .title
         .map(|t| feed_title(&t.content))
-        .filter(|t| !t.is_empty());
+        // A title with no letter or digit ("…", "---") names nothing; keep the host byline instead.
+        .filter(|t| t.chars().any(char::is_alphanumeric));
     let items = feed
         .entries
         .into_iter()
@@ -255,6 +256,12 @@ mod tests {
               </title><item><title>A</title><link>https://x.test/a</link></item></channel></rss>"#;
         assert_eq!(parse_feed(none).title, None);
         assert_eq!(parse_feed(blank).title, None);
+        let punct = r#"<rss version="2.0"><channel><title> --- </title></channel></rss>"#;
+        assert_eq!(
+            parse_feed(punct).title,
+            None,
+            "punctuation alone is not a name"
+        );
     }
 
     /// Line breaks and indentation inside `<title>` collapse; a double-encoded entity decodes.

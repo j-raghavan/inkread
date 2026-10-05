@@ -150,7 +150,9 @@ class DailyController(private val context: Context) {
      * the UI thread; [onDone] is invoked (on a worker thread) with success + a short status message.
      */
     fun compile(onDone: (Boolean, String) -> Unit) {
-        Executors.newSingleThreadExecutor().execute {
+        // A plain thread rather than an executor that was never shut down — one idle thread leaked
+        // per compile.
+        thread(name = "daily-compile") {
             try {
                 onDone(compileBlocking(), lastStatus)
             } catch (e: Exception) {
