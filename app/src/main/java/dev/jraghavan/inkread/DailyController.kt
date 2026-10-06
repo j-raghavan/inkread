@@ -12,6 +12,7 @@ import java.util.Locale
 import java.util.concurrent.Callable
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
+import kotlin.concurrent.thread
 
 /**
  * inkread-daily orchestration (#66): the Android shell's half of the daily pipeline. Stores the
@@ -45,7 +46,7 @@ class DailyController(private val context: Context) {
 
     private fun prefs() = context.getSharedPreferences("daily", Context.MODE_PRIVATE)
 
-    private fun dailyDir(): File = File(context.filesDir, "daily").apply { mkdirs() }
+    private fun dailyDir(): File = File(context.filesDir, DIR).apply { mkdirs() }
 
     // ── Sources ─────────────────────────────────────────────────────────────────────────────────
 
@@ -65,32 +66,46 @@ class DailyController(private val context: Context) {
             }
         }.getOrDefault(emptyList())
 
-    /** Add a source from a pasted feed URL; derives a byline from the host. No-op on a blank URL. */
-    fun addSource(url: String) {
+    /** Add a source from a pasted feed URL; derives a byline from the host. Returns the stored URL,
+     *  or null on a blank one. */
+    fun addSource(url: String): String? {
         val u = url.trim()
-        if (u.isEmpty()) return
-        val updated = sources().filterNot { it.url == u } + Source(bylineFor(u), u)
-        save(updated)
+        if (u.isEmpty()) return null
+        update { cur -> cur.filterNot { it.url == u } + Source(bylineFor(u), u) }
+        return u
     }
 
-    fun removeSource(url: String) = save(sources().filterNot { it.url == url })
+    /**
+     * Name a just-added source from its feed's own title (#268), off the UI thread, so the reader
+     * does not see the host until the next compile. [onNamed] runs on a worker thread, and only if
+     * the name changed.
+     */
+    fun nameFromFeed(url: String, onNamed: () -> Unit) {
+        thread(name = "daily-name") {
+            try {
+                val title = fetchFeed(url, booleanArrayOf(false)).title
+                if (title != null && adoptFeedTitles(mapOf(url to title))) onNamed()
+            } catch (e: Exception) {
+                Log.w(TAG, "naming $url from its feed failed", e)
+            }
+        }
+    }
 
-    /** Mute/unmute a source without removing it (the Sources checklist). */
-    fun setSourceEnabled(url: String, enabled: Boolean) =
-        save(sources().map { if (it.url == url) it.copy(enabled = enabled) else it })
-
-    /** Persist an edited source list wholesale (enable/disable + removals from the Sources editor). */
-    fun setSources(list: List<Source>) = save(list)
-
+    /**
+     * Persist the Sources editor's list wholesale (order, edits, mutes, removals). [opened] is the
+     * list the editor started from: a compile may have named a source from its feed while the
+     * editor was open, and writing back the editor's stale host name would undo that
+     * ([keepAdoptedNames]).
+     */
+    fun setSources(list: List<Source>, opened: List<Source>) =
+        update { stored -> keepAdoptedNames(list, opened, stored) }
 
     /** The sources a compile actually fetches (muted ones excluded). */
     fun enabledSources(): List<Source> = sources().filter { it.enabled }
 
     /** Bulk-add sources (the suggested-feeds picker), de-duped against what's already followed. */
-    fun addSources(list: List<Source>) {
-        val cur = sources()
-        save(cur + list.filterNot { s -> cur.any { it.url == s.url } })
-    }
+    fun addSources(list: List<Source>) =
+        update { cur -> cur + list.filterNot { s -> cur.any { it.url == s.url } } }
 
     /** A small curated catalog of well-known feeds, so a new user can start with one tap instead of
      *  hunting for feed URLs. Shown as a default-on checklist. */
@@ -101,8 +116,17 @@ class DailyController(private val context: Context) {
     fun ensureSeeded() {
         val p = prefs()
         if (p.getBoolean("seeded", false)) return
-        if (sources().isEmpty()) save(SUGGESTED)
+        update { cur -> cur.ifEmpty { SUGGESTED } }
         p.edit().putBoolean("seeded", true).apply()
+    }
+
+    /** Read-modify-write the stored source list under [SOURCES_LOCK], so a background compile
+     *  naming sources and the reader editing them cannot drop each other's change. */
+    private fun update(f: (List<Source>) -> List<Source>): Boolean = synchronized(SOURCES_LOCK) {
+        val cur = sources()
+        val next = f(cur)
+        if (next != cur) save(next)
+        next != cur
     }
 
     private fun save(list: List<Source>) {
@@ -126,7 +150,9 @@ class DailyController(private val context: Context) {
      * the UI thread; [onDone] is invoked (on a worker thread) with success + a short status message.
      */
     fun compile(onDone: (Boolean, String) -> Unit) {
-        Executors.newSingleThreadExecutor().execute {
+        // A plain thread rather than an executor that was never shut down — one idle thread leaked
+        // per compile.
+        thread(name = "daily-compile") {
             try {
                 onDone(compileBlocking(), lastStatus)
             } catch (e: Exception) {
@@ -160,10 +186,19 @@ class DailyController(private val context: Context) {
         // HEADLINES_SHOWN headlines — so a newly added feed could compile into the issue yet never
         // appear on the front page. Round-robin gives every source front-of-issue presence.
         val perSource = mutableListOf<List<JSONObject>>()
+        // The bylines in source order, for grouping the issue's contents (#269) — collected as each
+        // source is read so they match the `source` its articles carry exactly.
+        val sourceOrder = JSONArray()
         try {
             for (src in active) {
                 val reached = booleanArrayOf(false)
-                val items = fetchFeedItems(src.url, reached)
+                val feed = fetchFeed(src.url, reached)
+                val items = feed.items
+                // Name a source still called after its host from its feed (#268) before building its
+                // articles, so the very compile that learns the name already prints it.
+                feed.title?.let { adoptFeedTitles(mapOf(src.url to it)) }
+                val name = sources().find { it.url == src.url }?.name ?: src.name
+                sourceOrder.put(name)
                 if (reached[0]) feedsReached++
                 itemsFound += items.length()
                 val take = minOf(items.length(), clampLimit(src.limit))
@@ -176,7 +211,7 @@ class DailyController(private val context: Context) {
                         if (html.isBlank()) null
                         else JSONObject()
                             .put("title", item.optString("title"))
-                            .put("source", src.name)
+                            .put("source", name)
                             .put("url", item.optString("url"))
                             .put("published", item.optString("published"))
                             // The feed's own description, for the contents page (#198). Absent on
@@ -212,6 +247,7 @@ class DailyController(private val context: Context) {
             .put("title", "inkread daily")
             .put("date", todayDisplay())
             .put("articles", articles)
+            .put("sources", sourceOrder)
             .toString()
         val bytes = try {
             NativeBridge.nativeDailyAssemble(issueJson)
@@ -298,10 +334,10 @@ class DailyController(private val context: Context) {
      * try common feed paths (`/feed`, `/rss`, …) — so a user can paste a site, not just a feed.
      * `reached[0]` is set true if any URL responded (to distinguish "no network" from "not a feed").
      */
-    private fun fetchFeedItems(url: String, reached: BooleanArray): JSONArray {
-        val body = fetch(url) ?: return JSONArray()
+    private fun fetchFeed(url: String, reached: BooleanArray): Feed {
+        val body = fetch(url) ?: return noFeed()
         reached[0] = true
-        parseFeed(body)?.let { if (it.length() > 0) return it }
+        parseFeed(body)?.let { if (it.items.length() > 0) return it }
         // Not a feed — discover one from the page, then fall back to common paths.
         val candidates = buildList {
             discoverFeedUrl(body, url)?.let { add(it) }
@@ -311,17 +347,41 @@ class DailyController(private val context: Context) {
             if (c == url) continue
             val b = fetch(c) ?: continue
             parseFeed(b)?.let {
-                if (it.length() > 0) {
-                    Log.i(TAG, "discovered feed for $url -> $c (${it.length()} items)")
+                if (it.items.length() > 0) {
+                    Log.i(TAG, "discovered feed for $url -> $c (${it.items.length()} items)")
                     return it
                 }
             }
         }
-        return JSONArray()
+        return noFeed()
     }
 
-    private fun parseFeed(xml: String): JSONArray? =
-        runCatching { JSONArray(NativeBridge.nativeDailyParseFeed(xml)) }.getOrNull()
+    /** A parsed feed: its own title (null when it gives none) and its entries. */
+    private class Feed(val title: String?, val items: JSONArray)
+
+    /** A fresh empty [Feed] each time: `JSONArray` is mutable, so a shared instance is a hazard. */
+    private fun noFeed() = Feed(null, JSONArray())
+
+    private fun parseFeed(xml: String): Feed? =
+        runCatching {
+            val o = JSONObject(NativeBridge.nativeDailyParseFeed(xml))
+            Feed(
+                // optString would turn JSON null into the string "null" — a source named "null".
+                if (o.isNull("title")) null else o.getString("title"),
+                o.optJSONArray("items") ?: JSONArray(),
+            )
+        }.getOrNull()
+
+    /**
+     * Rename every source still named after its host to the title its feed gave this compile (#268),
+     * so a feed added as `rss.elpais.com` reads "EL PAÍS" from then on — including feeds added before
+     * feeds could name themselves. Names the reader typed and curated names are left alone ([named]).
+     *
+     * Applied to the stored list, not the one the compile started from. Returns whether a name
+     * changed.
+     */
+    private fun adoptFeedTitles(titles: Map<String, String>): Boolean =
+        titles.isNotEmpty() && update { cur -> adoptTitles(cur, titles) }
 
     /** Find a feed URL advertised in a page's `<link rel="alternate" type="…rss/atom+xml" href="…">`. */
     private fun discoverFeedUrl(html: String, base: String): String? {
@@ -363,6 +423,12 @@ class DailyController(private val context: Context) {
     /** Internal rather than private so the pure limit/ordering logic is host-testable (#193). */
     internal companion object {
         const val TAG = "DailyController"
+        private const val DIR = "daily" // under filesDir; holds every compiled issue
+
+        /** Whether [file] is a compiled Daily issue — one that lives in the Daily folder. */
+        fun isIssue(filesDir: File, file: File): Boolean = runCatching {
+            file.parentFile?.canonicalPath == File(filesDir, DIR).canonicalPath
+        }.getOrDefault(false)
 
         /** Curated popular feeds for the suggested-sources picker (stable, well-known RSS/Atom). */
         /**
@@ -379,8 +445,7 @@ class DailyController(private val context: Context) {
         fun withUrl(source: Source, newUrl: String): Source {
             val u = newUrl.trim()
             if (u.isEmpty() || u == source.url) return source
-            val wasDerived = source.name == bylineFor(source.url)
-            return source.copy(name = if (wasDerived) bylineFor(u) else source.name, url = u)
+            return source.copy(name = if (isHostNamed(source)) bylineFor(u) else source.name, url = u)
         }
 
         /**
@@ -390,6 +455,69 @@ class DailyController(private val context: Context) {
          */
         fun bylineFor(url: String): String =
             runCatching { URL(url).host.removePrefix("www.") }.getOrDefault(url).ifBlank { url }
+
+        /** Whether [source] still carries the default byline derived from its URL — the one name
+         *  the app may replace on the reader's behalf ([withUrl], [named]). */
+        fun isHostNamed(source: Source): Boolean = source.name == bylineFor(source.url)
+
+        /**
+         * [source] renamed to its feed's own [feedTitle] (#268) — but only while its name is still the
+         * host-derived default. A curated byline ("BBC News") and a name the reader typed are theirs to
+         * keep; a feed must not overwrite either on every compile. A blank or missing title changes
+         * nothing.
+         */
+        fun named(source: Source, feedTitle: String?): Source {
+            val t = feedTitle?.trim().orEmpty()
+            if (t.isEmpty() || !isHostNamed(source)) return source
+            return source.copy(name = t)
+        }
+
+        /**
+         * [source] after the Sources editor's Edit (#166, #268): re-pointed at [newUrl] via [withUrl],
+         * then named [newName] if the reader changed it. A name left as it was lets [withUrl] move a
+         * host-derived byline with the URL; a blank name is a slip and keeps the current one.
+         */
+        fun edited(source: Source, newName: String, newUrl: String): Source {
+            val moved = withUrl(source, newUrl)
+            val n = newName.trim()
+            return if (n.isEmpty() || n == source.name) moved else moved.copy(name = n)
+        }
+
+        /**
+         * [sources] with each host-named source renamed to its feed's title in [titles] (by URL) via
+         * [named] — unless another source already goes by that name. The front page groups headlines
+         * by name, so two feeds sharing one would merge into a single section.
+         */
+        fun adoptTitles(sources: List<Source>, titles: Map<String, String>): List<Source> {
+            val out = sources.toMutableList()
+            out.indices.forEach { i ->
+                val title = titles[out[i].url] ?: return@forEach
+                val renamed = named(out[i], title)
+                val taken = out.withIndex().any { (j, o) -> j != i && o.name.equals(renamed.name, ignoreCase = true) }
+                if (!taken) out[i] = renamed
+            }
+            return out
+        }
+
+        /**
+         * The Sources editor's [edited] list, keeping a name a compile adopted while the editor was
+         * open (#268): a row host-named both when the editor opened and on Save, but named otherwise
+         * in [stored], takes the stored name.
+         */
+        fun keepAdoptedNames(edited: List<Source>, opened: List<Source>, stored: List<Source>): List<Source> =
+            edited.map { e ->
+                val was = opened.find { it.url == e.url }
+                val now = stored.find { it.url == e.url }
+                if (isHostNamed(e) && was != null && isHostNamed(was) && now != null && !isHostNamed(now)) {
+                    e.copy(name = now.name)
+                } else {
+                    e
+                }
+            }
+
+        /** Serialises read-modify-write of the stored source list ([update]) across controller
+         *  instances — the activity's and the background compile's. */
+        private val SOURCES_LOCK = Any()
 
         val SUGGESTED = listOf(
             Source("Hacker News", "https://hnrss.org/frontpage"),
@@ -416,6 +544,53 @@ class DailyController(private val context: Context) {
          * sees listed as active.
          */
         fun clampLimit(n: Int): Int = n.coerceIn(MIN_PER_SOURCE, MAX_PER_SOURCE)
+
+        /**
+         * The front page's source sections ([sections], as first seen in the issue) put in the
+         * reader's source order ([order], source names) (#267). First-seen order is not enough: the
+         * issue round-robins sources and drops articles that failed to fetch, so a source whose first
+         * article failed would sink below sources the reader put after it — and a reorder would not
+         * show until the next compile. A section matching no current source (renamed since the issue
+         * was compiled) keeps its first-seen place after the known ones.
+         */
+        // The issue's own contents are grouped by the same rule in inkread-daily `epub::sections`.
+        fun inSourceOrder(sections: List<String>, order: List<String>): List<String> =
+            sections.sortedBy { order.indexOf(it).let { i -> if (i < 0) Int.MAX_VALUE else i } }
+
+        /**
+         * How many of the front page's sections (by [weights], in order) go in the left column: the
+         * split that brings the two columns closest to even, so the sections stay in order down them.
+         * Always at least one section on the left when there is any.
+         */
+        fun columnSplit(weights: List<Int>): Int {
+            if (weights.isEmpty()) return 0
+            val total = weights.sum()
+            var left = 0
+            var best = 1
+            var bestGap = Int.MAX_VALUE
+            for (k in 1..weights.size) {
+                left += weights[k - 1]
+                val gap = kotlin.math.abs(total - 2 * left)
+                if (gap <= bestGap) { best = k; bestGap = gap } // a tie goes to the longer left column
+            }
+            return best
+        }
+
+        /**
+         * [list] with [item] moved [by] places (negative = towards the front), for reordering
+         * sources (#267). Places are counted among the elements that are not [hidden] — a removed
+         * row is still in the staged order but no longer on screen, and one tap must move a row past
+         * the neighbour the reader can see. Hidden elements go to the end, where Save drops them.
+         * Clamped at the ends, so ▲ on the first row or ▼ on the last changes nothing; an [item] not
+         * in the visible list leaves it unchanged.
+         */
+        fun <T> moved(list: List<T>, item: T, by: Int, hidden: (T) -> Boolean = { false }): List<T> {
+            val visible = list.filterNot(hidden).toMutableList()
+            val from = visible.indexOf(item)
+            if (from < 0) return list
+            visible.add((from + by).coerceIn(0, visible.lastIndex), visible.removeAt(from))
+            return visible + list.filter(hidden)
+        }
 
         /**
          * Round-robin the sources: every source's 1st article, then every source's 2nd, and so on.

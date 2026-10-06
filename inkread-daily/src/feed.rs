@@ -23,14 +23,31 @@ pub struct FeedItem {
     pub summary: Option<String>,
 }
 
-/// Parse an RSS / Atom / JSON feed into its entries, in document order. Tolerant of malformed input.
+/// A parsed feed: its own title and its entries.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct ParsedFeed {
+    /// The feed's own name (RSS `<channel><title>`, Atom `<feed><title>`, JSON Feed `title`), cleaned
+    /// for use as a byline (#268); `None` when the feed gives none or only whitespace.
+    pub title: Option<String>,
+    /// Entries in document order.
+    pub items: Vec<FeedItem>,
+}
+
+/// Parse an RSS / Atom / JSON feed into its title and entries (in document order). Malformed input
+/// yields an empty [`ParsedFeed`] rather than an error (RR21-FR3).
 #[must_use]
-pub fn parse_feed(xml: &str) -> Vec<FeedItem> {
+pub fn parse_feed(xml: &str) -> ParsedFeed {
     let feed = match feed_rs::parser::parse(xml.as_bytes()) {
         Ok(f) => f,
-        Err(_) => return Vec::new(),
+        Err(_) => return ParsedFeed::default(),
     };
-    feed.entries
+    let title = feed
+        .title
+        .map(|t| feed_title(&t.content))
+        // A title with no letter or digit ("…", "---") names nothing; keep the host byline instead.
+        .filter(|t| t.chars().any(char::is_alphanumeric));
+    let items = feed
+        .entries
         .into_iter()
         .map(|e| FeedItem {
             // feed-rs does one XML entity decode; some feeds double-encode (e.g. The Verge ships
@@ -53,7 +70,53 @@ pub fn parse_feed(xml: &str) -> Vec<FeedItem> {
                 .map(|t| crate::extract::decode_entities(t.content.trim()))
                 .filter(|t| !t.is_empty()),
         })
-        .collect()
+        .collect();
+    ParsedFeed { title, items }
+}
+
+/// Where a feed title is cut for use as a byline. It is shown on a Sources row, the front page and
+/// every article's byline, so a publisher's paragraph-length `<title>` must not become one; a cut
+/// title ends in "…".
+const FEED_TITLE_CHARS: usize = 60;
+
+/// Separators between a feed's name and what follows it ("Ars Technica - All content").
+const TAGLINE_SEPARATORS: [&str; 5] = [": ", " - ", " – ", " — ", " | "];
+
+/// What follows a separator when it only says "this is the feed" — dropped from the byline. Anything
+/// else is kept: "BBC News - Technology" must not collapse into another feed's "BBC News", and in
+/// "World news | The Guardian" the publisher is the part *after* the separator.
+const GENERIC_TAILS: [&str; 12] = [
+    "home",
+    "homepage",
+    "front page",
+    "all content",
+    "all posts",
+    "all stories",
+    "all articles",
+    "latest",
+    "latest news",
+    "top stories",
+    "rss",
+    "feed",
+];
+
+/// Clean a feed's title for use as a byline: decode the entities feed-rs leaves behind (the same
+/// double-encoding as entry titles), collapse whitespace, drop a generic trailing part, and cut it
+/// to length.
+fn feed_title(raw: &str) -> String {
+    let title = crate::extract::collapse_ws(&crate::extract::decode_entities(raw));
+    let name = TAGLINE_SEPARATORS
+        .iter()
+        .filter_map(|sep| title.rfind(sep).map(|at| (at, sep.len())))
+        .max()
+        .filter(|&(at, len)| {
+            let tail = title[at + len..].trim().to_lowercase();
+            GENERIC_TAILS.contains(&tail.as_str())
+        })
+        .map(|(at, _)| title[..at].trim())
+        .filter(|n| !n.is_empty())
+        .unwrap_or(&title);
+    crate::model::truncate_on_word(name, FEED_TITLE_CHARS)
 }
 
 /// The article URL for an entry: prefer the `alternate` link (the readable page), else the first
@@ -78,7 +141,7 @@ mod tests {
             <item><title>Hello World</title><link>https://x.test/a</link>
             <pubDate>Wed, 25 Jun 2026 18:33:54 +0000</pubDate></item>
             </channel></rss>"#;
-        let items = parse_feed(xml);
+        let items = parse_feed(xml).items;
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].title, "Hello World");
         assert_eq!(items[0].url, "https://x.test/a");
@@ -94,7 +157,7 @@ mod tests {
             <link href="https://x.test/b"/>
             <author><name>Sheena Vasani</name></author>
             <updated>2026-06-25T18:00:00Z</updated></entry></feed>"#;
-        let items = parse_feed(xml);
+        let items = parse_feed(xml).items;
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].url, "https://x.test/b");
         assert!(!items[0].url.contains("Sheena"));
@@ -107,7 +170,7 @@ mod tests {
             <link rel="self" href="https://x.test/feed"/>
             <link rel="alternate" href="https://x.test/article"/>
             </entry></feed>"#;
-        let items = parse_feed(xml);
+        let items = parse_feed(xml).items;
         assert_eq!(items[0].url, "https://x.test/article");
     }
 
@@ -116,7 +179,7 @@ mod tests {
         let xml = r#"<?xml version="1.0"?><rss version="2.0"><channel>
             <item><title>Tom &amp; Jerry&#x27;s day</title><link>https://x.test/c</link></item>
             </channel></rss>"#;
-        let items = parse_feed(xml);
+        let items = parse_feed(xml).items;
         assert_eq!(items[0].title, "Tom & Jerry's day");
     }
 
@@ -127,7 +190,7 @@ mod tests {
         let xml = r#"<?xml version="1.0"?><rss version="2.0"><channel>
             <item><title>Guardian&amp;#8217;s phone</title><link>https://x.test/v</link></item>
             </channel></rss>"#;
-        let items = parse_feed(xml);
+        let items = parse_feed(xml).items;
         assert_eq!(items[0].title, "Guardian\u{2019}s phone");
     }
 
@@ -137,7 +200,7 @@ mod tests {
         let json = r#"{"version":"https://jsonfeed.org/version/1","title":"Site",
             "items":[{"id":"1","url":"https://x.test/j","title":"JSON Item",
             "date_published":"2026-06-25T18:00:00Z"}]}"#;
-        let items = parse_feed(json);
+        let items = parse_feed(json).items;
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].title, "JSON Item");
         assert_eq!(items[0].url, "https://x.test/j");
@@ -145,8 +208,132 @@ mod tests {
 
     #[test]
     fn malformed_input_yields_empty_not_panic() {
-        assert!(parse_feed("<not a feed").is_empty());
-        assert!(parse_feed("").is_empty());
-        assert!(parse_feed("plain text, definitely not a feed").is_empty());
+        assert!(parse_feed("<not a feed").items.is_empty());
+        assert!(parse_feed("").items.is_empty());
+        assert!(parse_feed("plain text, definitely not a feed")
+            .items
+            .is_empty());
+        assert_eq!(parse_feed("<not a feed"), ParsedFeed::default());
+    }
+
+    /// The reported case: a feed added as `rss.elpais.com` names itself by its channel title (the
+    /// live feed's title, tagline included — the reader can shorten it with Edit).
+    #[test]
+    fn rss_channel_title_is_the_feed_title() {
+        let xml = r#"<?xml version="1.0"?><rss version="2.0"><channel><title>EL PA&#205;S: el peri&#243;dico global</title>
+            <item><title>A</title><link>https://x.test/a</link></item></channel></rss>"#;
+        let feed = parse_feed(xml);
+        assert_eq!(feed.title.as_deref(), Some("EL PAÍS: el periódico global"));
+        assert_eq!(
+            feed.items.len(),
+            1,
+            "entries still parse alongside the title"
+        );
+    }
+
+    /// The feed's title, not the first entry's: Atom puts both in `<title>` elements.
+    #[test]
+    fn atom_feed_title_is_not_an_entry_title() {
+        let xml = r#"<?xml version="1.0"?><feed xmlns="http://www.w3.org/2005/Atom">
+            <title>Atom Site</title>
+            <entry><title>Entry One</title><link href="https://x.test/1"/></entry></feed>"#;
+        assert_eq!(parse_feed(xml).title.as_deref(), Some("Atom Site"));
+    }
+
+    #[test]
+    fn json_feed_title_is_read() {
+        let json = r#"{"version":"https://jsonfeed.org/version/1","title":"Site","items":[]}"#;
+        assert_eq!(parse_feed(json).title.as_deref(), Some("Site"));
+    }
+
+    /// No title, or only whitespace, is `None` — the shell keeps its host-derived byline rather
+    /// than renaming a source to nothing.
+    #[test]
+    fn a_missing_or_blank_title_is_none() {
+        let none = r#"<rss version="2.0"><channel>
+            <item><title>A</title><link>https://x.test/a</link></item></channel></rss>"#;
+        let blank = r#"<rss version="2.0"><channel><title>
+              </title><item><title>A</title><link>https://x.test/a</link></item></channel></rss>"#;
+        assert_eq!(parse_feed(none).title, None);
+        assert_eq!(parse_feed(blank).title, None);
+        let punct = r#"<rss version="2.0"><channel><title> --- </title></channel></rss>"#;
+        assert_eq!(
+            parse_feed(punct).title,
+            None,
+            "punctuation alone is not a name"
+        );
+    }
+
+    /// Line breaks and indentation inside `<title>` collapse; a double-encoded entity decodes.
+    #[test]
+    fn a_title_is_cleaned_for_use_as_a_byline() {
+        let xml = r#"<rss version="2.0"><channel><title>
+              The  Guardian&amp;#8217;s
+              Feed </title></channel></rss>"#;
+        assert_eq!(
+            parse_feed(xml).title.as_deref(),
+            Some("The Guardian\u{2019}s Feed")
+        );
+    }
+
+    /// A paragraph-length title is capped on a character boundary — multi-byte text included.
+    #[test]
+    fn a_long_title_is_capped_without_splitting_a_character() {
+        let long = "é".repeat(200);
+        let xml = format!(r#"<rss version="2.0"><channel><title>{long}</title></channel></rss>"#);
+        let title = parse_feed(&xml).title.unwrap();
+        assert!(title.chars().count() <= FEED_TITLE_CHARS + 1, "{title}");
+        assert!(title.ends_with('…'), "{title}");
+        assert!(title.trim_end_matches('…').chars().all(|c| c == 'é'));
+    }
+
+    #[test]
+    fn a_generic_tail_is_dropped() {
+        for (raw, want) in [
+            ("Ars Technica - All content", "Ars Technica"),
+            ("BBC News | Home", "BBC News"),
+            ("The Verge – All Posts", "The Verge"),
+            ("NYT: Top Stories", "NYT"),
+            ("Quanta Magazine", "Quanta Magazine"),
+        ] {
+            assert_eq!(feed_title(raw), want, "{raw}");
+        }
+    }
+
+    /// Only a generic tail goes. A section name, a tagline, or a publisher placed last is part of
+    /// what tells this feed apart.
+    #[test]
+    fn a_meaningful_tail_is_kept() {
+        for raw in [
+            "BBC News - Technology",
+            "BBC News - World",
+            "World news | The Guardian",
+            "EL PAÍS: el periódico global",
+            "Comments on: A Post",
+            "Hacker-News Digest",
+        ] {
+            assert_eq!(feed_title(raw), raw);
+        }
+    }
+
+    /// Two feeds from one publisher keep distinct names.
+    #[test]
+    fn two_sections_of_one_publisher_stay_distinct() {
+        assert_ne!(
+            feed_title("BBC News - Technology"),
+            feed_title("BBC News - Science")
+        );
+    }
+
+    /// The last separator decides: "Site: News - Home" drops only "Home".
+    #[test]
+    fn only_the_last_part_is_considered() {
+        assert_eq!(feed_title("Site: News - Home"), "Site: News");
+    }
+
+    /// Nothing before the separator: keep the title rather than byline the source with nothing.
+    #[test]
+    fn a_title_that_is_only_a_generic_tail_is_kept_whole() {
+        assert_eq!(feed_title("- Home"), "- Home");
     }
 }

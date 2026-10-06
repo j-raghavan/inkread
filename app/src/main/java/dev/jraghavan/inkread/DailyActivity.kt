@@ -218,19 +218,20 @@ class DailyActivity : Activity() {
     /** The front page as the design wants it: headlines **grouped by source** into sections, laid
      *  out in two columns (a newspaper index). Tapping any headline opens the issue. */
     private fun headlinesBlock(headlines: List<DailyController.Headline>, issue: File): View {
-        // Group preserving first-seen source order.
-        val groups = LinkedHashMap<String, MutableList<DailyController.Headline>>()
-        headlines.forEach { groups.getOrPut(it.source) { mutableListOf() }.add(it) }
+        // Group by source, sections in the reader's source order (#267).
+        val bySource = LinkedHashMap<String, MutableList<DailyController.Headline>>()
+        headlines.forEach { bySource.getOrPut(it.source) { mutableListOf() }.add(it) }
+        val groups = DailyController.inSourceOrder(bySource.keys.toList(), daily.sources().map { it.name })
+            .associateWith { bySource.getValue(it) }
 
         val left = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         val right = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        // Distribute sections across the two columns, roughly balancing by headline count.
-        var leftCount = 0
-        var rightCount = 0
-        groups.forEach { (source, list) ->
-            val target = if (leftCount <= rightCount) left else right
-            target.addView(sourceSection(source, list, issue))
-            if (target === left) leftCount += list.size + 2 else rightCount += list.size + 2
+        // Fill the left column, then the right, splitting near the middle by headline count — so the
+        // sections read in source order down the columns, as a newspaper index does (#267).
+        val weights = groups.values.map { it.size + 2 } // a section head costs about two headlines
+        val split = DailyController.columnSplit(weights)
+        groups.entries.forEachIndexed { k, (source, list) ->
+            (if (k < split) left else right).addView(sourceSection(source, list, issue))
         }
         return LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -486,38 +487,59 @@ class DailyActivity : Activity() {
             .setMessage("Paste an RSS or Atom feed URL.")
             .setView(input)
             .setPositiveButton("Add") { _, _ ->
-                daily.addSource(input.text.toString())
+                val url = daily.addSource(input.text.toString())
                 setContentView(buildView())
+                // Swap the host byline for the feed's own name once it has been fetched (#268).
+                if (url != null) daily.nameFromFeed(url) {
+                    runOnUiThread { if (!isFinishing && !isDestroyed) setContentView(buildView()) }
+                }
             }
             .setNegativeButton("Cancel", null)
             .show()
     }
 
     /**
-     * Prompt for a replacement feed URL, pre-filled with the current one (#166).
+     * Prompt for a source's name and feed URL, pre-filled with the current ones (#166, #268).
      *
      * A feed URL could be added and removed but never corrected, so a typo or a publisher moving
      * their feed meant losing the row and its per-source article limit and re-adding it from
-     * scratch. [onAccept] receives the new URL only when it is worth applying: blank input is a
-     * slip rather than an instruction, and a URL already followed by another row would otherwise
-     * produce two entries fetching the same feed.
+     * scratch; and a feed added by URL was stuck with its host as its byline. [onAccept] receives
+     * the pair only when the URL is worth applying: a blank URL is a slip rather than an
+     * instruction, and a URL already followed by another row would otherwise produce two entries
+     * fetching the same feed. A blank name keeps the current one ([DailyController.edited]).
      */
-    private fun editSourceUrlDialog(current: String, others: List<String>, onAccept: (String) -> Unit) {
-        val input = EditText(this).apply {
-            setText(current)
-            setSelection(current.length)
+    private fun editSourceDialog(
+        currentName: String,
+        currentUrl: String,
+        others: List<String>,
+        onAccept: (name: String, url: String) -> Unit,
+    ) {
+        fun field(value: String, hint: String) = EditText(this).apply {
+            setText(value)
+            setSelection(value.length)
+            this.hint = hint
             setSingleLine()
         }
+        val name = field(currentName, "Name")
+        val url = field(currentUrl, "https://example.com/feed.xml")
+        val form = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dim(20), dim(8), dim(20), 0)
+            addView(label("Name", 10f, 0.1f))
+            addView(name)
+            addView(gap(dim(10)))
+            addView(label("Feed URL", 10f, 0.1f))
+            addView(url)
+        }
         AlertDialog.Builder(this, R.style.InkDialog)
-            .setTitle("Edit feed URL")
-            .setMessage("The byline follows the address when it was taken from one.")
-            .setView(input)
+            .setTitle("Edit source")
+            .setView(form)
             .setPositiveButton("Save") { _, _ ->
-                val u = input.text.toString().trim()
+                val u = url.text.toString().trim()
                 when {
                     u.isEmpty() -> Unit
                     u in others -> Toast.makeText(this, "Already following that feed", Toast.LENGTH_SHORT).show()
-                    else -> onAccept(u)
+                    else -> onAccept(name.text.toString(), u)
                 }
             }
             .setNegativeButton("Cancel", null)
@@ -525,8 +547,8 @@ class DailyActivity : Activity() {
     }
 
     /** Edit sources: a checklist (uncheck a row to mute it without losing it — e.g. disable NPR) with
-     *  a per-row Edit to correct its URL and a per-row Remove to drop it entirely. Saving applies
-     *  URL edits, mutes and removals in one pass. */
+     *  per-row ▲/▼ to reorder it, Edit to rename it or correct its URL and Remove to drop it
+     *  entirely. Saving applies the order, edits, mutes and removals in one pass. */
     private fun sourcesDialog() {
         val sources = daily.sources()
         if (sources.isEmpty()) {
@@ -536,12 +558,29 @@ class DailyActivity : Activity() {
         val enabled = sources.map { it.enabled }.toBooleanArray()
         val removed = BooleanArray(sources.size)
         val limits = sources.map { it.limit }.toIntArray()
-        // Edited URLs are staged like the limits and mutes, and committed by the same Save, so the
-        // dialog keeps one way of working rather than a per-row action that writes behind the
-        // reader's back while their other edits are still pending (#166).
-        val urls = sources.map { it.url }.toTypedArray()
+        // Name and URL edits are staged like the limits and mutes, and committed by the same Save, so
+        // the dialog keeps one way of working rather than a per-row action that writes behind the
+        // reader's back while their other edits are still pending (#166, #268). Each edit applies to
+        // the row as it now stands, so a second edit sees the first's result.
+        val staged = sources.toTypedArray()
+        // The order is staged too (#267): positions into `sources`, so the per-row arrays above keep
+        // their indices while rows move. Source order decides which source leads the front page and
+        // breaks ties in the issue's round-robin, so it is the reader's to set.
+        var order = sources.indices.toList()
 
         val list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        val rows = arrayOfNulls<View>(sources.size)
+        fun relayout() {
+            list.removeAllViews()
+            order.filterNot { removed[it] }.forEachIndexed { k, i ->
+                if (k > 0) list.addView(blackRule(Ink.hair()))
+                list.addView(rows[i])
+            }
+        }
+        fun move(i: Int, by: Int) {
+            order = DailyController.moved(order, i, by) { removed[it] }
+            relayout()
+        }
         sources.forEachIndexed { i, s ->
             val row = LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
@@ -559,44 +598,73 @@ class DailyActivity : Activity() {
                 text = "Edit"; setTextColor(ink); textSize = fs(11f); typeface = mono
                 letterSpacing = 0.1f; setPadding(dim(12), dim(6), dim(2), dim(6)); isClickable = true
                 setOnClickListener {
-                    editSourceUrlDialog(urls[i], others = urls.filterIndexed { j, _ -> j != i }) { u ->
-                        urls[i] = u
-                        info.text = "${s.name}\n$u"
+                    val others = staged.filterIndexed { j, _ -> j != i && !removed[j] }.map { it.url }
+                    editSourceDialog(staged[i].name, staged[i].url, others) { n, u ->
+                        staged[i] = DailyController.edited(staged[i], n, u)
+                        info.text = "${staged[i].name}\n${staged[i].url}"
                     }
                 }
             }
             val remove = TextView(this).apply {
                 text = "Remove"; setTextColor(ink); textSize = fs(11f); typeface = mono
                 letterSpacing = 0.1f; setPadding(dim(12), dim(6), dim(2), dim(6)); isClickable = true
-                setOnClickListener { removed[i] = true; row.visibility = View.GONE }
+                setOnClickListener { removed[i] = true; relayout() }
             }
+            row.addView(mover(onUp = { move(i, -1) }, onDown = { move(i, +1) }))
             row.addView(cb)
             row.addView(info, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
                 .apply { marginStart = dim(8) })
             row.addView(limitStepper(limits, i))
             row.addView(edit)
             row.addView(remove)
-            list.addView(row)
-            if (i < sources.size - 1) list.addView(blackRule(Ink.hair()))
+            rows[i] = row
         }
+        relayout()
         val scroll = ScrollView(this).apply {
             setPadding(dim(20), 0, dim(20), 0)
             addView(list)
         }
         AlertDialog.Builder(this, R.style.InkDialog)
-            .setTitle("Sources — uncheck to mute, ± sets articles per issue, Edit changes the URL")
+            .setTitle("Sources")
+            .setMessage(
+                "▲▼ reorders, uncheck to mute, ± sets articles per issue, Edit renames or changes the URL. " +
+                    "New names apply from the next issue.",
+            )
             .setView(scroll)
             .setPositiveButton("Save") { _, _ ->
-                val updated = sources.mapIndexedNotNull { i, s ->
+                val updated = order.mapNotNull { i ->
                     if (removed[i]) null
-                    else DailyController.withUrl(s, urls[i]).copy(enabled = enabled[i], limit = limits[i])
+                    else staged[i].copy(enabled = enabled[i], limit = limits[i])
                 }
-                daily.setSources(updated)
+                daily.setSources(updated, opened = sources)
                 setContentView(buildView())
             }
             .setNeutralButton("Add") { _, _ -> suggestedSourcesDialog() }
             .setNegativeButton("Cancel", null)
             .show()
+    }
+
+    /**
+     * A row's ▲/▼ pair (#267), stacked so it costs one narrow column of a row that already carries a
+     * checkbox, the name, the stepper and two actions. Buttons rather than drag: drag needs a
+     * reliable finger-up, which this panel does not deliver.
+     */
+    private fun mover(onUp: () -> Unit, onDown: () -> Unit): View {
+        val box = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER
+        }
+        fun button(label: String, desc: String, onTap: () -> Unit) = TextView(this).apply {
+            text = label; setTextColor(ink); textSize = fs(13f); typeface = mono
+            gravity = Gravity.CENTER
+            setPadding(dim(8), dim(2), dim(8), dim(2))
+            isClickable = true
+            contentDescription = desc
+            setOnClickListener { onTap() }
+        }
+        box.addView(button("▲", "Move up", onUp))
+        box.addView(button("▼", "Move down", onDown))
+        return box
     }
 
     /**

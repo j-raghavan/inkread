@@ -16,15 +16,17 @@ pub mod quote;
 
 pub use epub::assemble_epub;
 pub use extract::extract_readable;
-pub use feed::{parse_feed, FeedItem};
+pub use feed::{parse_feed, FeedItem, ParsedFeed};
 pub use model::{Article, Issue, Source};
 
 use serde::Deserialize;
 
-/// Parse a feed and return its entries as a JSON array (the JNI-friendly form of [`parse_feed`]).
+/// Parse a feed and return `{"title": …, "items": [...]}` (the JNI-friendly form of
+/// [`parse_feed`]); `title` is `null` when the feed has none.
 #[must_use]
 pub fn parse_feed_json(xml: &str) -> String {
-    serde_json::to_string(&parse_feed(xml)).unwrap_or_else(|_| "[]".to_string())
+    serde_json::to_string(&parse_feed(xml))
+        .unwrap_or_else(|_| r#"{"title":null,"items":[]}"#.to_string())
 }
 
 /// The shell's fetched issue, handed to the core as JSON: per article the raw fetched `html`, which
@@ -34,6 +36,9 @@ struct RawIssue {
     title: String,
     date: String,
     articles: Vec<RawArticle>,
+    /// Source names in the reader's order (#269); optional so an issue from an older shell parses.
+    #[serde(default)]
+    sources: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -78,6 +83,7 @@ pub fn assemble_issue_from_json(json: &str) -> Result<Vec<u8>, String> {
         title: raw.title,
         date: raw.date,
         articles,
+        sources: raw.sources,
     };
     Ok(assemble_epub(&issue))
 }
@@ -202,11 +208,20 @@ mod json_tests {
     #[test]
     fn parse_feed_json_round_trips() {
         let json = parse_feed_json(
-            r#"<rss version="2.0"><channel><item><title>T</title><link>https://x.test/1</link></item></channel></rss>"#,
+            r#"<rss version="2.0"><channel><title>Site</title><item><title>T</title><link>https://x.test/1</link></item></channel></rss>"#,
         );
-        assert!(
-            json.contains("\"title\":\"T\"") && json.contains("https://x.test/1"),
-            "{json}"
-        );
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["title"], "Site", "{json}");
+        assert_eq!(v["items"][0]["title"], "T", "{json}");
+        assert_eq!(v["items"][0]["url"], "https://x.test/1", "{json}");
+    }
+
+    /// The shape the shell reads holds on junk input too: an object with a null title and no items,
+    /// never a bare array or an empty string.
+    #[test]
+    fn parse_feed_json_on_junk_is_an_empty_object() {
+        let v: serde_json::Value = serde_json::from_str(&parse_feed_json("<nope")).unwrap();
+        assert!(v["title"].is_null());
+        assert_eq!(v["items"].as_array().map(Vec::len), Some(0));
     }
 }

@@ -51,7 +51,7 @@ for name, feed in FEEDS:
         xml = fetch(feed)
     except Exception as e:
         print(f"  FEED FAIL {name}: {e}", file=sys.stderr); continue
-    items = json.loads(subprocess.run([BIN, "parse"], input=xml, capture_output=True, text=True).stdout or "[]")
+    items = json.loads(subprocess.run([BIN, "parse"], input=xml, capture_output=True, text=True).stdout or '{"items":[]}')["items"]
     got = 0
     for it in items[:PER]:
         url = it.get("url", "")

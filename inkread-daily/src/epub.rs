@@ -101,14 +101,53 @@ fn opf(issue: &Issue) -> String {
     )
 }
 
-/// The EPUB-3 nav doc: a TOC linking the title page and each article (by its headline).
+/// The issue's articles grouped by source (#269): `(source, article indices)` in the reader's source
+/// order ([`Issue::sources`]), then any source not listed there in first-seen order. Within a section
+/// articles keep their reading order. Only sources with articles appear.
+///
+/// The spine stays round-robin (#107) — it is the page-turn order, and interleaving is what keeps
+/// every source near the front. Only the contents views are grouped, which is how a reader finds the
+/// topics worth reading in a past issue. The front page orders its sections by the same rule
+/// (`DailyController.inSourceOrder`).
+fn sections(issue: &Issue) -> Vec<(&str, Vec<usize>)> {
+    let mut out: Vec<(&str, Vec<usize>)> = issue
+        .sources
+        .iter()
+        .map(|s| (s.as_str(), Vec::new()))
+        .collect();
+    for (i, art) in issue.articles.iter().enumerate() {
+        match out.iter_mut().find(|(s, _)| *s == art.source) {
+            Some((_, indices)) => indices.push(i),
+            None => out.push((art.source.as_str(), vec![i])),
+        }
+    }
+    out.retain(|(_, indices)| !indices.is_empty());
+    out
+}
+
+/// An article's href relative to OEBPS/ (where the OPF, nav and title page live).
+fn article_href(i: usize) -> String {
+    article_path(i).trim_start_matches("OEBPS/").to_string()
+}
+
+/// The EPUB-3 nav doc: the cover, then one entry per source with its articles nested beneath (#269).
+/// A section entry links to its first article, so choosing a source in the TOC opens it.
 fn nav(issue: &Issue) -> String {
     let mut items = String::from("    <li><a href=\"title.xhtml\">Cover</a></li>\n");
-    for (i, art) in issue.articles.iter().enumerate() {
+    for (source, indices) in sections(issue) {
         items.push_str(&format!(
-            "    <li><a href=\"a{i:04}.xhtml\">{}</a></li>\n",
-            esc(&art.title)
+            "    <li><a href=\"{}\">{}</a><ol>\n",
+            article_href(indices[0]),
+            esc(source)
         ));
+        for &i in &indices {
+            items.push_str(&format!(
+                "      <li><a href=\"{}\">{}</a></li>\n",
+                article_href(i),
+                esc(&issue.articles[i].title)
+            ));
+        }
+        items.push_str("    </ol></li>\n");
     }
     format!(
         r#"<?xml version="1.0" encoding="utf-8"?>
@@ -120,31 +159,37 @@ fn nav(issue: &Issue) -> String {
     )
 }
 
-/// The cover: issue title, date, and the **In This Issue** contents (#198).
+/// The cover: issue title, date, and the **In This Issue** contents (#198), grouped by source (#269).
 ///
 /// A newspaper opens with a contents page so you can decide what is worth reading before committing
-/// to a page turn — which matters more on e-ink, where browsing costs a refresh each way. Every
-/// entry is a link into the article, carries its source, and shows a short excerpt where one can be
-/// had.
+/// to a page turn — which matters more on e-ink, where browsing costs a refresh each way. Each source
+/// is a section, as on the Daily front page; every entry is a link into the article and shows a short
+/// excerpt where one can be had.
 fn title_page(issue: &Issue) -> String {
     let mut toc = String::new();
-    for (i, art) in issue.articles.iter().enumerate() {
-        // `article_path` is the packaged path; inside the OPF everything is relative to OEBPS/.
-        let href = article_path(i).trim_start_matches("OEBPS/").to_string();
+    for (source, indices) in sections(issue) {
         toc.push_str(&format!(
-            "    <li><a href=\"{href}\">{}</a><br/><span class=\"src\">{}</span>",
-            esc(&art.title),
-            esc(&art.source)
+            "<h3 class=\"section\">{}</h3>\n<ul>\n",
+            esc(source)
         ));
-        // Title-only when there is nothing worth showing — an empty or near-empty line under every
-        // headline reads worse than no line at all.
-        if let Some(text) = art.excerpt(EXCERPT_CHARS) {
+        for &i in &indices {
+            let art = &issue.articles[i];
             toc.push_str(&format!(
-                "<br/><span class=\"excerpt\">{}</span>",
-                esc(&text)
+                "    <li><a href=\"{}\">{}</a>",
+                article_href(i),
+                esc(&art.title)
             ));
+            // Title-only when there is nothing worth showing — an empty or near-empty line under
+            // every headline reads worse than no line at all.
+            if let Some(text) = art.excerpt(EXCERPT_CHARS) {
+                toc.push_str(&format!(
+                    "<br/><span class=\"excerpt\">{}</span>",
+                    esc(&text)
+                ));
+            }
+            toc.push_str("</li>\n");
         }
-        toc.push_str("</li>\n");
+        toc.push_str("</ul>\n");
     }
     // The quotation sits between the masthead and the contents (#195) — where a paper puts it, and
     // read before deciding what to read.
@@ -159,7 +204,7 @@ fn title_page(issue: &Issue) -> String {
     xhtml(
         &issue.title,
         &format!(
-            "<h1>{}</h1>\n<p class=\"date\">{}</p>\n{quote}<h2>In This Issue</h2>\n<ul>\n{toc}</ul>",
+            "<h1>{}</h1>\n<p class=\"date\">{}</p>\n{quote}<h2>In This Issue</h2>\n{toc}",
             esc(&issue.title),
             esc(&issue.date)
         ),

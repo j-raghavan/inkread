@@ -90,8 +90,9 @@ object NativeBridge {
      *  cache hit (read-ahead). Best-effort — a failure is swallowed in the core. Engine-thread only. */
     external fun nativePrefetchPage(handle: Long, page: Int)
 
-    /** Parse an RSS/Atom feed into a JSON array of {title,url,published} (#66). Standalone — no
-     *  document handle; the shell fetches the feed, the core parses it. "[]" on junk input. */
+    /** Parse an RSS/Atom feed into JSON `{title, items:[{title,url,published,summary}]}` (#66, feed
+     *  title #268). Standalone — no document handle; the shell fetches the feed, the core parses
+     *  it. Junk input gives a null title and no items. */
     external fun nativeDailyParseFeed(xml: String): String
 
     /** Assemble a daily-issue EPUB from the shell's fetched JSON ({title,date,articles:[{title,

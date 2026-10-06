@@ -962,23 +962,22 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
                 "opened $bookId: $pageCount pages, resumed at page ${NativeBridge.nativeCurrentPage(docHandle)}",
             )
             // Decode the TOC once: it drives both chapter prev/next (1.7) and the Daily per-article
-            // jump. Chapter starts = top-level resolved targets (fall back to all targets for a flat
-            // TOC), de-duped + sorted by page.
+            // jump ([TocNav]).
             val toc = try {
                 WireCodec.decodeToc(NativeBridge.nativeToc(docHandle))
             } catch (e: RuntimeException) {
                 Log.e(TAG, "toc failed: ${e.message}"); emptyList()
             }
-            val tops = toc.filter { it.depth == 0 && it.targetPage != null }
-            chapters = (if (tops.isNotEmpty()) tops else toc.filter { it.targetPage != null })
-                .map { it.targetPage!! to it.title }
-                .distinctBy { it.first }
-                .sortedBy { it.first }
-            // Daily: a tapped headline opens the issue AT that article. The issue's TOC is
-            // [Cover, article0, article1, …], so article N is TOC entry N+1.
+            // Judged by the file being opened, not the launch intent: a book picked from inside the
+            // reader after a Daily issue opens in this same activity, with the same intent.
+            val isDaily = DailyController.isIssue(filesDir, File(path))
+            chapters = TocNav.chapterStarts(toc, perArticle = isDaily)
+            // Daily: a tapped headline opens the issue AT that article (its reading-order index) —
+            // once, and only for the issue; the extra is consumed so a later open cannot replay it.
             val dailyArticle = intent.getIntExtra(EXTRA_DAILY_ARTICLE, -1)
-            if (dailyArticle >= 0) {
-                toc.getOrNull(dailyArticle + 1)?.targetPage?.let { page ->
+            intent.removeExtra(EXTRA_DAILY_ARTICLE)
+            if (isDaily && dailyArticle >= 0) {
+                TocNav.dailyArticlePage(toc, dailyArticle)?.let { page ->
                     try {
                         NativeBridge.nativeJumpToPage(docHandle, page)
                         currentPage = NativeBridge.nativeCurrentPage(docHandle)

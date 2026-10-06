@@ -55,7 +55,7 @@ impl Article {
             .map(strip_markup)
             .filter(|s| !s.trim().is_empty())
             .unwrap_or_else(|| strip_markup(&self.body_html));
-        let text = source.split_whitespace().collect::<Vec<_>>().join(" ");
+        let text = crate::extract::collapse_ws(&source);
         if text.is_empty() {
             return None;
         }
@@ -94,7 +94,7 @@ fn strip_markup(html: &str) -> String {
 /// Cut `text` to at most `max_chars` **characters**, breaking at a word boundary and marking the
 /// cut with an ellipsis. Counting characters rather than bytes is what keeps this from splitting a
 /// multi-byte character — a feed summary is arbitrary text, and half a character renders as a box.
-fn truncate_on_word(text: &str, max_chars: usize) -> String {
+pub(crate) fn truncate_on_word(text: &str, max_chars: usize) -> String {
     if text.chars().count() <= max_chars {
         return text.to_string();
     }
@@ -117,6 +117,11 @@ pub struct Issue {
     pub date: String,
     /// Articles in reading order.
     pub articles: Vec<Article>,
+    /// The followed sources' names in the reader's order (#269): the contents page and the TOC group
+    /// articles under these, in this order. A source with no article gets no section; an article
+    /// whose source is not listed is grouped after the listed ones.
+    #[serde(default)]
+    pub sources: Vec<String>,
 }
 
 impl Issue {
