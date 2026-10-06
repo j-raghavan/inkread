@@ -36,6 +36,9 @@ struct RawIssue {
     title: String,
     date: String,
     articles: Vec<RawArticle>,
+    /// Source names in the reader's order (#269); optional so an issue from an older shell parses.
+    #[serde(default)]
+    sources: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -80,6 +83,7 @@ pub fn assemble_issue_from_json(json: &str) -> Result<Vec<u8>, String> {
         title: raw.title,
         date: raw.date,
         articles,
+        sources: raw.sources,
     };
     Ok(assemble_epub(&issue))
 }

@@ -117,6 +117,11 @@ pub struct Issue {
     pub date: String,
     /// Articles in reading order.
     pub articles: Vec<Article>,
+    /// The followed sources' names in the reader's order (#269): the contents page and the TOC group
+    /// articles under these, in this order. A source with no article gets no section; an article
+    /// whose source is not listed (an issue from an older shell) is grouped after the listed ones.
+    #[serde(default)]
+    pub sources: Vec<String>,
 }
 
 impl Issue {

@@ -186,6 +186,9 @@ class DailyController(private val context: Context) {
         // HEADLINES_SHOWN headlines — so a newly added feed could compile into the issue yet never
         // appear on the front page. Round-robin gives every source front-of-issue presence.
         val perSource = mutableListOf<List<JSONObject>>()
+        // The bylines in source order, for grouping the issue's contents (#269) — collected as each
+        // source is read so they match the `source` its articles carry exactly.
+        val sourceOrder = JSONArray()
         try {
             for (src in active) {
                 val reached = booleanArrayOf(false)
@@ -195,6 +198,7 @@ class DailyController(private val context: Context) {
                 // articles, so the very compile that learns the name already prints it.
                 feed.title?.let { adoptFeedTitles(mapOf(src.url to it)) }
                 val name = sources().find { it.url == src.url }?.name ?: src.name
+                sourceOrder.put(name)
                 if (reached[0]) feedsReached++
                 itemsFound += items.length()
                 val take = minOf(items.length(), clampLimit(src.limit))
@@ -243,6 +247,7 @@ class DailyController(private val context: Context) {
             .put("title", "inkread daily")
             .put("date", todayDisplay())
             .put("articles", articles)
+            .put("sources", sourceOrder)
             .toString()
         val bytes = try {
             NativeBridge.nativeDailyAssemble(issueJson)

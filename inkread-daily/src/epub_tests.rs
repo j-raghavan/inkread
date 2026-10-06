@@ -19,6 +19,7 @@ fn article(title: &str, source: &str, body: &str, published: Option<&str>) -> Ar
 
 fn sample_issue() -> Issue {
     Issue {
+        sources: vec![],
         title: "inkread daily".to_string(),
         date: "24 Jun 2026".to_string(),
         articles: vec![
@@ -71,6 +72,7 @@ fn malformed_body_html_is_currently_accepted_extraction_slice_must_sanitize() {
     // fetched content is assembled. This test PINS the current leniency so a future switch to strict
     // parsing surfaces here as a failure rather than silently — it documents the gap, not an endorsement.
     let issue = Issue {
+        sources: vec![],
         title: "t".to_string(),
         date: "d".to_string(),
         articles: vec![article("Bad", "Src", "<p>unclosed & a raw < here", None)],
@@ -84,6 +86,7 @@ fn malformed_body_html_is_currently_accepted_extraction_slice_must_sanitize() {
 #[test]
 fn an_empty_issue_still_assembles_a_valid_epub() {
     let issue = Issue {
+        sources: vec![],
         title: "inkread daily".to_string(),
         date: "24 Jun 2026".to_string(),
         articles: vec![],
@@ -97,6 +100,7 @@ fn an_empty_issue_still_assembles_a_valid_epub() {
 fn xml_metacharacters_in_titles_do_not_break_the_container() {
     // A hostile headline with &, <, >, quotes must not produce malformed XHTML/OPF.
     let issue = Issue {
+        sources: vec![],
         title: "Tom & Jerry <b>\"news\"</b>".to_string(),
         date: "24 Jun 2026".to_string(),
         articles: vec![article(
@@ -221,6 +225,7 @@ fn one_very_long_word_still_yields_text() {
 #[test]
 fn the_contents_page_links_every_article_and_the_issue_still_opens() {
     let issue = Issue {
+        sources: vec![],
         title: "inkread daily".into(),
         date: "21 Aug 2026".into(),
         articles: vec![
@@ -284,6 +289,7 @@ fn the_cover_carries_the_daily_quotation() {
 fn a_quotation_is_escaped_into_the_cover() {
     for q in crate::quote::all() {
         let issue = Issue {
+            sources: vec![],
             title: "t".into(),
             date: "x".into(),
             articles: vec![article("A", "S", "<p>b</p>", None)],
@@ -296,10 +302,153 @@ fn a_quotation_is_escaped_into_the_cover() {
     // real container.
     for day in 1..=12 {
         let issue = Issue {
+            sources: vec![],
             title: "inkread daily".into(),
             date: format!("{day} Aug 2026"),
             articles: vec![article("A", "S", "<p>b</p>", None)],
         };
         EpubPackage::open(assemble_epub(&issue)).expect("assembled issue opens");
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// #269 — In This Issue and the TOC grouped by source.
+// ---------------------------------------------------------------------------------------------
+
+/// A round-robin issue, as the shell compiles it: rank 1 of every source, then rank 2, … — with
+/// "Ars"'s first article lost to a failed fetch, so it first appears late.
+fn round_robin_issue(sources: &[&str]) -> Issue {
+    Issue {
+        title: "inkread daily".into(),
+        date: "5 Oct 2026".into(),
+        articles: vec![
+            article("TC 1", "TechCrunch", "<p>a</p>", None),
+            article("BBC 1", "BBC", "<p>b</p>", None),
+            article("TC 2", "TechCrunch", "<p>c</p>", None),
+            article("Ars 2", "Ars", "<p>d</p>", None),
+            article("BBC 2", "BBC", "<p>e</p>", None),
+        ],
+        sources: sources.iter().map(|s| s.to_string()).collect(),
+    }
+}
+
+fn names<'a>(s: &[(&'a str, Vec<usize>)]) -> Vec<&'a str> {
+    s.iter().map(|(n, _)| *n).collect()
+}
+
+/// Sections follow the reader's source order, not first appearance — a source whose first article
+/// failed must not sink below sources placed after it.
+#[test]
+fn sections_follow_the_readers_source_order() {
+    let issue = round_robin_issue(&["Ars", "TechCrunch", "BBC"]);
+    let s = sections(&issue);
+    assert_eq!(names(&s), ["Ars", "TechCrunch", "BBC"]);
+    assert_eq!(
+        s[1].1,
+        [0, 2],
+        "articles keep their reading order within a section"
+    );
+}
+
+/// Every article is listed exactly once, whatever the order says.
+#[test]
+fn every_article_appears_in_exactly_one_section() {
+    for order in [
+        vec![],
+        vec!["BBC"],
+        vec!["Ars", "TechCrunch", "BBC", "Muted"],
+    ] {
+        let issue = round_robin_issue(&order);
+        let mut all: Vec<usize> = sections(&issue).into_iter().flat_map(|(_, l)| l).collect();
+        all.sort_unstable();
+        assert_eq!(all, [0, 1, 2, 3, 4], "order {order:?}");
+    }
+}
+
+/// A listed source with no article (muted, or every fetch failed) gets no empty section; a source
+/// the order does not list (an issue from an older shell) follows the listed ones, first-seen.
+#[test]
+fn unlisted_and_empty_sources_are_handled() {
+    let issue = round_robin_issue(&["Muted", "BBC"]);
+    assert_eq!(names(&sections(&issue)), ["BBC", "TechCrunch", "Ars"]);
+}
+
+#[test]
+fn an_empty_issue_has_no_sections_and_still_opens() {
+    let issue = Issue {
+        sources: vec!["BBC".into()],
+        title: "t".into(),
+        date: "d".into(),
+        articles: vec![],
+    };
+    assert!(sections(&issue).is_empty());
+    EpubPackage::open(assemble_epub(&issue)).expect("an empty issue opens");
+}
+
+/// The cover shows one heading per source, in order, each followed by its own headlines.
+#[test]
+fn the_contents_page_is_grouped_by_source() {
+    let cover = title_page(&round_robin_issue(&["TechCrunch", "BBC", "Ars"]));
+    let at = |needle: &str| {
+        cover
+            .find(needle)
+            .unwrap_or_else(|| panic!("missing {needle}"))
+    };
+    let (tc, bbc, ars) = (at(">TechCrunch</h3>"), at(">BBC</h3>"), at(">Ars</h3>"));
+    assert!(tc < bbc && bbc < ars, "sections out of order");
+    // "TC 2" sits under TechCrunch even though BBC 1 comes between them in reading order.
+    assert!(tc < at(">TC 2</a>") && at(">TC 2</a>") < bbc);
+    assert!(bbc < at(">BBC 2</a>") && at(">BBC 2</a>") < ars);
+}
+
+/// End to end through the reader's EPUB backend: the TOC nests articles under their source, each
+/// section opens its first article, and the spine is still round-robin.
+#[test]
+fn the_toc_nests_articles_under_their_source_and_the_spine_is_unchanged() {
+    let issue = round_robin_issue(&["TechCrunch", "BBC", "Ars"]);
+    let pkg = EpubPackage::open(assemble_epub(&issue)).expect("opens");
+    let labels: Vec<&str> = pkg.toc.iter().map(|n| n.label.as_str()).collect();
+    assert_eq!(labels, ["Cover", "TechCrunch", "BBC", "Ars"]);
+    let tc = &pkg.toc[1];
+    assert_eq!(
+        tc.href.as_deref().map(|h| h.ends_with("a0000.xhtml")),
+        Some(true)
+    );
+    let kids: Vec<&str> = tc.children.iter().map(|n| n.label.as_str()).collect();
+    assert_eq!(kids, ["TC 1", "TC 2"]);
+    assert!(tc.children[1]
+        .href
+        .as_deref()
+        .unwrap()
+        .ends_with("a0002.xhtml"));
+    // Reading order: title page, then the articles exactly as compiled.
+    let spine: Vec<String> = pkg.chapters.iter().map(|c| c.href.clone()).collect();
+    assert!(spine[1].ends_with("a0000.xhtml") && spine[2].ends_with("a0001.xhtml"));
+}
+
+/// Source names are escaped like every other user-supplied string, in both views.
+#[test]
+fn a_source_name_is_escaped_in_both_views() {
+    let issue = Issue {
+        sources: vec!["Tom & Jerry's <News>".into()],
+        title: "t".into(),
+        date: "d".into(),
+        articles: vec![article("A", "Tom & Jerry's <News>", "<p>b</p>", None)],
+    };
+    assert!(title_page(&issue).contains("Tom &amp; Jerry&apos;s &lt;News&gt;"));
+    let pkg = EpubPackage::open(assemble_epub(&issue)).expect("opens");
+    assert_eq!(pkg.toc[1].label, "Tom & Jerry's <News>");
+}
+
+/// The JSON boundary: `sources` reaches the assembler, and an issue without it (an older shell)
+/// still assembles.
+#[test]
+fn source_order_crosses_the_json_boundary() {
+    let art = r#"{"title":"T","source":"BBC","html":"<p>x</p>"}"#;
+    let with = format!(r#"{{"title":"t","date":"d","articles":[{art}],"sources":["BBC"]}}"#);
+    let without = format!(r#"{{"title":"t","date":"d","articles":[{art}]}}"#);
+    for json in [with, without] {
+        let bytes = crate::assemble_issue_from_json(&json).expect("assembles");
+        assert_eq!(EpubPackage::open(bytes).unwrap().toc[1].label, "BBC");
     }
 }
