@@ -423,7 +423,13 @@ fn the_toc_nests_articles_under_their_source_and_the_spine_is_unchanged() {
         .ends_with("a0002.xhtml"));
     // Reading order: title page, then the articles exactly as compiled.
     let spine: Vec<String> = pkg.chapters.iter().map(|c| c.href.clone()).collect();
-    assert!(spine[1].ends_with("a0000.xhtml") && spine[2].ends_with("a0001.xhtml"));
+    assert_eq!(spine.len(), 6);
+    for (i, href) in spine[1..].iter().enumerate() {
+        assert!(
+            href.ends_with(&format!("a{i:04}.xhtml")),
+            "spine {i}: {href}"
+        );
+    }
 }
 
 /// Source names are escaped like every other user-supplied string, in both views.
@@ -444,11 +450,25 @@ fn a_source_name_is_escaped_in_both_views() {
 /// still assembles.
 #[test]
 fn source_order_crosses_the_json_boundary() {
-    let art = r#"{"title":"T","source":"BBC","html":"<p>x</p>"}"#;
-    let with = format!(r#"{{"title":"t","date":"d","articles":[{art}],"sources":["BBC"]}}"#);
-    let without = format!(r#"{{"title":"t","date":"d","articles":[{art}]}}"#);
-    for json in [with, without] {
+    let arts = r#"{"title":"A1","source":"A","html":"<p>x</p>"},{"title":"B1","source":"B","html":"<p>y</p>"}"#;
+    let first = |json: String| {
         let bytes = crate::assemble_issue_from_json(&json).expect("assembles");
-        assert_eq!(EpubPackage::open(bytes).unwrap().toc[1].label, "BBC");
+        EpubPackage::open(bytes).unwrap().toc[1].label.clone()
+    };
+    // The listed order wins over first appearance — so dropping `sources` would fail this.
+    let with = format!(r#"{{"title":"t","date":"d","articles":[{arts}],"sources":["B","A"]}}"#);
+    assert_eq!(first(with), "B");
+    // Without it (an older shell), first-seen order.
+    let without = format!(r#"{{"title":"t","date":"d","articles":[{arts}]}}"#);
+    assert_eq!(first(without), "A");
+}
+
+/// One source: one section holding every article, in reading order.
+#[test]
+fn a_single_source_issue_is_one_section() {
+    let mut issue = round_robin_issue(&["TechCrunch"]);
+    for a in &mut issue.articles {
+        a.source = "TechCrunch".into();
     }
+    assert_eq!(sections(&issue), vec![("TechCrunch", vec![0, 1, 2, 3, 4])]);
 }

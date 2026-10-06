@@ -208,4 +208,17 @@ class DailyFeedUrlTest {
         val out = DailyController.adoptTitles(listOf(a, b), mapOf(a.url to "Same", b.url to "Same"))
         assertEquals(listOf("Same", "b.example"), out.map { it.name })
     }
+
+    // ── Recognising an issue (#269) ───────────────────────────────────────────────────────────────
+
+    @Test
+    fun onlyFilesInTheDailyFolderAreIssues() {
+        val files = java.nio.file.Files.createTempDirectory("files").toFile()
+        java.io.File(files, "daily").mkdirs()
+        assertEquals(true, DailyController.isIssue(files, java.io.File(files, "daily/inkread-daily-2026-10-05.epub")))
+        assertEquals(false, DailyController.isIssue(files, java.io.File(files, "books/novel.epub")))
+        assertEquals(false, DailyController.isIssue(files, java.io.File(files, "daily/sub/x.epub")))
+        assertEquals("a path that only looks similar", false,
+            DailyController.isIssue(files, java.io.File(files, "daily2/x.epub")))
+    }
 }

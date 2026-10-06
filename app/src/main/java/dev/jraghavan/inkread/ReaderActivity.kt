@@ -968,15 +968,15 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             } catch (e: RuntimeException) {
                 Log.e(TAG, "toc failed: ${e.message}"); emptyList()
             }
-            // A Daily issue: opened from the Daily screen (EXTRA_DAILY_ARTICLE, −1 for no particular
-            // article) or reopened from Recents, where only its location says what it is.
-            val isDaily = intent.hasExtra(EXTRA_DAILY_ARTICLE) || runCatching {
-                File(path).parentFile?.canonicalPath == File(filesDir, "daily").canonicalPath
-            }.getOrDefault(false)
+            // Judged by the file being opened, not the launch intent: a book picked from inside the
+            // reader after a Daily issue opens in this same activity, with the same intent.
+            val isDaily = DailyController.isIssue(filesDir, File(path))
             chapters = TocNav.chapterStarts(toc, perArticle = isDaily)
-            // Daily: a tapped headline opens the issue AT that article (its reading-order index).
+            // Daily: a tapped headline opens the issue AT that article (its reading-order index) —
+            // once, and only for the issue; the extra is consumed so a later open cannot replay it.
             val dailyArticle = intent.getIntExtra(EXTRA_DAILY_ARTICLE, -1)
-            if (dailyArticle >= 0) {
+            intent.removeExtra(EXTRA_DAILY_ARTICLE)
+            if (isDaily && dailyArticle >= 0) {
                 TocNav.dailyArticlePage(toc, dailyArticle)?.let { page ->
                     try {
                         NativeBridge.nativeJumpToPage(docHandle, page)

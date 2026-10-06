@@ -107,7 +107,8 @@ fn opf(issue: &Issue) -> String {
 ///
 /// The spine stays round-robin (#107) — it is the page-turn order, and interleaving is what keeps
 /// every source near the front. Only the contents views are grouped, which is how a reader finds the
-/// topics worth reading in a past issue.
+/// topics worth reading in a past issue. The front page orders its sections by the same rule
+/// (`DailyController.inSourceOrder`).
 fn sections(issue: &Issue) -> Vec<(&str, Vec<usize>)> {
     let mut out: Vec<(&str, Vec<usize>)> = issue
         .sources
@@ -116,11 +117,11 @@ fn sections(issue: &Issue) -> Vec<(&str, Vec<usize>)> {
         .collect();
     for (i, art) in issue.articles.iter().enumerate() {
         match out.iter_mut().find(|(s, _)| *s == art.source) {
-            Some((_, list)) => list.push(i),
+            Some((_, indices)) => indices.push(i),
             None => out.push((art.source.as_str(), vec![i])),
         }
     }
-    out.retain(|(_, list)| !list.is_empty());
+    out.retain(|(_, indices)| !indices.is_empty());
     out
 }
 
@@ -133,13 +134,13 @@ fn article_href(i: usize) -> String {
 /// A section entry links to its first article, so choosing a source in the TOC opens it.
 fn nav(issue: &Issue) -> String {
     let mut items = String::from("    <li><a href=\"title.xhtml\">Cover</a></li>\n");
-    for (source, list) in sections(issue) {
+    for (source, indices) in sections(issue) {
         items.push_str(&format!(
             "    <li><a href=\"{}\">{}</a><ol>\n",
-            article_href(list[0]),
+            article_href(indices[0]),
             esc(source)
         ));
-        for &i in &list {
+        for &i in &indices {
             items.push_str(&format!(
                 "      <li><a href=\"{}\">{}</a></li>\n",
                 article_href(i),
@@ -166,12 +167,12 @@ fn nav(issue: &Issue) -> String {
 /// excerpt where one can be had.
 fn title_page(issue: &Issue) -> String {
     let mut toc = String::new();
-    for (source, list) in sections(issue) {
+    for (source, indices) in sections(issue) {
         toc.push_str(&format!(
             "<h3 class=\"section\">{}</h3>\n<ul>\n",
             esc(source)
         ));
-        for &i in &list {
+        for &i in &indices {
             let art = &issue.articles[i];
             toc.push_str(&format!(
                 "    <li><a href=\"{}\">{}</a>",

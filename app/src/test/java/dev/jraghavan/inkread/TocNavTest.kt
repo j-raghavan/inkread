@@ -41,7 +41,7 @@ class TocNavTest {
     /** Chapter ›› steps through every article of a grouped issue, not just each source's first. */
     @Test
     fun aGroupedDailyIssueGetsOneChapterPerArticle() {
-        val stops = TocNav.chapterStarts(grouped)
+        val stops = TocNav.chapterStarts(grouped, perArticle = true)
         assertEquals(listOf(0, 1, 2, 3, 4, 5), stops.map { it.first })
         assertEquals("labels are the headlines, not the section names", "TC 1", stops[1].second)
     }
@@ -54,6 +54,24 @@ class TocNavTest {
             item(0, 20, "Part Two"), item(1, 20, "Ch 3"),
         )
         assertEquals(listOf(0 to "Part One", 20 to "Part Two"), TocNav.chapterStarts(book))
+    }
+
+    /** A book whose TOC lists an entry out of page order still steps by its top-level chapters. */
+    @Test
+    fun aBooksOutOfOrderTocKeepsItsTopLevelChapters() {
+        val book = listOf(
+            item(0, 0, "Ch 1"), item(1, 3, "1.1"), item(1, 6, "1.2"),
+            item(0, 10, "Ch 2"), item(1, 12, "2.1"),
+            item(0, 2, "Notes"), // listed last, but early in the book
+        )
+        assertEquals(listOf(0, 2, 10), TocNav.chapterStarts(book).map { it.first })
+    }
+
+    /** A targeted parent whose children have no target is still a stop. */
+    @Test
+    fun aParentWithUntargetedChildrenIsALeaf() {
+        val toc = listOf(item(0, 0, "Cover"), item(0, 1, "Section"), item(1, null, "label only"))
+        assertEquals(listOf(0, 1), TocNav.chapterStarts(toc, perArticle = true).map { it.first })
     }
 
     @Test

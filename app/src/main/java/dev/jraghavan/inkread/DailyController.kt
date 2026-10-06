@@ -46,7 +46,7 @@ class DailyController(private val context: Context) {
 
     private fun prefs() = context.getSharedPreferences("daily", Context.MODE_PRIVATE)
 
-    private fun dailyDir(): File = File(context.filesDir, "daily").apply { mkdirs() }
+    private fun dailyDir(): File = File(context.filesDir, DIR).apply { mkdirs() }
 
     // ── Sources ─────────────────────────────────────────────────────────────────────────────────
 
@@ -423,6 +423,12 @@ class DailyController(private val context: Context) {
     /** Internal rather than private so the pure limit/ordering logic is host-testable (#193). */
     internal companion object {
         const val TAG = "DailyController"
+        private const val DIR = "daily" // under filesDir; holds every compiled issue
+
+        /** Whether [file] is a compiled Daily issue — one that lives in the Daily folder. */
+        fun isIssue(filesDir: File, file: File): Boolean = runCatching {
+            file.parentFile?.canonicalPath == File(filesDir, DIR).canonicalPath
+        }.getOrDefault(false)
 
         /** Curated popular feeds for the suggested-sources picker (stable, well-known RSS/Atom). */
         /**
@@ -547,6 +553,7 @@ class DailyController(private val context: Context) {
          * show until the next compile. A section matching no current source (renamed since the issue
          * was compiled) keeps its first-seen place after the known ones.
          */
+        // The issue's own contents are grouped by the same rule in inkread-daily `epub::sections`.
         fun inSourceOrder(sections: List<String>, order: List<String>): List<String> =
             sections.sortedBy { order.indexOf(it).let { i -> if (i < 0) Int.MAX_VALUE else i } }
 
