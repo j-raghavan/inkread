@@ -105,7 +105,7 @@ dependencies = [
 
 [[package]]
 name = "build-dict"
-version = "1.3.3"
+version = "1.3.4"
 dependencies = [
  "inkread-dict",
 ]
@@ -261,7 +261,7 @@ dependencies = [
 
 [[package]]
 name = "device-eink"
-version = "1.3.3"
+version = "1.3.4"
 dependencies = [
  "proptest",
 ]
@@ -652,7 +652,7 @@ dependencies = [
 
 [[package]]
 name = "inkread-daily"
-version = "1.3.3"
+version = "1.3.4"
 dependencies = [
  "ego-tree",
  "feed-rs",
@@ -666,7 +666,7 @@ dependencies = [
 
 [[package]]
 name = "inkread-dict"
-version = "1.3.3"
+version = "1.3.4"
 dependencies = [
  "flate2",
  "rusqlite",
@@ -674,7 +674,7 @@ dependencies = [
 
 [[package]]
 name = "inkread-epub"
-version = "1.3.3"
+version = "1.3.4"
 dependencies = [
  "ab_glyph",
  "ego-tree",
@@ -692,21 +692,21 @@ dependencies = [
 
 [[package]]
 name = "inkread-ink"
-version = "1.3.3"
+version = "1.3.4"
 dependencies = [
  "proptest",
 ]
 
 [[package]]
 name = "inkread-lua"
-version = "1.3.3"
+version = "1.3.4"
 dependencies = [
  "mlua",
 ]
 
 [[package]]
 name = "inkread-opds"
-version = "1.3.3"
+version = "1.3.4"
 dependencies = [
  "feed-rs",
  "serde",
@@ -715,14 +715,14 @@ dependencies = [
 
 [[package]]
 name = "inkread-pdftext"
-version = "1.3.3"
+version = "1.3.4"
 dependencies = [
  "inkread-epub",
 ]
 
 [[package]]
 name = "inkread-update"
-version = "1.3.3"
+version = "1.3.4"
 dependencies = [
  "semver",
  "serde",
@@ -1302,7 +1302,7 @@ dependencies = [
 
 [[package]]
 name = "reader-core"
-version = "1.3.3"
+version = "1.3.4"
 dependencies = [
  "device-eink",
  "inkread-daily",
