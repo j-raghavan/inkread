@@ -87,23 +87,32 @@ class ToolPalette(
         private set
 
     /**
-     * The pill's sizing (#133 / #200). Menu Size scales the **glyph**; the spacing around it does
-     * not move.
+     * The pill's sizing (#133 / #200 / #281). Menu Size scales the glyph fully and the inset
+     * around it partly.
      *
      * The reader asked for "smaller icons ... but with some margin to keep some distance between
      * button for ease of activation". Scaling everything by one factor cannot deliver that — every
-     * ratio survives, so the buttons end up proportionally as crowded as they started. Scaling only
-     * the glyph and holding the inset and the gap at their design size means a smaller icon leaves
-     * *more* clearance around it, not the same.
+     * ratio survives, so the buttons end up proportionally as crowded as they started. Holding
+     * [TOOL_INSET_FIXED] of the inset while the rest follows the glyph means a smaller icon leaves
+     * proportionally *more* clearance around it, while the button itself still shrinks.
      *
-     * The box is derived rather than set, so the glyph is always exactly [TOOL_GLYPH] scaled and
-     * always centred, including when [TOOL_BOX_MIN] catches it.
+     * Everything is then taken as a share of the panel rather than a fixed dp ([panelPx]). dp
+     * holds a button at one physical size on every Supernote, which makes the same toolbar a
+     * larger share of a Nomad than of a Manta; [panelScale] keeps it the same share of each.
      */
-    private fun glyphPx() = Ink.dp(glyphDp(Ink.uiScale))
+    private fun glyphPx() = panelPx(glyphDp(Ink.uiScale))
 
-    private fun boxPx() = Ink.dp(boxDp(Ink.uiScale))
+    private fun boxPx() = panelPx(boxDp(Ink.uiScale))
 
     private fun insetPx() = (boxPx() - glyphPx()) / 2
+
+    /** [dp] as pixels on this panel, scaled by [panelScale]. Truncated like [Ink.dp], so on the
+     *  reference panel at Menu Size M every size is the pixel it has always been. */
+    private fun panelPx(dp: Float) = (Ink.dpf(dp) * panelScale(Ink.shortSideDp())).toInt()
+
+    /** Spacing around the buttons: follows Menu Size and the panel, so a compact toolbar has
+     *  compact margins as well as small icons. */
+    private fun spacingPx(dp: Int) = panelPx(dp * Ink.uiScale)
 
     /** The separator runs most of the way across the strip, so it tracks the button box. */
     private fun dividerRunPx() = boxPx() * DIVIDER_RUN_PERCENT / 100
@@ -149,7 +158,7 @@ class ToolPalette(
                 // right, a horizontal bar sits across the top, which is where it was asked for.
                 val sideGravity = if (side == Anchor.START) Gravity.START else Gravity.END
                 gravity = sideGravity or if (horizontal) Gravity.TOP else Gravity.CENTER_VERTICAL
-                val inset = Ink.dp(6)
+                val inset = spacingPx(DOCK_INSET)
                 // Clearance applies along the docked side, and only to the horizontal form: the
                 // vertical pill rides the middle of its edge and never reaches the corner.
                 val docked = inset + if (horizontal) dockClearance else 0
@@ -238,9 +247,9 @@ class ToolPalette(
         if (expanded) {
             container.background = pill()
             if (horizontal) {
-                container.setPadding(Ink.dp(7), Ink.dp(5), Ink.dp(7), Ink.dp(5))
+                container.setPadding(spacingPx(7), spacingPx(5), spacingPx(7), spacingPx(5))
             } else {
-                container.setPadding(Ink.dp(5), Ink.dp(7), Ink.dp(5), Ink.dp(7))
+                container.setPadding(spacingPx(5), spacingPx(7), spacingPx(5), spacingPx(7))
             }
             // The grip belongs on the docked edge, so the strip grows inward from it and the grip
             // itself never moves. Docked right, that means building the row back to front.
@@ -304,12 +313,12 @@ class ToolPalette(
         layoutParams = if (horizontal) {
             LinearLayout.LayoutParams(Ink.hair(), dividerRunPx()).apply {
                 gravity = Gravity.CENTER_VERTICAL
-                val h = Ink.dp(DIVIDER_GAP); setMargins(h, 0, h, 0)
+                val h = spacingPx(DIVIDER_GAP); setMargins(h, 0, h, 0)
             }
         } else {
             LinearLayout.LayoutParams(dividerRunPx(), Ink.hair()).apply {
                 gravity = Gravity.CENTER_HORIZONTAL
-                val v = Ink.dp(DIVIDER_GAP); setMargins(0, v, 0, v)
+                val v = spacingPx(DIVIDER_GAP); setMargins(0, v, 0, v)
             }
         }
     }
@@ -321,7 +330,7 @@ class ToolPalette(
             setColorFilter(Ink.ink)
             val pad = insetPx(); setPadding(pad, pad, pad, pad)
             val side = boxPx()
-            layoutParams = LinearLayout.LayoutParams(side, side).apply { val m = Ink.dp(TOOL_GAP); setMargins(m, m, m, m) }
+            layoutParams = LinearLayout.LayoutParams(side, side).apply { val m = spacingPx(TOOL_GAP); setMargins(m, m, m, m) }
             isClickable = true
             contentDescription = desc
             setOnClickListener { onTap() }
@@ -335,7 +344,7 @@ class ToolPalette(
         setPadding(pad, pad, pad, pad)
         val side = boxPx()
         layoutParams = LinearLayout.LayoutParams(side, side).apply {
-            val m = Ink.dp(TOOL_GAP); setMargins(m, m, m, m)
+            val m = spacingPx(TOOL_GAP); setMargins(m, m, m, m)
         }
         contentDescription = "Collapse / move tools"
         applyDragToggle(this)
@@ -460,11 +469,13 @@ class ToolPalette(
         setPadding(pad, pad, pad, pad)
         val side = boxPx()
         layoutParams = LinearLayout.LayoutParams(side, side).apply {
-            val m = Ink.dp(TOOL_GAP); setMargins(m, m, m, m)
+            val m = spacingPx(TOOL_GAP); setMargins(m, m, m, m)
         }
         if (active) {
             background = GradientDrawable().apply {
-                setColor(Ink.ink); cornerRadius = Ink.dpf(Ink.RADIUS)
+                // In proportion to the box, so the active square keeps its shape at every size
+                // instead of rounding into a circle once the radius passes half the box.
+                setColor(Ink.ink); cornerRadius = boxPx() * Ink.RADIUS / boxDp(1f)
             }
         }
         isClickable = true
@@ -555,44 +566,46 @@ class ToolPalette(
         const val IDLE_ALPHA = 0.55f
 
         /**
-         * Design sizes for one tool button, in dp (#200).
-         *
-         * Only [TOOL_GLYPH] answers to Menu Size. [TOOL_INSET] and [TOOL_GAP] are held at their
-         * design size, so shrinking the icon widens the clearance around it rather than closing it
-         * up — see the sizing helpers above for why one uniform factor cannot do that.
-         *
-         * At Menu Size M this reproduces the original 32dp glyph in a 60dp box exactly, so a reader
-         * who never touches the setting sees the toolbar they already had.
+         * Design sizes for one tool button at Menu Size M on the reference panel, in dp (#200):
+         * a 32dp glyph in a 60dp box, the toolbar as it has always been on a Manta.
          */
         const val TOOL_GLYPH = 32
         const val TOOL_INSET = 14
         const val TOOL_GAP = 2
 
         /**
-         * The smallest touch target the box may be derived down to, whatever the glyph does.
-         *
-         * 48dp is the platform's recommended minimum. It is a floor rather than the target itself
-         * because this is a stylus-first panel where the pen tip is under a millimetre — the floor
-         * is there for the finger, not the pen.
+         * The part of [TOOL_INSET] that does not follow Menu Size (#281). The rest scales with the
+         * glyph, so the clearance around an icon grows as a share of its button as the size comes
+         * down, while the button itself still shrinks with the setting.
          */
-        const val TOOL_BOX_MIN = 48
+        const val TOOL_INSET_FIXED = 2
+
+        /**
+         * The panel the design sizes are drawn for: a Manta's 1024dp short side (1920px at
+         * density 300). There the toolbar is exactly the design size; a smaller panel gets the same
+         * share of its own, so on a Nomad (749dp) Menu Size M is a 44dp button (#281).
+         */
+        const val REFERENCE_SHORT_DP = 1024f
+
+        /** The gap between the pill and the edge it docks against. */
+        const val DOCK_INSET = 6
 
         /** How far the hairline separator runs across the strip, as a percentage of the box. */
         const val DIVIDER_RUN_PERCENT = 70
 
-        /** Clearance either side of a separator. Spacing, so it does not scale. */
+        /** Clearance either side of a separator. */
         const val DIVIDER_GAP = 4
 
-        /**
-         * The design sizes at a given Menu Size, in dp before density (#200).
-         *
-         * Resolved in dp and multiplied by density once, rather than scaling an already-converted
-         * pixel size: two truncations would leave the box a fraction under the [TOOL_BOX_MIN] floor
-         * the setting is chosen against.
-         */
-        fun glyphDp(uiScale: Float) = (TOOL_GLYPH * uiScale).toInt()
+        /** The design sizes at a given Menu Size, in dp before density (#200 / #281). */
+        fun glyphDp(uiScale: Float) = TOOL_GLYPH * uiScale
 
-        fun boxDp(uiScale: Float) = maxOf(TOOL_BOX_MIN, glyphDp(uiScale) + 2 * TOOL_INSET)
+        fun insetDp(uiScale: Float) = TOOL_INSET_FIXED + (TOOL_INSET - TOOL_INSET_FIXED) * uiScale
+
+        fun boxDp(uiScale: Float) = glyphDp(uiScale) + 2 * insetDp(uiScale)
+
+        /** How much a panel with a [shortSideDp] short side scales the design sizes (#281).
+         *  Shared with the tool-options column so it stays in proportion to the toolbar. */
+        fun panelScale(shortSideDp: Float) = shortSideDp / REFERENCE_SHORT_DP
 
         /** Where the view's leading edge sits, given its anchor and offset. */
         fun edge(anchor: Anchor, offset: Float, host: Int, view: Int): Float {

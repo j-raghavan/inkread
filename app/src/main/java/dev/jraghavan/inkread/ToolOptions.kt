@@ -44,7 +44,12 @@ class ToolOptions(
     private val toolbar: () -> ToolPalette.Placement? = { null },
 ) {
     private val density = activity.resources.displayMetrics.density
-    private fun dp(v: Int) = (v * density).toInt()
+
+    /** Sizes follow the panel the same way the toolbar's do ([ToolPalette.panelScale]), so the
+     *  column stays in proportion to the pill it opens beside (#281). */
+    private val panelScale = ToolPalette.panelScale(Ink.shortSideDp())
+    private fun dp(v: Int) = (v * density * panelScale).toInt()
+    private fun sp(v: Float) = Ink.sp(v) * panelScale
 
     private var panel: LinearLayout? = null
     private var circles: MutableList<View> = mutableListOf()
@@ -96,9 +101,9 @@ class ToolOptions(
         val col = LinearLayout(activity).apply {
             orientation = LinearLayout.VERTICAL
             background = Ink.cardBg(22)
-            setPadding(Ink.dp(10), Ink.dp(12), Ink.dp(10), Ink.dp(12))
+            setPadding(dp(10), dp(12), dp(10), dp(12))
         }
-        col.addView(Ink.eyebrow(activity, title).apply { setPadding(0, 0, 0, Ink.dp(8)) })
+        col.addView(Ink.eyebrow(activity, title).apply { textSize = sp(11f); setPadding(0, 0, 0, dp(8)) })
         colors.forEachIndexed { i, c ->
             col.addView(swatchCell(c, names.getOrElse(i) { "" }, i == selected) {
                 onPick(i)
@@ -107,7 +112,8 @@ class ToolOptions(
         }
         if (lineWidths.isNotEmpty()) {
             col.addView(Ink.eyebrow(activity, "Thickness").apply {
-                setPadding(0, Ink.dp(10), 0, Ink.dp(6))
+                textSize = sp(11f)
+                setPadding(0, dp(10), 0, dp(6))
             })
             lineWidths.forEachIndexed { i, w ->
                 col.addView(widthCell(w, widthNames.getOrElse(i) { "" }, i == widthSelected) {
@@ -143,7 +149,7 @@ class ToolOptions(
             gravity = Gravity.RIGHT or Gravity.CENTER_VERTICAL
             rightMargin = Ink.sdp(FALLBACK_INSET)
         }
-        val gap = Ink.dp(GAP)
+        val gap = dp(GAP)
         when (sideFor(pill, host.width, host.height)) {
             Side.BELOW_PILL -> {
                 lp.gravity = Gravity.TOP or dockedEdge(pill)
@@ -284,7 +290,7 @@ class ToolOptions(
         // Same caption styling as the colour swatches, so the two rows read as one control.
         val label = TextView(activity).apply {
             text = name
-            textSize = Ink.sp(11f)
+            textSize = sp(11f)
             typeface = Ink.mono
             letterSpacing = 0.04f
             gravity = Gravity.CENTER
@@ -324,7 +330,7 @@ class ToolOptions(
         }
         val label = TextView(activity).apply {
             text = name
-            textSize = Ink.sp(11f)
+            textSize = sp(11f)
             typeface = Ink.mono
             letterSpacing = 0.04f
             gravity = Gravity.CENTER
