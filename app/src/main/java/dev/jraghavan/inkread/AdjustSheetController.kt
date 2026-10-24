@@ -14,6 +14,7 @@ import android.view.Window
 import android.widget.HorizontalScrollView
 import android.widget.ImageView
 import android.widget.LinearLayout
+import android.widget.SeekBar
 import android.widget.TextView
 import android.widget.Toast
 
@@ -131,7 +132,7 @@ class AdjustSheetController(private val host: Host) {
             val cell = LinearLayout(activity).apply {
                 orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER
                 setPadding(Ink.sdp(4), Ink.sdp(10), Ink.sdp(4), Ink.sdp(10)); isClickable = true
-                minimumHeight = Ink.tap() // #245: 47.5dp at XS
+                minimumHeight = Ink.tap() // #245: 47.5dp at 0.8
                 setOnClickListener { select(i) }
                 addView(
                     ImageView(activity).apply { setImageResource(icon); setColorFilter(Ink.ink) },
@@ -177,9 +178,14 @@ class AdjustSheetController(private val host: Host) {
 
     /** A KOReader-style **segmented control**: a rounded pill of [options] with the [selected]
      *  segment filled dark. Updates its own highlight on tap, then calls [onSelect]. */
-    private fun segmented(options: List<String>, selected: Int, onSelect: (Int) -> Unit): View {
+    private fun segmented(options: List<String>, selected: Int, onSelect: (Int) -> Unit): View =
+        segmentedControl(options, selected, onSelect).view
+
+    /** A [segmented] control, plus [Segmented.select] to move its highlight from elsewhere. */
+    private class Segmented(val view: View, val select: (Int) -> Unit)
+
+    private fun segmentedControl(options: List<String>, selected: Int, onSelect: (Int) -> Unit): Segmented {
         val radius = Ink.sdp(20).toFloat()
-        var sel = selected
         val segs = ArrayList<TextView>()
         fun style(tv: TextView, on: Boolean) {
             if (on) {
@@ -192,7 +198,9 @@ class AdjustSheetController(private val host: Host) {
                 tv.background = null
             }
         }
-        return LinearLayout(activity).apply {
+        /** Highlight segment [i]; -1 highlights none. */
+        fun select(i: Int) = segs.forEachIndexed { j, t -> style(t, j == i) }
+        val view = LinearLayout(activity).apply {
             orientation = LinearLayout.HORIZONTAL
             background = GradientDrawable().apply {
                 setColor(Ink.paper); cornerRadius = radius
@@ -203,14 +211,15 @@ class AdjustSheetController(private val host: Host) {
                 val tv = TextView(activity).apply {
                     text = opt; textSize = Ink.sp(15f); gravity = Gravity.CENTER
                     setPadding(Ink.sdp(6), Ink.sdp(10), Ink.sdp(6), Ink.sdp(10)); isClickable = true
-                    minHeight = Ink.tap() // #245: 31.5dp at XS, incl. the Menu Size selector itself
-                    setOnClickListener { sel = i; segs.forEachIndexed { j, t -> style(t, j == sel) }; onSelect(i) }
+                    minHeight = Ink.tap() // #245: 31.5dp at 0.8, incl. the Menu Size selector itself
+                    setOnClickListener { select(i); onSelect(i) }
                 }
-                style(tv, i == sel)
                 segs.add(tv)
                 addView(tv, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
             }
         }
+        select(selected)
+        return Segmented(view, ::select)
     }
 
     /** A KOReader-style **cell bar**: [count] boxes filled up to the current level; tapping box i
@@ -298,13 +307,24 @@ class AdjustSheetController(private val host: Host) {
             .show()
     }
 
-    private fun settingRow(label: String, control: View): View {
+    /** [hint], when given, is a secondary view stacked under the label. */
+    private fun settingRow(label: String, control: View, hint: View? = null): View {
         return LinearLayout(activity).apply {
             orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
             setPadding(Ink.sdp(16), Ink.sdp(14), Ink.sdp(16), Ink.sdp(14))
-            addView(TextView(activity).apply {
+            val title = TextView(activity).apply {
                 text = label; textSize = Ink.sp(16f); setTextColor(Color.BLACK); gravity = Gravity.END
-            }, LinearLayout.LayoutParams(Ink.sdp(96), ViewGroup.LayoutParams.WRAP_CONTENT))
+            }
+            val heading = if (hint == null) {
+                title
+            } else {
+                LinearLayout(activity).apply {
+                    orientation = LinearLayout.VERTICAL; gravity = Gravity.END
+                    addView(title)
+                    addView(hint)
+                }
+            }
+            addView(heading, LinearLayout.LayoutParams(Ink.sdp(96), ViewGroup.LayoutParams.WRAP_CONTENT))
             addView(control, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
                 marginStart = Ink.sdp(14)
             })
@@ -475,9 +495,7 @@ class AdjustSheetController(private val host: Host) {
                 host.repaintPanel()
             }
         }))
-        container.addView(settingRow("Menu Size", segmented(DisplayPrefs.UI_SCALE_LABELS, DisplayPrefs.nearestUiScaleIndex(prefs.uiScale)) { which ->
-            applyUiScale(DisplayPrefs.UI_SCALES[which])
-        }))
+        container.addView(menuSizeRow())
         container.addView(settingRow("Full Refresh", segmented(DisplayPrefs.REFRESH_INTERVAL_LABELS, DisplayPrefs.REFRESH_INTERVALS.indexOf(prefs.fullRefreshEvery).coerceAtLeast(0)) { which ->
             val n = DisplayPrefs.REFRESH_INTERVALS[which]
             prefs.fullRefreshEvery = n
@@ -485,6 +503,48 @@ class AdjustSheetController(private val host: Host) {
             host.diag { "DIAG full-refresh every=$n pages" }
         }))
         return container
+    }
+
+    /**
+     * Menu Size (#133 / #281): the XS–2XL presets, with a slider under them that fine-tunes between
+     * and past them. One setting, two ways in — a preset tap moves the slider, and a drag lights the
+     * preset it lands on, or none when it stops between two.
+     *
+     * The size is applied when the drag ends, not on every step: applying rebuilds the tool palette,
+     * and a rebuild per step would flash the panel all the way along the drag.
+     */
+    private fun menuSizeRow(): View {
+        // The current size reads under the label, clear of the slider's ends where a finger
+        // reaching for the thumb at XS or 2XL lands.
+        val readout = TextView(activity).apply {
+            text = DisplayPrefs.uiScaleLabel(prefs.uiScale); textSize = Ink.sp(14f); setTextColor(Ink.muted)
+            gravity = Gravity.END
+        }
+        lateinit var presets: Segmented
+        val seek = Ink.seekBar(activity, fingerTarget = true).apply {
+            max = DisplayPrefs.UI_SCALE_SLIDER_MAX
+            progress = DisplayPrefs.uiScaleToSlider(prefs.uiScale)
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(sb: SeekBar, p: Int, fromUser: Boolean) {
+                    val scale = DisplayPrefs.sliderToUiScale(p)
+                    readout.text = DisplayPrefs.uiScaleLabel(scale)
+                    if (fromUser) presets.select(DisplayPrefs.uiScalePresetIndex(scale))
+                }
+                override fun onStartTrackingTouch(sb: SeekBar) {}
+                override fun onStopTrackingTouch(sb: SeekBar) { applyUiScale(DisplayPrefs.sliderToUiScale(sb.progress)) }
+            })
+        }
+        presets = segmentedControl(DisplayPrefs.UI_SCALE_LABELS, DisplayPrefs.uiScalePresetIndex(prefs.uiScale)) { which ->
+            val scale = DisplayPrefs.UI_SCALES[which]
+            seek.progress = DisplayPrefs.uiScaleToSlider(scale)
+            applyUiScale(scale)
+        }
+        val control = LinearLayout(activity).apply {
+            orientation = LinearLayout.VERTICAL
+            addView(presets.view)
+            addView(seek, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        }
+        return settingRow("Menu Size", control, hint = readout)
     }
 
     /** Persist + apply the menu/chrome scale (#133) for large panels (e.g. the Manta).
@@ -495,11 +555,11 @@ class AdjustSheetController(private val host: Host) {
      *  happened to re-render it, and the reader — looking straight at the toolbar while the toast
      *  told them to reopen a menu — would reasonably conclude the setting did not cover it (#200). */
     private fun applyUiScale(scale: Float) {
+        if (scale == prefs.uiScale) return // a tap or drag that ends where it started
         prefs.uiScale = scale
         Ink.uiScale = scale
         host.refreshToolPalette()
-        val label = DisplayPrefs.UI_SCALE_LABELS[DisplayPrefs.nearestUiScaleIndex(scale)]
-        Toast.makeText(activity, "Menu size $label — menus resize as you reopen them", Toast.LENGTH_SHORT).show()
+        Toast.makeText(activity, "Menu size ${DisplayPrefs.uiScaleLabel(scale)} — menus resize as you reopen them", Toast.LENGTH_SHORT).show()
     }
 
     /** A reading style preset (1.10): a bundle of (text scale, line-spacing index, contrast step,

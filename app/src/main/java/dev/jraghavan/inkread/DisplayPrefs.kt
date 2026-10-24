@@ -57,9 +57,20 @@ class DisplayPrefs(private val context: Context) {
 
     /** UI-chrome scale for menus/sheets (#133). Larger panels (e.g. the Manta) want bigger menus;
      *  this scales the reader's chrome text/controls independently of [textScale] (the reading body
-     *  text). 1.0 = the current sizing. Read clamped to the [UI_SCALES] range. */
+     *  text). 1.0 = the current sizing. Any value in [UI_SCALE_MIN]..[UI_SCALE_MAX] — the presets
+     *  are shortcuts onto the slider's range, not the only values allowed (#281). */
     var uiScale: Float
-        get() = display.getFloat("ui_scale", 1.0f).coerceIn(UI_SCALES.first(), UI_SCALES.last())
+        get() {
+            if (!display.getBoolean(KEY_UI_SCALE_PRESETS_V2, false)) {
+                val saved = display.getFloat("ui_scale", 1.0f)
+                display.edit()
+                    .putFloat("ui_scale", migratedUiScale(saved))
+                    .putBoolean(KEY_UI_SCALE_PRESETS_V2, true)
+                    .apply()
+                return migratedUiScale(saved).coerceIn(UI_SCALE_MIN, UI_SCALE_MAX)
+            }
+            return display.getFloat("ui_scale", 1.0f).coerceIn(UI_SCALE_MIN, UI_SCALE_MAX)
+        }
         set(s) = display.edit().putFloat("ui_scale", s).apply()
 
     /** Periodic full (flashing) refresh cadence (#99): force a FULL EPD refresh every Nth page-turn
@@ -173,15 +184,51 @@ class DisplayPrefs(private val context: Context) {
         /** Reflow font-size steps (multiples of the core's base body size); 1.0 = default. */
         val TEXT_SCALES = floatArrayOf(0.6f, 0.7f, 0.8f, 0.9f, 1.0f, 1.15f, 1.3f, 1.5f, 1.75f, 2.0f, 2.5f, 3.0f)
 
-        /** Menu/chrome scale steps (#133); 1.0 = the default sizing. Kept small and coarse so the
-         *  segmented control stays e-ink-tappable.
-         *
-         *  XS (0.8) exists because the tool palette read as oversized once it could be docked along
-         *  the top (#200). It is the smallest step offered on purpose: it puts the palette's 60dp
-         *  button on exactly 48dp, the minimum touch target the platform recommends. Anything
-         *  smaller is below that floor and is not offered without a device in hand. */
-        val UI_SCALES = floatArrayOf(0.8f, 0.9f, 1.0f, 1.15f, 1.3f, 1.5f)
+        /** Menu/chrome scale presets (#133); 1.0 = the default sizing. Kept few and coarse so the
+         *  segmented control stays e-ink-tappable; the slider under them fine-tunes between (#281).
+         *  XS is the compact end: its toolbar button is 72% of M's, S's 86%. */
+        val UI_SCALES = floatArrayOf(0.7f, 0.85f, 1.0f, 1.15f, 1.3f, 1.5f)
         val UI_SCALE_LABELS = listOf("XS", "S", "M", "L", "XL", "2XL")
+
+        /** The Menu Size slider runs from XS to 2XL in 5% steps (#281). Sheet and bar controls keep
+         *  their [Ink.tap] minimum at any size; the tool palette follows the setting all the way
+         *  down, since it is a pen target first. */
+        const val UI_SCALE_MIN = 0.7f
+        const val UI_SCALE_MAX = 1.5f
+        const val UI_SCALE_STEP = 0.05f
+
+        /** Set once [uiScale] has moved a saved size off the XS/S values those presets used to have. */
+        private const val KEY_UI_SCALE_PRESETS_V2 = "ui_scale_presets_v2"
+
+        /** XS and S used to be 0.8 and 0.9. A reader who picked either keeps their preset, now at
+         *  its new size, rather than being left on an in-between percentage (#281). */
+        fun migratedUiScale(saved: Float): Float = when {
+            kotlin.math.abs(saved - 0.8f) < UI_SCALE_STEP / 2 -> UI_SCALES[0]
+            kotlin.math.abs(saved - 0.9f) < UI_SCALE_STEP / 2 -> UI_SCALES[1]
+            else -> saved
+        }
+
+        /** Slider positions across [UI_SCALE_MIN]..[UI_SCALE_MAX]. */
+        val UI_SCALE_SLIDER_MAX = Math.round((UI_SCALE_MAX - UI_SCALE_MIN) / UI_SCALE_STEP)
+
+        /** The slider position for [scale], clamped to the range. */
+        fun uiScaleToSlider(scale: Float): Int =
+            Math.round((scale - UI_SCALE_MIN) / UI_SCALE_STEP).coerceIn(0, UI_SCALE_SLIDER_MAX)
+
+        /** The scale at slider position [pos]. Rounded to hundredths, so float drift cannot leave a
+         *  preset's position a hair off the preset's own value. */
+        fun sliderToUiScale(pos: Int): Float =
+            Math.round((UI_SCALE_MIN + pos.coerceIn(0, UI_SCALE_SLIDER_MAX) * UI_SCALE_STEP) * 100) / 100f
+
+        /** The [UI_SCALES] preset [scale] sits on, or -1 when it is between presets — the segmented
+         *  control then highlights nothing rather than claiming a size the reader did not pick. */
+        fun uiScalePresetIndex(scale: Float): Int =
+            UI_SCALES.indexOfFirst { kotlin.math.abs(it - scale) < UI_SCALE_STEP / 2 }
+
+        /** How the current Menu Size reads in the sheet and the toast: the preset name, or a
+         *  percentage of M when the slider sits between two. */
+        fun uiScaleLabel(scale: Float): String =
+            uiScalePresetIndex(scale).let { if (it >= 0) UI_SCALE_LABELS[it] else "${Math.round(scale * 100)}%" }
 
         /** Page-turn intervals for the periodic full refresh (#99); index 0 = Off, the default. */
         /** Page margin steps offered, as a percentage of page width (#167). The reader asked for
@@ -220,8 +267,5 @@ class DisplayPrefs(private val context: Context) {
          */
         fun steppedScaleIndex(scale: Float, by: Int): Int =
             (nearestScaleIndex(scale) + by).coerceIn(0, TEXT_SCALES.size - 1)
-
-        /** Index of the [UI_SCALES] entry nearest to [scale]. */
-        fun nearestUiScaleIndex(scale: Float): Int = nearestIndex(UI_SCALES, scale)
     }
 }

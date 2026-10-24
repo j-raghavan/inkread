@@ -129,7 +129,7 @@ class BottomBarController(private val host: Host) {
             typeface = Ink.mono
             letterSpacing = 0.04f
             gravity = Gravity.CENTER
-            minHeight = Ink.tap() // #245: 21.9dp at XS before this
+            minHeight = Ink.tap() // #245: 21.9dp at 0.8 before this
             setPadding(Ink.sdp(12), Ink.sdp(6), Ink.sdp(12), Ink.sdp(6))
             background = GradientDrawable().apply {
                 setColor(Ink.fill)
@@ -137,23 +137,9 @@ class BottomBarController(private val host: Host) {
             }
             setOnClickListener { dialog.dismiss(); showPageEntry(total) }
         }
-        // A refined, thin grayscale track + small round thumb (the default SeekBar reads clunky).
-        val trackH = Ink.sdp(3).coerceAtLeast(2)
-        fun bar(c: Int) = GradientDrawable().apply { setColor(c); cornerRadius = trackH.toFloat(); setSize(0, trackH) }
-        val track = android.graphics.drawable.LayerDrawable(
-            arrayOf(
-                bar(Ink.hairline),
-                android.graphics.drawable.ClipDrawable(bar(Ink.ink), Gravity.START, android.graphics.drawable.ClipDrawable.HORIZONTAL),
-            ),
-        ).apply { setId(0, android.R.id.background); setId(1, android.R.id.progress) }
-        val knob = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(Ink.ink); setSize(Ink.sdp(16), Ink.sdp(16)) }
-        val seek = SeekBar(activity).apply {
+        val seek = Ink.seekBar(activity).apply {
             max = total - 1
             progress = cur
-            progressDrawable = track
-            thumb = knob
-            splitTrack = false
-            setPadding(Ink.sdp(10), Ink.sdp(4), Ink.sdp(10), Ink.sdp(4))
             setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
                 override fun onProgressChanged(sb: SeekBar, p: Int, fromUser: Boolean) {
                     if (fromUser) pageLabel.text = "${p + 1} / $total"
@@ -167,7 +153,7 @@ class BottomBarController(private val host: Host) {
         fun chapterBtn(glyph: String, dir: Int) = TextView(activity).apply {
             text = glyph; setTextColor(Ink.ink); textSize = Ink.sp(20f); typeface = Ink.serifBold
             gravity = Gravity.CENTER; setPadding(Ink.sdp(8), Ink.sdp(2), Ink.sdp(8), Ink.sdp(2)); isClickable = true
-            minHeight = Ink.tap(); minWidth = Ink.tap() // #245: 24.0dp at XS, 44.8dp even at 2XL
+            minHeight = Ink.tap(); minWidth = Ink.tap() // #245: 24.0dp at 0.8, 44.8dp even at 2XL
             setOnClickListener { dialog.dismiss(); chapterJump(dir) }
         }
         fileNameLine()?.let(container::addView)
@@ -191,7 +177,7 @@ class BottomBarController(private val host: Host) {
                 gravity = Gravity.CENTER_VERTICAL
                 setPadding(Ink.sdp(24), 0, Ink.sdp(24), Ink.sdp(8))
                 isClickable = true
-                minimumHeight = Ink.tapRow() // #245: 19.7dp at XS before this
+                minimumHeight = Ink.tapRow() // #245: 19.7dp at 0.8 before this
                 setOnClickListener { dialog.dismiss(); showContentsLazy() }
                 addView(TextView(activity).apply {
                     text = lbl; setTextColor(Ink.inkSoft); textSize = Ink.sp(12f); typeface = Ink.serif

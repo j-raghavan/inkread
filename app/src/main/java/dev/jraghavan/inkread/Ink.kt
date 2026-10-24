@@ -10,6 +10,7 @@ import android.view.View
 import android.view.ViewGroup
 import android.view.Window
 import android.widget.LinearLayout
+import android.widget.SeekBar
 import android.widget.TextView
 
 /**
@@ -42,6 +43,11 @@ object Ink {
     // ── Metrics (system density → no Context needed) ──
     private val density = android.content.res.Resources.getSystem().displayMetrics.density
 
+    /** The panel's short side in dp — the same in either orientation, so a size derived from it
+     *  does not change when the reader rotates (#281). Read live rather than cached at init. */
+    fun shortSideDp(): Float =
+        android.content.res.Resources.getSystem().displayMetrics.let { minOf(it.widthPixels, it.heightPixels) / it.density }
+
     /**
      * UI-chrome scale (#133) — the user's menu-size preference ([DisplayPrefs.uiScale]), set once at
      * Activity start. Chrome text sizes are declared at their design value and passed through [sp],
@@ -62,13 +68,15 @@ object Ink {
 
     fun dpf(v: Int): Float = v * density
 
+    fun dpf(v: Float): Float = v * density
+
     /**
      * Minimum extent for a **compact** tappable control (#245) — a button or an option cell, where
      * the target is roughly as wide as it is tall.
      *
      * Deliberately **not** scaled by [uiScale]. Menu Size changes how big the chrome looks; it does
      * not change how big a fingertip is, and the smaller steps were putting clickable cells at
-     * 20-32dp. Measured on a Manta at XS: the page label 21.9dp, the chapter buttons 24.0dp, the
+     * 20-32dp. Measured on a Manta at 0.8, then XS: the page label 21.9dp, the chapter buttons 24.0dp, the
      * Adjust sheet's segmented options 31.5dp — including the Menu Size selector itself, so the
      * control that gets you back out of XS was among the hardest to hit.
      *
@@ -163,6 +171,41 @@ object Ink {
             window?.setBackgroundDrawable(cardBg())
             runCatching { show() }
         }
+
+    /** The slider thumb's diameter, in dp before Menu Size. */
+    private const val SEEK_THUMB = 16
+
+    /**
+     * The reader's slider: a thin grayscale track with a small round thumb (the default SeekBar
+     * reads clunky on e-ink). Shared by the page scrubber and the Menu Size slider.
+     *
+     * [fingerTarget] pads it out to a [tap]-tall target, with half a target of slack past each end
+     * of the track. SeekBar measures itself from its thumb and ignores `minimumHeight`, so padding
+     * is the way to grow the target; the track is drawn inside it and stays thin.
+     */
+    fun seekBar(ctx: Context, fingerTarget: Boolean = false): SeekBar {
+        val trackH = sdp(3).coerceAtLeast(2)
+        fun bar(c: Int) = GradientDrawable().apply { setColor(c); cornerRadius = trackH.toFloat(); setSize(0, trackH) }
+        val track = android.graphics.drawable.LayerDrawable(
+            arrayOf(
+                bar(hairline),
+                android.graphics.drawable.ClipDrawable(bar(ink), Gravity.START, android.graphics.drawable.ClipDrawable.HORIZONTAL),
+            ),
+        ).apply { setId(0, android.R.id.background); setId(1, android.R.id.progress) }
+        val thumbPx = sdp(SEEK_THUMB)
+        val knob = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(ink); setSize(thumbPx, thumbPx) }
+        return SeekBar(ctx).apply {
+            progressDrawable = track
+            thumb = knob
+            splitTrack = false
+            if (fingerTarget) {
+                val v = ((tap() - thumbPx) / 2).coerceAtLeast(sdp(4))
+                setPadding(tap() / 2, v, tap() / 2, v)
+            } else {
+                setPadding(sdp(10), sdp(4), sdp(10), sdp(4))
+            }
+        }
+    }
 
     /** A pill button — filled (black) for the primary action, outlined for secondary. */
     fun pillButton(ctx: Context, label: String, primary: Boolean, onTap: () -> Unit): TextView =
