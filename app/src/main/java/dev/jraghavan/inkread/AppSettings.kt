@@ -17,6 +17,7 @@ object AppSettings {
     private const val KEY_UPDATE_LAST_CHECK_MS = "update_last_check_ms"
     private const val KEY_TOOLBAR_HORIZONTAL = "toolbar_horizontal"
     private const val KEY_TOOLBAR_ON_LEFT = "toolbar_on_left"
+    private const val KEY_TOOL_TIPS = "tool_tips"
     private const val KEY_OPDS_URL = "opds_url"
     private const val KEY_OPDS_USER = "opds_user"
     private const val KEY_OPDS_PASSWORD = "opds_password"
@@ -76,6 +77,17 @@ object AppSettings {
 
     fun setToolbarOnLeft(c: Context, value: Boolean) =
         prefs(c).edit().putBoolean(KEY_TOOLBAR_ON_LEFT, value).apply()
+
+    /**
+     * When true, picking a tool shows a one-line tip on how to use it (#284).
+     *
+     * On by default, so a new reader still learns each tool where they pick it. A reader who knows
+     * the tools can turn them off; Settings → How it works explains each tool either way.
+     */
+    fun toolTips(c: Context): Boolean = prefs(c).getBoolean(KEY_TOOL_TIPS, true)
+
+    fun setToolTips(c: Context, value: Boolean) =
+        prefs(c).edit().putBoolean(KEY_TOOL_TIPS, value).apply()
 
     // ── Self-update (ADR-INKREAD-0014) ────────────────────────────────────────────────────────────
 

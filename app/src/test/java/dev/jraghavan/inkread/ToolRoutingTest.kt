@@ -51,6 +51,13 @@ class ToolRoutingTest {
         for (tool in Tool.entries - Tool.PEN) assertNotNull("$tool hint", tool.hint)
     }
 
+    /** Re-tapping Lasso always names the new mode; only the "how to switch" tail is a tip (#284). */
+    @Test
+    fun lassoModeMessageKeepsTheModeNameWithTipsOff() {
+        assertEquals("Freehand lasso (tap Lasso again to switch)", Tool.lassoModeMessage("Freehand lasso", tips = true))
+        assertEquals("Freehand lasso", Tool.lassoModeMessage("Freehand lasso", tips = false))
+    }
+
     /** Only the eraser end overrides; an unknown/finger tool type is left to the palette (the
      *  caller already gates on the tool type, so this must not silently reroute). */
     @Test
