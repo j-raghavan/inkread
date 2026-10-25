@@ -2,6 +2,8 @@ package dev.jraghavan.inkread
 
 import android.view.MotionEvent
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Test
 
 /**
@@ -39,6 +41,14 @@ class ToolRoutingTest {
     @Test
     fun eraserPaletteErasesWithThePenTip() {
         assertEquals(Tool.ERASER, Tool.forStylus(Tool.ERASER, MotionEvent.TOOL_TYPE_STYLUS))
+    }
+
+    /** Switching to Pen shows no hint Toast: the Toast window closing drops the firmware's live ink,
+     *  so what was written right after the switch vanished (#254). Every other tool keeps its hint. */
+    @Test
+    fun onlyPenHasNoHint() {
+        assertNull(Tool.PEN.hint)
+        for (tool in Tool.entries - Tool.PEN) assertNotNull("$tool hint", tool.hint)
     }
 
     /** Only the eraser end overrides; an unknown/finger tool type is left to the palette (the

@@ -57,16 +57,23 @@ class DictController(private val host: Host) {
     /** Resolve the word under a normalized point and look it up (engine thread). */
     fun defineWord(page: Int, nx: Float, ny: Float) {
         if (host.docHandle == 0L) return
-        val sel = try {
-            WireCodec.decodeSelection(NativeBridge.nativeWordAt(host.docHandle, page, nx, ny))
-        } catch (e: RuntimeException) {
-            Log.e(TAG, "wordAt failed: ${e.message}"); return
-        }
-        if (sel.isEmpty) {
+        val word = wordAt(page, nx, ny)
+        if (word == null) {
             runOnUiThread { Toast.makeText(activity, "No word there", Toast.LENGTH_SHORT).show() }
             return
         }
-        lookupAndShow(sel.text)
+        lookupAndShow(word)
+    }
+
+    /** The word under a normalized point, or null when there is none (engine thread). */
+    fun wordAt(page: Int, nx: Float, ny: Float): String? {
+        if (host.docHandle == 0L) return null
+        val sel = try {
+            WireCodec.decodeSelection(NativeBridge.nativeWordAt(host.docHandle, page, nx, ny))
+        } catch (e: RuntimeException) {
+            Log.e(TAG, "wordAt failed: ${e.message}"); return null
+        }
+        return if (sel.isEmpty) null else sel.text
     }
 
     /** Resolve the text within a highlighted rect and look up its first word (engine thread). */
@@ -92,7 +99,7 @@ class DictController(private val host: Host) {
     }
 
     /** On-device lookup → online fallback (cached) → show the popup (engine thread). */
-    private fun lookupAndShow(rawWord: String) {
+    fun lookupAndShow(rawWord: String) {
         val word = rawWord.trim().trim { !it.isLetter() && it != '\'' && it != '-' }
         if (word.isEmpty()) return
         if (!ensureDictOpen()) {

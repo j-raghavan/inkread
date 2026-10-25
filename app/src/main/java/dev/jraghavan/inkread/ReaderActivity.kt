@@ -307,7 +307,8 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         override fun clearFirmwareInk() = this@ReaderActivity.clearFirmwareInk()
         override fun repaintPanel() = this@ReaderActivity.repaintPanel()
         override fun drawLivePath(buf: ArrayList<Float>, paint: Paint) = this@ReaderActivity.drawLivePath(buf, paint)
-        override fun defineWord(page: Int, nx: Float, ny: Float) = dict.defineWord(page, nx, ny)
+        override fun wordAt(page: Int, nx: Float, ny: Float) = dict.wordAt(page, nx, ny)
+        override fun lookupWord(word: String) = dict.lookupAndShow(word)
         override fun diag(msg: () -> String) = this@ReaderActivity.diag(msg)
     })
 
@@ -1519,15 +1520,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             if (chosen != Tool.PEN) clearFirmwareInk()
             repaintPanel()
         }
-        val hint = when (chosen) {
-            Tool.PEN -> "Pen — write with the stylus"
-            Tool.HIGHLIGHTER -> "Highlighter — drag over text; tap again to change shade"
-            Tool.ERASER -> "Eraser — drag over ink to remove it, or flip the pen from any tool"
-            Tool.DEFINE -> "Define — tap a word to look it up; drag over text to select it"
-            Tool.LASSO -> "Lasso — circle strokes to select; tap Lasso again for Freehand"
-            else -> chosen.label
-        }
-        Toast.makeText(this, hint, Toast.LENGTH_SHORT).show()
+        chosen.hint?.let { Toast.makeText(this, it, Toast.LENGTH_SHORT).show() }
         lasso.updateLassoHint()
         return true
     }

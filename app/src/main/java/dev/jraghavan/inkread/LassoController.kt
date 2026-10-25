@@ -529,10 +529,19 @@ class LassoController(private val host: Host) {
         host.engineExecute { clearSelectionAndRender() }
     }
 
-    /** Drop the selection + toolbar and re-render the page (engine thread). */
+    /**
+     * Drop the selection + toolbar and re-render the page (engine thread).
+     *
+     * The firmware overlay is cleared before the repaint, as [setSelection] does. Pen strokes stay
+     * on that overlay until the next page render, so after an undo, delete or cut it still holds the
+     * strokes the core just removed, and the firmware shows them again the next time the pen touches
+     * the panel (#254). The repaint bakes every committed stroke from the core, so clearing loses
+     * nothing.
+     */
     private fun clearSelectionAndRender() {
         selectedIds = IntArray(0)
         selectionBounds = FloatArray(0)
+        host.clearFirmwareInk()
         host.repaintPanel()
         updateLassoHint() // re-show the hint if still on the Lasso tool with nothing selected
         runOnUiThread { host.dismissSelectionToolbar() }

@@ -17,12 +17,15 @@ import android.widget.LinearLayout
  * gesture tricks don't transfer. We disambiguate "ink" / "erase" / "lasso" / "define" by an
  * **explicit selected tool**, never by guessing a gesture — the reMarkable/Boox/Scribe modal family.
  */
-enum class Tool(val label: String, val iconRes: Int) {
-    PEN("Pen", R.drawable.ic_tool_pen),
-    HIGHLIGHTER("Highlight", R.drawable.ic_tool_highlighter),
-    ERASER("Eraser", R.drawable.ic_tool_eraser),
-    LASSO("Lasso", R.drawable.ic_tool_lasso),
-    DEFINE("Define", R.drawable.ic_menu_dict),
+enum class Tool(val label: String, val iconRes: Int, val hint: String?) {
+    // No hint for Pen: the hint Toast is its own window, and when it closes the firmware drops the
+    // live-ink overlay, taking everything written since the switch off the panel (#254). The ringed
+    // Pen icon is the feedback. The other tools don't ride the firmware overlay.
+    PEN("Pen", R.drawable.ic_tool_pen, null),
+    HIGHLIGHTER("Highlight", R.drawable.ic_tool_highlighter, "Highlighter — drag over text; tap again to change shade"),
+    ERASER("Eraser", R.drawable.ic_tool_eraser, "Eraser — drag over ink to remove it, or flip the pen from any tool"),
+    LASSO("Lasso", R.drawable.ic_tool_lasso, "Lasso — circle strokes to select; tap Lasso again for Freehand"),
+    DEFINE("Define", R.drawable.ic_menu_dict, "Define — tap a word to look it up; drag over text to select it"),
     ;
 
     companion object {
