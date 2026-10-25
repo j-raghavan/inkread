@@ -63,8 +63,11 @@ class StylusInkController(private val host: Host) {
         /** Draw an in-progress gesture path over the cached page (UI thread) — the highlighter band. */
         fun drawLivePath(buf: ArrayList<Float>, paint: Paint)
 
-        /** Engine thread: look up the word under a normalized point (pen long-press). */
-        fun defineWord(page: Int, nx: Float, ny: Float)
+        /** Engine thread: the word under a normalized point, or null when there is none. */
+        fun wordAt(page: Int, nx: Float, ny: Float): String?
+
+        /** Engine thread: look up a word resolved by [wordAt] (pen long-press). */
+        fun lookupWord(word: String)
 
         /** Verbose diagnostic log, gated by the shell's `DIAG` flag. */
         fun diag(msg: () -> String)
@@ -98,17 +101,54 @@ class StylusInkController(private val host: Host) {
     private var lpDownY = 0f
     private var lpMoved = false
 
-    /** Fires when the pen has been held ~still on a word: look it up, cancelling the nascent stroke. */
+    /** Bumped on every pen DOWN, so a word resolved after the next stroke began is ignored. */
+    private var lpSeq = 0
+
+    /** A hold fired and its word is still resolving: the stroke is kept, neither committed nor dropped. */
+    private var lpPending = false
+
+    /** The pen lifted while [lpPending]: commit the kept stroke if the hold is not a lookup. */
+    private var lpLifted = false
+
+    /** The current pen gesture became a lookup: its remaining points are not ink. */
+    private var lpConsumed = false
+
+    /** The pen moved on after its lookup, so the firmware painted ink the core never got. */
+    private var lpTrailing = false
+
+    /**
+     * Fires when the pen has been held ~still. The stroke waits while the word under the pen is
+     * resolved on the engine thread: only on a word does the hold become a lookup that drops the
+     * stroke and wipes the dot it left. Off a word, or once the pen has moved on, the hold was a
+     * pause in writing and the stroke carries on as ink.
+     */
     private val longPress = Runnable {
-        handler.removeCallbacks(strokeFinalize) // this hold is a lookup, not a stroke
-        strokeBuf.clear()
         if (host.viewW == 0 || host.viewH == 0) return@Runnable
         val nx = host.vToNx(lpDownX); val ny = host.vToNy(lpDownY)
         val page = host.currentPage
-        host.diag { "DIAG long-press lookup @($nx,$ny) page=$page" }
+        val seq = lpSeq
+        handler.removeCallbacks(strokeFinalize)
+        lpPending = true; lpLifted = false
+        host.engineExecute {
+            val word = host.wordAt(page, nx, ny)
+            handler.post { onHoldResolved(seq, word, nx, ny, page) }
+        }
+    }
+
+    /** The word under a hold is known (UI thread): look it up, or let the stroke carry on as ink. */
+    private fun onHoldResolved(seq: Int, word: String?, nx: Float, ny: Float, page: Int) {
+        if (seq != lpSeq || !lpPending) return
+        lpPending = false
+        if (word == null || lpMoved) {
+            if (lpLifted) finalizeStroke() else armStrokeTimeout()
+            return
+        }
+        host.diag { "DIAG long-press lookup '$word' @($nx,$ny) page=$page" }
+        strokeBuf.clear()
+        lpConsumed = true
         host.engineExecute {
             host.clearFirmwareInk(); host.repaintPanel() // wipe the pen dot the hold left
-            host.defineWord(page, nx, ny)
+            host.lookupWord(word)
         }
     }
 
@@ -190,6 +230,10 @@ class StylusInkController(private val host: Host) {
     fun captureStylus(e: MotionEvent) {
         when (e.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
+                // A held stroke whose word is still resolving was a stroke after all (its UP came, or
+                // was swallowed): commit it before this one starts.
+                if (lpPending) { lpPending = false; finalizeStroke() }
+                lpSeq++; lpConsumed = false; lpTrailing = false
                 strokeBuf.clear()
                 strokeBuf.add(e.x); strokeBuf.add(e.y)
                 armStrokeTimeout()
@@ -201,11 +245,15 @@ class StylusInkController(private val host: Host) {
                 }
             }
             MotionEvent.ACTION_MOVE -> {
+                if (lpConsumed) {
+                    if (kotlin.math.hypot(e.x - lpDownX, e.y - lpDownY) > LONG_PRESS_SLOP_PX) lpTrailing = true
+                    return
+                }
                 for (i in 0 until e.historySize) {
                     strokeBuf.add(e.getHistoricalX(i)); strokeBuf.add(e.getHistoricalY(i))
                 }
                 strokeBuf.add(e.x); strokeBuf.add(e.y)
-                armStrokeTimeout()
+                if (!lpPending) armStrokeTimeout()
                 // Any real movement means this is a stroke, not a hold → cancel the pending lookup.
                 if (!lpMoved && kotlin.math.hypot(e.x - lpDownX, e.y - lpDownY) > LONG_PRESS_SLOP_PX) {
                     lpMoved = true; handler.removeCallbacks(longPress)
@@ -215,9 +263,14 @@ class StylusInkController(private val host: Host) {
             }
             MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
                 handler.removeCallbacks(longPress) // lifted before the hold fired → normal stroke
+                if (lpConsumed) {
+                    // The hold was a lookup: the lift adds no dot, and ink drawn after it goes.
+                    if (lpTrailing) host.engineExecute { host.clearFirmwareInk(); host.repaintPanel() }
+                    return
+                }
                 strokeBuf.add(e.x); strokeBuf.add(e.y)
                 handler.removeCallbacks(strokeFinalize)
-                finalizeStroke()
+                if (lpPending) lpLifted = true else finalizeStroke()
             }
         }
     }
