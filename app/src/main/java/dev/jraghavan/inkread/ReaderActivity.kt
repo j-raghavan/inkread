@@ -20,11 +20,9 @@ import android.view.MotionEvent
 import android.view.SurfaceHolder
 import android.view.SurfaceView
 import android.widget.Toast
-import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
 import android.widget.FrameLayout
-import android.widget.TextView
 import dev.jraghavan.inkread.eink.EinkAdapter
 import java.net.URL
 import dev.jraghavan.inkread.eink.DisplayAdapters
@@ -172,8 +170,6 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
     /** The floating selection toolbar; created in onCreate. */
     private lateinit var selectionToolbar: SelectionToolbar
     private lateinit var toolOptions: ToolOptions
-    /** Persistent Lasso discoverability banner (shown while Lasso is active with no selection). */
-    private var lassoHint: TextView? = null
     /** In-document search (RR2) — owns its own query/hit state + dialogs (SRP). The shell only
      *  draws the active hit's highlight (see [drawSearchHighlight]) for the current page. */
     private val search = SearchController(object : SearchController.Host {
@@ -275,9 +271,6 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         override fun showSelectionToolbar(rect: android.graphics.RectF, canPaste: Boolean) =
             selectionToolbar.show(rect, canPaste)
         override fun dismissSelectionToolbar() = selectionToolbar.dismiss()
-        override fun setLassoHintVisible(show: Boolean) {
-            lassoHint?.visibility = if (show) View.VISIBLE else View.GONE
-        }
         override fun defineWord(page: Int, nx: Float, ny: Float) = dict.defineWord(page, nx, ny)
         override fun defineSelectionText(text: String) = dict.defineSelectionText(text)
         override fun addDigest(page: Int, boundsNorm: FloatArray) = digest.addDigest(page, boundsNorm)
@@ -577,24 +570,6 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         stylus.penWidthIndex = prefs
             .getInt(KEY_PEN_WIDTH, StylusInkController.DEFAULT_PEN_WIDTH_INDEX)
             .coerceIn(0, StylusInkController.PEN_WIDTHS.size - 1)
-        // Persistent affordance for Lasso (discoverability): a slim top banner shown while the
-        // Lasso tool is active and nothing is selected. Tells the user the loop gesture; hidden
-        // once a selection exists or another tool is chosen.
-        lassoHint = TextView(this).apply {
-            text = "Lasso — draw a loop around your writing to select"
-            textSize = Ink.sp(14f)
-            setTextColor(Color.WHITE)
-            setBackgroundColor(Color.BLACK)
-            setPadding(dpInt(16), dpInt(8), dpInt(16), dpInt(8))
-            visibility = View.GONE
-        }
-        root.addView(
-            lassoHint,
-            FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-            ).apply { gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL; topMargin = dpInt(8) },
-        )
         setContentView(root)
     }
 
@@ -1487,7 +1462,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         // Re-tapping the active Lasso toggles its sub-mode (NeoReader: Smart ↔ Freehand).
         if (chosen == Tool.LASSO && tool == Tool.LASSO) {
             val name = lasso.cycleLassoMode()
-            Toast.makeText(this, "$name (tap Lasso again to switch)", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, Tool.lassoModeMessage(name, AppSettings.toolTips(this)), Toast.LENGTH_SHORT).show()
             return true
         }
         // Re-tapping the active Pen/Highlighter shows (or restyles, in place) its colour column — an
@@ -1520,8 +1495,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             if (chosen != Tool.PEN) clearFirmwareInk()
             repaintPanel()
         }
-        chosen.hint?.let { Toast.makeText(this, it, Toast.LENGTH_SHORT).show() }
-        lasso.updateLassoHint()
+        if (AppSettings.toolTips(this)) chosen.hint?.let { Toast.makeText(this, it, Toast.LENGTH_SHORT).show() }
         return true
     }
 

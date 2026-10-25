@@ -107,6 +107,18 @@ class SettingsActivity : Activity() {
             },
         )
 
+        column.addView(
+            toggleRow(
+                title = "Tool tips",
+                desc = "Show a short tip on how to use a tool each time you pick it from the " +
+                    "palette. Turn this off once you know the tools; “How it works” below " +
+                    "explains each one.",
+                on = AppSettings.toolTips(this),
+            ) {
+                AppSettings.setToolTips(this, !AppSettings.toolTips(this)); refresh()
+            },
+        )
+
         // ── Dictionary ─────────────────────────────────────────────────────────────
         column.addView(spacer(dp(34)))
         column.addView(eyebrow("Dictionary"))
@@ -376,10 +388,10 @@ class SettingsActivity : Activity() {
     private companion object {
         /** Concise, accurate cheatsheet of the non-obvious features (title → one line). */
         val HELP = listOf(
-            "Pen & Highlighter" to "Write and highlight on the page with the stylus; the floating tool palette switches between them.",
+            "Pen & Highlighter" to "Write and highlight on the page with the stylus; the floating tool palette switches between them. Tap Pen or Highlighter again to pick a colour.",
             "Eraser" to "Switch to the eraser in the tool palette to wipe strokes — or, if your pen has an eraser end, just flip it over.",
             "Your library" to "Connect a calibre content server or Calibre-Web under Library, then browse it from Home and download books onto your shelf.",
-            "Lasso select" to "Circle ink or text to move, copy, delete, or look it up.",
+            "Lasso select" to "Circle ink or text to move, copy, delete, or look it up. Tap Lasso again to switch between Smart and Freehand.",
             "Define" to "Select a word and tap Define to look it up in the on-device dictionaries.",
             "Search" to "Find text anywhere in the document and jump between matches.",
             "Bookmarks" to "Mark pages and return to them from the marks list.",

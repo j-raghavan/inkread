@@ -18,7 +18,7 @@ import kotlin.math.min
  * `ReaderActivity` (SRP). Owns the selection state (stroke ids + normalized bounds), the lasso
  * loop capture/finalize (ink OR printed-text fallback), selection move, the selection-toolbar
  * actions (delete/cut/copy/paste/select-all/digest/done), ink undo/redo, and the Define tool's tap-vs-drag
- * dispatch. The shell keeps the views (selection toolbar, hint banner), the page/zoom geometry,
+ * dispatch. The shell keeps the selection toolbar view, the page/zoom geometry,
  * and the draw primitives — all reached through [Host].
  *
  * Threading mirrors the original inline code: capture runs on the UI thread; the core calls run
@@ -92,9 +92,6 @@ class LassoController(private val host: Host) {
 
         fun dismissSelectionToolbar()
 
-        /** Show/hide the Lasso discoverability banner. */
-        fun setLassoHintVisible(show: Boolean)
-
         // Sibling-controller actions offered from the text-selection sheet.
         /** Engine thread: word lookup at a normalized point (Define tap). */
         fun defineWord(page: Int, nx: Float, ny: Float)
@@ -156,12 +153,6 @@ class LassoController(private val host: Host) {
     fun cycleLassoMode(): String {
         lassoMode = if (lassoMode == 0) 1 else 0
         return if (lassoMode == 0) "Smart lasso" else "Freehand lasso"
-    }
-
-    /** Show the Lasso banner while the tool is active with nothing selected. */
-    fun updateLassoHint() {
-        val show = host.activeTool == Tool.LASSO && selectedIds.isEmpty()
-        runOnUiThread { host.setLassoHintVisible(show) }
     }
 
     /** Drop any lasso selection when the page changes — the ids belong to the old page (engine). */
@@ -439,7 +430,6 @@ class LassoController(private val host: Host) {
         }
         host.clearFirmwareInk() // wipe the firmware ink left by drawing the lasso loop
         host.repaintPanel()
-        updateLassoHint() // hide the hint once something is selected; re-show if selection emptied
         runOnUiThread {
             if (selectedIds.isEmpty()) {
                 host.dismissSelectionToolbar()
@@ -543,7 +533,6 @@ class LassoController(private val host: Host) {
         selectionBounds = FloatArray(0)
         host.clearFirmwareInk()
         host.repaintPanel()
-        updateLassoHint() // re-show the hint if still on the Lasso tool with nothing selected
         runOnUiThread { host.dismissSelectionToolbar() }
     }
 

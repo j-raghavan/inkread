@@ -24,7 +24,7 @@ enum class Tool(val label: String, val iconRes: Int, val hint: String?) {
     PEN("Pen", R.drawable.ic_tool_pen, null),
     HIGHLIGHTER("Highlight", R.drawable.ic_tool_highlighter, "Highlighter — drag over text; tap again to change shade"),
     ERASER("Eraser", R.drawable.ic_tool_eraser, "Eraser — drag over ink to remove it, or flip the pen from any tool"),
-    LASSO("Lasso", R.drawable.ic_tool_lasso, "Lasso — circle strokes to select; tap Lasso again for Freehand"),
+    LASSO("Lasso", R.drawable.ic_tool_lasso, "Lasso — circle strokes to select; tap Lasso again to switch Smart/Freehand"),
     DEFINE("Define", R.drawable.ic_menu_dict, "Define — tap a word to look it up; drag over text to select it"),
     ;
 
@@ -43,6 +43,14 @@ enum class Tool(val label: String, val iconRes: Int, val hint: String?) {
          */
         fun forStylus(palette: Tool, motionToolType: Int): Tool =
             if (motionToolType == MotionEvent.TOOL_TYPE_ERASER) ERASER else palette
+
+        /**
+         * What re-tapping Lasso announces (#284). The mode name always shows, since nothing else on
+         * screen says whether the next loop is Smart or Freehand; the "how to switch" tail is a tip,
+         * so it follows the Tool tips setting.
+         */
+        fun lassoModeMessage(mode: String, tips: Boolean): String =
+            if (tips) "$mode (tap Lasso again to switch)" else mode
     }
 }
 
