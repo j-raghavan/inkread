@@ -18,7 +18,7 @@ encoding_rs = { workspace = true }
 # scraper (html5ever-based, ISC) parses chapter XHTML into a tree we lower to our own owned content
 # model; the parse tree is transient (never escapes parse_blocks). ego-tree (scraper's own tree, MIT)
 # is named directly so the recursive walker can take a `NodeRef`.
-scraper = { version = "0.27", default-features = false }
+scraper = { version = "0.29", default-features = false }
 ego-tree = "0.11"
 # ab_glyph (Apache-2.0/MIT, pure Rust) — glyph advances (Metrics) + outline rasterization for the
 # reflow renderer; cross-compiles to aarch64-android with no native font lib.
