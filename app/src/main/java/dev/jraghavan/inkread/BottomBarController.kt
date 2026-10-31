@@ -168,6 +168,9 @@ class BottomBarController(private val host: Host) {
                 addView(pageLabel, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { marginStart = Ink.sdp(12) })
             },
         )
+        // Estimated time left (#98), under the slider as its own centred line so it never competes
+        // with the scrubber for width on a narrow panel. Shown only when there is something to pace.
+        readingEstimateLine(cur, total)?.let(container::addView)
         // Current-chapter line under the scrubber: orients the reader and makes the ‹‹/›› obvious.
         // Left = "Ch i/n · Title" (ellipsized); right = in-chapter "p/q" (stays visible). Tap → the
         // full Contents sheet. Shown only when the document has chapters.
@@ -297,6 +300,23 @@ class BottomBarController(private val host: Host) {
         if (ch.isEmpty()) return null
         val idx = ch.indexOfLast { it.first <= host.currentPage }.coerceAtLeast(0)
         return "Ch ${idx + 1}/${ch.size} · ${ch[idx].second}"
+    }
+
+    /** The "~N min left" line under the scrubber (#98), or null when there is nothing to pace (an
+     *  unknown total, or already on the last page). The estimate itself comes from the Rust core;
+     *  [ReadingEstimate] owns the when-to-show rule, and the minutes hop is skipped when hidden. */
+    private fun readingEstimateLine(cur: Int, total: Int): View? {
+        val text =
+            ReadingEstimate.label(cur, total) { NativeBridge.nativeReadingMinutesLeft(it) } ?: return null
+        return TextView(activity).apply {
+            this.text = text
+            setTextColor(Ink.muted)
+            textSize = Ink.sp(11f)
+            typeface = Ink.mono
+            maxLines = 1
+            gravity = Gravity.CENTER
+            setPadding(Ink.sdp(24), 0, Ink.sdp(24), Ink.sdp(6))
+        }
     }
 
     /** In-chapter position "3/24" — the current page within the current chapter (this chapter's start
