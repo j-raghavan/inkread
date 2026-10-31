@@ -1654,3 +1654,143 @@ fn a_layout_change_does_not_dump_the_reader_at_the_chapter_start() {
         "landed on the chapter's first page ({landed}), losing progress within it"
     );
 }
+
+/// A two-chapter book for the #270 in-book-link tests: a contents page with every link kind, and a
+/// long feature chapter carrying a `#deep` anchor far enough in to land past its first page.
+fn issue_book() -> EpubBackend {
+    let contents = "<html><body>\
+        <p>In This Issue</p>\
+        <p><a href=\"ch1.xhtml\">Feature story</a></p>\
+        <p><a href=\"ch1.xhtml#deep\">Jump deep into the feature</a></p>\
+        <p><a href=\"https://example.com/read\">On the web</a></p>\
+        <p><a href=\"missing.xhtml\">Broken link</a></p>\
+        <p><a href=\"mailto:editor@example.com\">Email us</a></p>\
+        </body></html>";
+    let mut feature = String::from("<html><body>");
+    for i in 0..14 {
+        feature.push_str(&format!(
+            "<p>Feature paragraph {i}. The morning was unremarkable and the light through the \
+             window was the light of every other morning.</p>"
+        ));
+    }
+    feature.push_str("<p id=\"deep\">The deep section the contents points at.</p>");
+    feature.push_str("<p>Trailing paragraph after the anchor.</p></body></html>");
+    EpubBackend::from_html_chapters(vec![contents, feature.as_str()], vp(400, 600))
+}
+
+/// Every link the given chapter carries, across all of its pages.
+fn links_in_chapter(b: &EpubBackend, chapter: usize) -> Vec<PageLink> {
+    (0..b.page_count())
+        .filter(|&p| b.chapter_of(p) == chapter)
+        .flat_map(|p| b.page_links(p))
+        .collect()
+}
+
+/// The global index of a chapter's first page.
+fn chapter_first_page(b: &EpubBackend, chapter: usize) -> usize {
+    (0..b.page_count())
+        .find(|&p| b.chapter_of(p) == chapter)
+        .expect("the chapter has a page")
+}
+
+/// The distinct link targets a chapter carries. A multi-word link is several rects sharing one
+/// target (like a multi-rect PDF link), so the tests reason about distinct destinations.
+fn distinct_targets(b: &EpubBackend, chapter: usize) -> Vec<LinkTarget> {
+    let mut targets: Vec<LinkTarget> = links_in_chapter(b, chapter)
+        .into_iter()
+        .map(|l| l.target)
+        .collect();
+    targets.sort_by_key(|t| match t {
+        LinkTarget::Page(p) => (0u8, *p, String::new()),
+        LinkTarget::Uri(u) => (1, 0, u.clone()),
+    });
+    targets.dedup();
+    targets
+}
+
+#[test]
+fn epub_in_book_links_resolve_to_pages_and_uris() {
+    let b = issue_book();
+    let _ = render(&b, 0, 400, 600); // settle the pagination at this viewport
+    let targets = distinct_targets(&b, 0);
+
+    // The mailto and the missing resource are not navigable, so the contents page offers exactly
+    // three destinations: chapter 1's start, the #deep anchor deeper in, and the external URL.
+    assert_eq!(targets.len(), 3, "distinct targets: {targets:?}");
+    assert!(
+        targets.contains(&LinkTarget::Uri("https://example.com/read".into())),
+        "the external URL passes through untouched"
+    );
+
+    let ch1_pages: Vec<usize> = targets
+        .iter()
+        .filter_map(|t| match t {
+            LinkTarget::Page(p) => Some(*p),
+            LinkTarget::Uri(_) => None,
+        })
+        .collect();
+    assert_eq!(ch1_pages.len(), 2, "a plain and a fragment target");
+    assert!(ch1_pages.iter().all(|&p| b.chapter_of(p) == 1));
+    let ch1_start = chapter_first_page(&b, 1);
+    assert_eq!(
+        ch1_pages[0], ch1_start,
+        "the plain link lands on the chapter start"
+    );
+    assert!(
+        ch1_pages[1] > ch1_start,
+        "the fragment link lands deeper than the chapter start ({} > {ch1_start})",
+        ch1_pages[1]
+    );
+}
+
+#[test]
+fn epub_link_rects_are_normalized_and_sit_on_text() {
+    let b = issue_book();
+    let _ = render(&b, 0, 400, 600);
+    let links = b.page_links(0);
+    assert!(!links.is_empty(), "the contents page has links");
+    let chars = b.page_chars(0);
+    for l in &links {
+        assert!(
+            l.x0 >= 0.0 && l.y0 >= 0.0 && l.x1 <= 1.0 && l.y1 <= 1.0,
+            "box normalized to [0,1]: {l:?}"
+        );
+        assert!(l.x1 > l.x0 && l.y1 > l.y0, "non-degenerate box: {l:?}");
+        assert!(
+            chars.iter().any(|c| {
+                let cx = (c.rect.x0 + c.rect.x1) * 0.5;
+                let cy = (c.rect.y0 + c.rect.y1) * 0.5;
+                cx >= l.x0 && cx <= l.x1 && cy >= l.y0 && cy <= l.y1
+            }),
+            "a link box with no glyph under it: {l:?}"
+        );
+    }
+}
+
+#[test]
+fn epub_links_survive_a_font_size_relayout() {
+    let b = issue_book();
+    let _ = render(&b, 0, 400, 600);
+    assert_eq!(distinct_targets(&b, 0).len(), 3);
+
+    // Bump the text scale; chapter 0 reflows (and may now span more pages).
+    b.set_text_scale(1.8, 0).unwrap();
+    let _ = render(&b, 0, 400, 600);
+
+    let after = distinct_targets(&b, 0);
+    assert_eq!(after.len(), 3, "the same destinations survive the relayout");
+    assert!(after.contains(&LinkTarget::Uri("https://example.com/read".into())));
+    let ch1_start = chapter_first_page(&b, 1);
+    let frag = after
+        .iter()
+        .filter_map(|t| match t {
+            LinkTarget::Page(p) if b.chapter_of(*p) == 1 => Some(*p),
+            _ => None,
+        })
+        .max()
+        .expect("a fragment target into chapter 1");
+    assert!(
+        frag > ch1_start,
+        "the fragment still resolves deeper than the chapter start after relayout"
+    );
+}
