@@ -256,6 +256,25 @@ pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativePageCount<'
     .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
 }
 
+// nativeReadingMinutesLeft(pagesLeft) : int — estimated minutes to finish `pagesLeft` more pages,
+// at the core's default per-page cost (#98). Handle-less: pure policy arithmetic, no document, so
+// the cached-state bottom bar can ask without an engine round-trip. `0` means nothing (meaningful)
+// is left; the shell decides visibility.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativeReadingMinutesLeft<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    pages_left: jint,
+) -> jint {
+    env.with_env(|_env| -> jni::errors::Result<jint> {
+        Ok(crate::reading::minutes_left(
+            pages_left,
+            crate::reading::DEFAULT_SECS_PER_PAGE as jint,
+        ))
+    })
+    .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
+}
+
 // nativeDocTitle(handle) : String — the document's title from its metadata, or "" if none. The
 // shell stores it so the library shows the real title (not the filename).
 #[unsafe(no_mangle)]
