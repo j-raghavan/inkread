@@ -1794,3 +1794,123 @@ fn epub_links_survive_a_font_size_relayout() {
         "the fragment still resolves deeper than the chapter start after relayout"
     );
 }
+
+/// The text of a page, as the reader's glyphs read back.
+fn page_text(b: &EpubBackend, page: usize) -> String {
+    b.page_chars(page).iter().map(|c| c.ch).collect()
+}
+
+#[test]
+fn epub_fragment_lands_on_the_page_holding_the_anchor() {
+    // Closes the loop end-to-end: the #deep target resolves to the page whose text actually holds
+    // the anchored block, not merely "deeper than the chapter start".
+    let b = issue_book();
+    let _ = render(&b, 0, 400, 600);
+    let frag = distinct_targets(&b, 0)
+        .into_iter()
+        .filter_map(|t| match t {
+            LinkTarget::Page(p) if b.chapter_of(p) == 1 => Some(p),
+            _ => None,
+        })
+        .max()
+        .expect("a fragment target into chapter 1");
+    assert!(
+        page_text(&b, frag).contains("deep section"),
+        "the fragment page holds the anchor's block; text was {:?}",
+        page_text(&b, frag)
+    );
+}
+
+#[test]
+fn epub_same_file_fragment_resolves_within_the_chapter() {
+    // A bare `#frag` (no path) is the common magazine / "In This Issue" case: it points inside the
+    // same file the link sits in.
+    let mut html = String::from("<html><body><p><a href=\"#deep\">jump</a></p>");
+    for i in 0..14 {
+        html.push_str(&format!(
+            "<p>Filler paragraph {i} with enough words to push the anchor well past the first \
+             page of this chapter.</p>"
+        ));
+    }
+    html.push_str("<p id=\"deep\">The deep section in the same file.</p></body></html>");
+    let b = EpubBackend::from_html_chapters(vec![html.as_str()], vp(400, 600));
+    let _ = render(&b, 0, 400, 600);
+    let frag = b
+        .page_links(0)
+        .into_iter()
+        .filter_map(|l| match l.target {
+            LinkTarget::Page(p) => Some(p),
+            LinkTarget::Uri(_) => None,
+        })
+        .max()
+        .expect("a page target");
+    assert_eq!(
+        b.chapter_of(frag),
+        0,
+        "a same-file link stays in this chapter"
+    );
+    assert!(frag > 0, "and lands past the first page");
+    assert!(page_text(&b, frag).contains("deep section"));
+}
+
+#[test]
+fn epub_unknown_fragment_falls_back_to_chapter_start() {
+    let b = EpubBackend::from_html_chapters(
+        vec![
+            "<html><body><p><a href=\"ch1.xhtml#ghost\">missing anchor</a></p></body></html>",
+            "<html><body><p>Chapter two opening.</p><p>More of chapter two.</p></body></html>",
+        ],
+        vp(400, 600),
+    );
+    let _ = render(&b, 0, 400, 600);
+    let target = b
+        .page_links(0)
+        .into_iter()
+        .find_map(|l| match l.target {
+            LinkTarget::Page(p) => Some(p),
+            LinkTarget::Uri(_) => None,
+        })
+        .expect("a page target");
+    assert_eq!(
+        target,
+        chapter_first_page(&b, 1),
+        "an unknown fragment still lands the reader at the chapter start"
+    );
+}
+
+#[test]
+fn epub_link_scheme_and_query_handling() {
+    // An uppercase scheme is still external; a protocol-relative URL is not in-book navigation and
+    // is dropped; a `?query` before the fragment does not defeat in-book resolution.
+    let b = EpubBackend::from_html_chapters(
+        vec![
+            "<html><body>\
+             <p><a href=\"HTTPS://Example.COM/x\">upper</a></p>\
+             <p><a href=\"//cdn.example.com/x\">protorel</a></p>\
+             <p><a href=\"ch1.xhtml?v=2#frag\">query</a></p>\
+             </body></html>",
+            "<html><body><p>c2 opening</p><p id=\"frag\">c2 anchor block</p></body></html>",
+        ],
+        vp(400, 600),
+    );
+    let _ = render(&b, 0, 400, 600);
+    let targets = distinct_targets(&b, 0);
+    assert!(
+        targets
+            .iter()
+            .any(|t| matches!(t, LinkTarget::Uri(u) if u == "HTTPS://Example.COM/x")),
+        "an uppercase http(s) scheme is recognized as external"
+    );
+    assert!(
+        !targets
+            .iter()
+            .any(|t| matches!(t, LinkTarget::Uri(u) if u.contains("cdn.example.com"))),
+        "a protocol-relative URL is dropped"
+    );
+    assert!(
+        targets
+            .iter()
+            .any(|t| matches!(t, LinkTarget::Page(p) if b.chapter_of(*p) == 1)),
+        "a ?query before the #fragment still resolves in-book"
+    );
+}

@@ -288,37 +288,10 @@ impl EpubBackend {
     /// fixture cannot. Everything downstream — indexing, materialization, caching — is the real path.
     #[cfg(test)]
     fn from_chapters(chapters: Vec<Vec<Block>>, viewport: crate::render::Viewport) -> Self {
-        let chapters: Vec<Chapter> = chapters.into_iter().map(Chapter::Parsed).collect();
-        let chapter_keys: Vec<String> = (0..chapters.len())
-            .map(|i| format!("ch{i}.xhtml"))
-            .collect();
-        let chapter_anchors = RefCell::new(vec![Vec::new(); chapter_keys.len()]);
-        Self {
-            chapters: RefCell::new(chapters),
-            chapter_keys,
-            chapter_anchors,
-            stylesheet: Stylesheet::default(),
-            images: ImageStore::default(),
-            image_sizes: RefCell::new(HashMap::new()),
-            nav: Vec::new(),
-            meta: DocumentMetadata {
-                title: Some("Synthetic".into()),
-                author: None,
-            },
-            font: RefCell::new(AbFont::default_font()),
-            hyph: EnHyphenator::new(),
-            font_id: Cell::new(0),
-            scale: Cell::new(1.0),
-            line_spacing: Cell::new(DEFAULT_LINE_SPACING),
-            align: Cell::new(Align::default()),
-            columns: Cell::new(1),
-            margin_pct: Cell::new(DEFAULT_MARGIN_PCT),
-            viewport: Cell::new((viewport.width, viewport.height)),
-            laid: RefCell::new(None),
-            chapter_pages: RefCell::new(Vec::new()),
-            pagination_cache: RefCell::new(None),
-            progress: RefCell::new(None),
-        }
+        Self::test_backend(
+            chapters.into_iter().map(Chapter::Parsed).collect(),
+            viewport,
+        )
     }
 
     /// Build a backend from raw per-chapter XHTML, left unparsed so the real parse (and so the
@@ -326,10 +299,19 @@ impl EpubBackend {
     /// [`Self::from_chapters`], which injects already-parsed blocks. Chapter keys are `ch{i}.xhtml`.
     #[cfg(test)]
     fn from_html_chapters(htmls: Vec<&str>, viewport: crate::render::Viewport) -> Self {
-        let chapters: Vec<Chapter> = htmls
-            .into_iter()
-            .map(|h| Chapter::Source(h.to_string()))
-            .collect();
+        Self::test_backend(
+            htmls
+                .into_iter()
+                .map(|h| Chapter::Source(h.to_string()))
+                .collect(),
+            viewport,
+        )
+    }
+
+    /// The shared body of the test constructors: a backend with default typography over `chapters`,
+    /// synthetic `ch{i}.xhtml` keys and no container, TOC or stylesheet.
+    #[cfg(test)]
+    fn test_backend(chapters: Vec<Chapter>, viewport: crate::render::Viewport) -> Self {
         let chapter_keys: Vec<String> = (0..chapters.len())
             .map(|i| format!("ch{i}.xhtml"))
             .collect();
@@ -695,29 +677,14 @@ impl EpubBackend {
     /// re-anchoring that makes a highlight/Digest survive a font-size change (RR12-FR4). Picks, within
     /// the pin's chapter, the last page whose first anchored glyph is at or before the pin's offset.
     pub(crate) fn pin_to_page(&self, pin: &PinPosition) -> usize {
-        let laid = self.laid();
         // Clamp a foreign/corrupt chapter index into range rather than scanning the whole book.
-        let chapter =
-            (pin.chapter_index.max(0) as usize).min(laid.chapter_start.len().saturating_sub(1));
-        let start = laid.chapter_start.get(chapter).copied().unwrap_or(0);
-        let end = laid
-            .chapter_start
-            .get(chapter + 1)
-            .copied()
-            .unwrap_or(laid.total_pages);
-        drop(laid);
+        let chapter = {
+            let laid = self.laid();
+            (pin.chapter_index.max(0) as usize).min(laid.chapter_start.len().saturating_sub(1))
+        };
+        let (start, end) = self.chapter_page_range(chapter);
         let target = pin.text_offset.max(0);
-        let mut best = start;
-        for page in start..end {
-            match self.page_chars(page).into_iter().find_map(|c| c.anchor) {
-                Some(a) if (a.char_offset as i32) <= target => best = page,
-                // A real anchor past the target → reading order says stop. An anchorless interior
-                // page (a rule-only or empty page) must NOT stop the scan: keep looking.
-                Some(_) => break,
-                None => continue,
-            }
-        }
-        best
+        self.last_anchored_page(start, end, |a| (a.char_offset as i32) <= target)
     }
 
     /// The `[start, end]` [`PinPosition`] pair a selection rectangle covers on `page` — the anchor a
@@ -755,24 +722,40 @@ impl EpubBackend {
     /// within `chapter`. Mirrors [`Self::pin_to_page`] but keyed on the block rather than a character
     /// offset: the last page whose first anchored glyph is at or before `block` (#270 fragment jump).
     fn block_to_page(&self, chapter: usize, block: usize) -> usize {
-        let (start, end) = {
-            let laid = self.laid();
-            let start = laid.chapter_start.get(chapter).copied().unwrap_or(0);
-            let end = laid
-                .chapter_start
-                .get(chapter + 1)
-                .copied()
-                .unwrap_or(laid.total_pages);
-            (start, end)
-        };
+        let (start, end) = self.chapter_page_range(chapter);
+        self.last_anchored_page(start, end, |a| a.block <= block)
+    }
+
+    /// The `[start, end)` global page range chapter `chapter` occupies. An out-of-range chapter
+    /// yields an empty range at the end of the book.
+    fn chapter_page_range(&self, chapter: usize) -> (usize, usize) {
+        let laid = self.laid();
+        let start = laid.chapter_start.get(chapter).copied().unwrap_or(0);
+        let end = laid
+            .chapter_start
+            .get(chapter + 1)
+            .copied()
+            .unwrap_or(laid.total_pages);
+        (start, end)
+    }
+
+    /// Within `[start, end)`, the last page whose first anchored glyph still satisfies `keep` — the
+    /// reading-order scan shared by [`Self::pin_to_page`] (keyed on character offset) and
+    /// [`Self::block_to_page`] (keyed on block index). A real anchor that fails `keep` stops the
+    /// scan (reading order); an anchorless interior page (rule-only or empty) must not, so the scan
+    /// keeps looking past it. Relies on a page's first-anchor key being monotonic across the chapter.
+    fn last_anchored_page(
+        &self,
+        start: usize,
+        end: usize,
+        keep: impl Fn(&TextAnchor) -> bool,
+    ) -> usize {
         let mut best = start;
         for page in start..end {
             match self.page_chars(page).into_iter().find_map(|c| c.anchor) {
-                Some(a) if a.block <= block => best = page,
-                // A real anchor past the target → reading order says stop; an anchorless interior
-                // page (rule-only or empty) must not, so keep scanning.
+                Some(a) if keep(&a) => best = page,
                 Some(_) => break,
-                None => {}
+                None => continue,
             }
         }
         best
@@ -787,20 +770,26 @@ impl EpubBackend {
         if href.is_empty() {
             return None;
         }
-        if href.starts_with("http://") || href.starts_with("https://") {
-            return Some(LinkTarget::Uri(href.to_string()));
+        // A URI scheme (`scheme:…`) or a protocol-relative `//host/…` means this is not an in-book
+        // reference. `http(s)` opens externally (scheme compared case-insensitively); anything else
+        // (mailto, tel, data, ftp, …) the reader cannot navigate, so it is not offered as a link.
+        if let Some(scheme) = uri_scheme(href) {
+            return if scheme == "http" || scheme == "https" {
+                Some(LinkTarget::Uri(href.to_string()))
+            } else {
+                None
+            };
         }
-        // Schemes the reader has nowhere to send are not offered as links.
-        for scheme in ["mailto:", "tel:", "data:", "javascript:"] {
-            if href.starts_with(scheme) {
-                return None;
-            }
+        if href.starts_with("//") {
+            return None;
         }
-        // In-book: a resource path and an optional #fragment. An empty path is this same chapter.
+        // In-book: a resource path, an optional `?query`, and an optional `#fragment`. An empty path
+        // is this same chapter.
         let (path, frag) = match href.split_once('#') {
             Some((p, f)) => (p, (!f.is_empty()).then_some(f)),
             None => (href, None),
         };
+        let path = path.split_once('?').map_or(path, |(p, _)| p);
         let ci = if path.is_empty() {
             page_chapter
         } else {
@@ -1296,6 +1285,26 @@ fn basename(href: &str) -> String {
         .next()
         .unwrap_or(href)
         .to_string()
+}
+
+/// The lower-cased URI scheme of `href` (`http`, `mailto`, …) when it has one — a `scheme:` prefix
+/// whose `:` precedes any `/`, `?` or `#` and whose name is RFC-3986 shaped (letter, then letters /
+/// digits / `+` / `-` / `.`). `None` for a relative in-book reference such as `ch2.xhtml#frag`.
+fn uri_scheme(href: &str) -> Option<String> {
+    let colon = href.find(':')?;
+    // A ':' that only appears after a path/query/fragment delimiter is part of the path, not a
+    // scheme (e.g. `a/b:c`).
+    if colon > href.find(['/', '?', '#']).unwrap_or(href.len()) {
+        return None;
+    }
+    let scheme = &href[..colon];
+    let mut chars = scheme.chars();
+    if !chars.next().is_some_and(|c| c.is_ascii_alphabetic()) {
+        return None;
+    }
+    chars
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
+        .then(|| scheme.to_ascii_lowercase())
 }
 
 #[cfg(test)]
