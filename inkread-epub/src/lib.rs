@@ -32,9 +32,9 @@ pub use layout::{
 };
 pub use measure::{CachedHyphenator, CachedMetrics};
 pub use render::{
-    clear_reading_fonts, page_glyphs, reading_font_names, register_fallback_font,
+    clear_reading_fonts, page_glyphs, page_link_rects, reading_font_names, register_fallback_font,
     register_reading_font, render_page, render_page_with_images, AbFont, EnHyphenator, GrayCanvas,
-    ImageSource, NoImageBytes, PlacedGlyph,
+    ImageSource, LinkBox, NoImageBytes, PlacedGlyph,
 };
 
 /// The error surface for EPUB parsing — mirrors `inkread-dict`'s shape so the `reader-core` adapter
