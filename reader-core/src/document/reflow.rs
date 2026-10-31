@@ -23,10 +23,13 @@ use inkread_epub::measure::{CachedHyphenator, CachedMetrics};
 use inkread_epub::render::{
     render_page_with_images as raster_page, AbFont, EnHyphenator, GrayCanvas, ImageSource,
 };
-use inkread_epub::{parse_blocks_with, Block, EpubPackage, ImageStore, NavPoint, Stylesheet};
+use inkread_epub::{
+    page_link_rects, parse_blocks_anchored, Anchor, Block, EpubPackage, ImageStore, NavPoint,
+    Stylesheet,
+};
 
 use crate::document::text_select::{self, CharBox, NormRect, TextAnchor, TextSelection};
-use crate::document::{Document, DocumentMetadata, SearchMatch, TocEntry};
+use crate::document::{Document, DocumentMetadata, LinkTarget, PageLink, SearchMatch, TocEntry};
 use crate::error::{CoreError, CoreResult};
 use crate::persistence::{PaginationCache, PaginationProgress};
 use crate::position::PinPosition;
@@ -172,6 +175,9 @@ pub struct EpubBackend {
     chapters: RefCell<Vec<Chapter>>,
     /// Each chapter's resource basename (for matching TOC hrefs → chapter index).
     chapter_keys: Vec<String>,
+    /// Each chapter's fragment anchors (`id` → block), filled lazily as the chapter is parsed.
+    /// `chapter_anchors[i]` is empty until chapter `i` has been through [`Self::parse_chapter`].
+    chapter_anchors: RefCell<Vec<Vec<Anchor>>>,
     /// The table of contents from the package (resolved to page targets in [`Self::toc`]).
     nav: Vec<NavPoint>,
     /// Title/author.
@@ -249,9 +255,11 @@ impl EpubBackend {
             title: pkg.title.clone(),
             author: pkg.author.clone(),
         };
+        let chapter_anchors = RefCell::new(vec![Vec::new(); chapter_keys.len()]);
         Ok(Self {
             chapters: RefCell::new(chapters),
             chapter_keys,
+            chapter_anchors,
             stylesheet: pkg.stylesheet,
             images: pkg.images,
             image_sizes: RefCell::new(HashMap::new()),
@@ -280,13 +288,38 @@ impl EpubBackend {
     /// fixture cannot. Everything downstream — indexing, materialization, caching — is the real path.
     #[cfg(test)]
     fn from_chapters(chapters: Vec<Vec<Block>>, viewport: crate::render::Viewport) -> Self {
-        let chapters: Vec<Chapter> = chapters.into_iter().map(Chapter::Parsed).collect();
-        let chapter_keys = (0..chapters.len())
+        Self::test_backend(
+            chapters.into_iter().map(Chapter::Parsed).collect(),
+            viewport,
+        )
+    }
+
+    /// Build a backend from raw per-chapter XHTML, left unparsed so the real parse (and so the
+    /// fragment-anchor capture behind #270) runs on first materialization — unlike
+    /// [`Self::from_chapters`], which injects already-parsed blocks. Chapter keys are `ch{i}.xhtml`.
+    #[cfg(test)]
+    fn from_html_chapters(htmls: Vec<&str>, viewport: crate::render::Viewport) -> Self {
+        Self::test_backend(
+            htmls
+                .into_iter()
+                .map(|h| Chapter::Source(h.to_string()))
+                .collect(),
+            viewport,
+        )
+    }
+
+    /// The shared body of the test constructors: a backend with default typography over `chapters`,
+    /// synthetic `ch{i}.xhtml` keys and no container, TOC or stylesheet.
+    #[cfg(test)]
+    fn test_backend(chapters: Vec<Chapter>, viewport: crate::render::Viewport) -> Self {
+        let chapter_keys: Vec<String> = (0..chapters.len())
             .map(|i| format!("ch{i}.xhtml"))
             .collect();
+        let chapter_anchors = RefCell::new(vec![Vec::new(); chapter_keys.len()]);
         Self {
             chapters: RefCell::new(chapters),
             chapter_keys,
+            chapter_anchors,
             stylesheet: Stylesheet::default(),
             images: ImageStore::default(),
             image_sizes: RefCell::new(HashMap::new()),
@@ -323,12 +356,16 @@ impl EpubBackend {
             return;
         };
         if let Chapter::Source(html) = slot {
-            // `parse_blocks_with` takes the source by reference, so move it out first and let the
+            // `parse_blocks_anchored` takes the source by reference, so move it out first and let the
             // old `Chapter` (and the XHTML inside it) drop as soon as the blocks exist.
             let html = std::mem::take(html);
             #[cfg(test)]
             CHAPTER_PARSES.with(|c| c.set(c.get() + 1));
-            *slot = Chapter::Parsed(parse_blocks_with(&html, &self.stylesheet));
+            let parsed = parse_blocks_anchored(&html, &self.stylesheet);
+            if let Some(slot_anchors) = self.chapter_anchors.borrow_mut().get_mut(index) {
+                *slot_anchors = parsed.anchors;
+            }
+            *slot = Chapter::Parsed(parsed.blocks);
         }
     }
 
@@ -640,29 +677,14 @@ impl EpubBackend {
     /// re-anchoring that makes a highlight/Digest survive a font-size change (RR12-FR4). Picks, within
     /// the pin's chapter, the last page whose first anchored glyph is at or before the pin's offset.
     pub(crate) fn pin_to_page(&self, pin: &PinPosition) -> usize {
-        let laid = self.laid();
         // Clamp a foreign/corrupt chapter index into range rather than scanning the whole book.
-        let chapter =
-            (pin.chapter_index.max(0) as usize).min(laid.chapter_start.len().saturating_sub(1));
-        let start = laid.chapter_start.get(chapter).copied().unwrap_or(0);
-        let end = laid
-            .chapter_start
-            .get(chapter + 1)
-            .copied()
-            .unwrap_or(laid.total_pages);
-        drop(laid);
+        let chapter = {
+            let laid = self.laid();
+            (pin.chapter_index.max(0) as usize).min(laid.chapter_start.len().saturating_sub(1))
+        };
+        let (start, end) = self.chapter_page_range(chapter);
         let target = pin.text_offset.max(0);
-        let mut best = start;
-        for page in start..end {
-            match self.page_chars(page).into_iter().find_map(|c| c.anchor) {
-                Some(a) if (a.char_offset as i32) <= target => best = page,
-                // A real anchor past the target → reading order says stop. An anchorless interior
-                // page (a rule-only or empty page) must NOT stop the scan: keep looking.
-                Some(_) => break,
-                None => continue,
-            }
-        }
-        best
+        self.last_anchored_page(start, end, |a| (a.char_offset as i32) <= target)
     }
 
     /// The `[start, end]` [`PinPosition`] pair a selection rectangle covers on `page` — the anchor a
@@ -694,6 +716,101 @@ impl EpubBackend {
     /// The chapter index that global `page` falls in (the last chapter whose start ≤ page).
     fn chapter_of(&self, page: usize) -> usize {
         self.laid().chapter_of(page)
+    }
+
+    /// The global page that `block` (a chapter-relative reading-order block index) first appears on,
+    /// within `chapter`. Mirrors [`Self::pin_to_page`] but keyed on the block rather than a character
+    /// offset: the last page whose first anchored glyph is at or before `block` (#270 fragment jump).
+    fn block_to_page(&self, chapter: usize, block: usize) -> usize {
+        let (start, end) = self.chapter_page_range(chapter);
+        self.last_anchored_page(start, end, |a| a.block <= block)
+    }
+
+    /// The `[start, end)` global page range chapter `chapter` occupies. An out-of-range chapter
+    /// yields an empty range at the end of the book.
+    fn chapter_page_range(&self, chapter: usize) -> (usize, usize) {
+        let laid = self.laid();
+        let start = laid.chapter_start.get(chapter).copied().unwrap_or(0);
+        let end = laid
+            .chapter_start
+            .get(chapter + 1)
+            .copied()
+            .unwrap_or(laid.total_pages);
+        (start, end)
+    }
+
+    /// Within `[start, end)`, the last page whose first anchored glyph still satisfies `keep` — the
+    /// reading-order scan shared by [`Self::pin_to_page`] (keyed on character offset) and
+    /// [`Self::block_to_page`] (keyed on block index). A real anchor that fails `keep` stops the
+    /// scan (reading order); an anchorless interior page (rule-only or empty) must not, so the scan
+    /// keeps looking past it. Relies on a page's first-anchor key being monotonic across the chapter.
+    fn last_anchored_page(
+        &self,
+        start: usize,
+        end: usize,
+        keep: impl Fn(&TextAnchor) -> bool,
+    ) -> usize {
+        let mut best = start;
+        for page in start..end {
+            match self.page_chars(page).into_iter().find_map(|c| c.anchor) {
+                Some(a) if keep(&a) => best = page,
+                Some(_) => break,
+                None => continue,
+            }
+        }
+        best
+    }
+
+    /// Resolve an EPUB `href` (relative to the page in `page_chapter`) into a [`LinkTarget`] (#270):
+    /// an `http(s)` URL becomes an external target; an in-book reference resolves to a page by
+    /// chapter basename (like the TOC) and, where it carries a `#fragment`, to the page holding that
+    /// anchor. Other URI schemes and references to resources the book does not contain yield `None`.
+    fn resolve_href(&self, href: &str, page_chapter: usize) -> Option<LinkTarget> {
+        let href = href.trim();
+        if href.is_empty() {
+            return None;
+        }
+        // A URI scheme (`scheme:…`) or a protocol-relative `//host/…` means this is not an in-book
+        // reference. `http(s)` opens externally (scheme compared case-insensitively); anything else
+        // (mailto, tel, data, ftp, …) the reader cannot navigate, so it is not offered as a link.
+        if let Some(scheme) = uri_scheme(href) {
+            return if scheme == "http" || scheme == "https" {
+                Some(LinkTarget::Uri(href.to_string()))
+            } else {
+                None
+            };
+        }
+        if href.starts_with("//") {
+            return None;
+        }
+        // In-book: a resource path, an optional `?query`, and an optional `#fragment`. An empty path
+        // is this same chapter.
+        let (path, frag) = match href.split_once('#') {
+            Some((p, f)) => (p, (!f.is_empty()).then_some(f)),
+            None => (href, None),
+        };
+        let path = path.split_once('?').map_or(path, |(p, _)| p);
+        let ci = if path.is_empty() {
+            page_chapter
+        } else {
+            let key = basename(path);
+            self.chapter_keys.iter().position(|k| *k == key)?
+        };
+        if let Some(frag) = frag {
+            // Anchors are filled on parse; make sure the target chapter has been through it.
+            self.parse_chapter(ci);
+            let block = self
+                .chapter_anchors
+                .borrow()
+                .get(ci)
+                .and_then(|anchors| anchors.iter().find(|a| a.id == frag).map(|a| a.block));
+            if let Some(block) = block {
+                return Some(LinkTarget::Page(self.block_to_page(ci, block)));
+            }
+            // An unknown fragment still lands the reader in the right chapter.
+        }
+        let start = self.laid().chapter_start.get(ci).copied().unwrap_or(0);
+        Some(LinkTarget::Page(start))
     }
 }
 
@@ -751,6 +868,39 @@ impl Document for EpubBackend {
         self.nav
             .iter()
             .map(|n| resolve_nav(n, &self.chapter_keys, &laid.chapter_start))
+            .collect()
+    }
+
+    /// The clickable in-book and external links on `page` (#270 / RR11-FR3). The reflow layout
+    /// carries each run's `href`; here each linked run's box is normalized to `[0,1]` and its href
+    /// resolved to a page jump or external URI. A link whose target the book does not contain is
+    /// dropped. Mirrors the PDF backend so the shell's tap handling is reused unchanged.
+    fn page_links(&self, index: usize) -> Vec<PageLink> {
+        let page_chapter = self.chapter_of(index);
+        // Collect the normalized boxes first so the layout borrow is released before resolving an
+        // href, which may parse and lay out another chapter.
+        let boxes = self
+            .with_page(index, |page, opts| {
+                let pw = opts.page_w.max(1.0);
+                let ph = opts.page_h.max(1.0);
+                page_link_rects(page, opts, &self.font.borrow())
+                    .into_iter()
+                    .map(|l| (l.href, [l.x0 / pw, l.y0 / ph, l.x1 / pw, l.y1 / ph]))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        boxes
+            .into_iter()
+            .filter_map(|(href, [x0, y0, x1, y1])| {
+                let target = self.resolve_href(&href, page_chapter)?;
+                Some(PageLink {
+                    x0: x0.clamp(0.0, 1.0),
+                    y0: y0.clamp(0.0, 1.0),
+                    x1: x1.clamp(0.0, 1.0),
+                    y1: y1.clamp(0.0, 1.0),
+                    target,
+                })
+            })
             .collect()
     }
 
@@ -1135,6 +1285,26 @@ fn basename(href: &str) -> String {
         .next()
         .unwrap_or(href)
         .to_string()
+}
+
+/// The lower-cased URI scheme of `href` (`http`, `mailto`, …) when it has one — a `scheme:` prefix
+/// whose `:` precedes any `/`, `?` or `#` and whose name is RFC-3986 shaped (letter, then letters /
+/// digits / `+` / `-` / `.`). `None` for a relative in-book reference such as `ch2.xhtml#frag`.
+fn uri_scheme(href: &str) -> Option<String> {
+    let colon = href.find(':')?;
+    // A ':' that only appears after a path/query/fragment delimiter is part of the path, not a
+    // scheme (e.g. `a/b:c`).
+    if colon > href.find(['/', '?', '#']).unwrap_or(href.len()) {
+        return None;
+    }
+    let scheme = &href[..colon];
+    let mut chars = scheme.chars();
+    if !chars.next().is_some_and(|c| c.is_ascii_alphabetic()) {
+        return None;
+    }
+    chars
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
+        .then(|| scheme.to_ascii_lowercase())
 }
 
 #[cfg(test)]

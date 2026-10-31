@@ -810,6 +810,51 @@ pub fn page_glyphs(page: &Page, opts: &LayoutOpts, font: &AbFont) -> Vec<PlacedG
     out
 }
 
+/// A hyperlink region on a page: the pixel box (top-left origin, same transform as [`page_glyphs`])
+/// of a run that sits inside an `<a href>`, with that `href` verbatim. `reader-core` normalizes the
+/// box to `[0,1]` and resolves the `href` to a page jump or external URI (#270 / RR11-FR3).
+///
+/// One box per linked run per line: a link broken across two lines yields two boxes (one per line),
+/// which the shell hit-tests independently, exactly as a multi-line PDF link does.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LinkBox {
+    pub x0: f32,
+    pub y0: f32,
+    pub x1: f32,
+    pub y1: f32,
+    pub href: String,
+}
+
+/// Extract a laid-out [`Page`]'s hyperlink regions as positioned boxes (pixel space), mirroring the
+/// layout transform [`page_glyphs`] uses so a box lands on the painted text. The horizontal span is
+/// measured with [`AbFont::advance`] — the very measure the layout placed the run with — so the box
+/// tracks the run's ink without re-walking its glyphs. Rule and image lines carry no links (#270).
+#[must_use]
+pub fn page_link_rects(page: &Page, opts: &LayoutOpts, font: &AbFont) -> Vec<LinkBox> {
+    let margin = opts.margin;
+    let mut out = Vec::new();
+    for line in &page.lines {
+        if line.rule {
+            continue;
+        }
+        let y0 = margin + line.top;
+        let y1 = y0 + line.height;
+        for run in &line.runs {
+            let Some(href) = &run.href else { continue };
+            let x0 = margin + run.x;
+            let x1 = x0 + font.advance(&run.text, run.size_px, run.bold, run.italic);
+            out.push(LinkBox {
+                x0,
+                y0,
+                x1,
+                y1,
+                href: href.clone(),
+            });
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -891,6 +936,104 @@ mod tests {
             })],
             style: BlockStyle::default(),
         }
+    }
+
+    /// A paragraph of `plain` text followed by a run of `link` text that carries `href`.
+    fn linked_paragraph(plain: &str, link: &str, href: &str) -> Block {
+        Block::Paragraph {
+            content: vec![
+                Inline::Run(TextRun {
+                    text: plain.into(),
+                    bold: false,
+                    italic: false,
+                    href: None,
+                }),
+                Inline::Run(TextRun {
+                    text: link.into(),
+                    bold: false,
+                    italic: false,
+                    href: Some(href.into()),
+                }),
+            ],
+            style: BlockStyle::default(),
+        }
+    }
+
+    #[test]
+    fn page_link_rects_box_the_linked_text_only() {
+        // The layout places each word as its own run, so a multi-word link is several boxes, each
+        // carrying the href. They must cover the linked words and nothing before them.
+        let font = AbFont::default_font();
+        let opts = LayoutOpts::new(4000.0, 600.0, 18.0);
+        let pages = paginate(
+            &[linked_paragraph("see ", "chapter two", "ch2.xhtml")],
+            &opts,
+            &font,
+        );
+        let links = page_link_rects(&pages[0], &opts, &font);
+        assert!(!links.is_empty(), "the linked run produced a box");
+        assert!(
+            links.iter().all(|l| l.href == "ch2.xhtml"),
+            "every box carries the link's href"
+        );
+
+        // The leftmost box starts at the link's first glyph (the 'c' of "chapter"), i.e. after the
+        // unlinked "see " that precedes it.
+        let glyphs = page_glyphs(&pages[0], &opts, &font);
+        let link_start = glyphs
+            .iter()
+            .find(|g| g.ch == 'c')
+            .expect("the link's first glyph");
+        let leftmost = links
+            .iter()
+            .min_by(|a, b| a.x0.total_cmp(&b.x0))
+            .expect("a box");
+        assert!(
+            (leftmost.x0 - link_start.x0).abs() < 1.0,
+            "box starts at the linked text ({} vs {})",
+            leftmost.x0,
+            link_start.x0
+        );
+        assert!(links.iter().all(|l| l.x1 > l.x0 && l.x1 <= 4000.0));
+        // Vertically each box is the line box, matching the glyphs on that line.
+        assert!(links
+            .iter()
+            .all(|l| (l.y0 - link_start.y0).abs() < 1.0 && l.y1 > l.y0));
+    }
+
+    #[test]
+    fn page_link_rects_ignores_unlinked_text() {
+        let font = AbFont::default_font();
+        let opts = LayoutOpts::new(400.0, 600.0, 18.0);
+        let pages = paginate(&[paragraph("just prose, no links here")], &opts, &font);
+        assert!(page_link_rects(&pages[0], &opts, &font).is_empty());
+    }
+
+    #[test]
+    fn page_link_rects_carries_external_href_verbatim() {
+        let font = AbFont::default_font();
+        let opts = LayoutOpts::new(4000.0, 600.0, 18.0);
+        let href = "https://example.com/a?b=1#c";
+        let pages = paginate(&[linked_paragraph("", "visit", href)], &opts, &font);
+        let links = page_link_rects(&pages[0], &opts, &font);
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].href, href, "external href is untouched");
+    }
+
+    #[test]
+    fn page_link_rects_splits_a_link_across_lines() {
+        // A link long enough to wrap yields one box per line it occupies.
+        let font = AbFont::default_font();
+        let opts = LayoutOpts::new(140.0, 600.0, 18.0);
+        let long = "a very long hyperlink that certainly wraps onto a second line";
+        let pages = paginate(&[linked_paragraph("", long, "target.xhtml")], &opts, &font);
+        let links = page_link_rects(&pages[0], &opts, &font);
+        assert!(
+            links.len() >= 2,
+            "a wrapped link spans multiple boxes, got {}",
+            links.len()
+        );
+        assert!(links.iter().all(|l| l.href == "target.xhtml"));
     }
 
     fn ink_count(c: &GrayCanvas) -> usize {

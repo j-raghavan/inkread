@@ -14,6 +14,10 @@ number is given in parentheses.
 
 ### Added
 
+- Links inside EPUBs are now followable: tapping an *In This Issue* entry, a contents entry, a
+  footnote reference or any in-book cross-reference jumps to its target, a `#fragment` link lands on
+  the page holding that anchor, and external `http(s)` links open in the browser. Fixed-layout PDF
+  links already worked; the reflowable backend now reports them too (#270).
 - `CHANGELOG.md` (this file), reconstructed from the tags, and an Unreleased line is now part of the
   PR checklist in `CONTRIBUTING.md`.
 - Property-based tests (`proptest`) for `PinPosition` round-trip and ordering totality, the
