@@ -23,7 +23,10 @@ pub mod layout;
 pub mod measure;
 pub mod render;
 mod transcode;
-pub use content::{parse_blocks, parse_blocks_with, Block, Inline, TextRun};
+pub use content::{
+    parse_blocks, parse_blocks_anchored, parse_blocks_with, Anchor, Block, ChapterContent, Inline,
+    TextRun,
+};
 pub use css::{BlockStyle, Length, PageBreak, Stylesheet};
 pub use img::ImageError;
 pub use layout::{

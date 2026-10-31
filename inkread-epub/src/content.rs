@@ -129,6 +129,25 @@ impl Block {
     }
 }
 
+/// A fragment-link target declared in a chapter: an element `id` (or an `<a name>`), mapped to the
+/// reading-order index of the [`Block`] its content begins in. `reader-core` resolves an in-book
+/// `href` ending in `#id` to a page through this (#270). Block-granular on purpose: an id inside a
+/// block points at that block, which is where a jump should land.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Anchor {
+    /// The fragment identifier, without the leading `#`.
+    pub id: String,
+    /// Reading-order index of the block the anchor sits in (matches `SourceAnchor::block`).
+    pub block: usize,
+}
+
+/// A parsed chapter: its linear [`Block`]s and the fragment [`Anchor`]s declared within them.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ChapterContent {
+    pub blocks: Vec<Block>,
+    pub anchors: Vec<Anchor>,
+}
+
 /// Accumulated inline emphasis as the walker descends styled spans.
 #[derive(Debug, Clone, Copy, Default)]
 struct Style {
@@ -193,11 +212,18 @@ pub fn parse_blocks(html: &str) -> Vec<Block> {
     parse_blocks_with(html, &Stylesheet::default())
 }
 
-/// Parse a chapter's XHTML against the book's `sheet`. Resolves `<body>` and walks it; loose inline
-/// content between block elements becomes anonymous paragraphs. The chapter's own `<style>` blocks
-/// are layered over `sheet` (later source wins). Never panics.
+/// As [`parse_blocks_anchored`], discarding the fragment anchors — for callers that only paginate.
 #[must_use]
 pub fn parse_blocks_with(html: &str, sheet: &Stylesheet) -> Vec<Block> {
+    parse_blocks_anchored(html, sheet).blocks
+}
+
+/// Parse a chapter's XHTML against the book's `sheet`, returning both its [`Block`]s and the
+/// fragment [`Anchor`]s declared within them (#270). Resolves `<body>` and walks it; loose inline
+/// content between block elements becomes anonymous paragraphs; the chapter's own `<style>` blocks
+/// are layered over `sheet` (later source wins). Never panics.
+#[must_use]
+pub fn parse_blocks_anchored(html: &str, sheet: &Stylesheet) -> ChapterContent {
     let doc = Html::parse_document(html);
     let root = doc.tree.root();
 
@@ -219,15 +245,68 @@ pub fn parse_blocks_with(html: &str, sheet: &Stylesheet) -> Vec<Block> {
     let start = find_body(root).unwrap_or(root);
     let mut out = Vec::new();
     let mut pending: Vec<Inline> = Vec::new();
+    // `pending_ids` holds ids declared by a container (or an empty/blank block) that are waiting to
+    // bind to the next block emitted; `anchors` is the resolved id→block map.
+    let mut anchors: Vec<Anchor> = Vec::new();
+    let mut pending_ids: Vec<String> = Vec::new();
     walk_blocks(
         start,
         &mut out,
         &mut pending,
+        &mut anchors,
+        &mut pending_ids,
         &parsed,
         BlockStyle::default(),
     );
-    flush_paragraph(&mut out, &mut pending, BlockStyle::default());
-    out
+    flush_paragraph(
+        &mut out,
+        &mut pending,
+        &mut anchors,
+        &mut pending_ids,
+        BlockStyle::default(),
+    );
+    ChapterContent {
+        blocks: out,
+        anchors,
+    }
+}
+
+/// The fragment-target ids an element itself declares: its `id`, plus an `<a name>`.
+fn own_anchor_ids(el: &scraper::node::Element) -> Vec<String> {
+    let mut ids = Vec::new();
+    if let Some(id) = el.attr("id").filter(|s| !s.is_empty()) {
+        ids.push(id.to_string());
+    }
+    if el.name() == "a" {
+        if let Some(name) = el.attr("name").filter(|s| !s.is_empty()) {
+            ids.push(name.to_string());
+        }
+    }
+    ids
+}
+
+/// Every fragment-target id in `node`'s subtree (including `node` itself), in document order — the
+/// ids a block "contains", such as a footnote `<a id>` sitting inside a paragraph.
+fn subtree_anchor_ids(node: NodeRef<Node>) -> Vec<String> {
+    node.descendants()
+        .filter_map(|d| match d.value() {
+            Node::Element(el) => Some(el),
+            _ => None,
+        })
+        .flat_map(own_anchor_ids)
+        .collect()
+}
+
+/// Bind the `pending` container ids and this block's own `ids` to the block at index `block`.
+fn bind_anchors(
+    anchors: &mut Vec<Anchor>,
+    pending: &mut Vec<String>,
+    block: usize,
+    ids: Vec<String>,
+) {
+    for id in pending.drain(..).chain(ids) {
+        anchors.push(Anchor { id, block });
+    }
 }
 
 /// Concatenate the text of every `<style>` element in the document, head or body. Separated by
@@ -294,6 +373,8 @@ fn walk_blocks(
     node: NodeRef<Node>,
     out: &mut Vec<Block>,
     pending: &mut Vec<Inline>,
+    anchors: &mut Vec<Anchor>,
+    pending_ids: &mut Vec<String>,
     sheet: &simplecss::StyleSheet<'_>,
     inherited: BlockStyle,
 ) {
@@ -304,18 +385,23 @@ fn walk_blocks(
                 let name = el.name();
                 match name {
                     "p" => {
-                        flush_paragraph(out, pending, inherited);
+                        flush_paragraph(out, pending, anchors, pending_ids, inherited);
+                        let idx = out.len();
                         let content = collect_inlines(child);
                         if !is_blank(&content) {
                             out.push(Block::Paragraph {
                                 content,
                                 style: declared(child, el, sheet, inherited),
                             });
+                            bind_anchors(anchors, pending_ids, idx, subtree_anchor_ids(child));
+                        } else {
+                            pending_ids.extend(subtree_anchor_ids(child));
                         }
                     }
                     "h1" | "h2" | "h3" | "h4" | "h5" | "h6" => {
-                        flush_paragraph(out, pending, inherited);
+                        flush_paragraph(out, pending, anchors, pending_ids, inherited);
                         let level = name.as_bytes()[1] - b'0';
+                        let idx = out.len();
                         let content = collect_inlines(child);
                         if !is_blank(&content) {
                             out.push(Block::Heading {
@@ -323,58 +409,88 @@ fn walk_blocks(
                                 content,
                                 style: declared(child, el, sheet, inherited),
                             });
+                            bind_anchors(anchors, pending_ids, idx, subtree_anchor_ids(child));
+                        } else {
+                            pending_ids.extend(subtree_anchor_ids(child));
                         }
                     }
                     "br" => pending.push(Inline::Break),
                     "hr" => {
-                        flush_paragraph(out, pending, inherited);
+                        flush_paragraph(out, pending, anchors, pending_ids, inherited);
+                        let idx = out.len();
                         out.push(Block::Rule {
                             style: declared(child, el, sheet, inherited),
                         });
+                        bind_anchors(anchors, pending_ids, idx, own_anchor_ids(el));
                     }
                     "table" => {
-                        flush_paragraph(out, pending, inherited);
+                        flush_paragraph(out, pending, anchors, pending_ids, inherited);
                         let own = declared(child, el, sheet, inherited);
+                        // The table's own id binds to its first row.
+                        pending_ids.extend(own_anchor_ids(el));
                         let start = out.len();
-                        walk_table(child, out, sheet, own.inherited_only());
+                        walk_table(
+                            child,
+                            out,
+                            anchors,
+                            pending_ids,
+                            sheet,
+                            own.inherited_only(),
+                        );
                         apply_container_style(&mut out[start..], &own);
                     }
                     "ul" | "ol" => {
-                        flush_paragraph(out, pending, inherited);
+                        flush_paragraph(out, pending, anchors, pending_ids, inherited);
                         let own = declared(child, el, sheet, inherited);
+                        // The list's own id binds to its first item.
+                        pending_ids.extend(own_anchor_ids(el));
                         let start = out.len();
-                        walk_list(child, name == "ol", out, sheet, own.inherited_only());
+                        walk_list(
+                            child,
+                            name == "ol",
+                            out,
+                            anchors,
+                            pending_ids,
+                            sheet,
+                            own.inherited_only(),
+                        );
                         apply_container_style(&mut out[start..], &own);
                     }
                     "img" => {
                         // Standalone (block-level) image.
-                        flush_paragraph(out, pending, inherited);
+                        flush_paragraph(out, pending, anchors, pending_ids, inherited);
                         if let Some(src) = el.attr("src") {
+                            let idx = out.len();
                             out.push(Block::Image {
                                 src: src.to_string(),
                                 alt: el.attr("alt").unwrap_or_default().to_string(),
                                 style: declared(child, el, sheet, inherited),
                             });
+                            bind_anchors(anchors, pending_ids, idx, own_anchor_ids(el));
                         }
                     }
                     _ if NON_CONTENT_TAGS.contains(&name) => {}
                     _ if INLINE_TAGS.contains(&name) => {
                         // Inline emphasis at block level → fold into the anonymous paragraph, the
                         // tag's *own* emphasis included: `<em>x</em>` between two paragraphs is
-                        // italic, and descending straight into its children would drop that.
+                        // italic, and descending straight into its children would drop that. Any id
+                        // it carries binds to the anonymous paragraph it becomes part of.
+                        pending_ids.extend(subtree_anchor_ids(child));
                         collect_element(child, el, Style::default(), None, pending);
                     }
                     // Any other element (div/section/blockquote/figure/article/… or unknown) is a
                     // transparent block container: flush, then descend so its content forms its own
                     // blocks rather than merging across the boundary. Its declared style descends
-                    // with it — a `<div class="titlepage">` styles the blocks it wraps.
+                    // with it — a `<div class="titlepage">` styles the blocks it wraps. Its own id
+                    // binds to the first block emitted inside it.
                     _ => {
                         let own = declared(child, el, sheet, inherited);
                         let descends = own.inherited_only();
-                        flush_paragraph(out, pending, inherited);
+                        flush_paragraph(out, pending, anchors, pending_ids, inherited);
+                        pending_ids.extend(own_anchor_ids(el));
                         let start = out.len();
-                        walk_blocks(child, out, pending, sheet, descends);
-                        flush_paragraph(out, pending, descends);
+                        walk_blocks(child, out, pending, anchors, pending_ids, sheet, descends);
+                        flush_paragraph(out, pending, anchors, pending_ids, descends);
                         apply_container_style(&mut out[start..], &own);
                     }
                 }
@@ -392,6 +508,8 @@ fn walk_blocks(
 fn walk_table(
     node: NodeRef<Node>,
     out: &mut Vec<Block>,
+    anchors: &mut Vec<Anchor>,
+    pending_ids: &mut Vec<String>,
     sheet: &simplecss::StyleSheet<'_>,
     inherited: BlockStyle,
 ) {
@@ -400,14 +518,20 @@ fn walk_table(
             continue;
         };
         match el.name() {
-            "thead" | "tbody" | "tfoot" => walk_table(child, out, sheet, inherited),
+            "thead" | "tbody" | "tfoot" => {
+                walk_table(child, out, anchors, pending_ids, sheet, inherited);
+            }
             "caption" => {
+                let idx = out.len();
                 let content = collect_inlines(child);
                 if !is_blank(&content) {
                     out.push(Block::Paragraph {
                         content,
                         style: declared(child, el, sheet, inherited),
                     });
+                    bind_anchors(anchors, pending_ids, idx, own_anchor_ids(el));
+                } else {
+                    pending_ids.extend(own_anchor_ids(el));
                 }
             }
             "tr" => {
@@ -424,10 +548,15 @@ fn walk_table(
                     .collect();
                 // A row of nothing but spacing cells is layout scaffolding, not content.
                 if !cells.is_empty() && !cells.iter().all(Vec::is_empty) {
+                    let idx = out.len();
                     out.push(Block::Row {
                         style: hoist_edge_breaks(&cells, style),
                         cells,
                     });
+                    // Only the row's own id (cell-internal ids index a nested block list, not `out`).
+                    bind_anchors(anchors, pending_ids, idx, own_anchor_ids(el));
+                } else {
+                    pending_ids.extend(own_anchor_ids(el));
                 }
             }
             _ => {}
@@ -503,8 +632,26 @@ fn walk_cell(
     .overlaid_with(&own.inherited_only());
     let mut out = Vec::new();
     let mut pending = Vec::new();
-    walk_blocks(node, &mut out, &mut pending, sheet, descends);
-    flush_paragraph(&mut out, &mut pending, descends);
+    // A cell's blocks form a nested list, not the chapter's `out`, so their indices do not address a
+    // page; anchors inside a cell are collected into throwaway buffers and dropped (#270).
+    let mut anchors = Vec::new();
+    let mut pending_ids = Vec::new();
+    walk_blocks(
+        node,
+        &mut out,
+        &mut pending,
+        &mut anchors,
+        &mut pending_ids,
+        sheet,
+        descends,
+    );
+    flush_paragraph(
+        &mut out,
+        &mut pending,
+        &mut anchors,
+        &mut pending_ids,
+        descends,
+    );
     apply_container_style(&mut out, &own);
     out
 }
@@ -538,6 +685,8 @@ fn walk_list(
     node: NodeRef<Node>,
     ordered: bool,
     out: &mut Vec<Block>,
+    anchors: &mut Vec<Anchor>,
+    pending_ids: &mut Vec<String>,
     sheet: &simplecss::StyleSheet<'_>,
     inherited: BlockStyle,
 ) {
@@ -546,6 +695,7 @@ fn walk_list(
         if let Node::Element(el) = child.value() {
             if el.name() == "li" {
                 index += 1;
+                let idx = out.len();
                 let content = collect_inlines(child);
                 if !is_blank(&content) {
                     out.push(Block::ListItem {
@@ -554,6 +704,9 @@ fn walk_list(
                         content,
                         style: declared(child, el, sheet, inherited),
                     });
+                    bind_anchors(anchors, pending_ids, idx, subtree_anchor_ids(child));
+                } else {
+                    pending_ids.extend(subtree_anchor_ids(child));
                 }
             }
         }
@@ -679,16 +832,24 @@ fn push_text(out: &mut Vec<Inline>, raw: &str, style: Style, href: Option<&str>)
 
 /// Flush the pending anonymous-block inlines as a paragraph (if non-blank), clearing the buffer.
 /// An anonymous block has no element of its own, so it takes the enclosing container's `style`.
-fn flush_paragraph(out: &mut Vec<Block>, pending: &mut Vec<Inline>, style: BlockStyle) {
+fn flush_paragraph(
+    out: &mut Vec<Block>,
+    pending: &mut Vec<Inline>,
+    anchors: &mut Vec<Anchor>,
+    pending_ids: &mut Vec<String>,
+    style: BlockStyle,
+) {
     if pending.is_empty() {
         return;
     }
     trim_edges(pending);
     if !is_blank(pending) {
+        let idx = out.len();
         out.push(Block::Paragraph {
             content: std::mem::take(pending),
             style,
         });
+        bind_anchors(anchors, pending_ids, idx, Vec::new());
     } else {
         pending.clear();
     }

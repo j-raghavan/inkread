@@ -549,3 +549,66 @@ fn cells_keep_their_inline_emphasis() {
         "the <em> run should still be italic"
     );
 }
+
+/// The anchors a chapter declares, as `(id, block)` pairs — the #270 fragment map.
+fn anchors_of(html: &str) -> Vec<(String, usize)> {
+    parse_blocks_anchored(html, &Stylesheet::default())
+        .anchors
+        .into_iter()
+        .map(|a| (a.id, a.block))
+        .collect()
+}
+
+#[test]
+fn block_element_id_maps_to_its_own_block() {
+    // A paragraph and a heading each carry an id → the id resolves to that block's index.
+    let a = anchors_of(&body(
+        r#"<p>intro</p><h2 id="sec2">Section Two</h2><p id="p3">body</p>"#,
+    ));
+    assert_eq!(a, vec![("sec2".into(), 1), ("p3".into(), 2)]);
+}
+
+#[test]
+fn inline_anchor_inside_a_paragraph_maps_to_that_paragraph() {
+    // A footnote target `<a id>` sitting mid-paragraph binds to the paragraph it lives in.
+    let a = anchors_of(&body(
+        r##"<p>one</p><p>see <a id="fn1" href="#x">note</a> here</p>"##,
+    ));
+    assert_eq!(a, vec![("fn1".into(), 1)]);
+}
+
+#[test]
+fn legacy_a_name_is_an_anchor() {
+    // Older EPUBs mark targets with `<a name>` rather than `id`.
+    let a = anchors_of(&body(r#"<p><a name="top"></a>start</p>"#));
+    assert_eq!(a, vec![("top".into(), 0)]);
+}
+
+#[test]
+fn container_id_binds_to_its_first_inner_block() {
+    // A `<div id="article2">` wrapping content resolves to the first block inside it, which is
+    // where an "In This Issue" jump should land (#270).
+    let a = anchors_of(&body(
+        r#"<p>lead</p><div id="article2"><h3>Headline</h3><p>story</p></div>"#,
+    ));
+    assert_eq!(a, vec![("article2".into(), 1)]);
+}
+
+#[test]
+fn list_item_id_maps_to_its_item() {
+    let a = anchors_of(&body(r#"<ul><li>first</li><li id="two">second</li></ul>"#));
+    assert_eq!(a, vec![("two".into(), 1)]);
+}
+
+#[test]
+fn no_ids_means_no_anchors() {
+    assert!(anchors_of(&body("<p>plain</p><h1>title</h1>")).is_empty());
+}
+
+#[test]
+fn an_id_on_a_blank_block_carries_to_the_next_real_block() {
+    // An empty anchor paragraph (common: `<p id="x"></p>` before content) must not be lost; it
+    // binds to the next block that actually renders.
+    let a = anchors_of(&body(r#"<p id="anchor"></p><p>the real content</p>"#));
+    assert_eq!(a, vec![("anchor".into(), 0)]);
+}
