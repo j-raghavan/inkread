@@ -232,10 +232,13 @@ class BottomBarController(private val host: Host) {
                 // wrapped to a second line, so some cells were a line taller and the row went ragged.
                 // Pin every label to one line and let it shrink to fit the cell, keeping the designed
                 // size (11sp x Menu Size) when it fits and the whole row one height when it doesn't.
+                // Floor at 8sp (the smallest mono still legible on the panel); the max is coerced
+                // above it so autosize's min-less-than-max contract holds at any Menu Size.
                 maxLines = 1
-                val max = Ink.sp(11f).toInt().coerceAtLeast(9)
+                val minSp = 8
+                val maxSp = Ink.sp(11f).toInt().coerceAtLeast(minSp + 1)
                 androidx.core.widget.TextViewCompat.setAutoSizeTextTypeUniformWithConfiguration(
-                    this, 8, max, 1, android.util.TypedValue.COMPLEX_UNIT_SP,
+                    this, minSp, maxSp, 1, android.util.TypedValue.COMPLEX_UNIT_SP,
                 )
             })
             controls.addView(cell, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))

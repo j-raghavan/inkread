@@ -256,7 +256,7 @@ pub extern "system" fn Java_dev_jraghavan_inkread_NativeBridge_nativePageCount<'
     .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
 }
 
-// nativeReadingMinutesLeft(pagesLeft) : int — estimated minutes to finish `pagesLeft` more pages,
+// nativeReadingMinutesLeft(pagesLeft) : int. Estimated minutes to finish `pagesLeft` more pages,
 // at the core's default per-page cost (#98). Handle-less: pure policy arithmetic, no document, so
 // the cached-state bottom bar can ask without an engine round-trip. `0` means nothing (meaningful)
 // is left; the shell decides visibility.

@@ -1,6 +1,6 @@
 //! Reading-time estimate (#98): a rough "time left" from the pages still ahead.
 //!
-//! Deliberately crude — a fixed per-page cost, not a measurement. A device page holds a different
+//! Deliberately crude: a fixed per-page cost, not a measurement. A device page holds a different
 //! amount of text in a reflowed EPUB than in a fixed-layout PDF, so this is an orientation aid, not
 //! a clock. Deriving the per-page cost from the reader's observed turn cadence is the obvious later
 //! refinement (#98); the policy lives here, host-tested, so that change is a one-place edit.
