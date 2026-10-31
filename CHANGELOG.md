@@ -14,6 +14,8 @@ number is given in parentheses.
 
 ### Added
 
+- An estimated time left ("~12 min left") now shows under the page slider in the reader's bottom
+  bar, hidden when the total page count is unknown or on the last page (#98).
 - Links inside EPUBs are now followable: tapping an *In This Issue* entry, a contents entry, a
   footnote reference or any in-book cross-reference jumps to its target, a `#fragment` link lands on
   the page holding that anchor, and external `http(s)` links open in the browser. Fixed-layout PDF
@@ -63,6 +65,11 @@ number is given in parentheses.
 
 ### Fixed
 
+- The bottom bar's control-row labels no longer wrap to a second line at a large Menu Size on a
+  narrow panel: each label is held to one line and shrinks to fit its cell, so the row stays one
+  height instead of going ragged (#247).
+- The "Marks" control now uses a stacked-ribbon icon so it no longer looks like the "Contents" list
+  icon beside it (#253).
 - Production `unwrap`/`expect` removed from the PDF backend, `PinPosition` serialization, text
   selection, and the PDF text-block splitter — paths the JNI bridge reaches, where an unwind would
   have violated RR21-FR3. A missing symbol-fallback face or hyphenation pattern set now degrades
