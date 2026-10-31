@@ -225,9 +225,18 @@ class BottomBarController(private val host: Host) {
                 LinearLayout.LayoutParams(Ink.sdp(39), Ink.sdp(39)),
             )
             cell.addView(TextView(activity).apply {
-                text = label; setTextColor(Ink.inkSoft); textSize = Ink.sp(11f)
+                text = label; setTextColor(Ink.inkSoft)
                 typeface = Ink.mono; letterSpacing = 0.02f
                 gravity = Gravity.CENTER; setPadding(0, Ink.sdp(5), 0, 0)
+                // #247: at a large Menu Size on a narrow panel the label outgrew its 1/12 cell and
+                // wrapped to a second line, so some cells were a line taller and the row went ragged.
+                // Pin every label to one line and let it shrink to fit the cell, keeping the designed
+                // size (11sp x Menu Size) when it fits and the whole row one height when it doesn't.
+                maxLines = 1
+                val max = Ink.sp(11f).toInt().coerceAtLeast(9)
+                androidx.core.widget.TextViewCompat.setAutoSizeTextTypeUniformWithConfiguration(
+                    this, 8, max, 1, android.util.TypedValue.COMPLEX_UNIT_SP,
+                )
             })
             controls.addView(cell, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         }
