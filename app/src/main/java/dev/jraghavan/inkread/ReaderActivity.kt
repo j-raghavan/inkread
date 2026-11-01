@@ -305,6 +305,20 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         override fun diag(msg: () -> String) = this@ReaderActivity.diag(msg)
     })
 
+    /** Auto page-turn (#97): hands-free one-page-per-interval advancing. It drives the same
+     *  coalesced turn path as a manual tap, and is cancelled by any manual touch (see the touch
+     *  listener) and in onPause/onDestroy, so no timer leaks. The handler schedule/cancel are wired
+     *  here; all the state logic is in [AutoPageTurn], host-tested. */
+    private val autoTurn = AutoPageTurn(
+        object : AutoPageTurn.Host {
+            override val currentPage get() = this@ReaderActivity.currentPage
+            override val pageCount get() = this@ReaderActivity.pageCount
+            override fun advanceOnePage() = queuePageTurn(+1)
+        },
+        schedule = { delayMs, run -> mainHandler.postDelayed(run, delayMs) },
+        cancel = { run -> mainHandler.removeCallbacks(run) },
+    )
+
     // ---- finger gestures: the panel DOES deliver finger UP (action=1) and a continuous stationary
     //      MOVE stream while held, so a tap (quick DOWN→UP) and a long-press (MOVEs past the
     //      threshold) are distinguishable. Tap → page nav fires on UP; a 500ms hold → word lookup.
@@ -420,6 +434,9 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         //     touch within PALM_REJECT_MS of a stylus event (touch or hover; see
         //     dispatchGenericMotionEvent).
         surfaceView.setOnTouchListener { _, event ->
+            // #97: any manual touch (finger or pen) ends hands-free auto page-turn. Auto-turn drives
+            // the turn path directly and never dispatches touches, so this cannot cancel itself.
+            if (event.actionMasked == MotionEvent.ACTION_DOWN) autoTurn.stop()
             val toolType = event.getToolType(0)
             if (toolType == MotionEvent.TOOL_TYPE_STYLUS || toolType == MotionEvent.TOOL_TYPE_ERASER) {
                 // The firmware paints the live ink (PEN); the app captures the same points to bake +
@@ -643,6 +660,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         if (::toolOptions.isInitialized) toolOptions.dismiss()
         mainHandler.removeCallbacks(fingerLongPress) // drop any pending finger gesture on leaving
         mainHandler.removeCallbacks(pendingCentreMenu) // don't pop the bar on a paused/finishing activity (#54)
+        autoTurn.stop() // #97: never let the hands-free timer fire against a backgrounded reader
         dismissReflowProgress() // don't leak the "Reflowing…" dialog if backgrounded mid-reflow (#55)
         stylus.cancelPendingOnPause() // drop the pending pen-lookup + deferred flush (explicit save below)
         ink.teardown() // release the firmware ink claim + clear the overlay
@@ -765,6 +783,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
     }
 
     override fun onDestroy() {
+        autoTurn.stop() // #97: drop any pending hands-free turn before the reader goes away
         engine.execute {
             closeDocument()
             dict.close()
