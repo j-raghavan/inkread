@@ -14,6 +14,9 @@ number is given in parentheses.
 
 ### Added
 
+- Hands-free **auto page-turn**: an Auto control in the reader's bottom bar turns the page by itself
+  every 15, 30, 45, 60 or 90 seconds until you touch the screen or the book ends. The pace you pick
+  is remembered for next time (#97).
 - An estimated time left ("~12 min left") now shows under the page slider in the reader's bottom
   bar, hidden when the total page count is unknown or on the last page (#98).
 - Links inside EPUBs are now followable: tapping an *In This Issue* entry, a contents entry, a
