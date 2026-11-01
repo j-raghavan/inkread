@@ -385,7 +385,12 @@ class BottomBarController(private val host: Host) {
         val presets = AutoPageTurn.PRESETS
         val remembered = host.autoTurnIntervalSec
         val labels = Array(presets.size + 1) { i ->
-            if (i == 0) "Off" else "Every ${presets[i - 1]}s".let { if (presets[i - 1] == remembered) "$it  •" else it }
+            if (i == 0) {
+                "Off"
+            } else {
+                val s = presets[i - 1]
+                if (s == remembered) "Every ${s}s  •" else "Every ${s}s" // bullet marks the last-used pace
+            }
         }
         AlertDialog.Builder(activity, R.style.InkDialog)
             .setTitle("Auto page-turn")

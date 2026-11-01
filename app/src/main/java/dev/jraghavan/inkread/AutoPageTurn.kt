@@ -55,7 +55,7 @@ class AutoPageTurn(
             return
         }
         isRunning = true
-        schedule(intervalSec * 1000L, tick)
+        schedule(delayMs(), tick)
     }
 
     /** Stop auto-turn and drop any pending turn. Safe to call when already stopped. */
@@ -73,10 +73,12 @@ class AutoPageTurn(
             return
         }
         host.advanceOnePage()
-        schedule(intervalSec * 1000L, tick)
+        schedule(delayMs(), tick)
     }
 
     private fun hasNextPage(): Boolean = host.pageCount > 0 && host.currentPage < host.pageCount - 1
+
+    private fun delayMs(): Long = intervalSec * 1000L
 
     companion object {
         const val MIN_INTERVAL_SEC = 15
