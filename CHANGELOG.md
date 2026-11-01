@@ -65,6 +65,12 @@ number is given in parentheses.
 
 ### Fixed
 
+- The ink tool palette now reads clearly on the e-ink panel. The selected colour swatch is ringed
+  with a gap between the ring and the swatch and its name is underlined, so the chosen colour is
+  unmistakable instead of a black ring lost against a dark grey. The highlighter shades are deepened,
+  and a darker colour (Pink) is now the default, so a highlight shows as a clear grey tint rather
+  than a near-white one you can miss. The eraser marks its sweep with a thin dotted trail in place of
+  the wide grey band, which no longer leaves heavy ghosting behind (#253).
 - The bottom bar's control-row labels no longer wrap to a second line at a large Menu Size on a
   narrow panel: each label is held to one line and shrinks to fit its cell, so the row stays one
   height instead of going ragged (#247).

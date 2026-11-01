@@ -2,7 +2,10 @@ package dev.jraghavan.inkread
 
 import android.app.Activity
 import android.graphics.Color
+import android.graphics.Paint
+import android.graphics.drawable.Drawable
 import android.graphics.drawable.GradientDrawable
+import android.graphics.drawable.LayerDrawable
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
@@ -235,7 +238,13 @@ class ToolOptions(
             v.background = circleBg(palette[i], i == selected)
         }
         labels.forEachIndexed { i, t ->
-            t.setTextColor(if (i == selected) Ink.ink else Ink.muted)
+            val sel = i == selected
+            t.setTextColor(if (sel) Ink.ink else Ink.muted)
+            // Underline the chosen colour's name as a second, unambiguous cue (#253): on a
+            // monochrome panel the ring alone can be hard to read, and the names disambiguate greys.
+            t.paintFlags =
+                if (sel) t.paintFlags or Paint.UNDERLINE_TEXT_FLAG
+                else t.paintFlags and Paint.UNDERLINE_TEXT_FLAG.inv()
         }
     }
 
@@ -303,16 +312,31 @@ class ToolOptions(
         return cell
     }
 
-    private fun circleBg(packed: Int, selected: Boolean): GradientDrawable {
+    private fun circleBg(packed: Int, selected: Boolean): Drawable {
         val r = (packed ushr 24) and 0xFF
         val g = (packed ushr 16) and 0xFF
         val b = (packed ushr 8) and 0xFF
-        return GradientDrawable().apply {
+        val fill = GradientDrawable().apply {
             shape = GradientDrawable.OVAL
             setColor(Color.rgb(r, g, b)) // full opacity even for translucent inks
-            // Selected = thick black ring; others = thin grey ring so light swatches still read.
-            setStroke(if (selected) dp(4) else Ink.hair(), if (selected) Ink.ink else Ink.ringSoft)
         }
+        if (!selected) {
+            // Unselected: a thin grey ring so even light swatches keep a visible edge.
+            fill.setStroke(Ink.hair(), Ink.ringSoft)
+            return fill
+        }
+        // Selected: a bold black ring held OFF the swatch by a clear gap (#253). The ring used to
+        // sit flush on the swatch edge, so against a dark-grey swatch on the e-ink panel the black
+        // ring was nearly invisible and you couldn't tell which colour was chosen. The ring is the
+        // full-size layer; the fill is inset past the ring and the gap, leaving paper showing
+        // between them.
+        val ring = GradientDrawable().apply {
+            shape = GradientDrawable.OVAL
+            setColor(Color.TRANSPARENT)
+            setStroke(dp(3), Ink.ink)
+        }
+        val inset = dp(6) // tuned so paper shows between the ring and the swatch
+        return LayerDrawable(arrayOf(ring, fill)).apply { setLayerInset(1, inset, inset, inset, inset) }
     }
 
     private fun swatchCell(packed: Int, name: String, selected: Boolean, onTap: () -> Unit): View {
@@ -335,6 +359,7 @@ class ToolOptions(
             letterSpacing = 0.04f
             gravity = Gravity.CENTER
             setTextColor(if (selected) Ink.ink else Ink.muted)
+            if (selected) paintFlags = paintFlags or Paint.UNDERLINE_TEXT_FLAG // #253: name underlined when chosen
             setPadding(0, dp(4), 0, 0)
         }
         cell.addView(circle)
