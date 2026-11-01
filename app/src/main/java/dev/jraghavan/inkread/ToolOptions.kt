@@ -335,7 +335,7 @@ class ToolOptions(
             setColor(Color.TRANSPARENT)
             setStroke(dp(3), Ink.ink)
         }
-        val inset = dp(6) // ring width + the gap to the swatch
+        val inset = dp(6) // tuned so paper shows between the ring and the swatch
         return LayerDrawable(arrayOf(ring, fill)).apply { setLayerInset(1, inset, inset, inset, inset) }
     }
 

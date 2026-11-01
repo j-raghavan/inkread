@@ -1911,7 +1911,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         // default highlight is visible out of the box. The index is session-only (not persisted),
         // so the reorder needs no migration, and existing ink keeps its own stored colour.
         val HIGHLIGHT_COLORS = intArrayOf(
-            0xE91E6380.toInt(), // Pink (default: darkest, reads clearly on e-ink)
+            0xE91E6380.toInt(), // Pink (default: a deep colour that reads clearly on e-ink)
             0x1565C080.toInt(), // Blue
             0xE6510080.toInt(), // Orange (deep)
             0x558B2F80.toInt(), // Green (deep)
