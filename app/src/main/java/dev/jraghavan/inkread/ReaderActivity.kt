@@ -1903,14 +1903,21 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         // REAL colours are stored per stroke (packed r<<24|g<<16|b<<8|a) and persisted in the
         // .inkbin sidecar, so a colour device / a future PDF-annotation export shows true colour.
         // On the MONOCHROME Supernote they just render as greys. Re-tap a tool to cycle its colour.
+        //
+        // #253: the light, translucent highlighter shades (yellow, green, orange) collapse to a
+        // near-white grey on the e-ink panel, so a highlight is easy to miss. The shades here are
+        // deepened to lower-luminance hues that read as a clear grey tint at the same translucent
+        // alpha (text under them still shows through), and a darker colour (Pink) now leads so the
+        // default highlight is visible out of the box. The index is session-only (not persisted),
+        // so the reorder needs no migration, and existing ink keeps its own stored colour.
         val HIGHLIGHT_COLORS = intArrayOf(
-            0xFFEB3B80.toInt(), // Yellow (translucent — keeps text readable)
-            0x9CCC6580.toInt(), // Green
-            0xF0629280.toInt(), // Pink
-            0x4FC3F780.toInt(), // Blue
-            0xFFB74D80.toInt(), // Orange
+            0xE91E6380.toInt(), // Pink (default: darkest, reads clearly on e-ink)
+            0x1565C080.toInt(), // Blue
+            0xE6510080.toInt(), // Orange (deep)
+            0x558B2F80.toInt(), // Green (deep)
+            0xB8860B80.toInt(), // Yellow (dark goldenrod: the deepest yellow that still reads yellow)
         )
-        val HIGHLIGHT_COLOR_NAMES = arrayOf("Yellow", "Green", "Pink", "Blue", "Orange")
+        val HIGHLIGHT_COLOR_NAMES = arrayOf("Pink", "Blue", "Orange", "Green", "Yellow")
         val PEN_COLORS = intArrayOf(
             0x000000FF.toInt(), // Black
             0x1565C0FF.toInt(), // Blue
