@@ -237,6 +237,9 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         override fun openDicts() = dict.showDictionariesDialog()
         override fun openAdjust() = adjust.show()
         override fun refreshNow() { engine.execute { refreshCadence.reset(); refreshPanel() } } // #99
+        override val autoTurnIntervalSec get() = AppSettings.autoTurnIntervalSec(this@ReaderActivity)
+        override fun startAutoTurn(intervalSec: Int) = this@ReaderActivity.startAutoTurn(intervalSec)
+        override fun stopAutoTurn() = autoTurn.stop()
     })
 
     /** Lasso selection + Define-tool text selection (ADR-INKREAD-0010) — owns the selection
@@ -304,6 +307,20 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         override fun lookupWord(word: String) = dict.lookupAndShow(word)
         override fun diag(msg: () -> String) = this@ReaderActivity.diag(msg)
     })
+
+    /** Auto page-turn (#97): hands-free one-page-per-interval advancing. It drives the same
+     *  coalesced turn path as a manual tap, and is cancelled by any manual touch (see the touch
+     *  listener) and in onPause/onDestroy, so no timer leaks. The handler schedule/cancel are wired
+     *  here; all the state logic is in [AutoPageTurn], host-tested. */
+    private val autoTurn = AutoPageTurn(
+        object : AutoPageTurn.Host {
+            override val currentPage get() = this@ReaderActivity.currentPage
+            override val pageCount get() = this@ReaderActivity.pageCount
+            override fun advanceOnePage() = queuePageTurn(+1)
+        },
+        schedule = { delayMs, run -> mainHandler.postDelayed(run, delayMs) },
+        cancel = { run -> mainHandler.removeCallbacks(run) },
+    )
 
     // ---- finger gestures: the panel DOES deliver finger UP (action=1) and a continuous stationary
     //      MOVE stream while held, so a tap (quick DOWN→UP) and a long-press (MOVEs past the
@@ -420,6 +437,9 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         //     touch within PALM_REJECT_MS of a stylus event (touch or hover; see
         //     dispatchGenericMotionEvent).
         surfaceView.setOnTouchListener { _, event ->
+            // #97: any manual touch (finger or pen) ends hands-free auto page-turn. Auto-turn drives
+            // the turn path directly and never dispatches touches, so this cannot cancel itself.
+            if (event.actionMasked == MotionEvent.ACTION_DOWN) autoTurn.stop()
             val toolType = event.getToolType(0)
             if (toolType == MotionEvent.TOOL_TYPE_STYLUS || toolType == MotionEvent.TOOL_TYPE_ERASER) {
                 // The firmware paints the live ink (PEN); the app captures the same points to bake +
@@ -643,6 +663,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         if (::toolOptions.isInitialized) toolOptions.dismiss()
         mainHandler.removeCallbacks(fingerLongPress) // drop any pending finger gesture on leaving
         mainHandler.removeCallbacks(pendingCentreMenu) // don't pop the bar on a paused/finishing activity (#54)
+        autoTurn.stop() // #97: never let the hands-free timer fire against a backgrounded reader
         dismissReflowProgress() // don't leak the "Reflowing…" dialog if backgrounded mid-reflow (#55)
         stylus.cancelPendingOnPause() // drop the pending pen-lookup + deferred flush (explicit save below)
         ink.teardown() // release the firmware ink claim + clear the overlay
@@ -765,6 +786,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
     }
 
     override fun onDestroy() {
+        autoTurn.stop() // #97: drop any pending hands-free turn before the reader goes away
         engine.execute {
             closeDocument()
             dict.close()
@@ -1416,6 +1438,15 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         } catch (e: android.content.ActivityNotFoundException) {
             Toast.makeText(this, "No app to open this link", Toast.LENGTH_SHORT).show()
         }
+    }
+
+    /** Start hands-free auto page-turn (#97): remember the pace, begin turning, and confirm. A start
+     *  at the last page turns nothing, so say so rather than appear to do nothing. */
+    private fun startAutoTurn(intervalSec: Int) {
+        AppSettings.setAutoTurnIntervalSec(this, intervalSec)
+        autoTurn.start(intervalSec)
+        val msg = if (autoTurn.isRunning) "Auto page-turn: every ${autoTurn.intervalSec}s" else "Already at the last page"
+        Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
     }
 
     /** Jump to an absolute page on the engine thread, then render + refresh (RR11-FR1). */
