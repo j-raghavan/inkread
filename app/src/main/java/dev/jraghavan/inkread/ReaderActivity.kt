@@ -237,6 +237,9 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         override fun openDicts() = dict.showDictionariesDialog()
         override fun openAdjust() = adjust.show()
         override fun refreshNow() { engine.execute { refreshCadence.reset(); refreshPanel() } } // #99
+        override val autoTurnIntervalSec get() = AppSettings.autoTurnIntervalSec(this@ReaderActivity)
+        override fun startAutoTurn(intervalSec: Int) = this@ReaderActivity.startAutoTurn(intervalSec)
+        override fun stopAutoTurn() = autoTurn.stop()
     })
 
     /** Lasso selection + Define-tool text selection (ADR-INKREAD-0010) — owns the selection
@@ -1435,6 +1438,15 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         } catch (e: android.content.ActivityNotFoundException) {
             Toast.makeText(this, "No app to open this link", Toast.LENGTH_SHORT).show()
         }
+    }
+
+    /** Start hands-free auto page-turn (#97): remember the pace, begin turning, and confirm. A start
+     *  at the last page turns nothing, so say so rather than appear to do nothing. */
+    private fun startAutoTurn(intervalSec: Int) {
+        AppSettings.setAutoTurnIntervalSec(this, intervalSec)
+        autoTurn.start(intervalSec)
+        val msg = if (autoTurn.isRunning) "Auto page-turn: every ${autoTurn.intervalSec}s" else "Already at the last page"
+        Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
     }
 
     /** Jump to an absolute page on the engine thread, then render + refresh (RR11-FR1). */

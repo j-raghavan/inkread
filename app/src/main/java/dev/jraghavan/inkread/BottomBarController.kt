@@ -91,6 +91,15 @@ class BottomBarController(private val host: Host) {
 
         /** Manual full (flashing) EPD refresh to clear ghosting now (#99); also resets the cadence. */
         fun refreshNow()
+
+        /** The last-chosen auto page-turn interval in seconds, to mark in the chooser (#97). */
+        val autoTurnIntervalSec: Int
+
+        /** Start hands-free auto page-turn at [intervalSec] seconds (#97). */
+        fun startAutoTurn(intervalSec: Int)
+
+        /** Stop hands-free auto page-turn (#97). */
+        fun stopAutoTurn()
     }
 
     private val activity: Activity get() = host.activity
@@ -274,6 +283,7 @@ class BottomBarController(private val host: Host) {
         control(R.drawable.ic_menu_dict, "Dicts") { host.openDicts() }
         // Document controls consolidated into one KOReader-style tabbed sheet (Rotate/Fit/Font/Display).
         control(R.drawable.ic_menu_adjust, "Adjust") { host.openAdjust() }
+        control(R.drawable.ic_menu_autoturn, "Auto") { showAutoTurn() } // hands-free page-turn (#97)
         control(R.drawable.ic_menu_refresh, "Refresh") { host.refreshNow() } // manual full flash (#99)
         control(R.drawable.ic_menu_open, "Open") { host.openPicker() }
         container.addView(controls)
@@ -363,6 +373,25 @@ class BottomBarController(private val host: Host) {
                 }
             }
             .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    /**
+     * Pick an auto page-turn interval, or turn it off (#97). Opening the bar already stopped any
+     * running auto-turn (any manual touch does), so this is where the reader starts it again; the
+     * last-used interval is marked so the same pace is one tap away.
+     */
+    private fun showAutoTurn() {
+        val presets = AutoPageTurn.PRESETS
+        val remembered = host.autoTurnIntervalSec
+        val labels = Array(presets.size + 1) { i ->
+            if (i == 0) "Off" else "Every ${presets[i - 1]}s".let { if (presets[i - 1] == remembered) "$it  •" else it }
+        }
+        AlertDialog.Builder(activity, R.style.InkDialog)
+            .setTitle("Auto page-turn")
+            .setItems(labels) { _, which ->
+                if (which == 0) host.stopAutoTurn() else host.startAutoTurn(presets[which - 1])
+            }
             .show()
     }
 
