@@ -18,6 +18,7 @@ object AppSettings {
     private const val KEY_TOOLBAR_HORIZONTAL = "toolbar_horizontal"
     private const val KEY_TOOLBAR_ON_LEFT = "toolbar_on_left"
     private const val KEY_TOOL_TIPS = "tool_tips"
+    private const val KEY_AUTO_TURN_INTERVAL_SEC = "auto_turn_interval_sec"
     private const val KEY_OPDS_URL = "opds_url"
     private const val KEY_OPDS_USER = "opds_user"
     private const val KEY_OPDS_PASSWORD = "opds_password"
@@ -88,6 +89,17 @@ object AppSettings {
 
     fun setToolTips(c: Context, value: Boolean) =
         prefs(c).edit().putBoolean(KEY_TOOL_TIPS, value).apply()
+
+    /**
+     * The last interval, in seconds, chosen for auto page-turn (#97). Only the interval is kept, not
+     * whether auto-turn was on: a freshly opened book never starts turning by itself, so the reader
+     * always starts it deliberately, at the pace they last used. Clamped to the supported range.
+     */
+    fun autoTurnIntervalSec(c: Context): Int =
+        AutoPageTurn.clampInterval(prefs(c).getInt(KEY_AUTO_TURN_INTERVAL_SEC, AutoPageTurn.DEFAULT_INTERVAL_SEC))
+
+    fun setAutoTurnIntervalSec(c: Context, value: Int) =
+        prefs(c).edit().putInt(KEY_AUTO_TURN_INTERVAL_SEC, AutoPageTurn.clampInterval(value)).apply()
 
     // ── Self-update (ADR-INKREAD-0014) ────────────────────────────────────────────────────────────
 
