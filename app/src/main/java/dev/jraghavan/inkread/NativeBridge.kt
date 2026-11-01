@@ -79,6 +79,10 @@ object NativeBridge {
     /** Page count of the open document. */
     external fun nativePageCount(handle: Long): Int
 
+    /** Estimated minutes to finish `pagesLeft` more pages, at the core's default per-page cost
+     *  (#98). Handle-less pure arithmetic; `0` means nothing meaningful is left to read. */
+    external fun nativeReadingMinutesLeft(pagesLeft: Int): Int
+
     /** The document's title from its metadata, or "" if none — stored so the library shows the real
      *  title instead of the filename. */
     external fun nativeDocTitle(handle: Long): String
