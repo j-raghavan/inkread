@@ -428,8 +428,11 @@ data class LinkRect(
     val targetPage: Int?,
     val uri: String?,
 ) {
-    /** Whether the normalized tap point `(nx, ny)` falls inside this link. */
-    fun contains(nx: Float, ny: Float): Boolean = nx in x0..x1 && ny in y0..y1
+    /** Whether the normalized tap point `(nx, ny)` falls inside this link, grown by [pad] (a
+     *  normalized margin) on every side so small links stay tappable (#299). [pad] defaults to 0 for
+     *  an exact hit-test. */
+    fun contains(nx: Float, ny: Float, pad: Float = 0f): Boolean =
+        nx in (x0 - pad)..(x1 + pad) && ny in (y0 - pad)..(y1 + pad)
 }
 
 /** A normalized highlight box `[0,1]` of a [Selection] (RR11 / D3). */
