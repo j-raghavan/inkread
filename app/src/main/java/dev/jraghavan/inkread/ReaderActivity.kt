@@ -1373,12 +1373,13 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             ReaderGestures.Zone.PREV -> queuePageTurn(-1)
             ReaderGestures.Zone.NEXT -> queuePageTurn(+1)
             ReaderGestures.Zone.CENTRE -> {
-                // Centre: a double-tap zooms toward the point (#54); a single tap opens the menu,
-                // deferred [DOUBLE_TAP_MS] so the first tap of a double-tap doesn't flash the bar open.
-                // (Edge page turns above stay immediate — no double-tap latency on navigation.)
+                // Centre: a double-tap zooms toward the point (#54); a single tap in the lower band
+                // opens the menu, deferred [DOUBLE_TAP_MS] so the first tap of a double-tap doesn't
+                // flash the bar open. A single tap higher up does nothing, leaving the upper page for
+                // links and reading (#299). (Edge page turns above stay immediate.)
                 mainHandler.removeCallbacks(pendingCentreMenu)
                 if (isCentreDoubleTap(x, y)) doubleTapZoom(x, y)
-                else mainHandler.postDelayed(pendingCentreMenu, DOUBLE_TAP_MS)
+                else if (ReaderGestures.isMenuZone(y, h)) mainHandler.postDelayed(pendingCentreMenu, DOUBLE_TAP_MS)
             }
         }
     }
@@ -1910,6 +1911,11 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
          */
         const val BOOKMARK_ZONE_W = 0.14f
         const val BOOKMARK_ZONE_H = 0.08f
+
+        /** The bottom menu opens only from a centre tap in the lower [MENU_ZONE_H] of the panel, as a
+         *  fraction so it holds on any panel. A centre tap higher up is left for links and reading
+         *  (#299). */
+        const val MENU_ZONE_H = 0.30f
 
         /** Normalized margin added around each link rect when hit-testing a tap, so small links
          *  (footnote markers, inline cross-references) are tappable without pixel-perfect aim

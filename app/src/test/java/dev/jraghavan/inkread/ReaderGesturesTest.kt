@@ -82,6 +82,28 @@ class ReaderGesturesTest {
         }
     }
 
+    // ---- bottom-menu zone (#299) ----
+
+    @Test
+    fun theMenuZoneIsOnlyTheLowerBand() {
+        assertTrue("bottom of the page opens the menu", ReaderGestures.isMenuZone(h * 0.95f, h))
+        assertFalse("mid page does not", ReaderGestures.isMenuZone(h * 0.5f, h))
+        assertFalse("top of the page does not", ReaderGestures.isMenuZone(h * 0.05f, h))
+    }
+
+    @Test
+    fun theMenuZoneNeedsASizedPanel() {
+        assertFalse(ReaderGestures.isMenuZone(10f, 0f))
+    }
+
+    @Test
+    fun theMenuZoneScalesWithThePanel() {
+        for (ph in listOf(2560f, 1872f)) {
+            assertTrue(ReaderGestures.isMenuZone(ph * 0.98f, ph))
+            assertFalse(ReaderGestures.isMenuZone(ph * 0.5f, ph))
+        }
+    }
+
     // ---- swipes ----
 
     @Test
