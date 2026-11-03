@@ -54,6 +54,18 @@ object ReaderGestures {
     ): Boolean = viewW > 0f && viewH > 0f && x > viewW * (1f - zoneW) && y < viewH * zoneH
 
     /**
+     * Whether a centre-third tap at height `y` falls in the lower band that opens the bottom menu
+     * (the bottom [zoneH] of the panel, as a fraction so it holds on any panel). Keeping the menu off
+     * the upper page leaves that area for links and reading, so a tap near a link no longer competes
+     * with the menu (#299).
+     */
+    fun isMenuZone(
+        y: Float,
+        viewH: Float,
+        zoneH: Float = ReaderActivity.MENU_ZONE_H,
+    ): Boolean = viewH > 0f && y > viewH * (1f - zoneH)
+
+    /**
      * The page delta a finger travel of `(dx, dy)` means, or `null` if it is not a page-turning
      * swipe. Swiping **left** goes forward, matching the direction the page moves.
      *

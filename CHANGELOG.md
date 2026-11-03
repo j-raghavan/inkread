@@ -68,6 +68,10 @@ number is given in parentheses.
 
 ### Fixed
 
+- In-document links are easier to follow: the tap target around each link is widened so small links
+  (footnote markers, inline cross-references) no longer need pixel-perfect aim, and a centre tap now
+  opens the bottom menu only from the lower band of the page, leaving the rest of the page for links
+  and reading rather than competing with them (#299).
 - The ink tool palette now reads clearly on the e-ink panel. The selected colour swatch is ringed
   with a gap between the ring and the swatch and its name is underlined, so the chosen colour is
   unmistakable instead of a black ring lost against a dark grey. The highlighter shades are deepened,

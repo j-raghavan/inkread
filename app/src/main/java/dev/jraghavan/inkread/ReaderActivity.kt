@@ -1302,7 +1302,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
                 if (w > 0f) {
                     // Follow a tapped link first (links are zoom/pan-aware via vToNx/vToNy) so a link
                     // in the edge zone isn't swallowed as a page turn while zoomed (#52 review).
-                    val link = currentLinks.firstOrNull { it.contains(vToNx(fingerDownX), vToNy(fingerDownY)) }
+                    val link = currentLinks.firstOrNull { it.contains(vToNx(fingerDownX), vToNy(fingerDownY), LINK_TAP_SLOP_NORM) }
                     if (link != null) { followLink(link); return }
                     // The minimap thumbnail is the OLD page's; drop it so the turn doesn't leave the
                     // wrong page on screen (it re-captures on the next return to fit) (#52 review).
@@ -1352,7 +1352,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         val w = surfaceView.width.toFloat()
         val h = surfaceView.height.toFloat()
         if (w > 0f && h > 0f) {
-            val link = currentLinks.firstOrNull { it.contains(vToNx(x), vToNy(y)) }
+            val link = currentLinks.firstOrNull { it.contains(vToNx(x), vToNy(y), LINK_TAP_SLOP_NORM) }
             if (link != null) {
                 diag { "DIAG handleTap link hit -> ${link.targetPage ?: link.uri}" }
                 followLink(link)
@@ -1373,12 +1373,13 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             ReaderGestures.Zone.PREV -> queuePageTurn(-1)
             ReaderGestures.Zone.NEXT -> queuePageTurn(+1)
             ReaderGestures.Zone.CENTRE -> {
-                // Centre: a double-tap zooms toward the point (#54); a single tap opens the menu,
-                // deferred [DOUBLE_TAP_MS] so the first tap of a double-tap doesn't flash the bar open.
-                // (Edge page turns above stay immediate — no double-tap latency on navigation.)
+                // Centre: a double-tap zooms toward the point (#54); a single tap in the lower band
+                // opens the menu, deferred [DOUBLE_TAP_MS] so the first tap of a double-tap doesn't
+                // flash the bar open. A single tap higher up does nothing, leaving the upper page for
+                // links and reading (#299). (Edge page turns above stay immediate.)
                 mainHandler.removeCallbacks(pendingCentreMenu)
                 if (isCentreDoubleTap(x, y)) doubleTapZoom(x, y)
-                else mainHandler.postDelayed(pendingCentreMenu, DOUBLE_TAP_MS)
+                else if (ReaderGestures.isMenuZone(y, h)) mainHandler.postDelayed(pendingCentreMenu, DOUBLE_TAP_MS)
             }
         }
     }
@@ -1910,6 +1911,16 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
          */
         const val BOOKMARK_ZONE_W = 0.14f
         const val BOOKMARK_ZONE_H = 0.08f
+
+        /** The bottom menu opens only from a centre tap in the lower [MENU_ZONE_H] of the panel, as a
+         *  fraction so it holds on any panel. A centre tap higher up is left for links and reading
+         *  (#299). */
+        const val MENU_ZONE_H = 0.30f
+
+        /** Normalized margin added around each link rect when hit-testing a tap, so small links
+         *  (footnote markers, inline cross-references) are tappable without pixel-perfect aim
+         *  (#299). A fraction of the page so it holds on any panel. */
+        const val LINK_TAP_SLOP_NORM = 0.02f
 
         const val KEY_PALETTE_EXPANDED = "palette_expanded" // tools out or put away (#200).
         const val KEY_PALETTE_X = "palette_x" // parked tool-palette corner, host fractions (#200).
