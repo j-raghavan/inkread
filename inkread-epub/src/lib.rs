@@ -544,6 +544,135 @@ mod tests {
         out
     }
 
+    /// A real WebP of a flat colour, via the encoder (lossless VP8L).
+    fn test_webp(w: u32, h: u32) -> Vec<u8> {
+        let data = vec![100u8; (w * h * 3) as usize];
+        let mut out = Vec::new();
+        image_webp::WebPEncoder::new(&mut out)
+            .encode(&data, w, h, image_webp::ColorType::Rgb8)
+            .expect("webp encode");
+        out
+    }
+
+    /// A real single-frame GIF of a flat colour, via the encoder.
+    fn test_gif(w: u16, h: u16) -> Vec<u8> {
+        let mut rgba = vec![120u8; (w as usize * h as usize) * 4];
+        for px in rgba.chunks_exact_mut(4) {
+            px[3] = 255;
+        }
+        let mut out = Vec::new();
+        {
+            let frame = gif::Frame::from_rgba(w, h, &mut rgba);
+            let mut enc = gif::Encoder::new(&mut out, w, h, &[]).expect("gif encoder");
+            enc.write_frame(&frame).expect("gif frame");
+        }
+        out
+    }
+
+    /// Fixed metrics, so the end-to-end layout asserts geometry without a real font.
+    struct MonoMetrics;
+    impl Metrics for MonoMetrics {
+        fn advance(&self, text: &str, size_px: f32, _b: bool, _i: bool) -> f32 {
+            text.chars().count() as f32 * size_px * 0.5
+        }
+    }
+
+    /// Layout's image sizer backed by the book's real [`ImageStore`].
+    struct StoreSizer<'a>(&'a ImageStore);
+    impl ImageSizer for StoreSizer<'_> {
+        fn size(&self, src: &str) -> Option<(u32, u32)> {
+            self.0.size(src)
+        }
+    }
+
+    /// #187 end to end, every real-world shape at once: an SVG-wrapped PNG cover and bare `<img>`
+    /// references to a WebP and a GIF must survive the whole path, out of the real container,
+    /// through the parser, sized by the decoder, and laid out as a drawn box, with no `[image]` /
+    /// `[img]` placeholder text left on the page. This is the reopened-#187 bug reproduced in
+    /// reverse: before the fix each of these fell back to the placeholder.
+    #[test]
+    fn every_image_shape_lays_out_as_a_box_not_a_placeholder() {
+        const OPF2: &str = r#"<?xml version="1.0"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="id">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:identifier id="id">urn:uuid:shapes</dc:identifier>
+    <dc:title>Every Shape</dc:title>
+    <dc:language>en</dc:language>
+  </metadata>
+  <manifest>
+    <item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>
+    <item id="cov" href="images/cover.png" media-type="image/png"/>
+    <item id="wp" href="images/pic.webp" media-type="image/webp"/>
+    <item id="gf" href="images/anim.gif" media-type="image/gif"/>
+    <item id="c1" href="ch1.xhtml" media-type="application/xhtml+xml"/>
+    <item id="c2" href="ch2.xhtml" media-type="application/xhtml+xml"/>
+  </manifest>
+  <spine><itemref idref="c1"/><itemref idref="c2"/></spine>
+</package>"#;
+        // ch1: a `<div>` wrapping an `<svg><image>` cover. ch2: bare `<img>` to a WebP and a GIF.
+        const C1: &str = r#"<?xml version="1.0"?><html xmlns="http://www.w3.org/1999/xhtml"><body><div class="cover"><svg viewBox="0 0 4 2"><image width="4" height="2" xlink:href="images/cover.png"/></svg></div></body></html>"#;
+        const C2: &str = r#"<?xml version="1.0"?><html xmlns="http://www.w3.org/1999/xhtml"><body><p>Before.</p><img src="images/pic.webp" alt="a plate"/><p>Between.</p><img src="images/anim.gif"/><p>After.</p></body></html>"#;
+
+        let mut buf = Vec::new();
+        write_zip(
+            &mut buf,
+            &[
+                ("mimetype", b"application/epub+zip".to_vec()),
+                ("META-INF/container.xml", CONTAINER_XML.as_bytes().to_vec()),
+                ("OEBPS/content.opf", OPF2.as_bytes().to_vec()),
+                ("OEBPS/nav.xhtml", NAV.as_bytes().to_vec()),
+                ("OEBPS/images/cover.png", test_png(4, 2)),
+                ("OEBPS/images/pic.webp", test_webp(8, 4)),
+                ("OEBPS/images/anim.gif", test_gif(6, 3)),
+                ("OEBPS/ch1.xhtml", C1.as_bytes().to_vec()),
+                ("OEBPS/ch2.xhtml", C2.as_bytes().to_vec()),
+            ],
+        );
+        let pkg = EpubPackage::open(buf).expect("epub opens");
+
+        // The real container surfaces each illustration and the decoder sizes it, the format seam,
+        // end to end, including the two formats #204 could not read.
+        assert_eq!(pkg.images.size("images/cover.png"), Some((4, 2)), "png");
+        assert_eq!(pkg.images.size("images/pic.webp"), Some((8, 4)), "webp");
+        assert_eq!(pkg.images.size("images/anim.gif"), Some((6, 3)), "gif");
+
+        let opts = LayoutOpts {
+            page_w: 400.0,
+            page_h: 600.0,
+            margin: 20.0,
+            font_px: 16.0,
+            line_spacing: 1.3,
+            para_gap: 8.0,
+            align: Align::Left,
+            columns: 1,
+        };
+        let sizer = StoreSizer(&pkg.images);
+        for (i, want) in [(0usize, "images/cover.png"), (1, "images/pic.webp")] {
+            let blocks = parse_blocks_with(&pkg.chapters[i].html, &pkg.stylesheet);
+            let pages = paginate_with_images(&blocks, &opts, &MonoMetrics, &NoHyphen, &sizer);
+            let drew_box = pages
+                .iter()
+                .flat_map(|p| &p.lines)
+                .filter_map(|l| l.image.as_ref())
+                .any(|im| im.src == want);
+            assert!(drew_box, "no drawn box for {want}: {pages:?}");
+            let text: String = pages
+                .iter()
+                .flat_map(|p| &p.lines)
+                .flat_map(|l| &l.runs)
+                .map(|r| r.text.as_str())
+                .collect();
+            assert!(
+                !text.contains("[image"),
+                "placeholder leaked ({want}): {text:?}"
+            );
+            assert!(
+                !text.contains("[img"),
+                "placeholder leaked ({want}): {text:?}"
+            );
+        }
+    }
+
     /// #187: nothing downstream can draw an illustration the container never surfaces.
     #[test]
     fn a_manifest_image_is_listed_and_readable_by_href_or_file_name() {

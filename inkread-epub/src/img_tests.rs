@@ -154,3 +154,79 @@ fn scaling_up_is_defined_and_sized_correctly() {
     assert_eq!(out.len(), 6);
     assert!(out.iter().all(|&v| v == 10), "{out:?}");
 }
+
+// --- GIF and WebP, added for the reopened #187 (illustrated EPUBs ship these too). ---
+
+/// A GIF built by the real encoder, so the fixture stays honest rather than hand-pinned bytes.
+fn gif_bytes(width: u16, height: u16, mut rgba: Vec<u8>) -> Vec<u8> {
+    let mut out = Vec::new();
+    {
+        let frame = gif::Frame::from_rgba(width, height, &mut rgba);
+        let mut enc = gif::Encoder::new(&mut out, width, height, &[]).expect("gif encoder");
+        enc.write_frame(&frame).expect("gif frame");
+    }
+    out
+}
+
+/// A lossless (VP8L) WebP from the real encoder, so pixels round-trip exactly.
+fn webp_bytes(width: u32, height: u32, data: &[u8], color: image_webp::ColorType) -> Vec<u8> {
+    let mut out = Vec::new();
+    image_webp::WebPEncoder::new(&mut out)
+        .encode(data, width, height, color)
+        .expect("webp encode");
+    out
+}
+
+#[test]
+fn a_gif_decodes_and_sizes_from_its_header() {
+    // Two opaque pixels: red, then blue.
+    let raw = gif_bytes(2, 1, vec![255, 0, 0, 255, 0, 0, 255, 255]);
+    // Size comes from the logical-screen header without a frame decode.
+    assert_eq!(dimensions(&raw), Some((2, 1)));
+    let img = decode(&raw).expect("gif decodes");
+    assert_eq!((img.width, img.height), (2, 1));
+    assert_eq!(img.rgba.len(), 2 * 4);
+    // Opaque input stays opaque through the palette round-trip.
+    assert_eq!(img.rgba[3], 255);
+    assert_eq!(img.rgba[7], 255);
+}
+
+#[test]
+fn an_rgb_webp_decodes_to_opaque_rgba() {
+    // VP8L is lossless, so the exact colours come back, expanded to opaque RGBA.
+    let raw = webp_bytes(
+        1,
+        2,
+        &[10, 20, 30, 200, 100, 50],
+        image_webp::ColorType::Rgb8,
+    );
+    assert_eq!(dimensions(&raw), Some((1, 2)));
+    let img = decode(&raw).expect("webp decodes");
+    assert_eq!((img.width, img.height), (1, 2));
+    assert_eq!(&img.rgba[0..4], &[10, 20, 30, 255]);
+    assert_eq!(&img.rgba[4..8], &[200, 100, 50, 255]);
+}
+
+#[test]
+fn an_rgba_webp_keeps_its_alpha() {
+    let raw = webp_bytes(
+        1,
+        2,
+        &[255, 0, 0, 255, 0, 0, 255, 64],
+        image_webp::ColorType::Rgba8,
+    );
+    let img = decode(&raw).expect("webp decodes");
+    assert_eq!(&img.rgba[0..4], &[255, 0, 0, 255]);
+    assert_eq!(&img.rgba[4..8], &[0, 0, 255, 64]);
+}
+
+#[test]
+fn a_truncated_gif_or_webp_is_a_typed_error_not_a_panic() {
+    let gif = gif_bytes(2, 1, vec![0, 0, 0, 255, 255, 255, 255, 255]);
+    let webp = webp_bytes(2, 1, &[0, 0, 0, 255, 255, 255], image_webp::ColorType::Rgb8);
+    for full in [&gif, &webp] {
+        let half = &full[..full.len() / 2];
+        assert!(decode(half).is_err(), "half decode must fail cleanly");
+        let _ = dimensions(half); // must not panic
+    }
+}

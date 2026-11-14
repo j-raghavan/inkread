@@ -102,6 +102,114 @@ fn entities_are_decoded_and_block_image_extracted() {
     assert!(matches!(&b[1], Block::Image { src, alt, .. } if src == "a.png" && alt == "pic"));
 }
 
+// #187: an EPUB cover / full-page plate is an `<svg>` wrapping a raster `<image xlink:href>`,
+// not a bare `<img>`. html5ever lowers `xlink:href` to a namespaced `href`, so it is read from the
+// attribute iterator, not `attr()`.
+#[test]
+fn svg_wrapped_raster_image_becomes_a_block_image() {
+    let b = parse_blocks(&body(
+        r#"<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 600 800"><image width="600" height="800" xlink:href="../images/cover.jpg"/></svg>"#,
+    ));
+    assert_eq!(b.len(), 1, "{b:?}");
+    assert!(
+        matches!(&b[0], Block::Image { src, .. } if src == "../images/cover.jpg"),
+        "{b:?}"
+    );
+}
+
+// SVG 2 drops the `xlink:` prefix: a plain `href` on `<image>` must resolve the same way.
+#[test]
+fn svg_image_plain_href_resolves() {
+    let b = parse_blocks(&body(
+        r#"<svg viewBox="0 0 4 2"><image href="plate.png"/></svg>"#,
+    ));
+    assert!(
+        matches!(&b[0], Block::Image { src, .. } if src == "plate.png"),
+        "{b:?}"
+    );
+}
+
+// A genuinely vector `<svg>` carries no raster we can draw, so it emits nothing rather than an
+// empty or placeholder block, unchanged from before.
+#[test]
+fn vector_only_svg_emits_no_image() {
+    let b = parse_blocks(&body(
+        r#"<p>before</p><svg viewBox="0 0 10 10"><rect width="10" height="10"/></svg><p>after</p>"#,
+    ));
+    assert!(
+        !b.iter().any(|blk| matches!(blk, Block::Image { .. })),
+        "{b:?}"
+    );
+}
+
+// An inline `<svg><image>` (an icon mid-sentence) resolves to an inline image, mirroring `<img>`.
+#[test]
+fn inline_svg_image_resolves() {
+    let b = parse_blocks(&body(
+        r#"<p>see <svg><image xlink:href="icon.png"/></svg> here</p>"#,
+    ));
+    let Block::Paragraph { content, .. } = &b[0] else {
+        panic!("{b:?}")
+    };
+    assert!(
+        content
+            .iter()
+            .any(|i| matches!(i, Inline::Image { src, .. } if src == "icon.png")),
+        "{content:?}"
+    );
+}
+
+// EPUB 3 requires the `<img>` inside a `<picture>` to reference a *core* media type (GIF/JPEG/PNG/
+// SVG), because a WebP/AVIF `<source>` is only an optional upgrade. We render that guaranteed
+// fallback: the `<source>` elements are ignored and the `<img>` becomes the block image. This is
+// the spec-correct behaviour for a `<picture>` whose sources we could not decode anyway.
+#[test]
+fn picture_renders_the_core_type_img_fallback() {
+    let b = parse_blocks(&body(
+        r#"<picture><source type="image/webp" srcset="plate.webp"/><source type="image/avif" srcset="plate.avif"/><img src="plate.jpg" alt="plate"/></picture>"#,
+    ));
+    assert!(
+        matches!(&b[0], Block::Image { src, alt, .. } if src == "plate.jpg" && alt == "plate"),
+        "{b:?}"
+    );
+}
+
+// A `<figure>` wrapping an image (optionally with a `<figcaption>`) is a common illustration
+// container; the image inside it must still become a block image, the caption its own prose.
+#[test]
+fn figure_wrapped_image_is_a_block_image() {
+    let b = parse_blocks(&body(
+        r#"<figure><img src="diagram.png" alt="fig"/><figcaption>Figure 1</figcaption></figure>"#,
+    ));
+    assert!(
+        b.iter()
+            .any(|blk| matches!(blk, Block::Image { src, .. } if src == "diagram.png")),
+        "{b:?}"
+    );
+    let text: String = b
+        .iter()
+        .filter_map(|blk| match blk {
+            Block::Paragraph { content, .. } => Some(run(content)),
+            _ => None,
+        })
+        .collect();
+    assert!(text.contains("Figure 1"), "{b:?}");
+}
+
+// The other MobileRead cover pattern: a `<div>` wrapping the `<svg><image>` rather than a bare svg.
+// The div is a transparent container, so the wrapped svg image still resolves.
+#[test]
+fn div_wrapped_svg_cover_resolves() {
+    let b = parse_blocks(&body(
+        r#"<div class="cover"><svg viewBox="0 0 429 750"><image width="429" height="750" xlink:href="cover.png"/></svg></div>"#,
+    ));
+    assert!(
+        b.iter()
+            .any(|blk| matches!(blk, Block::Image { src, .. } if src == "cover.png")),
+        "{b:?}"
+    );
+}
+
 #[test]
 fn divs_do_not_merge_across_block_boundaries() {
     let b = parse_blocks(&body("<div>first</div><div>second</div>"));

@@ -1,13 +1,15 @@
 //! Raster image decoding for the reflow pipeline (#187).
 //!
-//! EPUBs carry their illustrations as PNG or JPEG in the manifest. This module turns those bytes
-//! into pixels, and — separately and much more cheaply — reads just their intrinsic size, which is
-//! all the layout stage needs to reserve a box before anything is drawn.
+//! EPUBs carry their illustrations as PNG, JPEG, GIF or WebP in the manifest. This module turns
+//! those bytes into pixels, and, separately and much more cheaply, reads just their intrinsic size,
+//! which is all the layout stage needs to reserve a box before anything is drawn.
 //!
-//! The same two codecs back the CBZ page reader, so this is the one decoder for both paths rather
-//! than a second copy. It is deliberately narrow: no colour management, no EXIF orientation, no
-//! animation. A payload that is neither PNG nor JPEG, or that fails to decode, is a typed error —
-//! never a panic (RR21-FR3), because a book's images are untrusted input.
+//! PNG and JPEG also back the CBZ page reader, so this is the one decoder for both paths rather than
+//! a second copy. GIF and WebP were added for the reopened #187: illustrated EPUBs ship them, and a
+//! format this module could not read fell back to an `[image]` placeholder on the page. It is
+//! deliberately narrow: no colour management, no EXIF orientation; an animated GIF or WebP yields
+//! its first frame. A payload in none of the four formats, or one that fails to decode, is a typed
+//! error, never a panic (RR21-FR3), because a book's images are untrusted input.
 
 use std::io::Cursor;
 
@@ -44,6 +46,13 @@ impl std::error::Error for ImageError {}
 const PNG_MAGIC: &[u8] = &[0x89, b'P', b'N', b'G'];
 /// JPEG start-of-image marker.
 const JPEG_MAGIC: &[u8] = &[0xFF, 0xD8];
+/// GIF magic, common to the `87a` and `89a` versions.
+const GIF_MAGIC: &[u8] = b"GIF8";
+
+/// True when `raw` is a RIFF/WebP container (`RIFF????WEBP`).
+fn is_webp(raw: &[u8]) -> bool {
+    raw.len() >= 12 && &raw[0..4] == b"RIFF" && &raw[8..12] == b"WEBP"
+}
 
 /// The image's intrinsic pixel size, read from the header alone.
 ///
@@ -63,19 +72,30 @@ pub fn dimensions(raw: &[u8]) -> Option<(u32, u32)> {
         dec.read_info().ok()?;
         let info = dec.info()?;
         Some((u32::from(info.width), u32::from(info.height)))
+    } else if raw.starts_with(GIF_MAGIC) {
+        // The logical-screen size, read from the header, not a frame decode.
+        let dec = gif::DecodeOptions::new().read_info(Cursor::new(raw)).ok()?;
+        Some((u32::from(dec.width()), u32::from(dec.height())))
+    } else if is_webp(raw) {
+        let dec = image_webp::WebPDecoder::new(Cursor::new(raw)).ok()?;
+        Some(dec.dimensions())
     } else {
         None
     }
 }
 
-/// Decode a PNG or JPEG to RGBA8, sniffing the codec by magic.
+/// Decode a PNG, JPEG, GIF or WebP to RGBA8, sniffing the codec by magic.
 pub fn decode(raw: &[u8]) -> Result<RgbaImage, ImageError> {
     if raw.starts_with(PNG_MAGIC) {
         decode_png(raw)
     } else if raw.starts_with(JPEG_MAGIC) {
         decode_jpeg(raw)
+    } else if raw.starts_with(GIF_MAGIC) {
+        decode_gif(raw)
+    } else if is_webp(raw) {
+        decode_webp(raw)
     } else {
-        Err(ImageError::Unsupported("not PNG or JPEG".into()))
+        Err(ImageError::Unsupported("not PNG, JPEG, GIF or WebP".into()))
     }
 }
 
@@ -128,6 +148,48 @@ fn decode_jpeg(raw: &[u8]) -> Result<RgbaImage, ImageError> {
     Ok(RgbaImage {
         width: u32::from(info.width),
         height: u32::from(info.height),
+        rgba,
+    })
+}
+
+fn decode_gif(raw: &[u8]) -> Result<RgbaImage, ImageError> {
+    // The first frame is the illustration; an animated GIF's later frames are ignored. `RGBA`
+    // output has the decoder expand the palette (and any transparent index) for us.
+    let mut opts = gif::DecodeOptions::new();
+    opts.set_color_output(gif::ColorOutput::RGBA);
+    let mut dec = opts
+        .read_info(Cursor::new(raw))
+        .map_err(|e| ImageError::Corrupt(format!("gif: {e}")))?;
+    let frame = dec
+        .read_next_frame()
+        .map_err(|e| ImageError::Corrupt(format!("gif frame: {e}")))?
+        .ok_or_else(|| ImageError::Corrupt("gif: no frames".into()))?;
+    Ok(RgbaImage {
+        width: u32::from(frame.width),
+        height: u32::from(frame.height),
+        rgba: frame.buffer.to_vec(),
+    })
+}
+
+fn decode_webp(raw: &[u8]) -> Result<RgbaImage, ImageError> {
+    let mut dec = image_webp::WebPDecoder::new(Cursor::new(raw))
+        .map_err(|e| ImageError::Corrupt(format!("webp: {e}")))?;
+    let (width, height) = dec.dimensions();
+    let size = dec
+        .output_buffer_size()
+        .ok_or_else(|| ImageError::Corrupt("webp: image too large".into()))?;
+    let mut buf = vec![0u8; size];
+    dec.read_image(&mut buf)
+        .map_err(|e| ImageError::Corrupt(format!("webp: {e}")))?;
+    // `read_image` yields RGB when the image has no alpha, RGBA when it does.
+    let rgba = if dec.has_alpha() {
+        buf
+    } else {
+        expand(&buf, 3, |p| [p[0], p[1], p[2], 255])
+    };
+    Ok(RgbaImage {
+        width,
+        height,
         rgba,
     })
 }
