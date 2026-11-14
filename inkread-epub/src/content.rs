@@ -366,6 +366,34 @@ fn find_body<'a>(node: NodeRef<'a, Node>) -> Option<NodeRef<'a, Node>> {
     None
 }
 
+/// The raster referenced by an SVG `<image>` element, as `(src, alt)`.
+///
+/// EPUB covers and full-page plates are near-universally an `<svg>` wrapping a single
+/// `<image xlink:href="…">`, not a bare `<img>` (#187); without this they rendered as nothing.
+/// html5ever lowers the SVG `image` element's `xlink:href`/`href` to a *namespaced* `href`
+/// attribute, which `attr("href")` (no-namespace) never matches, so the reference is read from the
+/// attribute iterator by local name. `src` is accepted too for leniency. An empty/whitespace value
+/// is treated as absent.
+fn svg_image_ref(svg: NodeRef<Node>) -> Option<(String, String)> {
+    for node in svg.descendants() {
+        let Some(el) = node.value().as_element() else {
+            continue;
+        };
+        if el.name() != "image" {
+            continue;
+        }
+        let href = el
+            .attrs()
+            .find(|(k, v)| matches!(*k, "href" | "xlink:href" | "src") && !v.trim().is_empty())
+            .map(|(_, v)| v.trim().to_string());
+        if let Some(src) = href {
+            let alt = el.attr("alt").unwrap_or_default().to_string();
+            return Some((src, alt));
+        }
+    }
+    None
+}
+
 /// Walk block-level structure under `node`, emitting [`Block`]s into `out`. Loose inline content
 /// accumulates in `pending` and is flushed as a paragraph when a block boundary is hit. `inherited`
 /// carries the declared style of the enclosing containers down to the blocks nested inside them.
@@ -464,6 +492,22 @@ fn walk_blocks(
                             out.push(Block::Image {
                                 src: src.to_string(),
                                 alt: el.attr("alt").unwrap_or_default().to_string(),
+                                style: declared(child, el, sheet, inherited),
+                            });
+                            bind_anchors(anchors, pending_ids, idx, own_anchor_ids(el));
+                        }
+                    }
+                    "svg" => {
+                        // An `<svg>` wrapping a raster `<image>` is the standard EPUB cover /
+                        // full-page plate (#187); treat it as that image. A genuinely vector SVG
+                        // (no `<image>` href) carries nothing we can raster, so it emits nothing,
+                        // as before.
+                        flush_paragraph(out, pending, anchors, pending_ids, inherited);
+                        if let Some((src, alt)) = svg_image_ref(child) {
+                            let idx = out.len();
+                            out.push(Block::Image {
+                                src,
+                                alt,
                                 style: declared(child, el, sheet, inherited),
                             });
                             bind_anchors(anchors, pending_ids, idx, own_anchor_ids(el));
@@ -780,6 +824,13 @@ fn collect_element(
                     src: src.to_string(),
                     alt: el.attr("alt").unwrap_or_default().to_string(),
                 });
+            }
+        }
+        "svg" => {
+            // An inline `<svg>` wrapping a raster `<image>` (e.g. an icon mid-sentence) resolves to
+            // that image, mirroring the block path (#187).
+            if let Some((src, alt)) = svg_image_ref(node) {
+                out.push(Inline::Image { src, alt });
             }
         }
         _ if NON_CONTENT_TAGS.contains(&name) => {}
