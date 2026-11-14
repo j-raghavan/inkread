@@ -343,13 +343,23 @@ fn bad_image_payloads_are_typed_errors_not_panics() {
         b.render_page(0, &mut buf),
         Err(CoreError::CorruptDocument(_))
     ));
-    // An image-extension entry holding a non-PNG/JPEG payload → UnsupportedFormat (sniff miss).
-    let b2 = CbzBackend::open(make_cbz(&[("p.jpg", b"GIF89a not a jpeg".to_vec())])).unwrap();
+    // An image-extension entry whose payload is a format the shared decoder does not support
+    // (here a BMP) → UnsupportedFormat (sniff miss). The decoder handles PNG/JPEG/GIF/WebP.
+    let b2 = CbzBackend::open(make_cbz(&[("p.jpg", b"BM not a bitmap".to_vec())])).unwrap();
     let mut px2 = vec![0u8; 8 * 8 * 4];
     let mut buf2 = PixelBuffer::from_rgba(&mut px2, 8, 8).unwrap();
     assert!(matches!(
         b2.render_page(0, &mut buf2),
         Err(CoreError::UnsupportedFormat(_))
+    ));
+    // A payload the decoder *does* recognise by magic but cannot decode is a corrupt image of that
+    // format, not an unsupported one: GIF is supported now (#187), so `GIF8…` garbage is corrupt.
+    let b3 = CbzBackend::open(make_cbz(&[("p.jpg", b"GIF89a not a gif".to_vec())])).unwrap();
+    let mut px3 = vec![0u8; 8 * 8 * 4];
+    let mut buf3 = PixelBuffer::from_rgba(&mut px3, 8, 8).unwrap();
+    assert!(matches!(
+        b3.render_page(0, &mut buf3),
+        Err(CoreError::CorruptDocument(_))
     ));
 }
 
