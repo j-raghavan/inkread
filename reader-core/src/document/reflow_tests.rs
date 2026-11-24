@@ -1169,8 +1169,14 @@ fn an_illustration_is_laid_out_and_drawn_rather_than_labelled() {
         .flat_map(|p| &p.lines)
         .find_map(|l| l.image.as_ref())
         .expect("no image box was laid out");
-    assert_eq!(placed.width, 120, "a small plate must not be upscaled");
-    assert_eq!(placed.height, 80);
+    // Drawn at the text's scale — CSS px are `font_px / 16` device px — capped at the measure.
+    let scale = (opts.font_px / 16.0).max(1.0);
+    let expect_w = (120.0 * scale).min(opts.column_width()).round() as u32;
+    assert_eq!(placed.width, expect_w, "plate not scaled with the text");
+    assert!(
+        (i64::from(placed.height) - i64::from(expect_w) * 80 / 120).abs() <= 1,
+        "aspect ratio not kept: {placed:?}"
+    );
 
     // …and no `[image]` placeholder text survives anywhere on the page.
     // Runs are per word and long words may be soft-hyphenated, so join loosely and look for words.
@@ -1196,17 +1202,21 @@ fn an_illustration_is_laid_out_and_drawn_rather_than_labelled() {
 fn a_rendered_illustrated_page_carries_the_images_pixels() {
     let doc =
         EpubBackend::open(ILLUSTRATED.to_vec(), vp(400, 600)).expect("illustrated epub opens");
+    // Scaled with the text, the plate no longer fits under the prose before it: find its page.
+    let opts = EpubBackend::opts_for(&doc.current_request());
+    let pages = doc.lay_out_chapter_upto(0, &opts, usize::MAX).0;
+    let page = pages
+        .iter()
+        .position(|p| p.lines.iter().any(|l| l.image.is_some()))
+        .expect("no page holds the plate");
     let mut bytes = vec![0u8; 400 * 600 * 4];
     let mut buf = PixelBuffer::from_rgba(&mut bytes, 400, 600).unwrap();
     let greys = {
-        doc.render_page(0, &mut buf).expect("renders");
+        doc.render_page(page, &mut buf).expect("renders");
         // The fixture's plate is a flat mid-grey; nothing else on the page draws that tone.
         bytes.chunks_exact(4).filter(|px| px[0] == 90).count()
     };
-    assert!(
-        greys > 5_000,
-        "expected the 120x80 plate's pixels, found {greys}"
-    );
+    assert!(greys > 5_000, "expected the plate's pixels, found {greys}");
 }
 
 // ---------------------------------------------------------------------------------------------

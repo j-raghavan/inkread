@@ -1194,7 +1194,8 @@ pub(crate) fn reset_layout_passes() {
 ///   different face.
 /// - `v7` → `v8`: images inside a paragraph or heading are drawn instead of their alt text. One
 ///   that is the block's only content becomes a figure, and one set among text becomes an inline
-///   box that can make its line taller. Both move page boundaries in any illustrated chapter.
+///   box that can make its line taller. Both move page boundaries in any illustrated chapter, as
+///   does scaling figures with the text (`font_px / 16`), which landed in the same release.
 ///
 /// Note the tripwire in the tests pins *measurement* — what `advance()` returns for a given style —
 /// so it does not fire for a change like `v6`, which alters **which style a run gets** rather than

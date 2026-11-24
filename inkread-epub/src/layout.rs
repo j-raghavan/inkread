@@ -1247,9 +1247,14 @@ impl<'o> Pager<'o> {
                 );
             }
             Block::Image { src, alt, .. } => {
-                if let Some(placed) =
-                    fit_image(src, alt, self.measure, self.opts.content_h(), 1.0, images)
-                {
+                if let Some(placed) = fit_image(
+                    src,
+                    alt,
+                    self.measure,
+                    self.opts.content_h(),
+                    self.opts.image_scale(),
+                    images,
+                ) {
                     // An image occupies one character position, as `<br>` does, so the offsets of
                     // everything after it stay stable whether or not it resolves (ADR-INKREAD-0012).
                     *cursor += 1;
@@ -1383,7 +1388,16 @@ impl<'o> Pager<'o> {
         };
         let placed: Option<Vec<PlacedImage>> = sole
             .iter()
-            .map(|(src, alt)| fit_image(src, alt, self.measure, self.opts.content_h(), 1.0, images))
+            .map(|(src, alt)| {
+                fit_image(
+                    src,
+                    alt,
+                    self.measure,
+                    self.opts.content_h(),
+                    self.opts.image_scale(),
+                    images,
+                )
+            })
             .collect();
         let Some(placed) = placed else {
             return false;

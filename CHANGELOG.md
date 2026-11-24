@@ -39,6 +39,11 @@ number is given in parentheses.
 
 ### Changed
 
+- EPUB figures scale with the text instead of being drawn at their pixel size. A book draws its
+  images for 16px text, so on the panel's much larger type a figure drawn at its pixel size came
+  out a fraction of the size its author intended (a 394px diagram filled a fifth of the page width).
+  Images are now drawn at `font size / 16` per image pixel, which is the same proportion to the text
+  as in the book's own layout, still fitted to the page and never shrunk below their pixel size.
 - The README states the plugin story as roadmap rather than as a shipped feature. `inkread-lua`
   embeds a working Lua 5.4 VM but ships only `inkread.log` and is not wired into `reader-core`, and
   no `.koplugin` shim exists, so the comparison table now points at a new **Roadmap** section

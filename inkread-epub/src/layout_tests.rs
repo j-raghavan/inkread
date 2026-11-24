@@ -1254,26 +1254,32 @@ fn punctuation_touching_an_inline_image_wraps_with_it() {
     );
 }
 
-/// A book draws its images for CSS pixels, at which body text is 16px. At a larger reading size an
-/// inline image scales with the text, so a 17px maths glyph still matches the line beside it instead
-/// of shrinking to a third of it.
+/// A book draws its images for CSS pixels, at which body text is 16px. At a larger reading size
+/// they scale with the text — figures and inline images alike — so a 17px maths glyph still
+/// matches the line beside it instead of shrinking to a third of it.
 #[test]
-fn inline_images_scale_with_the_text_size() {
+fn images_scale_with_the_text_size() {
     let opts = LayoutOpts {
         font_px: 32.0, // 2× the CSS 16px em
         line_spacing: 1.0,
         ..image_opts()
     };
+    let sizes = Sizes(&[("fig.png", 50, 20), ("sym.gif", 8, 6)]);
     let pages = paginate_with_images(
-        &[Block::Paragraph {
-            content: vec![text("a "), img("sym.gif")],
-            style: BlockStyle::default(),
-        }],
+        &[
+            image_block("fig.png"),
+            Block::Paragraph {
+                content: vec![text("a "), img("sym.gif")],
+                style: BlockStyle::default(),
+            },
+        ],
         &opts,
         &Mono,
         &NoHyphen,
-        &Sizes(&[("sym.gif", 8, 6)]),
+        &sizes,
     );
+    let figure = only_image(&pages);
+    assert_eq!((figure.width, figure.height), (100, 40));
     let inline = all_runs(&pages)
         .into_iter()
         .find_map(|r| r.image.as_ref())
