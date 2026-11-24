@@ -978,6 +978,310 @@ fn source_offsets_after_an_image_do_not_depend_on_it_resolving() {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Images inside paragraphs and headings — drawn, not named by their alt text.
+// ---------------------------------------------------------------------------------------------
+
+fn img(src: &str) -> Inline {
+    Inline::Image {
+        src: src.into(),
+        alt: "image".into(),
+    }
+}
+
+fn text(t: &str) -> Inline {
+    runs(t).remove(0)
+}
+
+fn all_runs(pages: &[Page]) -> Vec<&PlacedRun> {
+    pages
+        .iter()
+        .flat_map(|p| &p.lines)
+        .flat_map(|l| &l.runs)
+        .collect()
+}
+
+fn words(pages: &[Page]) -> String {
+    all_runs(pages)
+        .iter()
+        .map(|r| r.text.as_str())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// `<p><img/></p>` — how most converters wrap a figure — and a heading that is a picture of its
+/// chapter number are figures, laid out like a bare `<img>`; they used to print the word "image".
+#[test]
+fn a_block_holding_only_an_image_is_laid_out_as_a_figure() {
+    let opts = image_opts();
+    for block in [
+        Block::Paragraph {
+            content: vec![img("fig.gif")],
+            style: BlockStyle::default(),
+        },
+        Block::Heading {
+            level: 1,
+            // Whitespace and a break around the picture are not content.
+            content: vec![text(" "), img("fig.gif"), Inline::Break],
+            style: BlockStyle::default(),
+        },
+    ] {
+        let pages = paginate_with_images(
+            &[block],
+            &opts,
+            &Mono,
+            &NoHyphen,
+            &Sizes(&[("fig.gif", 60, 40)]),
+        );
+        let placed = only_image(&pages);
+        assert_eq!((placed.width, placed.height, placed.x), (60, 40, 70));
+        assert!(
+            !words(&pages).contains("image"),
+            "alt text printed: {pages:?}"
+        );
+    }
+}
+
+/// A figure-paragraph that cannot be drawn still says what is missing — and consumes the same
+/// characters either way, so a highlight after it stays put (ADR-INKREAD-0012).
+#[test]
+fn a_figure_paragraph_keeps_source_offsets_whether_or_not_it_resolves() {
+    let opts = image_opts();
+    let blocks = vec![
+        Block::Paragraph {
+            content: vec![img("a.gif"), Inline::Break, img("b.gif")],
+            style: BlockStyle::default(),
+        },
+        para("after"),
+    ];
+    let offset_of_after = |sizer: &dyn ImageSizer| -> usize {
+        all_runs(&paginate_with_images(
+            &blocks, &opts, &Mono, &NoHyphen, sizer,
+        ))
+        .iter()
+        .find(|r| r.text == "after")
+        .expect("prose run")
+        .anchor
+        .char_offset
+    };
+    let unresolved = paginate_with_images(&blocks, &opts, &Mono, &NoHyphen, &Sizes(&[]));
+    assert!(
+        words(&unresolved).contains("image"),
+        "missing image not named"
+    );
+    assert_eq!(
+        offset_of_after(&Sizes(&[("a.gif", 10, 10), ("b.gif", 10, 10)])),
+        offset_of_after(&Sizes(&[])),
+    );
+    // Two pictures in one paragraph are two figures.
+    let both = paginate_with_images(
+        &blocks,
+        &opts,
+        &Mono,
+        &NoHyphen,
+        &Sizes(&[("a.gif", 10, 10), ("b.gif", 10, 10)]),
+    );
+    let figures = both
+        .iter()
+        .flat_map(|p| &p.lines)
+        .filter(|l| l.image.is_some());
+    assert_eq!(figures.count(), 2);
+}
+
+/// A maths glyph mid-sentence is set in the line as a box of its own width, between the words.
+#[test]
+fn an_inline_image_is_set_in_the_line_between_words() {
+    let opts = image_opts(); // 10px Mono: 5px a character, 10px lines
+    let content = vec![text("so "), img("half.gif"), text(" of it")];
+    let pages = paginate_with_images(
+        &[Block::Paragraph {
+            content,
+            style: BlockStyle {
+                indent: Some(false),
+                ..BlockStyle::default()
+            },
+        }],
+        &opts,
+        &Mono,
+        &NoHyphen,
+        &Sizes(&[("half.gif", 8, 6)]),
+    );
+    let line = &pages[0].lines[0];
+    let xs: Vec<(f32, &str, bool)> = line
+        .runs
+        .iter()
+        .map(|r| (r.x, r.text.as_str(), r.image.is_some()))
+        .collect();
+    // "so" = 10px, a 5px space, the 8px image, a space, "of"...
+    assert_eq!(
+        xs,
+        vec![
+            (0.0, "so", false),
+            (15.0, "", true),
+            (28.0, "of", false),
+            (43.0, "it", false)
+        ]
+    );
+    let image = line.runs[1].image.as_ref().unwrap();
+    assert_eq!(
+        (image.src.as_str(), image.width, image.height),
+        ("half.gif", 8, 6)
+    );
+    // Shorter than the line: the line keeps its height and the text its place.
+    assert_eq!((line.height, line.text_top), (10.0, 0.0));
+    assert!(!words(&pages).contains("image"));
+}
+
+/// An inline image taller than the text makes its line taller, and the text is lowered to stay
+/// centred on it rather than being drawn over it.
+#[test]
+fn a_tall_inline_image_grows_its_line_and_centres_the_text() {
+    let opts = image_opts();
+    let pages = paginate_with_images(
+        &[
+            Block::Paragraph {
+                content: vec![text("x "), img("frac.gif"), text(" y")],
+                style: BlockStyle::default(),
+            },
+            para("next"),
+        ],
+        &opts,
+        &Mono,
+        &NoHyphen,
+        &Sizes(&[("frac.gif", 10, 30)]),
+    );
+    let lines = &pages[0].lines;
+    assert_eq!((lines[0].height, lines[0].text_top), (30.0, 10.0));
+    assert_eq!(lines[1].top, 30.0, "the next line must clear the image");
+
+    // With leading (14px lines for 10px text) the tall line keeps it: 30 + 4.
+    let spaced = LayoutOpts {
+        line_spacing: 1.4,
+        ..opts
+    };
+    let pages = paginate_with_images(
+        &[Block::Paragraph {
+            content: vec![text("x "), img("frac.gif")],
+            style: BlockStyle::default(),
+        }],
+        &spaced,
+        &Mono,
+        &NoHyphen,
+        &Sizes(&[("frac.gif", 10, 30)]),
+    );
+    let line = &pages[0].lines[0];
+    assert!((line.height - 34.0).abs() < 1e-3, "{line:?}");
+    assert!((line.text_top - 10.0).abs() < 1e-3, "{line:?}");
+}
+
+/// An inline image that does not fit after the words before it moves to the next line, like a
+/// word would; one wider than the measure is shrunk to it rather than overflowing.
+#[test]
+fn an_inline_image_wraps_and_never_overflows_the_measure() {
+    let opts = image_opts(); // 200px measure
+    let pages = paginate_with_images(
+        &[Block::Paragraph {
+            content: vec![text("words "), img("wide.gif"), text(" "), img("huge.gif")],
+            style: BlockStyle {
+                indent: Some(false),
+                ..BlockStyle::default()
+            },
+        }],
+        &opts,
+        &Mono,
+        &NoHyphen,
+        &Sizes(&[("wide.gif", 190, 5), ("huge.gif", 400, 10)]),
+    );
+    let images: Vec<(usize, f32, u32)> = pages[0]
+        .lines
+        .iter()
+        .enumerate()
+        .flat_map(|(i, l)| {
+            l.runs
+                .iter()
+                .filter_map(move |r| r.image.as_ref().map(|im| (i, r.x, im.width)))
+        })
+        .collect();
+    assert_eq!(images, vec![(1, 0.0, 190), (2, 0.0, 200)]);
+}
+
+/// The full stop after a formula has no space before it, so it is no place to break the line: when
+/// it does not fit, the formula goes down with it rather than leaving it to open the next line.
+#[test]
+fn punctuation_touching_an_inline_image_wraps_with_it() {
+    let opts = image_opts(); // 200px measure, 5px a character
+    let pages = paginate_with_images(
+        &[Block::Paragraph {
+            content: vec![text("abc "), img("eq.gif"), text(". next")],
+            style: BlockStyle {
+                indent: Some(false),
+                ..BlockStyle::default()
+            },
+        }],
+        &opts,
+        &Mono,
+        &NoHyphen,
+        // "abc" + space + 178px = 198px: the image fits, the full stop after it does not.
+        &Sizes(&[("eq.gif", 178, 5)]),
+    );
+    let lines: Vec<Vec<(f32, String)>> = pages[0]
+        .lines
+        .iter()
+        .map(|l| {
+            l.runs
+                .iter()
+                .map(|r| {
+                    let label = if r.image.is_some() {
+                        "<img>".into()
+                    } else {
+                        r.text.clone()
+                    };
+                    (r.x, label)
+                })
+                .collect()
+        })
+        .collect();
+    assert_eq!(
+        lines,
+        vec![
+            vec![(0.0, "abc".to_string())],
+            vec![
+                (0.0, "<img>".to_string()),
+                (178.0, ".".to_string()),
+                // "next" (20px) after a space no longer fits beside them: 183 + 5 + 20 > 200.
+            ],
+            vec![(0.0, "next".to_string())],
+        ]
+    );
+}
+
+/// A book draws its images for CSS pixels, at which body text is 16px. At a larger reading size an
+/// inline image scales with the text, so a 17px maths glyph still matches the line beside it instead
+/// of shrinking to a third of it.
+#[test]
+fn inline_images_scale_with_the_text_size() {
+    let opts = LayoutOpts {
+        font_px: 32.0, // 2× the CSS 16px em
+        line_spacing: 1.0,
+        ..image_opts()
+    };
+    let pages = paginate_with_images(
+        &[Block::Paragraph {
+            content: vec![text("a "), img("sym.gif")],
+            style: BlockStyle::default(),
+        }],
+        &opts,
+        &Mono,
+        &NoHyphen,
+        &Sizes(&[("sym.gif", 8, 6)]),
+    );
+    let inline = all_runs(&pages)
+        .into_iter()
+        .find_map(|r| r.image.as_ref())
+        .expect("inline image");
+    assert_eq!((inline.width, inline.height), (16, 12));
+}
+
+// ---------------------------------------------------------------------------------------------
 // #186 — stopping pagination once the requested page exists.
 // ---------------------------------------------------------------------------------------------
 

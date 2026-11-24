@@ -68,6 +68,11 @@ number is given in parentheses.
 
 ### Fixed
 
+- EPUB images inside a paragraph or heading are drawn instead of printing their alt text (usually
+  the word "image"). A paragraph or heading that holds only a picture, the way most converters wrap
+  figures, display equations and chapter-number art, is laid out as a figure. A picture set among
+  words, like a formula mid-sentence, sits in the line, which grows to fit it when it is taller
+  than the text, and wraps together with any punctuation touching it.
 - In-document links are easier to follow: the tap target around each link is widened so small links
   (footnote markers, inline cross-references) no longer need pixel-perfect aim, and a centre tap now
   opens the bottom menu only from the lower band of the page, leaving the rest of the page for links

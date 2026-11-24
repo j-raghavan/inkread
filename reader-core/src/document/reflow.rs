@@ -1192,13 +1192,16 @@ pub(crate) fn reset_layout_passes() {
 ///   files are one id where they were four. Every user font id after the first grouped family
 ///   shifts, and an id is what this key records, so a stored pagination would be read back for a
 ///   different face.
+/// - `v7` → `v8`: images inside a paragraph or heading are drawn instead of their alt text. One
+///   that is the block's only content becomes a figure, and one set among text becomes an inline
+///   box that can make its line taller. Both move page boundaries in any illustrated chapter.
 ///
 /// Note the tripwire in the tests pins *measurement* — what `advance()` returns for a given style —
 /// so it does not fire for a change like `v6`, which alters **which style a run gets** rather than
 /// how a style measures. Both invalidate a stored index. A change to run styling has to bump this
 /// by hand.
 fn layout_key(opts: &LayoutOpts, font_id: usize, chapters: usize) -> String {
-    format!("v7|{:016x}|{font_id}|{chapters}", opts.layout_digest())
+    format!("v8|{:016x}|{font_id}|{chapters}", opts.layout_digest())
 }
 
 /// A materialized chapter: the pages laid out so far, and whether that is all of them (#186).

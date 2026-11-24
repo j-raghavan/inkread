@@ -112,6 +112,9 @@ fn effective_align(style: &BlockStyle, user: Align) -> Align {
     }
 }
 
+/// Body text size, in CSS pixels, that a book's images were drawn against (the CSS initial `1em`).
+const CSS_PX_PER_EM: f32 = 16.0;
+
 /// Viewport + typography for a layout pass (all pixels). Repagination on a font-size or margin
 /// change just reruns [`paginate`] with new opts.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -203,6 +206,18 @@ impl LayoutOpts {
         (self.page_h - 2.0 * self.margin).max(1.0)
     }
 
+    /// Device pixels per image pixel. A book's images are drawn for CSS pixels, at which body text
+    /// is [`CSS_PX_PER_EM`] high; at the reader's size each of those is `font_px / 16` device
+    /// pixels, so an image scaled by that keeps the proportion to the text its author drew it for.
+    /// A maths glyph 17px tall then still matches the line beside it, rather than shrinking to a
+    /// third of it on a 300 dpi panel.
+    ///
+    /// Never below 1: an image is not shrunk *below* its intrinsic size by a small text setting,
+    /// only by the content box it has to fit.
+    fn image_scale(&self) -> f32 {
+        (self.font_px / CSS_PX_PER_EM).max(1.0)
+    }
+
     /// A stable hash of every layout-affecting field — the pagination-cache discriminator (RR9-FR3,
     /// `SPEC-RUST-READER.md`). Two `LayoutOpts` that paginate identically share a digest; any change
     /// that moves page boundaries (viewport, font size, line/para spacing, alignment, margin) flips
@@ -278,6 +293,34 @@ pub struct PlacedRun {
     /// says whether the hyphen shown at the break is one of ours. `None` on every other run, which
     /// is nearly all of them: a line normally ends at a word boundary.
     pub wrap: Option<Wrap>,
+    /// Set when this run is an image set in the line (`<img>` inside flowing text) rather than
+    /// text. Its `text` is then empty, so selection, search and copy pass over it; its width is the
+    /// image's, not a measured string's (see [`PlacedRun::width`]).
+    pub image: Option<InlineImage>,
+}
+
+impl PlacedRun {
+    /// The horizontal space the run occupies: the image's width for an inline image, else the
+    /// measured text.
+    #[must_use]
+    pub fn width(&self, m: &dyn Metrics) -> f32 {
+        match &self.image {
+            Some(image) => image.width as f32,
+            None => m.advance(&self.text, self.size_px, self.bold, self.italic),
+        }
+    }
+}
+
+/// An image set in a line of text, like a maths symbol mid-sentence. Its horizontal position is the
+/// run's `x`; vertically it is centred in the line box (CSS `vertical-align: middle`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InlineImage {
+    /// The resource reference from the book's markup, resolved by the renderer.
+    pub src: String,
+    /// Drawn width in pixels.
+    pub width: u32,
+    /// Drawn height in pixels.
+    pub height: u32,
 }
 
 /// How a line break split the word that ends a line. Only the layout knows this — the two cases
@@ -303,6 +346,10 @@ pub struct LayoutLine {
     pub height: f32,
     pub runs: Vec<PlacedRun>,
     pub rule: bool,
+    /// How far below `top` the line's text box starts. Zero except on a line holding an inline
+    /// image taller than the text: the line box grows to fit the image and the text is lowered by
+    /// half the difference, so text and image stay centred on each other.
+    pub text_top: f32,
     /// An illustration occupying this line's box (#187). Mutually exclusive with `runs` in
     /// practice: an image block emits one line that is nothing but the picture.
     pub image: Option<PlacedImage>,
@@ -364,33 +411,61 @@ pub struct Page {
 
 /// Fit an image into the content box, preserving its aspect ratio and centring it.
 ///
-/// Never enlarged past its intrinsic size — upscaling a small decorative glyph to the page width
-/// looks like a defect — and never larger than one page, so an oversized plate scales down to fit
-/// rather than being clipped or forcing an unbreakable overflow.
+/// Never enlarged past `max_scale` times its intrinsic size — a small decorative glyph blown up to
+/// the page width looks like a defect — and never larger than one page, so an oversized plate
+/// scales down to fit rather than being clipped or forcing an unbreakable overflow.
 fn fit_image(
     src: &str,
     alt: &str,
     content_w: f32,
     content_h: f32,
+    max_scale: f32,
     images: &dyn ImageSizer,
 ) -> Option<PlacedImage> {
-    let (iw, ih) = images.size(src)?;
+    // The vertical budget is a whole page: `add_image` starts a new page when it will not fit on
+    // this one, so an image capped at the content height always has somewhere to go.
+    let (width, height) = fit_box(images.size(src)?, content_w, content_h, max_scale)?;
+    Some(PlacedImage {
+        src: src.to_string(),
+        alt: alt.to_string(),
+        x: ((content_w - width as f32) * 0.5).round() as i32,
+        width,
+        height,
+    })
+}
+
+/// The drawn size of an image of intrinsic size `(iw, ih)`: scaled by `max_scale`, then shrunk
+/// (aspect kept) until it fits `max_w × max_h`. `None` for a zero-dimension image, which has no
+/// aspect to keep.
+fn fit_box((iw, ih): (u32, u32), max_w: f32, max_h: f32, max_scale: f32) -> Option<(u32, u32)> {
     if iw == 0 || ih == 0 {
         return None;
     }
     let (fw, fh) = (iw as f32, ih as f32);
-    // The vertical budget is a whole page: `add_image` starts a new page when it will not fit on
-    // this one, so an image capped at the content height always has somewhere to go.
-    let scale = (content_w / fw).min(content_h / fh).min(1.0);
-    let width = (fw * scale).round().max(1.0);
-    let height = (fh * scale).round().max(1.0);
-    Some(PlacedImage {
-        src: src.to_string(),
-        alt: alt.to_string(),
-        x: ((content_w - width) * 0.5).round() as i32,
-        width: width as u32,
-        height: height as u32,
-    })
+    let scale = (max_w / fw).min(max_h / fh).min(max_scale);
+    Some((
+        (fw * scale).round().max(1.0) as u32,
+        (fh * scale).round().max(1.0) as u32,
+    ))
+}
+
+/// The images of a block that holds nothing else — `<p><img/></p>`, or a heading whose only content
+/// is a picture of its chapter number. Whitespace and line breaks around them do not count as
+/// content. `None` when the block has text, or no image at all.
+///
+/// Such a block is a figure that happens to be wrapped in a paragraph, and is laid out as one: on a
+/// line of its own, fitted to the page and centred, rather than as an inline image in a line box.
+fn sole_images(content: &[Inline]) -> Option<Vec<(&str, &str)>> {
+    let mut found = Vec::new();
+    for inline in content {
+        match inline {
+            Inline::Image { src, alt } => found.push((src.as_str(), alt.as_str())),
+            Inline::Break => {}
+            Inline::Run(r) if r.text.trim().is_empty() => {}
+            Inline::Run(_) => return None,
+        }
+    }
+    (!found.is_empty()).then_some(found)
 }
 
 /// The end (exclusive) of the run of blocks starting at `i` that must stay on one page (#251).
@@ -775,6 +850,12 @@ impl<'o> Pager<'o> {
     /// Place a line of `height`, breaking to a new page first if it would overflow a non-empty page.
     /// Run `x` is already content-relative; the line's vertical position is carried by `top`.
     fn emit(&mut self, runs: Vec<PlacedRun>, height: f32, rule: bool) {
+        self.emit_line(runs, height, 0.0, rule);
+    }
+
+    /// As [`Self::emit`], with the text set `text_top` below the line's top (see
+    /// [`LayoutLine::text_top`]).
+    fn emit_line(&mut self, runs: Vec<PlacedRun>, height: f32, text_top: f32, rule: bool) {
         self.flush_gap();
         if self.cursor_y + height > self.page_h && !self.current.is_empty() {
             self.break_page();
@@ -785,6 +866,7 @@ impl<'o> Pager<'o> {
             height,
             runs,
             rule,
+            text_top,
             image: None,
             column_x: 0.0,
             column_w: self.measure,
@@ -1080,7 +1162,15 @@ impl<'o> Pager<'o> {
         let outer = (self.keep_lines, self.kept_one);
         self.keep_lines = style.break_inside == Some(PageBreak::Avoid);
         self.kept_one = false;
+        // A paragraph or heading that is nothing but a picture is laid out as a figure.
+        let figure = match block {
+            Block::Heading { content, .. } | Block::Paragraph { content, .. } => {
+                self.add_sole_images(content, block_index, cursor, images)
+            }
+            _ => false,
+        };
         match block {
+            _ if figure => {}
             Block::Heading { content, .. } => {
                 // Headings are bold by default, but that is inkread's typography, not a rule: a
                 // book that says `font-weight: normal` on its title gets a normal-weight title.
@@ -1096,6 +1186,7 @@ impl<'o> Pager<'o> {
                     block_index,
                     cursor,
                     m,
+                    images,
                 );
             }
             Block::Paragraph { content, style } => {
@@ -1126,6 +1217,7 @@ impl<'o> Pager<'o> {
                     block_index,
                     cursor,
                     m,
+                    images,
                 );
             }
             Block::ListItem {
@@ -1151,11 +1243,12 @@ impl<'o> Pager<'o> {
                     block_index,
                     cursor,
                     m,
+                    images,
                 );
             }
             Block::Image { src, alt, .. } => {
                 if let Some(placed) =
-                    fit_image(src, alt, self.measure, self.opts.content_h(), images)
+                    fit_image(src, alt, self.measure, self.opts.content_h(), 1.0, images)
                 {
                     // An image occupies one character position, as `<br>` does, so the offsets of
                     // everything after it stay stable whether or not it resolves (ADR-INKREAD-0012).
@@ -1190,6 +1283,7 @@ impl<'o> Pager<'o> {
                         block_index,
                         cursor,
                         m,
+                        images,
                     );
                     *cursor = at + 1;
                 }
@@ -1222,6 +1316,7 @@ impl<'o> Pager<'o> {
         block: usize,
         cursor: &mut usize,
         m: &dyn Metrics,
+        images: &dyn ImageSizer,
     ) {
         let lines = break_lines(
             inlines,
@@ -1235,13 +1330,72 @@ impl<'o> Pager<'o> {
             cursor,
             m,
             self.hyph,
+            &self.inline_sizer(images),
         );
         let line_h = size * self.opts.line_spacing;
         let n = lines.len();
         for (i, mut runs) in lines.into_iter().enumerate() {
             align_line(&mut runs, align, self.measure, i + 1 == n, m);
+            self.emit_text_line(runs, size, line_h);
+        }
+    }
+
+    /// How inline images are sized in this flow: at the opts' image scale, never taller than a page
+    /// (an inline image is not a figure, but nothing may be too tall for any page to hold).
+    fn inline_sizer<'s>(
+        &self,
+        images: &'s dyn ImageSizer,
+    ) -> impl Fn(&str, f32) -> Option<(u32, u32)> + 's {
+        let (scale, max_h) = (self.opts.image_scale(), self.opts.content_h());
+        move |src, max_w| fit_box(images.size(src)?, max_w, max_h, scale)
+    }
+
+    /// Emit a line of `size` px text, `line_h` tall — or, when an inline image on it is taller than
+    /// the text, tall enough for the image plus the line's usual leading, with the text lowered to
+    /// stay centred on the image (see [`LayoutLine::text_top`]).
+    fn emit_text_line(&mut self, runs: Vec<PlacedRun>, size: f32, line_h: f32) {
+        let tallest = runs
+            .iter()
+            .filter_map(|r| r.image.as_ref())
+            .map(|image| image.height as f32)
+            .fold(0.0f32, f32::max);
+        let needed = tallest + (line_h - size).max(0.0);
+        if needed > line_h {
+            self.emit_line(runs, needed, (needed - line_h) * 0.5, false);
+        } else {
             self.emit(runs, line_h, false);
         }
+    }
+
+    /// Lay out a paragraph or heading that holds nothing but images as figures — each on a line of
+    /// its own, fitted and centred like an `<img>` standing between blocks. Returns false, having
+    /// done nothing, when the block has text or any of its images cannot be sized; it is then laid
+    /// out as text, whose fallback names what is missing.
+    fn add_sole_images(
+        &mut self,
+        content: &[Inline],
+        block: usize,
+        cursor: &mut usize,
+        images: &dyn ImageSizer,
+    ) -> bool {
+        let Some(sole) = sole_images(content) else {
+            return false;
+        };
+        let placed: Option<Vec<PlacedImage>> = sole
+            .iter()
+            .map(|(src, alt)| fit_image(src, alt, self.measure, self.opts.content_h(), 1.0, images))
+            .collect();
+        let Some(placed) = placed else {
+            return false;
+        };
+        // Consume exactly the characters the block would as text, so every offset after it is the
+        // same however it was laid out — and the same as before figures were recognised, which keeps
+        // a saved highlight on the text it was made on (ADR-INKREAD-0012).
+        tokenize(content, false, false, block, cursor, &|_, _| None, 0.0);
+        for image in placed {
+            self.add_image(image);
+        }
+        true
     }
 
     /// Lay out one table row: each cell flowed as a block container in its own share of the
@@ -1337,6 +1491,7 @@ impl<'o> Pager<'o> {
         block: usize,
         cursor: &mut usize,
         m: &dyn Metrics,
+        images: &dyn ImageSizer,
     ) {
         let marker_w = m.advance(marker, size, false, false);
         let indent = marker_w + m.advance("  ", size, false, false);
@@ -1360,37 +1515,28 @@ impl<'o> Pager<'o> {
             cursor,
             m,
             self.hyph,
+            &self.inline_sizer(images),
         );
         // Prepend the marker to the first line at the content origin (hanging indent).
+        let marker_run = PlacedRun {
+            x: 0.0,
+            text: marker.to_string(),
+            size_px: size,
+            bold: false,
+            italic: false,
+            href: None,
+            anchor: marker_anchor,
+            wrap: None,
+            image: None,
+        };
         if let Some(first) = lines.first_mut() {
-            first.insert(
-                0,
-                PlacedRun {
-                    x: 0.0,
-                    text: marker.to_string(),
-                    size_px: size,
-                    bold: false,
-                    italic: false,
-                    href: None,
-                    anchor: marker_anchor,
-                    wrap: None,
-                },
-            );
+            first.insert(0, marker_run);
         } else {
-            lines.push(vec![PlacedRun {
-                x: 0.0,
-                text: marker.to_string(),
-                size_px: size,
-                bold: false,
-                italic: false,
-                href: None,
-                anchor: marker_anchor,
-                wrap: None,
-            }]);
+            lines.push(vec![marker_run]);
         }
         let line_h = size * self.opts.line_spacing;
         for runs in lines {
-            self.emit(runs, line_h, false);
+            self.emit_text_line(runs, size, line_h);
         }
     }
 
@@ -1407,6 +1553,7 @@ impl<'o> Pager<'o> {
             height,
             runs: Vec::new(),
             rule: false,
+            text_top: 0.0,
             image: Some(image),
             column_x: 0.0,
             column_w: self.measure,
@@ -1416,6 +1563,10 @@ impl<'o> Pager<'o> {
         self.cursor_y += height;
     }
 }
+
+/// Sizes an inline image to at most the given width: `(src, max_w) -> (width, height)`, or `None`
+/// when it does not resolve.
+type SizeOf<'a> = dyn Fn(&str, f32) -> Option<(u32, u32)> + 'a;
 
 /// A line-breaking token. `Word`s carry their source [`SourceAnchor`] so it can be stamped onto the
 /// resulting [`PlacedRun`].
@@ -1427,6 +1578,14 @@ enum Tok<'a> {
         href: Option<&'a str>,
         anchor: SourceAnchor,
     },
+    /// An inline image whose size resolved: an unbreakable box `width × height` px, placed like a
+    /// word. One that does not resolve is tokenized as a [`Tok::Word`] of its alt text instead.
+    Image {
+        src: &'a str,
+        width: u32,
+        height: u32,
+        anchor: SourceAnchor,
+    },
     Space,
     Break,
 }
@@ -1435,12 +1594,18 @@ enum Tok<'a> {
 /// whitespace-collapsed by Phase 2, so a single ASCII space separates words). `cursor` advances by
 /// the chapter-relative character count as words and the spaces/breaks between them are consumed, so
 /// each word's [`SourceAnchor`] records where its first character sits (ADR-INKREAD-0012).
+///
+/// `size_of(src, max_w)` sizes an inline image to at most `max_w` px wide, or `None` when it does
+/// not resolve. An image consumes its alt label's characters whether or not it resolves, so the
+/// offsets after it never depend on that.
 fn tokenize<'a>(
     inlines: &'a [Inline],
     bold_all: bool,
     italic_all: bool,
     block: usize,
     cursor: &mut usize,
+    size_of: &SizeOf<'_>,
+    max_image_w: f32,
 ) -> Vec<Tok<'a>> {
     let mut toks = Vec::new();
     for inline in inlines {
@@ -1449,16 +1614,25 @@ fn tokenize<'a>(
                 toks.push(Tok::Break);
                 *cursor += 1; // the <br> occupies one character position
             }
-            Inline::Image { alt, .. } => {
+            Inline::Image { src, alt } => {
                 let label = if alt.is_empty() { "[img]" } else { alt };
-                toks.push(Tok::Word {
-                    text: label,
-                    bold: false,
-                    italic: true,
-                    href: None,
-                    anchor: SourceAnchor {
-                        block,
-                        char_offset: *cursor,
+                let anchor = SourceAnchor {
+                    block,
+                    char_offset: *cursor,
+                };
+                toks.push(match size_of(src, max_image_w) {
+                    Some((width, height)) => Tok::Image {
+                        src,
+                        width,
+                        height,
+                        anchor,
+                    },
+                    None => Tok::Word {
+                        text: label,
+                        bold: false,
+                        italic: true,
+                        href: None,
+                        anchor,
                     },
                 });
                 *cursor += label.chars().count();
@@ -1503,10 +1677,7 @@ fn align_line(
         return;
     }
     let left = runs[0].x; // the line's left edge (indent)
-    let right = runs
-        .iter()
-        .map(|r| r.x + m.advance(&r.text, r.size_px, r.bold, r.italic))
-        .fold(0.0f32, f32::max);
+    let right = runs.iter().map(|r| r.x + r.width(m)).fold(0.0f32, f32::max);
     let slack = (content_w - right).max(0.0);
     if slack <= 0.0 {
         return;
@@ -1545,14 +1716,28 @@ fn break_lines(
     cursor: &mut usize,
     m: &dyn Metrics,
     hyph: &dyn Hyphenator,
+    size_of: &SizeOf<'_>,
 ) -> Vec<Vec<PlacedRun>> {
     let space_w = m.advance(" ", size, false, false);
     let mut lines: Vec<Vec<PlacedRun>> = Vec::new();
     let mut cur: Vec<PlacedRun> = Vec::new();
     let mut x = 0.0f32; // offset within the body column (excludes indent)
     let mut need_space = false;
+    // An inline image is sized to fit whichever line it lands on, so it never overflows the measure.
+    let max_image_w = (content_w - first_indent.max(rest_indent)).max(1.0);
+    // Where in `cur` the run of tokens with no space between them begins, and whether it holds an
+    // inline image. Such a run wraps as one: the full stop after a formula must not start a line.
+    let mut glue = Glue::default();
 
-    for tok in tokenize(inlines, bold_all, italic_all, block, cursor) {
+    for tok in tokenize(
+        inlines,
+        bold_all,
+        italic_all,
+        block,
+        cursor,
+        size_of,
+        max_image_w,
+    ) {
         match tok {
             Tok::Break => {
                 if !cur.is_empty() {
@@ -1560,8 +1745,60 @@ fn break_lines(
                 }
                 x = 0.0;
                 need_space = false;
+                glue = Glue::default();
             }
-            Tok::Space => need_space = true,
+            Tok::Space => {
+                need_space = true;
+                glue = Glue::default();
+            }
+            Tok::Image {
+                src,
+                width,
+                height,
+                anchor,
+            } => {
+                // Placed like a word that cannot be hyphenated: on this line if it fits, else at
+                // the start of the next.
+                let w = width as f32;
+                let lead = if need_space && !cur.is_empty() {
+                    space_w
+                } else {
+                    0.0
+                };
+                let indent_now = if lines.is_empty() {
+                    first_indent
+                } else {
+                    rest_indent
+                };
+                let mut start = if cur.is_empty() { 0.0 } else { x + lead };
+                if !cur.is_empty() && start + w > (content_w - indent_now).max(1.0) {
+                    start = break_line(&mut lines, &mut cur, &mut glue, rest_indent, m);
+                }
+                let indent = if lines.is_empty() {
+                    first_indent
+                } else {
+                    rest_indent
+                };
+                glue.start.get_or_insert(cur.len());
+                glue.has_image = true;
+                cur.push(PlacedRun {
+                    x: indent + start,
+                    text: String::new(),
+                    size_px: size,
+                    bold: false,
+                    italic: false,
+                    href: None,
+                    anchor,
+                    wrap: None,
+                    image: Some(InlineImage {
+                        src: src.to_string(),
+                        width,
+                        height,
+                    }),
+                });
+                x = start + w;
+                need_space = false;
+            }
             Tok::Word {
                 text,
                 bold,
@@ -1598,20 +1835,23 @@ fn break_lines(
                         block: anchor.block,
                         char_offset: anchor.char_offset + off,
                     };
-                    let push = |cur: &mut Vec<PlacedRun>, txt: String, px: f32, wrap| {
-                        cur.push(PlacedRun {
-                            x: indent + px,
-                            text: txt,
-                            size_px: size,
-                            bold,
-                            italic,
-                            href: href.map(str::to_string),
-                            anchor,
-                            wrap,
-                        });
-                    };
+                    let push =
+                        |cur: &mut Vec<PlacedRun>, glue: &mut Glue, txt: String, px: f32, wrap| {
+                            glue.start.get_or_insert(cur.len());
+                            cur.push(PlacedRun {
+                                x: indent + px,
+                                text: txt,
+                                size_px: size,
+                                bold,
+                                italic,
+                                href: href.map(str::to_string),
+                                anchor,
+                                wrap,
+                                image: None,
+                            });
+                        };
                     if rest_w <= room {
-                        push(&mut cur, rest.to_string(), start, None);
+                        push(&mut cur, &mut glue, rest.to_string(), start, None);
                         x = start + rest_w;
                         break;
                     }
@@ -1635,8 +1875,9 @@ fn break_lines(
                             )
                         });
                     if let Some((fragment, head_len, head_chars, wrap)) = split {
-                        push(&mut cur, fragment, start, Some(wrap));
+                        push(&mut cur, &mut glue, fragment, start, Some(wrap));
                         lines.push(std::mem::take(&mut cur));
+                        glue = Glue::default();
                         rest = &rest[head_len..];
                         off += head_chars;
                         first = false;
@@ -1645,13 +1886,12 @@ fn break_lines(
                     }
                     if !cur.is_empty() {
                         // Wrap the whole remaining word to a fresh line, then retry it there.
-                        lines.push(std::mem::take(&mut cur));
+                        x = break_line(&mut lines, &mut cur, &mut glue, rest_indent, m);
                         first = false;
-                        x = 0.0;
                         continue;
                     }
                     // Fresh line, no break point, still too wide → place it overflowing.
-                    push(&mut cur, rest.to_string(), 0.0, None);
+                    push(&mut cur, &mut glue, rest.to_string(), 0.0, None);
                     x = rest_w;
                     break;
                 }
@@ -1663,6 +1903,49 @@ fn break_lines(
         lines.push(cur);
     }
     lines
+}
+
+/// The trailing run of a line under construction whose tokens have no space between them.
+#[derive(Default)]
+struct Glue {
+    /// Index in the line's runs where the run begins; `None` before its first token is placed.
+    start: Option<usize>,
+    /// Whether it holds an inline image. Only then is it kept whole across a line break: text
+    /// tokens split at a style change ("<i>c</i>,") keep the break they have always had, so prose
+    /// without images wraps exactly as before.
+    has_image: bool,
+}
+
+/// Finish the line being built and start the next. When the line ends in a space-less run holding
+/// an inline image, and that run is not the whole line, the run moves down with the token being
+/// wrapped, so a formula and the punctuation touching it stay together. Returns where the next
+/// token starts on the new line (excluding the indent).
+fn break_line(
+    lines: &mut Vec<Vec<PlacedRun>>,
+    cur: &mut Vec<PlacedRun>,
+    glue: &mut Glue,
+    rest_indent: f32,
+    m: &dyn Metrics,
+) -> f32 {
+    let carried = match glue.start {
+        Some(start) if glue.has_image && start > 0 && start < cur.len() => cur.split_off(start),
+        _ => Vec::new(),
+    };
+    lines.push(std::mem::take(cur));
+    let Some(first) = carried.first() else {
+        *glue = Glue::default();
+        return 0.0;
+    };
+    // The new line is never the first, so its runs sit at the rest indent.
+    let dx = first.x - rest_indent;
+    let mut end = 0.0f32;
+    for mut run in carried {
+        run.x -= dx;
+        end = end.max(run.x - rest_indent + run.width(m));
+        cur.push(run);
+    }
+    glue.start = Some(0);
+    end
 }
 
 /// Whether `ch` belongs to a script written without inter-word spaces (Han, kana, Hangul, and the
