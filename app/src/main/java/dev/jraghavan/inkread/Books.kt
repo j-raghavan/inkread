@@ -39,6 +39,48 @@ object Books {
         return if (ext in SUPPORTED) ext else "pdf"
     }
 
+    /** How many leading bytes [acceptsImport] inspects. The PDF spec tolerates junk before `%PDF-`
+     *  within the first KiB, so that is the window a disguised PDF can still be recognized in. */
+    internal const val SNIFF_BYTES = 1024
+
+    /**
+     * Whether a picked file is worth keeping as a book. A core-supported extension is trusted (plain
+     * text has no signature, so the name is its only signal). Anything else must *look* like a
+     * document the core can open — a ZIP container (EPUB/CBZ) or a PDF header — or it is rejected.
+     * Without this, a file such as a Supernote `.epub.mark` annotation sidecar was stored as `.pdf`,
+     * failed in pdfium on every open, and stranded the reader on "Loading…". Pure + host-testable.
+     */
+    internal fun acceptsImport(displayName: String, head: ByteArray): Boolean {
+        if (displayName.substringAfterLast('.', "").lowercase() in SUPPORTED) return true
+        if (head.startsWith(ZIP_MAGIC)) return true
+        return head.indexOf(PDF_MAGIC, SNIFF_BYTES) >= 0
+    }
+
+    private val ZIP_MAGIC = byteArrayOf(0x50, 0x4B, 0x03, 0x04) // "PK\x03\x04"
+    private val PDF_MAGIC = "%PDF-".toByteArray(Charsets.US_ASCII)
+
+    private fun ByteArray.startsWith(prefix: ByteArray): Boolean =
+        size >= prefix.size && prefix.indices.all { this[it] == prefix[it] }
+
+    /** Up to [n] leading bytes (fewer at EOF). `InputStream.readNBytes` needs API 33; minSdk is 24. */
+    private fun InputStream.readNBytesCompat(n: Int): ByteArray {
+        val buf = ByteArray(n)
+        var got = 0
+        while (got < n) {
+            val r = read(buf, got, n - got)
+            if (r < 0) break
+            got += r
+        }
+        return buf.copyOf(got)
+    }
+
+    /** Index of [needle] within the first [limit] bytes, or -1. */
+    private fun ByteArray.indexOf(needle: ByteArray, limit: Int): Int {
+        val end = minOf(size, limit) - needle.size
+        for (i in 0..end) if (needle.indices.all { this[i + it] == needle[it] }) return i
+        return -1
+    }
+
     /** Every imported document (PDF, EPUB, CBZ, or plain text), sorted by name (case-insensitive). */
     fun list(context: Context): List<File> =
         dir(context)
@@ -63,6 +105,9 @@ object Books {
             // Over the cap: the core would reject this at open anyway (2 GiB), so don't keep a
             // huge/partial copy wasting storage. Match the native limit, fail before fully writing.
             if (!ok) { dest.delete(); return null }
+            // Refuse a file the core can't open rather than store it as a broken "PDF".
+            val head = dest.inputStream().use { it.readNBytesCompat(SNIFF_BYTES) }
+            if (!acceptsImport(raw, head)) { dest.delete(); return null }
             dest
         } catch (e: Exception) {
             dest.delete() // never leave a partial copy behind on an IO failure
