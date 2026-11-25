@@ -482,3 +482,57 @@ fn a_single_source_issue_is_one_section() {
     }
     assert_eq!(sections(&issue), vec![("TechCrunch", vec![0, 1, 2, 3, 4])]);
 }
+
+/// The chosen style is stamped into the OPF identifier so the reader can switch the band on/off
+/// (ADR-INKREAD-0018 D2).
+#[test]
+fn the_style_is_stamped_into_the_identifier() {
+    for (style, token) in [
+        (DailyLayoutStyle::Standard, "standard"),
+        (DailyLayoutStyle::Papernews, "papernews"),
+        (DailyLayoutStyle::Vintage, "vintage"),
+    ] {
+        let mut issue = sample_issue();
+        issue.style = style;
+        let pkg = EpubPackage::open(assemble_epub(&issue)).unwrap();
+        assert_eq!(
+            pkg.identifier.as_deref(),
+            Some(format!("urn:inkread-daily:{token}:{}", issue.date).as_str()),
+            "{token} stamped",
+        );
+    }
+}
+
+/// Vintage sets the byline in capitals and centres the headline; the other styles add no head CSS
+/// (ADR-INKREAD-0018 D1), so their documents are unchanged.
+#[test]
+fn vintage_capitalises_the_byline_and_centres_the_headline() {
+    let mut issue = sample_issue();
+    issue.style = DailyLayoutStyle::Vintage;
+    let pkg = EpubPackage::open(assemble_epub(&issue)).unwrap();
+    let article = pkg
+        .chapters
+        .iter()
+        .find(|c| c.html.contains("class=\"byline\""))
+        .expect("an article chapter");
+    assert!(
+        article
+            .html
+            .contains("<style>h1 { text-align: center; }</style>"),
+        "vintage centres the headline",
+    );
+    assert!(
+        article.html.contains("HACKER NEWS"),
+        "vintage byline is capitalised",
+    );
+}
+
+/// A non-vintage issue adds no head CSS at all (Papernews/Standard documents stay as before).
+#[test]
+fn non_vintage_adds_no_head_css() {
+    let pkg = EpubPackage::open(assemble_epub(&sample_issue())).unwrap();
+    assert!(
+        pkg.chapters.iter().all(|c| !c.html.contains("<style>")),
+        "papernews adds no head CSS",
+    );
+}

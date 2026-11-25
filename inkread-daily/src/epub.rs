@@ -10,7 +10,7 @@ use std::io::{Cursor, Write};
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipWriter};
 
-use crate::model::Issue;
+use crate::model::{DailyLayoutStyle, Issue};
 
 /// Build the issue EPUB as bytes. The result opens with the reader's EPUB backend and reflows like
 /// any book (honoring the shipped font-size/spacing controls + reflow-stable resume).
@@ -87,7 +87,7 @@ fn opf(issue: &Issue) -> String {
         r#"<?xml version="1.0" encoding="utf-8"?>
 <package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="id">
   <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
-    <dc:identifier id="id">urn:inkread-daily:{date}</dc:identifier>
+    <dc:identifier id="id">urn:inkread-daily:{style}:{date}</dc:identifier>
     <dc:title>{title} — {date}</dc:title>
     <dc:language>en</dc:language>
   </metadata>
@@ -98,6 +98,7 @@ fn opf(issue: &Issue) -> String {
 </package>"#,
         title = esc(&issue.title),
         date = esc(&issue.date),
+        style = issue.style.as_str(),
     )
 }
 
@@ -208,6 +209,7 @@ fn title_page(issue: &Issue) -> String {
             esc(&issue.title),
             esc(&issue.date)
         ),
+        issue.style,
     )
 }
 
@@ -218,21 +220,30 @@ const EXCERPT_CHARS: usize = 160;
 /// One article document: headline, a source · date byline, then the clean article body.
 fn article_xhtml(issue: &Issue, i: usize) -> String {
     let art = &issue.articles[i];
+    // Vintage sets the byline in capitals (ADR-INKREAD-0018 D1). Uppercase the raw text *before*
+    // escaping, so an entity like `&amp;` is not mangled into `&AMP;`.
+    let caps = |s: &str| {
+        if issue.style == DailyLayoutStyle::Vintage {
+            s.to_uppercase()
+        } else {
+            s.to_string()
+        }
+    };
     let byline = match art
         .published
         .as_deref()
         .map(clean_date)
         .filter(|d| !d.is_empty())
     {
-        Some(d) => format!("{} · {}", esc(&art.source), esc(&d)),
-        None => esc(&art.source),
+        Some(d) => format!("{} · {}", esc(&caps(&art.source)), esc(&caps(&d))),
+        None => esc(&caps(&art.source)),
     };
     let body = format!(
         "<h1>{}</h1>\n<p class=\"byline\">{byline}</p>\n{}",
         esc(&art.title),
         art.body_html // trusted: caller's contract is already-clean, well-formed XHTML (not escaped)
     );
-    xhtml(&art.title, &body)
+    xhtml(&art.title, &body, issue.style)
 }
 
 /// Turn a raw feed date into a short display date — drop the weekday prefix and the time/zone, so
@@ -250,18 +261,30 @@ fn clean_date(s: &str) -> String {
     s.split_whitespace().take(3).collect::<Vec<_>>().join(" ") // RFC-822 → "25 Jun 2026"
 }
 
-/// Wrap `body` (raw XHTML markup) in a minimal, well-formed XHTML document titled `title`.
-fn xhtml(title: &str, body: &str) -> String {
+/// Wrap `body` (raw XHTML markup) in a minimal, well-formed XHTML document titled `title`, with the
+/// style's head CSS (ADR-INKREAD-0018).
+fn xhtml(title: &str, body: &str, style: DailyLayoutStyle) -> String {
     format!(
         r#"<?xml version="1.0" encoding="utf-8"?>
 <html xmlns="http://www.w3.org/1999/xhtml">
-  <head><title>{}</title></head>
+  <head><title>{}</title>{head}</head>
   <body>
 {body}
   </body>
 </html>"#,
-        esc(title)
+        esc(title),
+        head = head_css(style),
     )
+}
+
+/// Extra per-style CSS for a document head (ADR-INKREAD-0018 D1). Vintage centres the headline for a
+/// classic masthead/nameplate feel (centre alignment is honoured by the reflow engine, #188); the
+/// other styles add nothing, so their documents stay byte-identical to before styles existed.
+fn head_css(style: DailyLayoutStyle) -> &'static str {
+    match style {
+        DailyLayoutStyle::Vintage => "<style>h1 { text-align: center; }</style>",
+        _ => "",
+    }
 }
 
 /// Escape the five XML metacharacters so user-supplied titles/sources/dates can't break the markup.
