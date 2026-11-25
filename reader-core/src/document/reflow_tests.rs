@@ -65,6 +65,32 @@ fn daily_render_dump() {
 }
 
 #[test]
+fn a_daily_issue_switches_on_the_headline_band() {
+    // End-to-end gate (ADR-INKREAD-0017 D5): a real inkread-daily issue is stamped
+    // `urn:inkread-daily:<date>`, which the backend reads to enable the band. A normal book does not.
+    let issue = inkread_daily::Issue {
+        title: "inkread daily".into(),
+        date: "2026-11-25".into(),
+        articles: vec![inkread_daily::Article {
+            title: "Big Headline Today".into(),
+            source: "Reuters".into(),
+            url: String::new(),
+            published: Some("25 Nov 2026".into()),
+            body_html: "<p>The agreement binds nearly two hundred nations to steeper cuts.</p>"
+                .into(),
+            summary: None,
+        }],
+        sources: vec!["Reuters".into()],
+    };
+    let daily = EpubBackend::open(inkread_daily::assemble_epub(&issue), vp(400, 600))
+        .expect("daily issue opens");
+    assert!(daily.band, "a daily issue enables the headline band");
+
+    let normal = EpubBackend::open(SAMPLE.to_vec(), vp(400, 600)).expect("sample opens");
+    assert!(!normal.band, "an ordinary book does not enable the band");
+}
+
+#[test]
 fn opens_paginates_and_exposes_metadata() {
     let b = EpubBackend::open(SAMPLE.to_vec(), vp(400, 600)).unwrap();
     assert_eq!(b.metadata().title.as_deref(), Some("Reflow Sample"));

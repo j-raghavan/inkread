@@ -182,6 +182,9 @@ pub struct EpubBackend {
     nav: Vec<NavPoint>,
     /// Title/author.
     meta: DocumentMetadata,
+    /// Whether this book is an inkread-daily issue (OPF id `urn:inkread-daily:…`), which switches on
+    /// the full-width headline band in multi-column mode (ADR-INKREAD-0017 D5).
+    band: bool,
     /// The reading face; `RefCell` so the `&self` font-family setter can swap it (RR4 / font select).
     font: RefCell<AbFont>,
     /// Soft-hyphenation for justified/narrow lines (book typography, like KOReader).
@@ -255,6 +258,12 @@ impl EpubBackend {
             title: pkg.title.clone(),
             author: pkg.author.clone(),
         };
+        // inkread-daily stamps each issue `urn:inkread-daily:<date>` (see `inkread-daily`); that is
+        // the signal that switches on the headline band, so no other book is affected (ADR-0017 D5).
+        let band = pkg
+            .identifier
+            .as_deref()
+            .is_some_and(|id| id.starts_with("urn:inkread-daily:"));
         let chapter_anchors = RefCell::new(vec![Vec::new(); chapter_keys.len()]);
         Ok(Self {
             chapters: RefCell::new(chapters),
@@ -265,6 +274,7 @@ impl EpubBackend {
             image_sizes: RefCell::new(HashMap::new()),
             nav: pkg.toc,
             meta,
+            band,
             font: RefCell::new(AbFont::default_font()),
             hyph: EnHyphenator::new(),
             font_id: Cell::new(0),
@@ -328,6 +338,7 @@ impl EpubBackend {
                 title: Some("Synthetic".into()),
                 author: None,
             },
+            band: false,
             font: RefCell::new(AbFont::default_font()),
             hyph: EnHyphenator::new(),
             font_id: Cell::new(0),
@@ -529,7 +540,11 @@ impl EpubBackend {
             Some(laid) => laid.request != request,
         };
         if stale {
-            let opts = Self::opts_for(&request);
+            let mut opts = Self::opts_for(&request);
+            // A daily issue lays out with the headline band on (ADR-INKREAD-0017 D5). It is part of
+            // the layout, so it is set before the cache key is derived — a daily pagination keys
+            // apart from a would-be non-band one of the same geometry.
+            opts.band = self.band;
             let key = layout_key(&opts, request.font_id, self.chapter_count());
             let cache = self.pagination_cache.borrow();
 

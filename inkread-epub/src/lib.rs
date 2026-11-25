@@ -94,6 +94,9 @@ pub struct EpubPackage {
     pub title: Option<String>,
     /// Primary creator/author, if declared.
     pub author: Option<String>,
+    /// The OPF unique identifier (`<dc:identifier>`), if declared. inkread-daily stamps its issues
+    /// `urn:inkread-daily:<date>`, which the reader uses to switch on the headline band (ADR-0017).
+    pub identifier: Option<String>,
     /// Reading-order content documents (linear spine first; see [`Chapter`]).
     pub chapters: Vec<Chapter>,
     /// The table of contents (EPUB 3 nav, falling back to EPUB 2 NCX — rbook resolves this).
@@ -189,6 +192,7 @@ impl EpubPackage {
         let meta = epub.metadata();
         let title = meta.title().map(|t| t.value().to_string());
         let author = meta.creators().next().map(|c| c.value().to_string());
+        let identifier = meta.identifier().map(|i| i.value().to_string());
 
         let mut chapters = Vec::new();
         let mut reader = epub.reader();
@@ -238,6 +242,7 @@ impl EpubPackage {
         Ok(Self {
             title,
             author,
+            identifier,
             chapters,
             toc,
             images,
@@ -424,6 +429,9 @@ mod tests {
         let pkg = EpubPackage::open(sample_epub()).expect("valid epub opens");
         assert_eq!(pkg.title.as_deref(), Some("The Test Book"));
         assert_eq!(pkg.author.as_deref(), Some("Ada Lovelace"));
+        // The OPF unique identifier is exposed (ADR-INKREAD-0017 D5): the reader reads it to decide
+        // whether a book is a daily issue and switch on the headline band.
+        assert_eq!(pkg.identifier.as_deref(), Some("urn:uuid:test"));
 
         assert_eq!(pkg.chapter_count(), 2, "two spine documents in order");
         assert!(pkg.chapters[0].html.contains("The first chapter."));
