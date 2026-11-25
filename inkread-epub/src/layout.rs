@@ -133,6 +133,10 @@ pub struct LayoutOpts {
     /// Text columns per page — 1 (default) or 2 (#194). A page too narrow to give two columns a
     /// readable measure falls back to one; see [`LayoutOpts::effective_columns`].
     pub columns: u8,
+    /// Daily headline band (ADR-INKREAD-0017): lay a chapter's leading heading(s) + byline
+    /// full-width above the columns, with the body reflowing beneath. Set only for daily issues;
+    /// `false` leaves multi-column reading byte-identical to before the band existed.
+    pub band: bool,
 }
 
 impl LayoutOpts {
@@ -148,6 +152,7 @@ impl LayoutOpts {
             para_gap: font_px * 0.7,
             align: Align::Left,
             columns: 1,
+            band: false,
         }
     }
 
@@ -241,6 +246,11 @@ impl LayoutOpts {
         // discarding them all for a field most books never set.
         if self.columns > 1 {
             eat(self.columns);
+        }
+        // Folded only when set, so every pagination cached before the band existed stays valid
+        // (ADR-INKREAD-0017 D1): a book that never sets `band` hashes exactly as it did before.
+        if self.band {
+            eat(0xBD);
         }
         h
     }

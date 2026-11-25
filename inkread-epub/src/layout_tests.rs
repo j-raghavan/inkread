@@ -93,8 +93,33 @@ fn layout_digest_is_pinned_against_algorithm_drift() {
         para_gap: 11.2,
         align: Align::Left,
         columns: 1,
+        band: false,
     };
     assert_eq!(opts.layout_digest(), 17_685_407_801_978_826_572);
+}
+
+#[test]
+fn band_flag_folds_into_digest_only_when_set() {
+    // ADR-INKREAD-0017 D1: the band is off by default and folded into the digest only when true, so
+    // a book that never sets it hashes exactly as it did before the band existed (every pagination
+    // cached pre-band stays valid). When set, it must flip the digest so a daily issue does not
+    // reuse a non-band pagination.
+    let base = LayoutOpts::new(400.0, 600.0, 16.0);
+    assert!(!base.band, "band is off by default");
+    assert_eq!(
+        base.layout_digest(),
+        LayoutOpts {
+            band: false,
+            ..base
+        }
+        .layout_digest(),
+        "band=false must not change the digest"
+    );
+    assert_ne!(
+        base.layout_digest(),
+        LayoutOpts { band: true, ..base }.layout_digest(),
+        "band=true must flip the digest"
+    );
 }
 
 use super::*;
@@ -136,6 +161,7 @@ fn style_opts() -> LayoutOpts {
         para_gap: 0.0,
         align: Align::Left,
         columns: 1,
+        band: false,
     }
 }
 
@@ -361,6 +387,7 @@ fn long_paragraph_wraps_to_multiple_lines() {
         para_gap: 0.0,
         align: Align::Left,
         columns: 1,
+        band: false,
     };
     let words = "aaaa ".repeat(12); // 12 words of 4 chars → ~ wraps
     let pages = paginate(&[para(words.trim())], &opts, &Mono);
@@ -392,6 +419,7 @@ fn cjk_opts() -> LayoutOpts {
         para_gap: 0.0,
         align: Align::Left,
         columns: 1,
+        band: false,
     }
 }
 
@@ -529,6 +557,7 @@ fn content_overflow_breaks_into_pages() {
         para_gap: 0.0,
         align: Align::Left,
         columns: 1,
+        band: false,
     };
     let blocks: Vec<Block> = (0..7).map(|_| para("x")).collect();
     let pages = paginate(&blocks, &opts, &Mono);
@@ -548,6 +577,7 @@ fn heading_uses_a_larger_line_height() {
         para_gap: 0.0,
         align: Align::Left,
         columns: 1,
+        band: false,
     };
     let pages = paginate(
         &[Block::Heading {
@@ -623,6 +653,7 @@ fn wide(font_px: f32) -> LayoutOpts {
         para_gap: 0.0,
         align: Align::Left,
         columns: 1,
+        band: false,
     }
 }
 
@@ -700,6 +731,7 @@ fn narrow_para() -> LayoutOpts {
         para_gap: 0.0,
         align: Align::Left,
         columns: 1,
+        band: false,
     }
 }
 
@@ -834,6 +866,7 @@ fn image_opts() -> LayoutOpts {
         para_gap: 0.0,
         align: Align::Left,
         columns: 1,
+        band: false,
     }
 }
 
@@ -1113,6 +1146,7 @@ fn two_col_opts() -> LayoutOpts {
         para_gap: 0.0,
         align: Align::Left,
         columns: 2,
+        band: false,
     }
 }
 

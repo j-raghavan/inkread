@@ -645,6 +645,7 @@ mod tests {
             para_gap: 8.0,
             align: Align::Left,
             columns: 1,
+            band: false,
         };
         let sizer = StoreSizer(&pkg.images);
         for (i, want) in [(0usize, "images/cover.png"), (1, "images/pic.webp")] {
