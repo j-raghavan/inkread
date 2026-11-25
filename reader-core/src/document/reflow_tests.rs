@@ -66,9 +66,11 @@ fn daily_render_dump() {
 
 #[test]
 fn a_daily_issue_switches_on_the_headline_band() {
-    // End-to-end gate (ADR-INKREAD-0017 D5): a real inkread-daily issue is stamped
-    // `urn:inkread-daily:<date>`, which the backend reads to enable the band. A normal book does not.
-    let issue = inkread_daily::Issue {
+    // End-to-end gate (ADR-INKREAD-0017 D5 / ADR-INKREAD-0018 D2): a real inkread-daily issue is
+    // stamped `urn:inkread-daily:<style>:<date>`, and the backend reads the style to set the band —
+    // on for Papernews/Vintage, off for Standard. A normal book never enables it.
+    use inkread_daily::DailyLayoutStyle;
+    let issue_with = |style: DailyLayoutStyle| inkread_daily::Issue {
         title: "inkread daily".into(),
         date: "2026-11-25".into(),
         articles: vec![inkread_daily::Article {
@@ -81,11 +83,20 @@ fn a_daily_issue_switches_on_the_headline_band() {
             summary: None,
         }],
         sources: vec!["Reuters".into()],
-        style: inkread_daily::DailyLayoutStyle::Papernews,
+        style,
     };
-    let daily = EpubBackend::open(inkread_daily::assemble_epub(&issue), vp(400, 600))
+    for style in [
+        DailyLayoutStyle::Standard,
+        DailyLayoutStyle::Papernews,
+        DailyLayoutStyle::Vintage,
+    ] {
+        let b = EpubBackend::open(
+            inkread_daily::assemble_epub(&issue_with(style)),
+            vp(400, 600),
+        )
         .expect("daily issue opens");
-    assert!(daily.band, "a daily issue enables the headline band");
+        assert_eq!(b.band, style.has_band(), "band matches the style {style:?}");
+    }
 
     let normal = EpubBackend::open(SAMPLE.to_vec(), vp(400, 600)).expect("sample opens");
     assert!(!normal.band, "an ordinary book does not enable the band");

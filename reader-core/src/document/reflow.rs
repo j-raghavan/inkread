@@ -258,12 +258,18 @@ impl EpubBackend {
             title: pkg.title.clone(),
             author: pkg.author.clone(),
         };
-        // inkread-daily stamps each issue `urn:inkread-daily:<date>` (see `inkread-daily`); that is
-        // the signal that switches on the headline band, so no other book is affected (ADR-0017 D5).
+        // A daily issue's OPF id is `urn:inkread-daily:<style>:<date>` (ADR-0017 D5 / ADR-0018 D2).
+        // The style decides the band: Papernews/Vintage carry it, Standard does not. A legacy issue
+        // with no `<style>` segment parses as the default Papernews, so it keeps its band.
         let band = pkg
             .identifier
             .as_deref()
-            .is_some_and(|id| id.starts_with("urn:inkread-daily:"));
+            .and_then(|id| id.strip_prefix("urn:inkread-daily:"))
+            .map(|rest| {
+                let token = rest.split(':').next().unwrap_or(rest);
+                inkread_daily::DailyLayoutStyle::from_token(token).has_band()
+            })
+            .unwrap_or(false);
         let chapter_anchors = RefCell::new(vec![Vec::new(); chapter_keys.len()]);
         Ok(Self {
             chapters: RefCell::new(chapters),
