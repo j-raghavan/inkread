@@ -683,10 +683,57 @@ fn leading_heading_run(blocks: &[Block]) -> Option<usize> {
     (n >= 1).then_some(n)
 }
 
-/// Lay a chapter's leading heading(s) as a full-width band, then the body in columns beneath it
-/// (ADR-INKREAD-0017 D2). The band is laid to the full text measure; the body is laid in columns
-/// with the **first physical page** shortened by the band height, so only page 0 carries the band
-/// and every later page is a normal full-height multi-column page (no top gap).
+/// Lay a chapter's body (the blocks after the band) into pages at `opts`'s column measure, with the
+/// first physical page's columns shortened by `reserve_top` to clear the band above them
+/// (ADR-INKREAD-0017 D2/D3). `index_base` re-bases the source-block index so anchors name the
+/// original block, and `cursor` threads the chapter-relative char offset (ADR-INKREAD-0012). Returns
+/// the column pages and whether the whole body was laid within `max_pages`.
+#[allow(clippy::too_many_arguments)]
+fn lay_body_columns(
+    body: &[Block],
+    opts: &LayoutOpts,
+    reserve_top: f32,
+    reserve_cols: usize,
+    index_base: usize,
+    m: &dyn Metrics,
+    hyph: &dyn Hyphenator,
+    images: &dyn ImageSizer,
+    max_pages: usize,
+    cursor: &mut usize,
+) -> (Vec<Page>, bool) {
+    let cols = opts.effective_columns();
+    let column_budget = max_pages.saturating_mul(usize::from(cols));
+    let mut pager = Pager::new(opts, hyph);
+    pager.reserve_top = reserve_top;
+    pager.reserve_cols = reserve_cols;
+    let mut complete = true;
+    let mut j = 0;
+    while j < body.len() {
+        if pager.finished_page_count() >= column_budget {
+            complete = false;
+            break;
+        }
+        let end = keep_run_end(body, j);
+        let laid = pager.add_keep_run(&body[j..end], |k| index_base + j + k, cursor, m, images);
+        j += laid.max(1);
+    }
+    let mut laid = if complete {
+        pager.finish()
+    } else {
+        pager.into_finished_pages()
+    };
+    if !complete {
+        let whole = laid.len().min(column_budget) / usize::from(cols) * usize::from(cols);
+        laid.truncate(whole);
+    }
+    (laid, complete)
+}
+
+/// Lay a chapter's leading heading(s) as a full-width band, then the body beneath it
+/// (ADR-INKREAD-0017 D2/D3). The band is laid to the full text measure; the body is laid with the
+/// **first physical page** shortened by the band height, so only page 0 carries the band and every
+/// later page is a normal full-height page (no top gap). A short body that fits on the first page is
+/// set in a single full-width column rather than two columns with a near-empty second one.
 #[allow(clippy::too_many_arguments)]
 fn paginate_with_band(
     blocks: &[Block],
@@ -716,35 +763,47 @@ fn paginate_with_band(
         .collect();
     let band_h = flow_height(&band_lines) + opts.para_gap;
 
-    // 2. The body: the remaining blocks in columns, the first physical page shortened by `band_h`.
-    // `band_len` re-bases the source-block index so anchors still name the original block (ADR-0012).
-    let columns = opts.effective_columns();
-    let column_budget = max_pages.saturating_mul(usize::from(columns));
-    let mut pager = Pager::new(opts, hyph);
-    pager.reserve_top = band_h;
-    pager.reserve_cols = usize::from(columns);
+    // 2. The body. A short article is set in a single full-width column beneath the band rather than
+    // two columns with a near-empty second one (ADR-INKREAD-0017 D3): lay one full-width column
+    // first, and if the whole body fits on the first page keep it, else lay two columns. `band_len`
+    // re-bases the source-block index so anchors still name the original block (ADR-0012).
     let body = &blocks[band_len..];
-    let mut complete = true;
-    let mut j = 0;
-    while j < body.len() {
-        if pager.finished_page_count() >= column_budget {
-            complete = false;
-            break;
-        }
-        let end = keep_run_end(body, j);
-        let laid = pager.add_keep_run(&body[j..end], |k| band_len + j + k, &mut cursor, m, images);
-        j += laid.max(1);
-    }
-    let mut laid = if complete {
-        pager.finish()
+    let cursor_after_band = cursor;
+    let mut single_opts = *opts;
+    single_opts.columns = 1;
+    let mut single_cursor = cursor_after_band;
+    let (single, single_fits) = lay_body_columns(
+        body,
+        &single_opts,
+        band_h,
+        1,
+        band_len,
+        m,
+        hyph,
+        images,
+        1,
+        &mut single_cursor,
+    );
+    let (laid, used_cols, complete) = if single_fits {
+        (single, 1u8, true)
     } else {
-        pager.into_finished_pages()
+        let columns = opts.effective_columns();
+        let mut multi_cursor = cursor_after_band;
+        let (multi, complete) = lay_body_columns(
+            body,
+            opts,
+            band_h,
+            usize::from(columns),
+            band_len,
+            m,
+            hyph,
+            images,
+            max_pages,
+            &mut multi_cursor,
+        );
+        (multi, columns, complete)
     };
-    if !complete {
-        let whole = laid.len().min(column_budget) / usize::from(columns) * usize::from(columns);
-        laid.truncate(whole);
-    }
-    let mut pages = combine_columns(laid, opts, columns);
+    let mut pages = combine_columns(laid, opts, used_cols);
 
     // 3. Drop the first page's body beneath the band and set the band atop it. Only page 0 moves —
     // later pages are full-height and already correct.

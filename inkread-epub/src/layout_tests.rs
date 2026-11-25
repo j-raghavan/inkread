@@ -238,6 +238,42 @@ fn band_leaves_no_top_gap_on_later_pages() {
 }
 
 #[test]
+fn band_sets_a_short_article_in_one_column() {
+    // A short body collapses lopsidedly into the left column of two; instead it is set in a single
+    // full-width column beneath the band (ADR-INKREAD-0017 D3).
+    let opts = band_opts();
+    let blocks = vec![
+        heading_block(1, "Short Notice"),
+        para("the measure passed six votes to one after a brief debate"),
+        para("a residents group welcomed the decision but asked for crossings"),
+    ];
+    let pages = paginate(&blocks, &opts, &Mono);
+    assert_eq!(pages.len(), 1, "short article is one page");
+    let body: Vec<_> = pages[0]
+        .lines
+        .iter()
+        .filter(|l| {
+            l.runs
+                .iter()
+                .any(|r| r.text.contains("measure") || r.text.contains("residents"))
+        })
+        .collect();
+    assert!(!body.is_empty(), "body present");
+    assert!(
+        body.iter().all(|l| (l.column_w - 600.0).abs() < 1.0),
+        "short body is set full width, not in a half column"
+    );
+    assert!(
+        pages[0]
+            .lines
+            .iter()
+            .flat_map(|l| &l.runs)
+            .all(|r| r.x < 301.0),
+        "no second column is used for a short article"
+    );
+}
+
+#[test]
 fn band_off_keeps_the_heading_in_a_column() {
     // With the band off (every non-daily book) the heading is laid to the column measure, as before.
     let opts = LayoutOpts {
