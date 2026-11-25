@@ -312,6 +312,76 @@ fn band_sets_a_short_article_in_one_column() {
 }
 
 #[test]
+fn band_keeps_source_anchors_contiguous_across_the_boundary() {
+    // ADR-INKREAD-0012/0017: the band must not disturb chapter-relative char offsets or source-block
+    // indices — highlights and resume re-resolve by these, so a gap/overlap in offsets, or a body
+    // block re-based to 0, would corrupt them.
+    let opts = band_opts();
+    let mut blocks = vec![heading_block(1, "HEADLINE"), para("BYLINE")];
+    for _ in 0..30 {
+        blocks.push(para("body words filling the two columns of the page here"));
+    }
+    let pages = paginate(&blocks, &opts, &Mono);
+    let anchors: Vec<(usize, usize, String)> = pages
+        .iter()
+        .flat_map(|p| &p.lines)
+        .flat_map(|l| &l.runs)
+        .map(|r| (r.anchor.block, r.anchor.char_offset, r.text.clone()))
+        .collect();
+    // The band keeps the heading at block 0 and the byline at block 1 (their original indices).
+    assert!(anchors
+        .iter()
+        .any(|(b, _, t)| *b == 0 && t.contains("HEADLINE")));
+    assert!(anchors
+        .iter()
+        .any(|(b, _, t)| *b == 1 && t.contains("BYLINE")));
+    // Body runs name the original post-band blocks (>= 2), never re-based to 0.
+    assert!(
+        anchors
+            .iter()
+            .filter(|(_, _, t)| t.contains("body"))
+            .all(|(b, _, _)| *b >= 2),
+        "body blocks are not re-based"
+    );
+    // Offsets are contiguous: every body char offset is past the whole band's text (no reset/overlap).
+    let band_max = anchors
+        .iter()
+        .filter(|(b, _, _)| *b <= 1)
+        .map(|(_, o, _)| *o)
+        .max()
+        .expect("band has runs");
+    assert!(
+        anchors
+            .iter()
+            .filter(|(_, _, t)| t.contains("body"))
+            .all(|(_, o, _)| *o > band_max),
+        "body offsets continue past the band, not reset"
+    );
+}
+
+#[test]
+fn band_partial_pagination_is_a_prefix() {
+    // The short/long decision uses a hardcoded one-page trial, so a `max_pages` prefix of a band
+    // article is byte-identical to the full pagination's first page (ADR-INKREAD-0013 prefix rule).
+    let opts = band_opts();
+    let mut blocks = vec![heading_block(1, "Headline"), para("Byline")];
+    for _ in 0..80 {
+        blocks.push(para(
+            "body text filling multiple pages of two columns here now",
+        ));
+    }
+    let full = paginate(&blocks, &opts, &Mono);
+    assert!(full.len() >= 2, "article spans pages: {}", full.len());
+    let (prefix, complete) = paginate_upto(&blocks, &opts, &Mono, &NoHyphen, &NoImages, 1);
+    assert!(!complete, "a long article is not complete in one page");
+    assert_eq!(prefix.len(), 1, "max_pages=1 yields one page");
+    assert_eq!(
+        prefix[0], full[0],
+        "the one page equals the full pagination's first page"
+    );
+}
+
+#[test]
 fn band_off_keeps_the_heading_in_a_column() {
     // With the band off (every non-daily book) the heading is laid to the column measure, as before.
     let opts = LayoutOpts {
