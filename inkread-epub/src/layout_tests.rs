@@ -149,6 +149,119 @@ fn para(text: &str) -> Block {
     styled_para(text, BlockStyle::default())
 }
 
+/// A heading block for the band tests (ADR-INKREAD-0017 D2).
+fn heading_block(level: u8, text: &str) -> Block {
+    Block::Heading {
+        level,
+        content: runs(text),
+        style: BlockStyle::default(),
+    }
+}
+
+/// A wide two-column viewport with the daily band on: text width 600 → two 300px columns.
+fn band_opts() -> LayoutOpts {
+    LayoutOpts {
+        page_w: 600.0,
+        page_h: 400.0,
+        margin: 0.0,
+        font_px: 10.0,
+        line_spacing: 1.0,
+        para_gap: 5.0,
+        align: Align::Left,
+        columns: 2,
+        band: true,
+    }
+}
+
+#[test]
+fn band_lays_the_headline_full_width_above_the_columns() {
+    // text_w = 600 (margin 0); each column = 300. The headline spans the full 600, the body is laid
+    // to the 300 column measure beneath it, and the second column is used (ADR-INKREAD-0017 D2).
+    let opts = band_opts();
+    let mut blocks = vec![heading_block(1, "Big Climate Deal Reached")];
+    for _ in 0..40 {
+        blocks.push(para(
+            "the agreement binds nearly two hundred nations to steeper cuts",
+        ));
+    }
+    let pages = paginate(&blocks, &opts, &Mono);
+    let p0 = &pages[0];
+    let head = p0
+        .lines
+        .iter()
+        .find(|l| l.runs.iter().any(|r| r.text.contains("Climate")))
+        .expect("headline on page 0");
+    assert!(
+        (head.column_w - 600.0).abs() < 1.0,
+        "headline spans the full width: {}",
+        head.column_w
+    );
+    let body: Vec<_> = p0
+        .lines
+        .iter()
+        .filter(|l| l.runs.iter().any(|r| r.text.contains("agreement")))
+        .collect();
+    assert!(!body.is_empty(), "body on page 0");
+    assert!(
+        body.iter().all(|l| (l.column_w - 300.0).abs() < 1.0),
+        "body laid to the column measure"
+    );
+    assert!(
+        body.iter().all(|l| l.top > head.top),
+        "body sits below the headline band"
+    );
+    assert!(
+        p0.lines.iter().flat_map(|l| &l.runs).any(|r| r.x >= 299.0),
+        "the second column is used"
+    );
+}
+
+#[test]
+fn band_leaves_no_top_gap_on_later_pages() {
+    // Only the first page carries the band; continuation pages are full-height and start at the top.
+    let opts = band_opts();
+    let mut blocks = vec![heading_block(1, "Headline")];
+    for _ in 0..200 {
+        blocks.push(para("short line here"));
+    }
+    let pages = paginate(&blocks, &opts, &Mono);
+    assert!(pages.len() >= 2, "article spans pages: {}", pages.len());
+    let p1_top = pages[1]
+        .lines
+        .iter()
+        .map(|l| l.top)
+        .fold(f32::INFINITY, f32::min);
+    assert!(
+        p1_top < 5.0,
+        "continuation page starts at the top, no band-height gap: {p1_top}"
+    );
+}
+
+#[test]
+fn band_off_keeps_the_heading_in_a_column() {
+    // With the band off (every non-daily book) the heading is laid to the column measure, as before.
+    let opts = LayoutOpts {
+        band: false,
+        ..band_opts()
+    };
+    let blocks = vec![
+        heading_block(1, "Headline"),
+        para("body text one here"),
+        para("body text two here"),
+    ];
+    let pages = paginate(&blocks, &opts, &Mono);
+    let head = pages[0]
+        .lines
+        .iter()
+        .find(|l| l.runs.iter().any(|r| r.text.contains("Headline")))
+        .expect("heading present");
+    assert!(
+        (head.column_w - 300.0).abs() < 1.0,
+        "heading confined to one column when the band is off: {}",
+        head.column_w
+    );
+}
+
 /// Build the opts used by the #188 declared-style tests: 10px Mono font (5px/char), content
 /// width 100 → 20 chars per line, and a reader whose global alignment is the default Left.
 fn style_opts() -> LayoutOpts {
