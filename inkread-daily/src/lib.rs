@@ -17,7 +17,7 @@ pub mod quote;
 pub use epub::assemble_epub;
 pub use extract::extract_readable;
 pub use feed::{parse_feed, FeedItem, ParsedFeed};
-pub use model::{Article, Issue, Source};
+pub use model::{Article, DailyLayoutStyle, Issue, Source};
 
 use serde::Deserialize;
 
@@ -39,6 +39,10 @@ struct RawIssue {
     /// Source names in the reader's order (#269); optional so an issue from an older shell parses.
     #[serde(default)]
     sources: Vec<String>,
+    /// The reader's chosen layout style (ADR-INKREAD-0018); optional so an older shell's JSON (no
+    /// style) assembles as the default Papernews.
+    #[serde(default)]
+    style: model::DailyLayoutStyle,
 }
 
 #[derive(Deserialize)]
@@ -84,6 +88,7 @@ pub fn assemble_issue_from_json(json: &str) -> Result<Vec<u8>, String> {
         date: raw.date,
         articles,
         sources: raw.sources,
+        style: raw.style,
     };
     Ok(assemble_epub(&issue))
 }

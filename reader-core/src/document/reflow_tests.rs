@@ -81,6 +81,7 @@ fn a_daily_issue_switches_on_the_headline_band() {
             summary: None,
         }],
         sources: vec!["Reuters".into()],
+        style: inkread_daily::DailyLayoutStyle::Papernews,
     };
     let daily = EpubBackend::open(inkread_daily::assemble_epub(&issue), vp(400, 600))
         .expect("daily issue opens");

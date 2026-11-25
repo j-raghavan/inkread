@@ -3,7 +3,7 @@
 //! caught on the host, not the device.
 
 use super::*;
-use crate::model::{Article, Issue};
+use crate::model::{Article, DailyLayoutStyle, Issue};
 use inkread_epub::EpubPackage;
 
 fn article(title: &str, source: &str, body: &str, published: Option<&str>) -> Article {
@@ -20,6 +20,7 @@ fn article(title: &str, source: &str, body: &str, published: Option<&str>) -> Ar
 fn sample_issue() -> Issue {
     Issue {
         sources: vec![],
+        style: DailyLayoutStyle::Papernews,
         title: "inkread daily".to_string(),
         date: "24 Jun 2026".to_string(),
         articles: vec![
@@ -73,6 +74,7 @@ fn malformed_body_html_is_currently_accepted_extraction_slice_must_sanitize() {
     // parsing surfaces here as a failure rather than silently — it documents the gap, not an endorsement.
     let issue = Issue {
         sources: vec![],
+        style: DailyLayoutStyle::Papernews,
         title: "t".to_string(),
         date: "d".to_string(),
         articles: vec![article("Bad", "Src", "<p>unclosed & a raw < here", None)],
@@ -87,6 +89,7 @@ fn malformed_body_html_is_currently_accepted_extraction_slice_must_sanitize() {
 fn an_empty_issue_still_assembles_a_valid_epub() {
     let issue = Issue {
         sources: vec![],
+        style: DailyLayoutStyle::Papernews,
         title: "inkread daily".to_string(),
         date: "24 Jun 2026".to_string(),
         articles: vec![],
@@ -101,6 +104,7 @@ fn xml_metacharacters_in_titles_do_not_break_the_container() {
     // A hostile headline with &, <, >, quotes must not produce malformed XHTML/OPF.
     let issue = Issue {
         sources: vec![],
+        style: DailyLayoutStyle::Papernews,
         title: "Tom & Jerry <b>\"news\"</b>".to_string(),
         date: "24 Jun 2026".to_string(),
         articles: vec![article(
@@ -226,6 +230,7 @@ fn one_very_long_word_still_yields_text() {
 fn the_contents_page_links_every_article_and_the_issue_still_opens() {
     let issue = Issue {
         sources: vec![],
+        style: DailyLayoutStyle::Papernews,
         title: "inkread daily".into(),
         date: "21 Aug 2026".into(),
         articles: vec![
@@ -290,6 +295,7 @@ fn a_quotation_is_escaped_into_the_cover() {
     for q in crate::quote::all() {
         let issue = Issue {
             sources: vec![],
+            style: DailyLayoutStyle::Papernews,
             title: "t".into(),
             date: "x".into(),
             articles: vec![article("A", "S", "<p>b</p>", None)],
@@ -303,6 +309,7 @@ fn a_quotation_is_escaped_into_the_cover() {
     for day in 1..=12 {
         let issue = Issue {
             sources: vec![],
+            style: DailyLayoutStyle::Papernews,
             title: "inkread daily".into(),
             date: format!("{day} Aug 2026"),
             articles: vec![article("A", "S", "<p>b</p>", None)],
@@ -329,6 +336,7 @@ fn round_robin_issue(sources: &[&str]) -> Issue {
             article("BBC 2", "BBC", "<p>e</p>", None),
         ],
         sources: sources.iter().map(|s| s.to_string()).collect(),
+        style: DailyLayoutStyle::Papernews,
     }
 }
 
@@ -377,6 +385,7 @@ fn unlisted_and_empty_sources_are_handled() {
 fn an_empty_issue_has_no_sections_and_still_opens() {
     let issue = Issue {
         sources: vec!["BBC".into()],
+        style: DailyLayoutStyle::Papernews,
         title: "t".into(),
         date: "d".into(),
         articles: vec![],
@@ -437,6 +446,7 @@ fn the_toc_nests_articles_under_their_source_and_the_spine_is_unchanged() {
 fn a_source_name_is_escaped_in_both_views() {
     let issue = Issue {
         sources: vec!["Tom & Jerry's <News>".into()],
+        style: DailyLayoutStyle::Papernews,
         title: "t".into(),
         date: "d".into(),
         articles: vec![article("A", "Tom & Jerry's <News>", "<p>b</p>", None)],
