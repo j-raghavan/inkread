@@ -629,7 +629,7 @@ pub fn paginate_upto(
     // band above the columns, with the body reflowing beneath it (ADR-INKREAD-0017 D2). Gated by
     // `opts.band` (set only for daily issues), so ordinary reading never takes this path.
     if opts.band && opts.effective_columns() > 1 {
-        if let Some(band_len) = leading_heading_run(blocks) {
+        if let Some(band_len) = band_run(blocks) {
             return paginate_with_band(blocks, band_len, opts, m, hyph, images, max_pages);
         }
     }
@@ -673,14 +673,25 @@ pub fn paginate_upto(
 }
 
 /// The number of leading blocks that form the headline band — the run of headings at the chapter
-/// start (ADR-INKREAD-0017 D2). `None` when the chapter does not open with a heading, which leaves
-/// the ordinary column path untouched. A following byline paragraph is folded in by a later step.
-fn leading_heading_run(blocks: &[Block]) -> Option<usize> {
-    let n = blocks
+/// start, plus an immediately-following byline paragraph (ADR-INKREAD-0017 D2/D4). `None` when the
+/// chapter does not open with a heading, which leaves the ordinary column path untouched.
+fn band_run(blocks: &[Block]) -> Option<usize> {
+    let headings = blocks
         .iter()
         .take_while(|b| matches!(b, Block::Heading { .. }))
         .count();
-    (n >= 1).then_some(n)
+    if headings == 0 {
+        return None;
+    }
+    // Fold an immediately-following paragraph into the band: in a daily article that is the byline
+    // (`<h1>` then `<p class="byline">`, see `inkread-daily`), which belongs under the headline, not
+    // at the top of the first column (ADR-INKREAD-0017 D4). This path is daily-gated, so the block
+    // after the heading is the byline, never body prose.
+    let byline = usize::from(matches!(
+        blocks.get(headings),
+        Some(Block::Paragraph { .. })
+    ));
+    Some(headings + byline)
 }
 
 /// Lay a chapter's body (the blocks after the band) into pages at `opts`'s column measure, with the

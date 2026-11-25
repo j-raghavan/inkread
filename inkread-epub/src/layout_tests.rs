@@ -178,7 +178,10 @@ fn band_lays_the_headline_full_width_above_the_columns() {
     // text_w = 600 (margin 0); each column = 300. The headline spans the full 600, the body is laid
     // to the 300 column measure beneath it, and the second column is used (ADR-INKREAD-0017 D2).
     let opts = band_opts();
-    let mut blocks = vec![heading_block(1, "Big Climate Deal Reached")];
+    let mut blocks = vec![
+        heading_block(1, "Big Climate Deal Reached"),
+        para("Reuters byline here"),
+    ];
     for _ in 0..40 {
         blocks.push(para(
             "the agreement binds nearly two hundred nations to steeper cuts",
@@ -235,6 +238,41 @@ fn band_leaves_no_top_gap_on_later_pages() {
         p1_top < 5.0,
         "continuation page starts at the top, no band-height gap: {p1_top}"
     );
+}
+
+#[test]
+fn band_includes_the_byline() {
+    // The byline (the paragraph right after the headline) belongs under the headline in the band,
+    // full width, not at the top of the first column (ADR-INKREAD-0017 D4).
+    let opts = band_opts();
+    let mut blocks = vec![
+        heading_block(1, "Big Headline Today"),
+        para("Reuters 23 Nov 2026"),
+    ];
+    for _ in 0..40 {
+        blocks.push(para(
+            "body text that is reasonably long to fill the two columns here",
+        ));
+    }
+    let pages = paginate(&blocks, &opts, &Mono);
+    let p0 = &pages[0];
+    let byline = p0
+        .lines
+        .iter()
+        .find(|l| l.runs.iter().any(|r| r.text.contains("Reuters")))
+        .expect("byline present");
+    assert!(
+        (byline.column_w - 600.0).abs() < 1.0,
+        "byline is in the full-width band, not a column: {}",
+        byline.column_w
+    );
+    let body_top = p0
+        .lines
+        .iter()
+        .filter(|l| l.runs.iter().any(|r| r.text.contains("body text")))
+        .map(|l| l.top)
+        .fold(f32::INFINITY, f32::min);
+    assert!(byline.top < body_top, "byline sits above the body columns");
 }
 
 #[test]
