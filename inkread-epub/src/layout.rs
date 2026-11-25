@@ -249,6 +249,7 @@ impl LayoutOpts {
         }
         // Folded only when set, so every pagination cached before the band existed stays valid
         // (ADR-INKREAD-0017 D1): a book that never sets `band` hashes exactly as it did before.
+        // `0xBD` is an arbitrary "band" domain-separator byte — it only has to be stable and distinct.
         if self.band {
             eat(0xBD);
         }
@@ -633,42 +634,23 @@ pub fn paginate_upto(
             return paginate_with_band(blocks, band_len, opts, m, hyph, images, max_pages);
         }
     }
-    let mut pager = Pager::new(opts, hyph);
     // Chapter-relative character cursor, advanced as source text is consumed in reading order, so
-    // every placed run/glyph carries a font-invariant offset (ADR-INKREAD-0012).
-    let mut cursor = 0usize;
-    let mut complete = true;
-    // `max_pages` counts pages, but the pager is producing *columns* — a two-column page needs two
-    // of them before it is whole.
-    let column_budget = max_pages.saturating_mul(usize::from(opts.effective_columns()));
-    // Walked in keep-runs rather than block by block: `page-break-after: avoid` binds a block to
-    // the next one, so what may be split across a page is a run, not always a single block (#251).
-    let mut i = 0;
-    while i < blocks.len() {
-        // Checked before the run, not after: once enough whole pages exist, laying out one more
-        // block is work the caller has said it does not need.
-        if pager.finished_page_count() >= column_budget {
-            complete = false;
-            break;
-        }
-        let end = keep_run_end(blocks, i);
-        let laid = pager.add_keep_run(&blocks[i..end], |k| i + k, &mut cursor, m, images);
-        i += laid.max(1);
-    }
+    // every placed run/glyph carries a font-invariant offset (ADR-INKREAD-0012). The ordinary path
+    // is [`lay_body_columns`] with no band reservation — the same walk the band's body uses.
     let columns = opts.effective_columns();
-    let mut laid = if complete {
-        pager.finish()
-    } else {
-        pager.into_finished_pages()
-    };
-    if !complete {
-        // A single keep-run or table row can emit several columns before the budget is looked at
-        // again, so the pager may have overshot — and in two-column mode an odd column count would
-        // make `combine_columns` build a half page the full pass never produces. Trim to whole
-        // pages within the budget, so a partial pagination stays a true prefix.
-        let whole = laid.len().min(column_budget) / usize::from(columns) * usize::from(columns);
-        laid.truncate(whole);
-    }
+    let mut cursor = 0usize;
+    let (laid, complete) = lay_body_columns(
+        blocks,
+        opts,
+        0.0,
+        0,
+        0,
+        m,
+        hyph,
+        images,
+        max_pages,
+        &mut cursor,
+    );
     (combine_columns(laid, opts, columns), complete)
 }
 
@@ -713,13 +695,19 @@ fn lay_body_columns(
     cursor: &mut usize,
 ) -> (Vec<Page>, bool) {
     let cols = opts.effective_columns();
+    // `max_pages` counts pages, but the pager is producing *columns* — a two-column page needs two
+    // of them before it is whole.
     let column_budget = max_pages.saturating_mul(usize::from(cols));
     let mut pager = Pager::new(opts, hyph);
     pager.reserve_top = reserve_top;
     pager.reserve_cols = reserve_cols;
     let mut complete = true;
+    // Walked in keep-runs rather than block by block: `page-break-after: avoid` binds a block to the
+    // next one, so what may be split across a page is a run, not always a single block (#251).
     let mut j = 0;
     while j < body.len() {
+        // Checked before the run, not after: once enough whole pages exist, laying out one more
+        // block is work the caller has said it does not need.
         if pager.finished_page_count() >= column_budget {
             complete = false;
             break;
@@ -734,6 +722,10 @@ fn lay_body_columns(
         pager.into_finished_pages()
     };
     if !complete {
+        // A single keep-run or table row can emit several columns before the budget is looked at
+        // again, so the pager may have overshot — and in two-column mode an odd column count would
+        // make `combine_columns` build a half page the full pass never produces. Trim to whole pages
+        // within the budget, so a partial pagination stays a true prefix.
         let whole = laid.len().min(column_budget) / usize::from(cols) * usize::from(cols);
         laid.truncate(whole);
     }
@@ -759,7 +751,10 @@ fn paginate_with_band(
     // cursor is shared so the body's chapter-relative offsets continue contiguously (ADR-0012).
     let mut band_opts = *opts;
     band_opts.columns = 1;
-    let mut band_pager = Pager::new(&band_opts, hyph);
+    // Unpaged (like a table cell: full measure, no page budget, top margin collapsed) so the band is
+    // one segment even for a tall multi-line headline — a paged pager would restart `top` at 0 on an
+    // overflow and make `flow_height` under-report the band height (ADR-INKREAD-0017 D2).
+    let mut band_pager = Pager::cell(&band_opts, hyph, band_opts.content_w());
     let mut cursor = 0usize;
     let mut bi = 0;
     while bi < band_len {
