@@ -44,7 +44,42 @@ class DailyController(private val context: Context) {
     /** A past issue on disk. */
     data class BackIssue(val dateLabel: String, val count: Int, val file: File)
 
+    /**
+     * The daily layout style presets (ADR-INKREAD-0018), mirroring the Rust `DailyLayoutStyle`. Each
+     * bundles the column count the issue opens in; the Rust core owns the headline band and the
+     * per-style markup. [token] matches the Rust `as_str` so the value survives the JSON/identifier
+     * round-trip unchanged.
+     */
+    enum class LayoutStyle(val token: String, val columns: Int) {
+        /** Today's plain reader look: one column, no band. */
+        STANDARD("standard", 1),
+
+        /** The default: two columns with a full-width headline band. */
+        PAPERNEWS("papernews", 2),
+
+        /** Papernews plus period dressing (centred headline, uppercased byline). */
+        VINTAGE("vintage", 2);
+
+        companion object {
+            /** Parse a stored [token]; unknown or legacy (none stored yet) → Papernews, so the
+             *  default is the two-column paper, matching the Rust `from_token`. */
+            fun fromToken(token: String?): LayoutStyle =
+                entries.firstOrNull { it.token == token } ?: PAPERNEWS
+        }
+    }
+
     private fun prefs() = context.getSharedPreferences("daily", Context.MODE_PRIVATE)
+
+    /** The reader's chosen daily layout style (ADR-INKREAD-0018 D3), from the "daily" prefs.
+     *  Defaults to Papernews, so an install that never chose one reads the two-column paper. */
+    fun layoutStyle(): LayoutStyle =
+        LayoutStyle.fromToken(prefs().getString("layout_style", LayoutStyle.PAPERNEWS.token))
+
+    /** Persist the chosen daily layout style. The next compile stamps it into the issue; opening a
+     *  daily issue uses [LayoutStyle.columns]. */
+    fun setLayoutStyle(style: LayoutStyle) {
+        prefs().edit().putString("layout_style", style.token).apply()
+    }
 
     private fun dailyDir(): File = File(context.filesDir, DIR).apply { mkdirs() }
 
@@ -248,6 +283,9 @@ class DailyController(private val context: Context) {
             .put("date", todayDisplay())
             .put("articles", articles)
             .put("sources", sourceOrder)
+            // The chosen layout style (ADR-INKREAD-0018 D3): assembly stamps it into the issue so the
+            // reader gates the band and the per-style markup on it.
+            .put("style", layoutStyle().token)
             .toString()
         val bytes = try {
             NativeBridge.nativeDailyAssemble(issueJson)

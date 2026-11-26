@@ -897,11 +897,17 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         val capsBytes = WireCodec.encodeCapabilities(adapter.capabilities())
         NativeBridge.nativeInit(capsBytes)
         val dbPath = File(filesDir, "reader.db").absolutePath
+        // A daily issue opens in its layout style's column count (ADR-INKREAD-0018 D3) rather than the
+        // global reading-columns pref: Papernews/Vintage are two-column papers, Standard one. Any
+        // other document keeps the reader's own `columns` setting.
+        val isDaily = DailyController.isIssue(filesDir, File(path))
+        val openColumns =
+            if (isDaily) DailyController(this).layoutStyle().columns else displayPrefs.columns
         docHandle = try {
             NativeBridge.nativeOpenDocumentWithStore(
                 path, capsBytes, viewW, viewH, DPI, dbPath, bookId,
                 displayPrefs.textScale, displayPrefs.fontId(faces),
-                displayPrefs.lineSpacingMult, displayPrefs.alignment, displayPrefs.columns,
+                displayPrefs.lineSpacingMult, displayPrefs.alignment, openColumns,
                 displayPrefs.marginPct,
             )
         } catch (e: RuntimeException) {
@@ -966,9 +972,9 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             } catch (e: RuntimeException) {
                 Log.e(TAG, "toc failed: ${e.message}"); emptyList()
             }
-            // Judged by the file being opened, not the launch intent: a book picked from inside the
-            // reader after a Daily issue opens in this same activity, with the same intent.
-            val isDaily = DailyController.isIssue(filesDir, File(path))
+            // `isDaily` (computed above, at the native open) judges by the file being opened, not the
+            // launch intent: a book picked from inside the reader after a Daily issue opens in this
+            // same activity, with the same intent.
             chapters = TocNav.chapterStarts(toc, perArticle = isDaily)
             // Daily: a tapped headline opens the issue AT that article (its reading-order index) —
             // once, and only for the issue; the extra is consumed so a later open cannot replay it.
