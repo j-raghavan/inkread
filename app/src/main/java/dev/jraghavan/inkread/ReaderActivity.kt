@@ -375,6 +375,9 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
     /** Filesystem path of the open document, for PDF export (ADR-INKREAD-0005). */
     @Volatile private var currentDocPath: String? = null
     @Volatile private var requestedId: String? = null
+    /** Set (engine thread) once an open failed and the reader is returning to the caller, so a queued
+     *  surfaceChanged doesn't go on to resume some other book on the way out. */
+    @Volatile private var abandoned = false
 
     /** Chrome painted onto the page bitmap: bookmark ribbon, selection box, search highlight. */
     private val overlays = PageOverlays(object : PageOverlays.Host {
@@ -826,7 +829,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
     }
 
     private fun openDocumentIfNeeded() {
-        if (docHandle != 0L) return
+        if (docHandle != 0L || abandoned) return
         val path = requestedPath
         val id = requestedId
         when {
@@ -911,6 +914,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             )
         } catch (e: RuntimeException) {
             Log.e(TAG, "open failed: ${e.message}")
+            onOpenFailed(path, e.message)
             0L
         }
         if (docHandle != 0L) {
@@ -1003,10 +1007,33 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         val dest = Books.importFrom(this, uri)
         if (dest == null) {
             Log.e(TAG, "import failed for $uri")
-            runOnUiThread { Toast.makeText(this, "Couldn't open that PDF", Toast.LENGTH_SHORT).show() }
+            // With a book still open (the in-reader Open control), stay on it; otherwise there is
+            // nothing to show, so go back rather than sit on "Loading…" (same as a cancel, #123).
+            leaveWithMessage(OpenFailure.NOT_A_DOCUMENT, finish = docHandle == 0L)
             return
         }
         openSwap(dest.absolutePath, dest.name)
+    }
+
+    /**
+     * A document failed to open (engine thread). Forget it as the resume book — else every relaunch
+     * retries it and strands the reader on "Loading…" again — then tell the reader why and return to
+     * where they came from.
+     */
+    private fun onOpenFailed(path: String, coreMessage: String?) {
+        if (prefs.getString(KEY_BOOK_PATH, null) == path) {
+            prefs.edit().remove(KEY_BOOK_PATH).remove(KEY_BOOK_ID).apply()
+        }
+        leaveWithMessage(OpenFailure.message(File(path).name, coreMessage), finish = true)
+    }
+
+    /** Toast [message] and, when [finish], close the reader (and stop any further auto-open). */
+    private fun leaveWithMessage(message: String, finish: Boolean) {
+        if (finish) abandoned = true
+        runOnUiThread {
+            Toast.makeText(this, message, Toast.LENGTH_LONG).show()
+            if (finish) finish()
+        }
     }
 
     /** Swap the open document to (`path`, `id`) on the engine thread: remember, close, open, render. */

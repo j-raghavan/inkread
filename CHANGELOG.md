@@ -39,6 +39,11 @@ number is given in parentheses.
 
 ### Changed
 
+- EPUB figures scale with the text instead of being drawn at their pixel size. A book draws its
+  images for 16px text, so on the panel's much larger type a figure drawn at its pixel size came
+  out a fraction of the size its author intended (a 394px diagram filled a fifth of the page width).
+  Images are now drawn at `font size / 16` per image pixel, which is the same proportion to the text
+  as in the book's own layout, still fitted to the page and never shrunk below their pixel size.
 - The README states the plugin story as roadmap rather than as a shipped feature. `inkread-lua`
   embeds a working Lua 5.4 VM but ships only `inkread.log` and is not wired into `reader-core`, and
   no `.koplugin` shim exists, so the comparison table now points at a new **Roadmap** section
@@ -68,6 +73,17 @@ number is given in parentheses.
 
 ### Fixed
 
+- EPUB images inside a paragraph or heading are drawn instead of printing their alt text (usually
+  the word "image"). A paragraph or heading that holds only a picture, the way most converters wrap
+  figures, display equations and chapter-number art, is laid out as a figure. A picture set among
+  words, like a formula mid-sentence, sits in the line, which grows to fit it when it is taller
+  than the text, and wraps together with any punctuation touching it (#314).
+- Picking a file the reader cannot open no longer leaves it stuck on "Loading…". The system picker
+  lists every file, so a Supernote `.epub.mark` annotation sidecar sitting beside its book looks just
+  like the book; it used to be imported as a "PDF" that failed silently on every open and every
+  relaunch. A picked file that is not a PDF, EPUB, CBZ or text file is now refused with a message, and
+  a book that fails to open says why, returns to where it was opened from, and is no longer resumed
+  on the next launch.
 - In-document links are easier to follow: the tap target around each link is widened so small links
   (footnote markers, inline cross-references) no longer need pixel-perfect aim, and a centre tap now
   opens the bottom menu only from the lower band of the page, leaving the rest of the page for links
