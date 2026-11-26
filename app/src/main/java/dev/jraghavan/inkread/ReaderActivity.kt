@@ -897,17 +897,16 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         val capsBytes = WireCodec.encodeCapabilities(adapter.capabilities())
         NativeBridge.nativeInit(capsBytes)
         val dbPath = File(filesDir, "reader.db").absolutePath
-        // A daily issue opens in its layout style's column count (ADR-INKREAD-0018 D3) rather than the
-        // global reading-columns pref: Papernews/Vintage are two-column papers, Standard one. Any
-        // other document keeps the reader's own `columns` setting.
+        // A daily issue opens in its layout style's column count (ADR-INKREAD-0018 D3): the reader core
+        // reads the style stamped into the issue and fixes the columns (and the band) from it, so the
+        // value passed here is ignored for a daily and simply carries the reader's own pref for every
+        // other document. `isDaily` is still needed below for per-article TOC navigation.
         val isDaily = DailyController.isIssue(filesDir, File(path))
-        val openColumns =
-            if (isDaily) DailyController(this).layoutStyle().columns else displayPrefs.columns
         docHandle = try {
             NativeBridge.nativeOpenDocumentWithStore(
                 path, capsBytes, viewW, viewH, DPI, dbPath, bookId,
                 displayPrefs.textScale, displayPrefs.fontId(faces),
-                displayPrefs.lineSpacingMult, displayPrefs.alignment, openColumns,
+                displayPrefs.lineSpacingMult, displayPrefs.alignment, displayPrefs.columns,
                 displayPrefs.marginPct,
             )
         } catch (e: RuntimeException) {

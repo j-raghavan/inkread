@@ -119,7 +119,7 @@ pub enum DailyLayoutStyle {
     /// The default: two columns with a full-width headline band.
     #[default]
     Papernews,
-    /// Papernews plus period dressing (nameplate, rules, dateline, uppercased byline).
+    /// Papernews plus a centred headline and an uppercased byline (ADR-INKREAD-0018 D1).
     Vintage,
 }
 
@@ -230,5 +230,31 @@ mod tests {
         let issue: Issue =
             serde_json::from_str(r#"{"title":"t","date":"d","articles":[]}"#).unwrap();
         assert_eq!(issue.style, DailyLayoutStyle::Papernews);
+    }
+
+    #[test]
+    fn wire_style_tokens_agree_across_serde_from_token_and_as_str() {
+        // The style token crosses the FFI three ways that must agree on one literal: the Kotlin shell
+        // writes it into the issue JSON, serde parses that JSON (rename_all = "lowercase"), and
+        // `as_str`/`from_token` carry it through the OPF identifier and back on the reader. Pin the
+        // three wire literals (the same ones `DailyController.LayoutStyle` uses) to every mechanism, so
+        // a rename on any side that silently drifts the token fails here rather than on a device.
+        for (token, expected) in [
+            ("standard", DailyLayoutStyle::Standard),
+            ("papernews", DailyLayoutStyle::Papernews),
+            ("vintage", DailyLayoutStyle::Vintage),
+        ] {
+            let issue: Issue = serde_json::from_str(&format!(
+                r#"{{"title":"t","date":"d","articles":[],"style":"{token}"}}"#
+            ))
+            .unwrap();
+            assert_eq!(issue.style, expected, "serde parses {token:?}");
+            assert_eq!(
+                DailyLayoutStyle::from_token(token),
+                expected,
+                "from_token {token:?}"
+            );
+            assert_eq!(expected.as_str(), token, "as_str {token:?}");
+        }
     }
 }

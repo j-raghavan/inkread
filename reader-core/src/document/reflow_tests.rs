@@ -103,6 +103,72 @@ fn a_daily_issue_switches_on_the_headline_band() {
 }
 
 #[test]
+fn a_daily_locks_its_column_count_to_its_stamped_style() {
+    // Regression (ADR-INKREAD-0018 D3): a daily's column count follows the style stamped into the
+    // issue, not the reader's live column pref, so columns and the band can never disagree. Before
+    // this, a back issue was opened with today's pref columns while its band came from its own stamp:
+    // a Standard back issue opened under a Papernews pref rendered two-column with no band (the
+    // heading jammed into the left column), and a Papernews back issue under a Standard pref lost its
+    // paper layout. `current_request` now takes the column count from the stamp for a daily.
+    use inkread_daily::DailyLayoutStyle;
+    let issue_with = |style: DailyLayoutStyle| inkread_daily::Issue {
+        title: "inkread daily".into(),
+        date: "2026-11-25".into(),
+        articles: vec![inkread_daily::Article {
+            title: "Big Headline Today".into(),
+            source: "Reuters".into(),
+            url: String::new(),
+            published: Some("25 Nov 2026".into()),
+            body_html: "<p>The agreement binds nearly two hundred nations to steeper cuts.</p>"
+                .into(),
+            summary: None,
+        }],
+        sources: vec!["Reuters".into()],
+        style,
+    };
+
+    // Standard issue: one column, and a pref asking for two is ignored.
+    let standard = EpubBackend::open(
+        inkread_daily::assemble_epub(&issue_with(DailyLayoutStyle::Standard)),
+        vp(400, 600),
+    )
+    .expect("standard issue opens");
+    assert_eq!(standard.daily_columns, Some(1));
+    standard.columns.set(2); // the live column pref asks for two
+    assert_eq!(
+        standard.current_request().columns,
+        1,
+        "a Standard daily stays one column despite a two-column pref"
+    );
+    assert!(!standard.band, "a Standard daily has no band");
+
+    // Papernews issue: two columns locked on, and a pref asking for one is ignored.
+    let paper = EpubBackend::open(
+        inkread_daily::assemble_epub(&issue_with(DailyLayoutStyle::Papernews)),
+        vp(400, 600),
+    )
+    .expect("papernews issue opens");
+    assert_eq!(paper.daily_columns, Some(2));
+    paper.columns.set(1); // the live column pref asks for one
+    assert_eq!(
+        paper.current_request().columns,
+        2,
+        "a Papernews daily stays two columns despite a one-column pref"
+    );
+    assert!(paper.band, "a Papernews daily carries the band");
+
+    // An ordinary book still follows the reader's column pref.
+    let normal = EpubBackend::open(SAMPLE.to_vec(), vp(400, 600)).expect("sample opens");
+    assert_eq!(normal.daily_columns, None);
+    normal.columns.set(2);
+    assert_eq!(
+        normal.current_request().columns,
+        2,
+        "an ordinary book follows the column pref"
+    );
+}
+
+#[test]
 fn opens_paginates_and_exposes_metadata() {
     let b = EpubBackend::open(SAMPLE.to_vec(), vp(400, 600)).unwrap();
     assert_eq!(b.metadata().title.as_deref(), Some("Reflow Sample"));

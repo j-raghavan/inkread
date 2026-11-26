@@ -128,8 +128,8 @@ class SettingsActivity : Activity() {
         column.addView(actionRow("Layout style", pillLabel = dailyStyle.label) { onLayoutStyleTapped() })
         column.addView(TextView(this).apply {
             text = "How your daily issue is laid out. Papernews is a two-column paper with a " +
-                "full-width headline; Vintage adds a classic nameplate; Standard is the plain " +
-                "single-column reader. Changing it rebuilds today's issue."
+                "full-width headline; Vintage centres the headline and sets the byline in capitals; " +
+                "Standard is the plain single-column reader. Changing it rebuilds today's issue."
             setTextColor(inkSoft); textSize = 14f; typeface = serif
             setPadding(0, dp(6), 0, 0); setLineSpacing(0f, 1.2f)
         })

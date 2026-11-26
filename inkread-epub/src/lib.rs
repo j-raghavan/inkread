@@ -95,7 +95,8 @@ pub struct EpubPackage {
     /// Primary creator/author, if declared.
     pub author: Option<String>,
     /// The OPF unique identifier (`<dc:identifier>`), if declared. inkread-daily stamps its issues
-    /// `urn:inkread-daily:<date>`, which the reader uses to switch on the headline band (ADR-0017).
+    /// `urn:inkread-daily:<style>:<date>`, which the reader uses to derive the layout style's column
+    /// count and headline band (ADR-INKREAD-0017 / ADR-INKREAD-0018).
     pub identifier: Option<String>,
     /// Reading-order content documents (linear spine first; see [`Chapter`]).
     pub chapters: Vec<Chapter>,

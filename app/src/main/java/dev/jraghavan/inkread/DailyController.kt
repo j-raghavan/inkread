@@ -52,20 +52,19 @@ class DailyController(private val context: Context) {
      */
     enum class LayoutStyle(
         val token: String,
-        val columns: Int,
         /** Reader-facing name for the chooser and the Settings row. */
         val label: String,
         /** One line describing the style, shown beneath its name in the chooser. */
         val blurb: String,
     ) {
         /** Today's plain reader look: one column, no band. */
-        STANDARD("standard", 1, "Standard", "One column, no headline band: the plain reader look."),
+        STANDARD("standard", "Standard", "One column, no headline band: the plain reader look."),
 
         /** The default: two columns with a full-width headline band. */
-        PAPERNEWS("papernews", 2, "Papernews", "Two columns with a full-width headline across the top."),
+        PAPERNEWS("papernews", "Papernews", "Two columns with a full-width headline across the top."),
 
-        /** Papernews plus period dressing (centred headline, uppercased byline). */
-        VINTAGE("vintage", 2, "Vintage", "Two columns, plus a classic nameplate and an uppercased byline.");
+        /** Papernews plus a centred headline and an uppercased byline. */
+        VINTAGE("vintage", "Vintage", "Two columns, with a centred headline and an uppercased byline.");
 
         companion object {
             /** Parse a stored [token]; unknown or legacy (none stored yet) → Papernews, so the
@@ -82,8 +81,9 @@ class DailyController(private val context: Context) {
     fun layoutStyle(): LayoutStyle =
         LayoutStyle.fromToken(prefs().getString("layout_style", LayoutStyle.PAPERNEWS.token))
 
-    /** Persist the chosen daily layout style. The next compile stamps it into the issue; opening a
-     *  daily issue uses [LayoutStyle.columns]. */
+    /** Persist the chosen daily layout style. The next compile stamps it into the issue; the reader
+     *  core then derives both the column count and the headline band from that stamp, so an issue
+     *  always renders in the style it was built with (ADR-INKREAD-0018 D3). */
     fun setLayoutStyle(style: LayoutStyle) {
         prefs().edit().putString("layout_style", style.token).apply()
     }
