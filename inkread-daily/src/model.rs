@@ -69,7 +69,7 @@ impl Article {
 /// contents line does not justify building a DOM per article. Anything between `<` and `>` goes,
 /// which is exactly right for well-formed input and fails safe on anything else — worst case a
 /// stray fragment is dropped from a preview line.
-fn strip_markup(html: &str) -> String {
+pub(crate) fn strip_markup(html: &str) -> String {
     let mut out = String::with_capacity(html.len());
     let mut in_tag = false;
     for ch in html.chars() {
