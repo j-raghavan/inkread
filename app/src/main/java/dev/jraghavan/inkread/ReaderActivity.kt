@@ -11,6 +11,7 @@ import android.graphics.Typeface
 import android.net.Uri
 import android.provider.Settings
 import android.os.Bundle
+import android.os.FileObserver
 import kotlin.math.ceil
 import android.os.Handler
 import android.os.Looper
@@ -104,6 +105,28 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
     @Volatile private var chapters: List<Pair<Int, String>> = emptyList()
     /** Stable id of the open book (its file name); keys thumbnails + the bookmarks file. */
     @Volatile private var currentBookId = ""
+    /** For a daily issue only: the file and its build time (mtime) at open. A layout-style change
+     *  (ADR-INKREAD-0018 D3) rebuilds today's issue in place, so `onResume` reopens it when the
+     *  build time has moved; otherwise the reader keeps showing the old style's pagination. Null/0
+     *  for a normal book, whose file never changes under the reader. */
+    private var openedIssuePath: String? = null
+    @Volatile private var openedIssueMtime = 0L
+    /** The daily layout-style token the open issue was shown with. When the selected style no longer
+     *  matches this, a restyle is in flight and the reader shows Loading instead of the old layout. */
+    private var openedWithStyle: String? = null
+    /** While a daily restyle is in flight, the render path shows Loading instead of the stale page, so
+     *  the old layout is never painted while the new one is being built. Cleared when the issue reopens. */
+    @Volatile private var awaitingRestyle = false
+    /** Watches the open daily issue's folder so a style change that rebuilds the issue reopens the
+     *  reader live, even while it stays foreground (onResume alone misses that, since no pause/resume
+     *  happens). Null for a normal book. */
+    private var issueWatcher: FileObserver? = null
+    /** Safety net: if a pending restyle never lands (it failed, or an offline fallback compile could
+     *  not run), stop showing Loading and re-render whatever is on disk so the reader is never stuck. */
+    private val restyleRecovery = Runnable {
+        awaitingRestyle = false // give up waiting and show the open issue as it is
+        if (docHandle != 0L) engine.execute { repaintPanel() }
+    }
     /** Foreground reading-session start (elapsed ms) + the page it began on, for ReadingStats. */
     private var sessionStartMs = 0L
     private var sessionStartPage = 0
@@ -192,6 +215,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         override val docHandle get() = this@ReaderActivity.docHandle
         override val prefs get() = displayPrefs
         override val reflowOn get() = this@ReaderActivity.reflowOn
+        override val isDailyIssue get() = openedIssuePath != null
         override val zoomPercent get() = (zoom * 100).toInt()
         override fun engineExecute(block: () -> Unit) { engine.execute(block) }
         override fun repaintPanel() = this@ReaderActivity.repaintPanel()
@@ -647,6 +671,10 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         // onWindowFocusChanged: the Supernote's window-focus events are flaky (the window can go
         // "Gone" right after launch), so onResume is the reliable foreground signal.
         applyToolInkState("resume")
+        // Bring a daily issue in line with the selected layout style (ADR-INKREAD-0018 D3): reopen it
+        // if the rebuild already landed, or show Loading now if a restyle is still in flight, so the
+        // old layout is never left on screen while the new one is prepared.
+        handleDailyRestyleOnResume()
         // Start timing this foreground reading session (ReadingStats — streak + weekly chrome).
         sessionStartMs = SystemClock.elapsedRealtime()
         sessionStartPage = currentPage
@@ -666,6 +694,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         if (::toolOptions.isInitialized) toolOptions.dismiss()
         mainHandler.removeCallbacks(fingerLongPress) // drop any pending finger gesture on leaving
         mainHandler.removeCallbacks(pendingCentreMenu) // don't pop the bar on a paused/finishing activity (#54)
+        mainHandler.removeCallbacks(restyleRecovery) // re-armed on the next resume if a restyle is still pending
         autoTurn.stop() // #97: never let the hands-free timer fire against a backgrounded reader
         dismissReflowProgress() // don't leak the "Reflowing…" dialog if backgrounded mid-reflow (#55)
         stylus.cancelPendingOnPause() // drop the pending pen-lookup + deferred flush (explicit save below)
@@ -790,6 +819,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
 
     override fun onDestroy() {
         autoTurn.stop() // #97: drop any pending hands-free turn before the reader goes away
+        stopIssueWatch() // release the daily-issue file watcher
         engine.execute {
             closeDocument()
             dict.close()
@@ -935,6 +965,24 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
             // Bookmarks remain a Kotlin sidecar (RR16), keyed by the book id.
             bookmarks = Bookmarks(File(filesDir, "bookmarks/${bookId.hashCode()}.json")).also { it.load() }
             currentBookId = bookId
+            // Track a daily issue so the reader reopens it when a layout-style change rebuilds it
+            // (ADR-INKREAD-0018 D3). The style is read from the FILE's stamp, not the pref: the user
+            // may have already selected a new style whose rebuild has not landed, so the open file is
+            // stale and we must show Loading instead of its old layout until the rebuild reopens. A
+            // file watcher catches the rebuild while foreground; onResume catches one made while away.
+            openedIssuePath = if (isDaily) path else null
+            openedIssueMtime = if (isDaily) File(path).lastModified() else 0L
+            openedWithStyle = if (isDaily) issueStyleToken(File(path)) else null
+            mainHandler.removeCallbacks(restyleRecovery)
+            if (isDaily) startIssueWatch(path) else stopIssueWatch()
+            // The open file's style no longer matches the selection → a restyle is in flight; show
+            // Loading (the render path is gated on this) until the rebuilt file reopens.
+            awaitingRestyle = isDaily && isTodayIssue(path) && openedWithStyle != null &&
+                openedWithStyle != DailyController(this).layoutStyle().token
+            if (awaitingRestyle) {
+                drawLoading()
+                mainHandler.postDelayed(restyleRecovery, 25_000L) // recover if the rebuild never lands
+            }
             reflowOn = false // a fresh document opens in fixed-layout view (ADR-INKREAD-0011)
             // A fixed-layout PDF magnifies; EPUB (always reflowed) does not (#61, RR25-FR3).
             magnifiable = try { NativeBridge.nativeIsMagnifiable(docHandle) } catch (e: RuntimeException) { false }
@@ -1046,6 +1094,83 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
     }
 
     /**
+     * Reopen the open daily issue if its file has been rebuilt (a layout-style change) since we
+     * opened it, so the new style shows. A no-op for a normal book or when nothing changed. Called
+     * from onResume and from the issue watcher; the mtime is claimed before the async swap so the two
+     * cannot both fire a reload for the same rebuild.
+     */
+    private fun reloadIssueIfChanged(): Boolean {
+        val path = openedIssuePath ?: return false
+        if (docHandle == 0L || openedIssueMtime == 0L) return false
+        val now = File(path).lastModified()
+        if (now != 0L && now != openedIssueMtime) {
+            openedIssueMtime = now
+            engine.execute { openSwap(path, currentBookId) }
+            return true
+        }
+        return false
+    }
+
+    /**
+     * On resume, reconcile the open daily issue with the selected layout style. If the rebuilt issue
+     * is already on disk, reopen it (Loading, then the new layout). If a restyle is still in flight,
+     * the file has not been rebuilt yet but the selected style changed since we opened, show Loading
+     * now so the old layout is never left on screen, and arm the recovery net for a restyle that
+     * never lands. Only today's issue is restyled, so a back issue is left as it is.
+     */
+    private fun handleDailyRestyleOnResume() {
+        if (reloadIssueIfChanged()) return // the rebuilt issue landed while away → reopened it
+        // Still the old file, but its stamp no longer matches the selection → a restyle is in flight.
+        val path = openedIssuePath ?: return
+        if (isTodayIssue(path) && openedWithStyle != null &&
+            openedWithStyle != DailyController(this).layoutStyle().token
+        ) {
+            awaitingRestyle = true // suppress the stale render until the rebuilt issue reopens
+            drawLoading()
+            mainHandler.removeCallbacks(restyleRecovery)
+            mainHandler.postDelayed(restyleRecovery, 25_000L)
+        }
+    }
+
+    /** Whether `path` is today's daily issue (the only one a style change rebuilds). */
+    private fun isTodayIssue(path: String): Boolean =
+        File(path).name == DailyController(this).todayIssue()?.name
+
+    /** The layout-style token stamped into a daily issue EPUB (`urn:inkread-daily:<style>:<date>`),
+     *  or null for a non-daily book. Read from the file so the reader can tell a just-opened stale
+     *  issue (old stamp) from one already in the selected style. */
+    private fun issueStyleToken(file: File): String? = runCatching {
+        java.util.zip.ZipFile(file).use { zip ->
+            val opf = zip.entries().asSequence().firstOrNull { it.name.endsWith(".opf") }
+                ?: return null
+            val text = zip.getInputStream(opf).bufferedReader().use { it.readText() }
+            Regex("urn:inkread-daily:([^:<\"]+):").find(text)?.groupValues?.get(1)
+        }
+    }.getOrNull()
+
+    /** Watch the open daily issue's folder for its file being rewritten (a style rebuild), so the
+     *  reader reopens live even while it stays foreground. The folder, not the file, is watched: a
+     *  rebuild that replaces the file by rename would leave a file-level watch on a dead inode. */
+    private fun startIssueWatch(path: String) {
+        stopIssueWatch()
+        val file = File(path)
+        val dir = file.parentFile ?: return
+        val name = file.name
+        @Suppress("DEPRECATION") // the File-based ctor is API 29+, minSdk is 24
+        issueWatcher = object : FileObserver(dir.absolutePath, CLOSE_WRITE or MOVED_TO or CREATE) {
+            override fun onEvent(event: Int, affectedPath: String?) {
+                if (affectedPath != name) return
+                mainHandler.post { reloadIssueIfChanged() }
+            }
+        }.also { it.startWatching() }
+    }
+
+    private fun stopIssueWatch() {
+        issueWatcher?.stopWatching()
+        issueWatcher = null
+    }
+
+    /**
      * Render the current page and blit it. [deferLinks] skips the per-page link fetch so the page-turn
      * path (postJump) can flash the panel first and fetch links *after* — links are only needed for
      * the next tap, not before the page is visible.
@@ -1055,6 +1180,12 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
         val buf = renderBuffer ?: return
         val bmp = bitmap ?: return
         if (handle == 0L) return
+        // A daily restyle is in flight: show Loading rather than repaint the old layout we are about
+        // to replace. Cleared when the rebuilt issue reopens (see openBook).
+        if (awaitingRestyle) {
+            drawLoading()
+            return
+        }
 
         // Render-path timing (Rendering M1 observability): core render → copy → composite → blit.
         // Cheap to measure; per-render detail is gated behind diag, and any render that approaches
