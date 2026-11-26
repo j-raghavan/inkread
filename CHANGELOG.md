@@ -77,7 +77,13 @@ number is given in parentheses.
   the word "image"). A paragraph or heading that holds only a picture, the way most converters wrap
   figures, display equations and chapter-number art, is laid out as a figure. A picture set among
   words, like a formula mid-sentence, sits in the line, which grows to fit it when it is taller
-  than the text, and wraps together with any punctuation touching it.
+  than the text, and wraps together with any punctuation touching it (#314).
+- Picking a file the reader cannot open no longer leaves it stuck on "Loading…". The system picker
+  lists every file, so a Supernote `.epub.mark` annotation sidecar sitting beside its book looks just
+  like the book; it used to be imported as a "PDF" that failed silently on every open and every
+  relaunch. A picked file that is not a PDF, EPUB, CBZ or text file is now refused with a message, and
+  a book that fails to open says why, returns to where it was opened from, and is no longer resumed
+  on the next launch.
 - In-document links are easier to follow: the tap target around each link is widened so small links
   (footnote markers, inline cross-references) no longer need pixel-perfect aim, and a centre tap now
   opens the bottom menu only from the lower band of the page, leaving the rest of the page for links

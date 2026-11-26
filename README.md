@@ -191,7 +191,7 @@ from the *Continue reading* card) — **PDF, EPUB, CBZ, and plain text** are sup
 **InkRead Daily** card to read today's auto-compiled issue. Your reading position, ink, and per-book
 settings are saved automatically and restored when you reopen.
 
-Two surfaces drive everything: a **bottom control bar** (tap the centre of the page) and a
+Two surfaces drive everything: a **bottom control bar** (tap the bottom-centre of the page) and a
 **floating tool palette** that sits as a small **inkwell puck** on the page (drag it to move, tap to
 expand the tools, tap again to collapse).
 
@@ -211,6 +211,7 @@ no cloud.
 
 | Action | How |
 |---|---|
+| Open the control bar (**centre-tap**) | Tap with a **finger** in the **bottom-centre** of the page: the middle third across, within the **bottom 30%**. A tap higher up does nothing, leaving the page free for links. The pen never opens it, and a finger tap while the pen hovers near the glass, or within a second of using it, is ignored as a resting palm |
 | Turn page | **Swipe** left/right, or tap the **left third** (back) / **right third** (forward) |
 | Reflow a PDF/EPUB | Centre-tap → **Adjust → Page → Reflow: On** — text re-wraps to your screen and font settings |
 | Jump to a page | Centre-tap → drag the **slider**, or tap the page number to type one |

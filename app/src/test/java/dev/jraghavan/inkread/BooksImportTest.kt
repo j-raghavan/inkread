@@ -1,6 +1,8 @@
 package dev.jraghavan.inkread
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
@@ -29,7 +31,8 @@ class BooksImportTest {
     @Test
     fun unknownOrMissingExtensionDefaultsToPdf() {
         // The core still content-sniffs on open, so a disguised PDF/ZIP resolves by its bytes; only a
-        // truly unknown container (e.g. a proprietary .mark) falls back to the pdf backend.
+        // truly unknown container falls back to the pdf backend — and [Books.acceptsImport] refuses
+        // one whose bytes aren't a PDF or ZIP (e.g. a Supernote .mark sidecar) before it is stored.
         assertEquals("pdf", Books.importExtension("annotated.mark"))
         assertEquals("pdf", Books.importExtension("noextension"))
         assertEquals("pdf", Books.importExtension("archive.zip"))
@@ -42,5 +45,50 @@ class BooksImportTest {
         assertEquals("epub", Books.importExtension("My.Book.v2.epub"))
         // A dotfile whose whole name is a supported suffix still resolves by that suffix.
         assertEquals("txt", Books.importExtension(".txt"))
+    }
+
+    // ---- acceptsImport: refuse files the core can't open instead of storing them as a broken PDF ----
+
+    private val zipHead = "PK\u0003\u0004\u0014\u0000mimetypeapplication/epub+zip".toByteArray(Charsets.ISO_8859_1)
+    private val pdfHead = "%PDF-1.7\n".toByteArray(Charsets.US_ASCII)
+    // The real header of a Supernote annotation sidecar (`<book>.epub.mark`).
+    private val markHead = "markSN_FILE_VER_20260016.\u0001\u0000\u0000<FILE_TYPE:MARK>".toByteArray(Charsets.ISO_8859_1)
+
+    @Test
+    fun rejectsSupernoteMarkSidecar() {
+        // Regression: picking `Book.epub.mark` (next to `Book.epub`) imported it as a PDF that
+        // could never open, leaving the reader stuck on "Loading…".
+        assertFalse(Books.acceptsImport("Wonder Book of Geometry, The - David Acheson.epub.mark", markHead))
+    }
+
+    @Test
+    fun trustsSupportedExtensionsRegardlessOfBytes() {
+        // Plain text has no signature; the core reports a damaged file of a known type on open.
+        assertTrue(Books.acceptsImport("notes.txt", "hello".toByteArray()))
+        assertTrue(Books.acceptsImport("book.epub", zipHead))
+        assertTrue(Books.acceptsImport("paper.PDF", ByteArray(0)))
+    }
+
+    @Test
+    fun acceptsRecognizableBytesUnderAnUnknownName() {
+        assertTrue(Books.acceptsImport("noextension", pdfHead))
+        assertTrue(Books.acceptsImport("download.bin", zipHead))
+        // PDFs may carry junk before the header (within the first KiB).
+        assertTrue(Books.acceptsImport("scan", ByteArray(100) { 0x20 } + pdfHead))
+        assertFalse(Books.acceptsImport("scan", ByteArray(Books.SNIFF_BYTES) { 0x20 } + pdfHead))
+    }
+
+    @Test
+    fun refusesExtensionlessPlainTextByDesign() {
+        // Text carries no signature, so without a `.txt`/`.text` name nothing says it is text. It
+        // was never openable this way (stored as .pdf, failed in pdfium); now it is refused up front.
+        assertFalse(Books.acceptsImport("notes", "Call me Ishmael.".toByteArray()))
+        assertTrue(Books.acceptsImport("notes.txt", "Call me Ishmael.".toByteArray()))
+    }
+
+    @Test
+    fun rejectsUnknownNameWithUnknownBytes() {
+        assertFalse(Books.acceptsImport("noextension", "just some bytes".toByteArray()))
+        assertFalse(Books.acceptsImport("empty", ByteArray(0)))
     }
 }
