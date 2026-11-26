@@ -2,6 +2,7 @@ package dev.jraghavan.inkread
 
 import dev.jraghavan.inkread.DailyController.LayoutStyle
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
@@ -23,6 +24,18 @@ class DailyLayoutStyleTest {
     fun tokensRoundTrip() {
         for (style in LayoutStyle.entries) {
             assertEquals(style, LayoutStyle.fromToken(style.token))
+        }
+    }
+
+    @Test
+    fun eachStyleHasADistinctLabelAndABlurb() {
+        // The Settings row and the chooser (ADR-INKREAD-0018 D4) show these, so every style needs a
+        // non-blank name and one-line blurb, and the names must not collide.
+        val labels = LayoutStyle.entries.map { it.label }
+        assertEquals(labels.size, labels.toSet().size)
+        for (style in LayoutStyle.entries) {
+            assertTrue(style.label.isNotBlank())
+            assertTrue(style.blurb.isNotBlank())
         }
     }
 

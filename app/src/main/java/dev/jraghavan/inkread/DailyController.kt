@@ -50,15 +50,22 @@ class DailyController(private val context: Context) {
      * per-style markup. [token] matches the Rust `as_str` so the value survives the JSON/identifier
      * round-trip unchanged.
      */
-    enum class LayoutStyle(val token: String, val columns: Int) {
+    enum class LayoutStyle(
+        val token: String,
+        val columns: Int,
+        /** Reader-facing name for the chooser and the Settings row. */
+        val label: String,
+        /** One line describing the style, shown beneath its name in the chooser. */
+        val blurb: String,
+    ) {
         /** Today's plain reader look: one column, no band. */
-        STANDARD("standard", 1),
+        STANDARD("standard", 1, "Standard", "One column, no headline band: the plain reader look."),
 
         /** The default: two columns with a full-width headline band. */
-        PAPERNEWS("papernews", 2),
+        PAPERNEWS("papernews", 2, "Papernews", "Two columns with a full-width headline across the top."),
 
         /** Papernews plus period dressing (centred headline, uppercased byline). */
-        VINTAGE("vintage", 2);
+        VINTAGE("vintage", 2, "Vintage", "Two columns, plus a classic nameplate and an uppercased byline.");
 
         companion object {
             /** Parse a stored [token]; unknown or legacy (none stored yet) → Papernews, so the
