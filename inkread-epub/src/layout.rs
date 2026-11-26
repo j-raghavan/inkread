@@ -113,6 +113,13 @@ fn effective_align(style: &BlockStyle, user: Align) -> Align {
 }
 
 /// Body text size, in CSS pixels, that a book's images were drawn against (the CSS initial `1em`).
+///
+/// An assumption, on the record: a book that sets its own base size (`html { font-size: 20px }`,
+/// or a `px` size on `body`) drew its images against that rather than 16px, so for such a book the
+/// scale is off by the ratio between the two, its images drawn somewhat larger or smaller relative
+/// to the text than its author saw them. The stylesheet is consulted per block (#188) but no root
+/// size is resolved from it, and 16px is what nearly every book inherits, so it stands as the
+/// default. Reading the book's root font size here would make the scale exact.
 const CSS_PX_PER_EM: f32 = 16.0;
 
 /// Viewport + typography for a layout pass (all pixels). Repagination on a font-size or margin
