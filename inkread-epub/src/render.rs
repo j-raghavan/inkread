@@ -581,21 +581,43 @@ fn draw_image(
     images: &dyn ImageSource,
     canvas: &mut GrayCanvas,
 ) {
-    let Some(raw) = images.bytes(&placed.src) else {
+    let x0 = (margin.round() as i32) + placed.x;
+    let y0 = (margin + top).round() as i32;
+    draw_pixels(
+        &placed.src,
+        x0,
+        y0,
+        placed.width,
+        placed.height,
+        images,
+        canvas,
+    );
+}
+
+/// Decode `src` and draw it `width × height` with its top-left at `(x0, y0)` — shared by figures and
+/// images set inline in text. Draws nothing for an image that will not resolve or decode.
+fn draw_pixels(
+    src: &str,
+    x0: i32,
+    y0: i32,
+    width: u32,
+    height: u32,
+    images: &dyn ImageSource,
+    canvas: &mut GrayCanvas,
+) {
+    let Some(raw) = images.bytes(src) else {
         return;
     };
     let Ok(decoded) = crate::img::decode(&raw) else {
         return;
     };
-    let gray = crate::img::scale_to_gray(&decoded, placed.width, placed.height);
+    let gray = crate::img::scale_to_gray(&decoded, width, height);
     if gray.is_empty() {
         return;
     }
-    let x0 = (margin.round() as i32) + placed.x;
-    let y0 = (margin + top).round() as i32;
-    for row in 0..placed.height {
-        for col in 0..placed.width {
-            let Some(&v) = gray.get(row as usize * placed.width as usize + col as usize) else {
+    for row in 0..height {
+        for col in 0..width {
+            let Some(&v) = gray.get(row as usize * width as usize + col as usize) else {
                 continue;
             };
             canvas.put(x0 + col as i32, y0 + row as i32, v);
@@ -654,10 +676,26 @@ pub fn render_page_with_images(
             continue;
         }
         for run in &line.runs {
+            if let Some(image) = &run.image {
+                // Centred in the line box, so it sits on the middle of the text beside it.
+                let x0 = (margin + run.x).round() as i32;
+                let y0 = (margin + line.top + (line.height - image.height as f32) * 0.5).round();
+                draw_pixels(
+                    &image.src,
+                    x0,
+                    y0 as i32,
+                    image.width,
+                    image.height,
+                    images,
+                    canvas,
+                );
+                continue;
+            }
             let scale = PxScale::from(run.size_px);
             // Baseline from the regular face so every run on the line — styled, or supplied by a
             // fallback — sits on the same one.
-            let baseline = margin + line.top + font.regular.as_scaled(scale).ascent();
+            let baseline =
+                margin + line.top + line.text_top + font.regular.as_scaled(scale).ascent();
             let mut pen_x = margin + run.x;
             let mut prev: Option<(&FontVec, GlyphId)> = None;
             for ch in run.text.chars() {
@@ -757,6 +795,11 @@ pub fn page_glyphs(page: &Page, opts: &LayoutOpts, font: &AbFont) -> Vec<PlacedG
                     });
                 }
             }
+            // An inline image has no characters to select; the gap after it starts at its edge.
+            if let Some(image) = &run.image {
+                prev_run_end = Some((run_start + image.width as f32, run.anchor));
+                continue;
+            }
             let mut pen_x = run_start;
             let mut prev: Option<(&FontVec, GlyphId)> = None;
             let run_first = out.len();
@@ -842,7 +885,7 @@ pub fn page_link_rects(page: &Page, opts: &LayoutOpts, font: &AbFont) -> Vec<Lin
         for run in &line.runs {
             let Some(href) = &run.href else { continue };
             let x0 = margin + run.x;
-            let x1 = x0 + font.advance(&run.text, run.size_px, run.bold, run.italic);
+            let x1 = x0 + run.width(font);
             out.push(LinkBox {
                 x0,
                 y0,
@@ -1637,6 +1680,69 @@ mod tests {
         );
         let drawn = canvas.pixels.iter().filter(|&&p| p == 100).count();
         assert!(drawn > 1_000, "expected a block of grey, got {drawn} px");
+    }
+
+    /// An image set mid-sentence reaches the canvas too, centred on its line, and the words around
+    /// it are still inked — below the line top when the image made the line taller.
+    #[test]
+    fn an_inline_image_is_drawn_in_its_line_beside_the_text() {
+        let opts = LayoutOpts::new(300.0, 300.0, 16.0);
+        let font = AbFont::default_font();
+        let words = |t: &str| {
+            Inline::Run(crate::content::TextRun {
+                text: t.into(),
+                bold: false,
+                italic: false,
+                href: None,
+            })
+        };
+        let blocks = [Block::Paragraph {
+            content: vec![
+                words("so "),
+                Inline::Image {
+                    src: "plate.png".into(),
+                    alt: "image".into(),
+                },
+                words(" here"),
+            ],
+            style: crate::css::BlockStyle::default(),
+        }];
+        let page = crate::layout::paginate_with_images(
+            &blocks,
+            &opts,
+            &crate::measure::CachedMetrics::new(&font),
+            &crate::layout::NoHyphen,
+            &FixedSize(20, 60), // taller than a 16px line
+        )
+        .remove(0);
+        let line = &page.lines[0];
+        assert!(
+            line.text_top > 0.0,
+            "line not grown for the image: {line:?}"
+        );
+
+        let mut canvas = GrayCanvas::new(300, 300);
+        render_page_with_images(
+            &page,
+            &opts,
+            &font,
+            &OneImage(grey_png(20, 60, 100)),
+            &mut canvas,
+        );
+        let grey = canvas.pixels.iter().filter(|&&p| p == 100).count();
+        // At least the whole image (an anti-aliased glyph edge can land on the same grey).
+        assert!(grey >= 20 * 60, "image not drawn whole: {grey} px");
+        // The text is inked inside the lowered text box, not up at the line's top.
+        let top = (opts.margin + line.top + line.text_top).floor() as usize;
+        let first_inked_row = canvas
+            .pixels
+            .chunks(300)
+            .position(|row| row.iter().any(|&p| p < 128 && p != 100))
+            .expect("no text inked");
+        assert!(
+            first_inked_row >= top,
+            "text at row {first_inked_row}, box from {top}"
+        );
     }
 
     /// The same page rendered without a source must not fail — just leave the box empty.
