@@ -65,10 +65,12 @@ impl Article {
 
 /// Drop tags and decode the handful of entities the assembly stage emits, leaving plain text.
 ///
-/// Deliberately not a parser: this runs over already-clean output from the readability stage, and a
-/// contents line does not justify building a DOM per article. Anything between `<` and `>` goes,
-/// which is exactly right for well-formed input and fails safe on anything else — worst case a
-/// stray fragment is dropped from a preview line.
+/// Deliberately not a parser: it runs over the readability stage's already-clean output (a contents
+/// excerpt) and over a feed's own summary (the no-prose fallback, [`crate::extract::summary_fallback`]),
+/// and neither justifies building a DOM per article. A feed summary is entity-decoded upstream before
+/// it reaches here, so these six named entities cover what the assembly stage itself emits. Anything
+/// between `<` and `>` goes, which is right for well-formed input and fails safe on anything else: at
+/// worst a stray fragment is dropped.
 pub(crate) fn strip_markup(html: &str) -> String {
     let mut out = String::with_capacity(html.len());
     let mut in_tag = false;

@@ -97,7 +97,7 @@ pub fn extract_readable(html: &str) -> String {
 /// extractor's length and boilerplate filters are deliberately *not* applied, since a short summary
 /// is exactly what we want to keep here.
 #[must_use]
-pub fn summary_fallback(summary: Option<&str>) -> String {
+pub(crate) fn summary_fallback(summary: Option<&str>) -> String {
     if let Some(text) = summary
         .map(|s| collapse_ws(&crate::model::strip_markup(s)))
         .filter(|s| !s.is_empty())
@@ -459,12 +459,15 @@ mod tests {
             extract_readable("<html><body><nav>Home About</nav><script>x</script></body></html>");
         assert!(out.is_empty(), "no prose extracts to empty: {out:?}");
 
-        // With a feed summary, the fallback shows it as a clean paragraph (tags/entities stripped).
-        let with = summary_fallback(Some("<b>A short</b> feed description &amp; blurb."));
+        // With a feed summary, the fallback shows it as a clean paragraph: tags stripped and a bare
+        // `&` (feed summaries are entity-decoded upstream) escaped exactly once, not doubled.
+        let with = summary_fallback(Some("<b>A short</b> feed & blurb."));
+        assert!(with.contains("A short feed &amp; blurb."), "{with}");
         assert!(
-            with.contains("A short feed description &amp; blurb.") && !with.contains("<b>"),
-            "{with}"
+            !with.contains("&amp;amp;"),
+            "escaped once, not twice: {with}"
         );
+        assert!(!with.contains("<b>"), "tags stripped: {with}");
         // With no summary, a plain note, and no em dash in either (house style).
         let without = summary_fallback(None);
         assert!(
