@@ -109,11 +109,12 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
      *  (ADR-INKREAD-0018 D3) rebuilds today's issue in place, so `onResume` reopens it when the
      *  build time has moved; otherwise the reader keeps showing the old style's pagination. Null/0
      *  for a normal book, whose file never changes under the reader. */
-    private var openedIssuePath: String? = null
+    @Volatile private var openedIssuePath: String? = null
     @Volatile private var openedIssueMtime = 0L
     /** The daily layout-style token the open issue was shown with. When the selected style no longer
-     *  matches this, a restyle is in flight and the reader shows Loading instead of the old layout. */
-    private var openedWithStyle: String? = null
+     *  matches this, a restyle is in flight and the reader shows Loading instead of the old layout.
+     *  `@Volatile`: written on the engine thread (openBook), read on the main thread (onResume). */
+    @Volatile private var openedWithStyle: String? = null
     /** While a daily restyle is in flight, the render path shows Loading instead of the stale page, so
      *  the old layout is never painted while the new one is being built. Cleared when the issue reopens. */
     @Volatile private var awaitingRestyle = false
@@ -124,8 +125,10 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
     /** Safety net: if a pending restyle never lands (it failed, or an offline fallback compile could
      *  not run), stop showing Loading and re-render whatever is on disk so the reader is never stuck. */
     private val restyleRecovery = Runnable {
-        awaitingRestyle = false // give up waiting and show the open issue as it is
-        if (docHandle != 0L) engine.execute { repaintPanel() }
+        // Give up waiting and show the open issue as it is. Clear the flag on the engine thread so it
+        // serializes with the render path (which reads it there), then repaint.
+        if (docHandle != 0L) engine.execute { awaitingRestyle = false; repaintPanel() }
+        else awaitingRestyle = false
     }
     /** Foreground reading-session start (elapsed ms) + the page it began on, for ReadingStats. */
     private var sessionStartMs = 0L
@@ -820,6 +823,7 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
     override fun onDestroy() {
         autoTurn.stop() // #97: drop any pending hands-free turn before the reader goes away
         stopIssueWatch() // release the daily-issue file watcher
+        mainHandler.removeCallbacks(restyleRecovery) // openBook can re-arm it after onPause; drop it now
         engine.execute {
             closeDocument()
             dict.close()
@@ -1120,15 +1124,20 @@ class ReaderActivity : Activity(), SurfaceHolder.Callback {
      */
     private fun handleDailyRestyleOnResume() {
         if (reloadIssueIfChanged()) return // the rebuilt issue landed while away → reopened it
-        // Still the old file, but its stamp no longer matches the selection → a restyle is in flight.
         val path = openedIssuePath ?: return
-        if (isTodayIssue(path) && openedWithStyle != null &&
+        // A restyle is in flight when the open file's stamp no longer matches the selection.
+        val pending = isTodayIssue(path) && openedWithStyle != null &&
             openedWithStyle != DailyController(this).layoutStyle().token
-        ) {
-            awaitingRestyle = true // suppress the stale render until the rebuilt issue reopens
-            drawLoading()
-            mainHandler.removeCallbacks(restyleRecovery)
+        mainHandler.removeCallbacks(restyleRecovery)
+        if (pending) {
+            // Suppress the stale render until the rebuilt issue reopens. Set the flag + draw Loading
+            // on the engine thread so an in-flight render drains first and Loading is the last blit.
+            engine.execute { awaitingRestyle = true; drawLoading() }
             mainHandler.postDelayed(restyleRecovery, 25_000L)
+        } else if (awaitingRestyle) {
+            // Style matches again (the restyle landed, or was reverted after a failure): stop waiting,
+            // so a never-arriving rebuild can't strand the reader on Loading.
+            engine.execute { awaitingRestyle = false; repaintPanel() }
         }
     }
 

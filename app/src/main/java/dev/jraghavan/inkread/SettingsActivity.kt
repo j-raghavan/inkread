@@ -307,12 +307,19 @@ class SettingsActivity : Activity() {
      * does this locally without re-fetching, off the UI thread, with a short notice.
      */
     private fun applyLayoutStyle(daily: DailyController, style: DailyController.LayoutStyle) {
+        val previous = daily.layoutStyle()
         daily.setLayoutStyle(style)
         refresh() // reflect the new pill at once
         if (daily.todayIssue() == null) return
         Toast.makeText(this, "Restyling today's issue as ${style.label}…", Toast.LENGTH_SHORT).show()
         daily.restyle(style) { ok ->
             runOnUiThread {
+                // On failure the issue file was not rebuilt, so revert the selection to keep the pref
+                // and the on-disk issue in step (and so the reader stops waiting on the open layout).
+                if (!ok) {
+                    daily.setLayoutStyle(previous)
+                    refresh()
+                }
                 val msg = if (ok) "Daily set to ${style.label}" else "Couldn't restyle today's issue"
                 Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
             }
