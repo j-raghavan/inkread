@@ -79,6 +79,14 @@ class BooksImportTest {
     }
 
     @Test
+    fun refusesExtensionlessPlainTextByDesign() {
+        // Text carries no signature, so without a `.txt`/`.text` name nothing says it is text. It
+        // was never openable this way (stored as .pdf, failed in pdfium); now it is refused up front.
+        assertFalse(Books.acceptsImport("notes", "Call me Ishmael.".toByteArray()))
+        assertTrue(Books.acceptsImport("notes.txt", "Call me Ishmael.".toByteArray()))
+    }
+
+    @Test
     fun rejectsUnknownNameWithUnknownBytes() {
         assertFalse(Books.acceptsImport("noextension", "just some bytes".toByteArray()))
         assertFalse(Books.acceptsImport("empty", ByteArray(0)))

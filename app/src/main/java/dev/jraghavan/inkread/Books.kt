@@ -49,6 +49,11 @@ object Books {
      * document the core can open — a ZIP container (EPUB/CBZ) or a PDF header — or it is rejected.
      * Without this, a file such as a Supernote `.epub.mark` annotation sidecar was stored as `.pdf`,
      * failed in pdfium on every open, and stranded the reader on "Loading…". Pure + host-testable.
+     *
+     * Deliberately, a plain-text file whose name has **no extension** is refused: text has no
+     * signature, so the name is the only thing that says it is text. Such a file was never openable
+     * anyway (it was stored as `.pdf` and failed in pdfium), so this is a refusal with a message in
+     * place of a silent failure, not a lost capability. Renaming it to `.txt` imports it.
      */
     internal fun acceptsImport(displayName: String, head: ByteArray): Boolean {
         if (displayName.substringAfterLast('.', "").lowercase() in SUPPORTED) return true
