@@ -1119,7 +1119,7 @@ fn a_books_declared_styles_reach_the_laid_out_page() {
 fn the_pagination_cache_version_tracks_changes_to_line_fitting() {
     let opts = LayoutOpts::new(600.0, 800.0, 16.0);
     assert!(
-        layout_key(&opts, 0, 1).starts_with("v8|"),
+        layout_key(&opts, 0, 1).starts_with("v9|"),
         "{}",
         layout_key(&opts, 0, 1)
     );

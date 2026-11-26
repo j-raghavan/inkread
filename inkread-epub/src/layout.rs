@@ -50,15 +50,18 @@ impl Hyphenator for NoHyphen {
 ///
 /// A comfortable single-column measure is 45-75 characters, but newspaper columns are deliberately
 /// far tighter — 30-35 is normal, which is the look this feature exists to produce. At roughly half
-/// an em per character, 14 em is about **28 characters**: tight, and squarely in newspaper
+/// an em per character, 13 em is about **26 characters**: tight, and squarely in newspaper
 /// territory.
 ///
 /// The floor is in ems, not pixels, because what matters is characters per line: raising the text
-/// size narrows the measure even though the page has not changed. Set from measurement rather than
-/// taste — at a comfortable reading size on a 1920px panel (56px text) a column comes out at 14 em,
-/// so a floor above that declines the feature exactly where it was asked for. Below this the line
-/// breaks every few words and justified text opens rivers, which is worse than one column.
-const MIN_COLUMN_EM: f32 = 14.0;
+/// size narrows the measure even though the page has not changed. It must also leave headroom: a
+/// floor set to exactly the measure a full panel yields declines the feature on the real device,
+/// where the rendered width is a little under the nominal panel size and, on the first layout, can
+/// be smaller still before the surface settles. At a comfortable reading size on a 1920px panel
+/// (56px text, default margins) two columns come out near 14 em each, so 14 left no tolerance and
+/// collapsed to one column on the actual Manta; 13 clears two columns there with margin to spare
+/// while staying wide enough that the line does not break every few words or open justified rivers.
+const MIN_COLUMN_EM: f32 = 13.0;
 
 /// The narrowest a table cell may be before the row gives up and stacks its cells instead.
 ///

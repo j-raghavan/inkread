@@ -1202,7 +1202,7 @@ pub(crate) fn reset_layout_passes() {
 /// how a style measures. Both invalidate a stored index. A change to run styling has to bump this
 /// by hand.
 fn layout_key(opts: &LayoutOpts, font_id: usize, chapters: usize) -> String {
-    format!("v8|{:016x}|{font_id}|{chapters}", opts.layout_digest())
+    format!("v9|{:016x}|{font_id}|{chapters}", opts.layout_digest())
 }
 
 /// A materialized chapter: the pages laid out so far, and whether that is all of them (#186).
