@@ -5,6 +5,8 @@ package dev.jraghavan.inkread
  * `"[<status>] <detail>"` (see `CoreError::status_code` in `reader-core/src/error.rs`); the detail
  * is backend diagnostics (e.g. a pdfium error enum) that mean nothing to a reader, so only the
  * status code picks the wording. Pure + host-testable.
+ *
+ * House style: no em dashes in anything a reader sees, toasts included.
  */
 object OpenFailure {
     private const val UNSUPPORTED_FORMAT = 2
@@ -19,7 +21,7 @@ object OpenFailure {
 
     fun message(fileName: String, coreMessage: String?): String = when (statusOf(coreMessage)) {
         UNSUPPORTED_FORMAT, CORRUPT_DOCUMENT ->
-            "Couldn't open \u201C$fileName\u201D \u2014 it isn't a PDF, EPUB, CBZ or text file, or it is damaged."
+            "Couldn't open \u201C$fileName\u201D, it isn't a PDF, EPUB, CBZ or text file, or it is damaged."
         DRM_PROTECTED -> "\u201C$fileName\u201D is DRM-protected and can't be opened."
         else -> "Couldn't open \u201C$fileName\u201D."
     }

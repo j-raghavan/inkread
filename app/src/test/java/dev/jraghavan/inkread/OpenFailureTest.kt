@@ -25,6 +25,12 @@ class OpenFailureTest {
         val msg = OpenFailure.message("book.pdf", pdfiumFormatError)
         assertTrue(msg.contains("book.pdf"))
         assertTrue(!msg.contains("pdfium") && !msg.contains("FormatError"))
+        // House style: no em dashes in reader-facing text.
+        assertTrue(!msg.contains('\u2014'))
+        assertEquals(
+            "Couldn't open \u201Cbook.pdf\u201D, it isn't a PDF, EPUB, CBZ or text file, or it is damaged.",
+            msg,
+        )
         assertEquals(msg, OpenFailure.message("book.pdf", "[2] unsupported file type: x"))
     }
 
