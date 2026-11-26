@@ -46,9 +46,9 @@ class DailyController(private val context: Context) {
 
     /**
      * The daily layout style presets (ADR-INKREAD-0018), mirroring the Rust `DailyLayoutStyle`. Each
-     * bundles the column count the issue opens in; the Rust core owns the headline band and the
-     * per-style markup. [token] matches the Rust `as_str` so the value survives the JSON/identifier
-     * round-trip unchanged.
+     * carries only its [token], [label] and [blurb]; the reader core derives the column count, the
+     * headline band and the per-style markup from the style stamped into the issue. [token] matches
+     * the Rust `as_str` so the value survives the JSON/identifier round-trip unchanged.
      */
     enum class LayoutStyle(
         val token: String,
@@ -304,9 +304,63 @@ class DailyController(private val context: Context) {
         val file = File(dailyDir(), "inkread-daily-${todayKey()}.epub")
         file.writeBytes(bytes)
         storeIssueMeta(articles, file)
+        // Cache the assembled input so a later layout-style change re-assembles locally instead of
+        // re-fetching every article (ADR-INKREAD-0018 D3) — see [restyle].
+        cacheIssueJson(issueJson)
         prefs().edit().putLong("compiledAtMillis", System.currentTimeMillis()).apply()
         Log.i(TAG, "compile OK: ${articles.length()} articles → ${file.name} (${bytes.size} bytes)")
         lastStatus = "Compiled ${articles.length()} articles"
+        return true
+    }
+
+    /** The cached assembly input for today's issue (the fetched articles), kept beside the EPUB so a
+     *  layout-style change can re-assemble without going back to the network. */
+    private fun issueJsonFile(): File = File(dailyDir(), "inkread-daily-${todayKey()}.json")
+
+    private fun cacheIssueJson(issueJson: String) {
+        runCatching {
+            val today = issueJsonFile()
+            today.writeText(issueJson)
+            // Only today's issue can be restyled (back issues are historical), so keep just its cache.
+            dailyDir().listFiles { f -> f.isFile && f.name.endsWith(".json") && f != today }
+                ?.forEach { it.delete() }
+        }.onFailure { Log.e(TAG, "cache issue json failed: ${it.message}") }
+    }
+
+    /**
+     * Re-assemble today's issue in [style] **without re-fetching** (ADR-INKREAD-0018 D3). A layout
+     * change only re-stamps the issue and re-applies the per-style markup, both local, so this is
+     * near instant where a full [compile] re-downloads every article. Falls back to a full compile
+     * when no cached input exists (e.g. the issue predates this cache). Runs off the UI thread.
+     */
+    fun restyle(style: LayoutStyle, onDone: (Boolean) -> Unit) {
+        thread(name = "daily-restyle") {
+            try {
+                onDone(restyleBlocking(style))
+            } catch (e: Exception) {
+                Log.e(TAG, "restyle failed", e)
+                onDone(false)
+            }
+        }
+    }
+
+    private fun restyleBlocking(style: LayoutStyle): Boolean {
+        val cached = issueJsonFile().takeIf { it.exists() }?.readText()
+        if (cached.isNullOrBlank()) {
+            Log.i(TAG, "restyle: no cached input, falling back to a full compile")
+            return compileBlocking()
+        }
+        val json = JSONObject(cached).put("style", style.token).toString()
+        val bytes = try {
+            NativeBridge.nativeDailyAssemble(json)
+        } catch (e: RuntimeException) {
+            Log.e(TAG, "restyle assemble failed: ${e.message}")
+            return false
+        }
+        File(dailyDir(), "inkread-daily-${todayKey()}.epub").writeBytes(bytes)
+        issueJsonFile().writeText(json) // keep the cached style in step with what shipped
+        prefs().edit().putLong("compiledAtMillis", System.currentTimeMillis()).apply()
+        Log.i(TAG, "restyle OK: today's issue → ${style.token}")
         return true
     }
 

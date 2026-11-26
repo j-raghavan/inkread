@@ -300,20 +300,20 @@ class SettingsActivity : Activity() {
     }
 
     /**
-     * Persist [style] and rebuild today's issue with it. Opening a daily already picks the style's
-     * column count (ADR-INKREAD-0018 D3), but the band and the Vintage markup are baked into the EPUB
-     * at assembly, so the issue must be recompiled to restamp it. Only when an issue exists for
-     * today; otherwise the next compile picks the style up. The rebuild re-fetches, so it runs off
-     * the UI thread with a short notice.
+     * Persist [style] and re-assemble today's issue in it. The reader derives the column count and
+     * the band from the style stamped into the issue (ADR-INKREAD-0018 D3), and the Vintage markup is
+     * written in at assembly, so the issue is re-stamped and re-assembled for the change to show. Only
+     * when an issue exists for today; otherwise the next compile picks the style up. [DailyController.restyle]
+     * does this locally without re-fetching, off the UI thread, with a short notice.
      */
     private fun applyLayoutStyle(daily: DailyController, style: DailyController.LayoutStyle) {
         daily.setLayoutStyle(style)
         refresh() // reflect the new pill at once
         if (daily.todayIssue() == null) return
-        Toast.makeText(this, "Rebuilding today's issue as ${style.label}…", Toast.LENGTH_SHORT).show()
-        daily.compile { ok, _ ->
+        Toast.makeText(this, "Restyling today's issue as ${style.label}…", Toast.LENGTH_SHORT).show()
+        daily.restyle(style) { ok ->
             runOnUiThread {
-                val msg = if (ok) "Daily set to ${style.label}" else "Couldn't rebuild today's issue"
+                val msg = if (ok) "Daily set to ${style.label}" else "Couldn't restyle today's issue"
                 Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
             }
         }
