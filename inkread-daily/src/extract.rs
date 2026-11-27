@@ -83,6 +83,17 @@ pub fn extract_readable(html: &str) -> String {
                 }
                 continue;
             }
+            Blk::Math(latex) => {
+                // A display equation: keep it as a math image the assembler renders to a PNG and
+                // embeds (the reflow engine has no math typesetting). The LaTeX rides in the `alt`
+                // — it is the assembler's render source, and the visible fallback if a formula does
+                // not render. Like code, it bypasses the prose filters: an equation is short and
+                // never ends the article.
+                out.push_str("<p class=\"eq\"><img class=\"latex\" alt=\"");
+                out.push_str(&escape(&latex));
+                out.push_str("\"/></p>\n");
+                continue;
+            }
             Blk::Prose(block) => block,
         };
         let t = collapse_ws(&strip_zero_width(&block));
@@ -131,11 +142,13 @@ pub(crate) fn summary_fallback(summary: Option<&str>) -> String {
     "<p>(No readable text could be extracted. Open the original to read it.)</p>".to_string()
 }
 
-/// One extracted block: ordinary prose (whitespace-collapsed, emitted as a `<p>`) or a preformatted
-/// code/command block (lines kept, emitted as a `<pre>` the reflow engine sets monospace).
+/// One extracted block: ordinary prose (whitespace-collapsed, emitted as a `<p>`), a preformatted
+/// code/command block (lines kept, emitted as a `<pre>` the reflow engine sets monospace), or a
+/// display equation (its LaTeX, emitted as a math `<img>` the assembler renders and embeds).
 enum Blk {
     Prose(String),
     Code(String),
+    Math(String),
 }
 
 /// A `<pre>` is code — not a plain-text mailing-list post — when it wraps a `<code>` element or
@@ -161,6 +174,34 @@ fn is_code_pre(pre: NodeRef<Node>) -> bool {
         }
     }
     has_code(pre)
+}
+
+/// The LaTeX of a WordPress-style math image, or `None` for an ordinary illustration. WordPress
+/// (and the common `latex.php` renderers) ship an equation as `<img class="latex" alt="…LaTeX…">`,
+/// so the formula is in the `alt` attribute; a `latex.php`/`/latex/` src is the same thing served
+/// by other engines. An ordinary `<img>` returns `None` and is dropped as before.
+fn math_latex(el: &scraper::node::Element) -> Option<String> {
+    let is_math = el.attr("class").is_some_and(|c| {
+        c.to_ascii_lowercase()
+            .split_whitespace()
+            .any(|w| w == "latex")
+    }) || el
+        .attr("src")
+        .is_some_and(|s| s.contains("latex.php") || s.contains("/latex/"));
+    if !is_math {
+        return None;
+    }
+    el.attr("alt")
+        .map(str::trim)
+        .filter(|a| !a.is_empty())
+        .map(str::to_string)
+}
+
+/// A display (block) equation is marked `\displaystyle` by WordPress; an inline formula is not. Only
+/// display equations become their own math image; inline formulas degrade to their LaTeX text, since
+/// the plain-text body cannot carry an image mid-sentence.
+fn is_display_math(latex: &str) -> bool {
+    latex.contains("displaystyle")
 }
 
 /// Split `html` into blocks. Parses with html5ever, narrows to the article body, then walks the tree:
@@ -225,6 +266,25 @@ fn walk(node: NodeRef<Node>, cur: &mut String, blocks: &mut Vec<Blk>) {
                 let name = el.name();
                 if SKIP_TAGS.contains(&name) {
                     continue; // chrome (script/style/nav/…) — drop the whole subtree
+                }
+                if name == "img" {
+                    if let Some(latex) = math_latex(el) {
+                        if is_display_math(&latex) {
+                            // A block equation: end the running paragraph and keep it as its own
+                            // math block for the assembler to render and embed.
+                            if !cur.trim().is_empty() {
+                                blocks.push(Blk::Prose(std::mem::take(cur)));
+                            }
+                            blocks.push(Blk::Math(latex));
+                        } else {
+                            // Inline math: the plain-text body has no place for an image mid-line,
+                            // so keep the formula readable as its LaTeX source in the running text.
+                            cur.push(' ');
+                            cur.push_str(&latex);
+                            cur.push(' ');
+                        }
+                    }
+                    continue; // a non-math image carries no readable text — drop it as before
                 }
                 if name == "pre" {
                     if !cur.trim().is_empty() {
@@ -726,6 +786,66 @@ Please check out the Open Source Software Security Wiki, a mailing-list footer t
         assert!(
             out.contains("<pre>sudo apt update\nsudo apt upgrade</pre>"),
             "got: {out:?}"
+        );
+    }
+
+    #[test]
+    fn a_display_equation_becomes_a_math_image_marker() {
+        // WordPress (Terry Tao) ships a display equation as <img class="latex" alt="\displaystyle …">
+        // inside a paragraph. It must survive extraction as a math <img> the assembler can render,
+        // carrying its LaTeX in the alt — not vanish the way an ordinary image does.
+        let html = "<article>\
+            <p>The partial sums of the first N positive integers satisfy the identity</p>\
+            <p><img class=\"latex\" alt=\"\\displaystyle \\sum_{n=1}^N n = \\frac{N(N+1)}{2}\" \
+               src=\"https://s0.wp.com/latex.php?latex=x\"/></p>\
+            <p>which is proved by induction on the number of terms involved here.</p></article>";
+        let out = extract_readable(html);
+        assert!(
+            out.contains("<p class=\"eq\"><img class=\"latex\" alt=\""),
+            "a display equation emits a math image: {out}"
+        );
+        assert!(
+            out.contains("\\displaystyle \\sum_{n=1}^N n = \\frac{N(N+1)}{2}"),
+            "the LaTeX rides in the alt: {out}"
+        );
+        assert!(
+            out.contains("partial sums of the first") && out.contains("proved by induction"),
+            "the prose around it is kept: {out}"
+        );
+    }
+
+    #[test]
+    fn an_inline_equation_degrades_to_its_latex_text() {
+        // An inline formula (no \displaystyle) cannot be placed mid-line in the plain-text body, so
+        // it stays readable as its LaTeX source inside the paragraph rather than disappearing.
+        let html = "<article><p>We write the golden ratio \
+            <img class=\"latex\" alt=\"\\phi = (1+\\sqrt 5)/2\" src=\"/latex/x.png\"/> \
+            throughout the remainder of this discussion for brevity.</p></article>";
+        let out = extract_readable(html);
+        assert!(
+            out.contains("golden ratio \\phi = (1+\\sqrt 5)/2 throughout"),
+            "inline math degrades to LaTeX text in the running line: {out}"
+        );
+        assert!(
+            !out.contains("<img"),
+            "inline math does not emit an image: {out}"
+        );
+    }
+
+    #[test]
+    fn an_ordinary_image_is_still_dropped() {
+        // A plain illustration is not math and carries no prose — extraction drops it as before.
+        let html = "<article><p>A chart follows that summarises the quarterly revenue figures here.</p>\
+            <p><img class=\"wp-image-123\" alt=\"Revenue by quarter\" src=\"/chart.png\"/></p></article>";
+        let out = extract_readable(html);
+        assert!(!out.contains("<img"), "a non-math image is dropped: {out}");
+        assert!(
+            !out.contains("class=\"eq\""),
+            "no math block emitted: {out}"
+        );
+        assert!(
+            out.contains("quarterly revenue figures"),
+            "prose kept: {out}"
         );
     }
 
