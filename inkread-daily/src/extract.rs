@@ -207,10 +207,374 @@ fn math_latex(el: &scraper::node::Element) -> Option<String> {
 }
 
 /// A display (block) equation is marked `\displaystyle` by WordPress; an inline formula is not. Only
-/// display equations become their own math image; inline formulas degrade to their LaTeX text, since
-/// the plain-text body cannot carry an image mid-sentence.
+/// display equations become their own math image; inline formulas are rendered to a readable Unicode
+/// approximation in the running text, since the plain-text body cannot carry an image mid-sentence.
 fn is_display_math(latex: &str) -> bool {
     latex.contains("displaystyle")
+}
+
+/// Render an inline LaTeX formula to a readable Unicode approximation for the plain-text body.
+///
+/// The body is plain text with no place for an inline image, so an inline formula is approximated:
+/// Greek letters, super/subscripts, `\sqrt`, `\frac`, blackboard sets and the common operators map
+/// to Unicode. Crucially, anything unrecognised has its LaTeX commands and braces **stripped**, so a
+/// formula never leaks a backslash or a brace onto the page (which reads as a rendering bug). Imperfect
+/// for complex maths by design: display equations, where the maths is load-bearing, render as images.
+fn latex_to_unicode(src: &str) -> String {
+    let chars: Vec<char> = src.chars().collect();
+    collapse_ws(&convert_latex(&chars))
+}
+
+/// Convert a LaTeX char slice to Unicode text (recursive for group arguments).
+fn convert_latex(chars: &[char]) -> String {
+    let mut out = String::new();
+    let mut i = 0;
+    while i < chars.len() {
+        match chars[i] {
+            '\\' => {
+                let mut j = i + 1;
+                while j < chars.len() && chars[j].is_ascii_alphabetic() {
+                    j += 1;
+                }
+                if j > i + 1 {
+                    i = apply_latex_command(
+                        &chars[i + 1..j].iter().collect::<String>(),
+                        chars,
+                        j,
+                        &mut out,
+                    );
+                } else if j < chars.len() {
+                    match chars[j] {
+                        '{' | '}' | '%' | '$' | '#' | '&' | '_' => out.push(chars[j]),
+                        ',' | ';' | ' ' | '!' | ':' => out.push(' '),
+                        _ => {}
+                    }
+                    i = j + 1;
+                } else {
+                    i = j;
+                }
+            }
+            '^' => {
+                let (g, next) = latex_group(chars, i + 1);
+                out.push_str(&to_script(&convert_latex(&g), true));
+                i = next;
+            }
+            '_' => {
+                let (g, next) = latex_group(chars, i + 1);
+                out.push_str(&to_script(&convert_latex(&g), false));
+                i = next;
+            }
+            '{' | '}' | '$' => i += 1,
+            c => {
+                out.push(c);
+                i += 1;
+            }
+        }
+    }
+    out
+}
+
+/// Handle a `\command` starting after its name (at `after`), writing to `out`; returns the new index.
+fn apply_latex_command(name: &str, chars: &[char], after: usize, out: &mut String) -> usize {
+    match name {
+        "frac" | "tfrac" | "dfrac" => {
+            let (num, a) = latex_group(chars, after);
+            let (den, b) = latex_group(chars, a);
+            out.push_str(&paren_if_compound(&convert_latex(&num)));
+            out.push('/');
+            out.push_str(&paren_if_compound(&convert_latex(&den)));
+            b
+        }
+        "sqrt" => {
+            let (g, a) = latex_group(chars, after);
+            out.push('√');
+            out.push_str(&paren_if_compound(&convert_latex(&g)));
+            a
+        }
+        "text" | "mathrm" | "mathsf" | "mathbf" | "mathit" | "boldsymbol" | "operatorname"
+        | "mbox" => {
+            let (g, a) = latex_group(chars, after);
+            out.push_str(&convert_latex(&g));
+            a
+        }
+        "mathbb" | "mathcal" | "mathscr" | "mathfrak" => {
+            let (g, a) = latex_group(chars, after);
+            out.push_str(&blackboard(&convert_latex(&g)));
+            a
+        }
+        other => {
+            out.push_str(latex_symbol(other));
+            after
+        }
+    }
+}
+
+/// Read a group argument at `start`: a `{...}` (returning its inner chars) or a single token
+/// (one char, or a `\command`), skipping any leading spaces. Returns the chars and the next index.
+fn latex_group(chars: &[char], mut i: usize) -> (Vec<char>, usize) {
+    while i < chars.len() && chars[i] == ' ' {
+        i += 1;
+    }
+    if i >= chars.len() {
+        return (Vec::new(), i);
+    }
+    if chars[i] == '{' {
+        let (start, mut depth, mut j) = (i + 1, 1i32, i + 1);
+        while j < chars.len() && depth > 0 {
+            match chars[j] {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                _ => {}
+            }
+            j += 1;
+        }
+        (chars[start..j].to_vec(), (j + 1).min(chars.len()))
+    } else if chars[i] == '\\' {
+        let mut j = i + 1;
+        while j < chars.len() && chars[j].is_ascii_alphabetic() {
+            j += 1;
+        }
+        let end = j.max(i + 2).min(chars.len());
+        (chars[i..end].to_vec(), end)
+    } else {
+        (vec![chars[i]], i + 1)
+    }
+}
+
+/// Wrap `s` in parentheses when it is a compound expression (has a space or an operator), so a
+/// fraction or root reads unambiguously; a single symbol is left bare.
+fn paren_if_compound(s: &str) -> String {
+    let compound = s.chars().count() > 1
+        && s.chars()
+            .any(|c| matches!(c, ' ' | '+' | '-' | '/' | '×' | '·' | '±' | '=' | '<' | '>'));
+    if compound {
+        format!("({s})")
+    } else {
+        s.to_string()
+    }
+}
+
+/// Map a string to super- or subscript Unicode where each character has one; characters without a
+/// script form are kept as-is (so `x^{2}` → `x²`, `a_{ij}` → `aᵢⱼ`, `n^{k+1}` → `nᵏ⁺¹` best-effort).
+fn to_script(s: &str, sup: bool) -> String {
+    s.chars()
+        .map(|c| script_char(c, sup).unwrap_or(c))
+        .collect()
+}
+
+fn script_char(c: char, sup: bool) -> Option<char> {
+    if sup {
+        Some(match c {
+            '0' => '⁰',
+            '1' => '¹',
+            '2' => '²',
+            '3' => '³',
+            '4' => '⁴',
+            '5' => '⁵',
+            '6' => '⁶',
+            '7' => '⁷',
+            '8' => '⁸',
+            '9' => '⁹',
+            '+' => '⁺',
+            '-' => '⁻',
+            '=' => '⁼',
+            '(' => '⁽',
+            ')' => '⁾',
+            'n' => 'ⁿ',
+            'i' => 'ⁱ',
+            'a' => 'ᵃ',
+            'b' => 'ᵇ',
+            'c' => 'ᶜ',
+            'k' => 'ᵏ',
+            'm' => 'ᵐ',
+            'x' => 'ˣ',
+            'T' => 'ᵀ',
+            _ => return None,
+        })
+    } else {
+        Some(match c {
+            '0' => '₀',
+            '1' => '₁',
+            '2' => '₂',
+            '3' => '₃',
+            '4' => '₄',
+            '5' => '₅',
+            '6' => '₆',
+            '7' => '₇',
+            '8' => '₈',
+            '9' => '₉',
+            '+' => '₊',
+            '-' => '₋',
+            '=' => '₌',
+            '(' => '₍',
+            ')' => '₎',
+            'a' => 'ₐ',
+            'e' => 'ₑ',
+            'i' => 'ᵢ',
+            'j' => 'ⱼ',
+            'n' => 'ₙ',
+            'o' => 'ₒ',
+            'x' => 'ₓ',
+            'k' => 'ₖ',
+            'm' => 'ₘ',
+            _ => return None,
+        })
+    }
+}
+
+/// Map a single blackboard/caligraphic letter to its Unicode double-struck form (R → ℝ, …); other
+/// text is kept as-is.
+fn blackboard(s: &str) -> String {
+    s.chars()
+        .map(|c| match c {
+            'R' => 'ℝ',
+            'N' => 'ℕ',
+            'Z' => 'ℤ',
+            'Q' => 'ℚ',
+            'C' => 'ℂ',
+            'P' => 'ℙ',
+            'H' => 'ℍ',
+            // 𝕋/𝔼/𝔽 live only in the Mathematical Alphanumeric block, which the devices' system
+            // fonts do not cover (no Noto Math face), so leave the plain letter, not a tofu box.
+            _ => c,
+        })
+        .collect()
+}
+
+/// The Unicode for a LaTeX control word, or `""` to drop a layout-only command (`\displaystyle`,
+/// `\left`, …) and any command we do not model (so nothing leaks to the page).
+fn latex_symbol(name: &str) -> &'static str {
+    match name {
+        // Lowercase Greek.
+        "alpha" => "α",
+        "beta" => "β",
+        "gamma" => "γ",
+        "delta" => "δ",
+        "epsilon" => "ε",
+        "varepsilon" => "ε",
+        "zeta" => "ζ",
+        "eta" => "η",
+        "theta" => "θ",
+        "vartheta" => "ϑ",
+        "iota" => "ι",
+        "kappa" => "κ",
+        "lambda" => "λ",
+        "mu" => "μ",
+        "nu" => "ν",
+        "xi" => "ξ",
+        "pi" => "π",
+        "varpi" => "ϖ",
+        "rho" => "ρ",
+        "varrho" => "ϱ",
+        "sigma" => "σ",
+        "tau" => "τ",
+        "upsilon" => "υ",
+        "phi" => "φ",
+        "varphi" => "φ",
+        "chi" => "χ",
+        "psi" => "ψ",
+        "omega" => "ω",
+        // Uppercase Greek.
+        "Gamma" => "Γ",
+        "Delta" => "Δ",
+        "Theta" => "Θ",
+        "Lambda" => "Λ",
+        "Xi" => "Ξ",
+        "Pi" => "Π",
+        "Sigma" => "Σ",
+        "Upsilon" => "Υ",
+        "Phi" => "Φ",
+        "Psi" => "Ψ",
+        "Omega" => "Ω",
+        // Relations and operators.
+        "times" => "×",
+        "cdot" => "·",
+        "div" => "÷",
+        "pm" => "±",
+        "mp" => "∓",
+        "ast" => "∗",
+        "star" => "⋆",
+        "circ" => "∘",
+        "bullet" => "•",
+        "oplus" => "⊕",
+        "otimes" => "⊗",
+        "leq" | "le" => "≤",
+        "geq" | "ge" => "≥",
+        "neq" | "ne" => "≠",
+        "approx" => "≈",
+        "equiv" => "≡",
+        "cong" => "≅",
+        "sim" => "∼",
+        "simeq" => "≃",
+        "propto" => "∝",
+        "ll" => "≪",
+        "gg" => "≫",
+        "subset" => "⊂",
+        "subseteq" => "⊆",
+        "supset" => "⊃",
+        "supseteq" => "⊇",
+        "in" => "∈",
+        "notin" => "∉",
+        "ni" => "∋",
+        "cup" => "∪",
+        "cap" => "∩",
+        "setminus" => "∖",
+        "emptyset" | "varnothing" => "∅",
+        "forall" => "∀",
+        "exists" => "∃",
+        "nabla" => "∇",
+        "partial" => "∂",
+        "infty" => "∞",
+        "sum" => "∑",
+        "prod" => "∏",
+        "int" => "∫",
+        "oint" => "∮",
+        "sqrt" => "√",
+        "angle" => "∠",
+        "perp" => "⊥",
+        "parallel" => "∥",
+        // Arrows.
+        "to" | "rightarrow" => "→",
+        "leftarrow" => "←",
+        "leftrightarrow" => "↔",
+        "Rightarrow" => "⇒",
+        "Leftarrow" => "⇐",
+        "Leftrightarrow" => "⇔",
+        "mapsto" => "↦",
+        "implies" => "⇒",
+        "iff" => "⇔",
+        "uparrow" => "↑",
+        "downarrow" => "↓",
+        // Dots and spacing-ish.
+        "ldots" | "dots" => "…",
+        "cdots" => "⋯",
+        "vdots" => "⋮",
+        "ddots" => "⋱",
+        "quad" => " ",
+        "qquad" => "  ",
+        "prime" => "′",
+        // Common functions kept as words.
+        "sin" => "sin",
+        "cos" => "cos",
+        "tan" => "tan",
+        "log" => "log",
+        "ln" => "ln",
+        "exp" => "exp",
+        "lim" => "lim",
+        "max" => "max",
+        "min" => "min",
+        "det" => "det",
+        "deg" => "deg",
+        "gcd" => "gcd",
+        "dim" => "dim",
+        // Layout-only / unmodelled: drop so nothing leaks.
+        _ => "",
+    }
 }
 
 /// Split `html` into blocks. Parses with html5ever, narrows to the article body, then walks the tree:
@@ -229,15 +593,36 @@ fn to_blocks(html: &str) -> Vec<Blk> {
     blocks
 }
 
-/// Narrow to the article body when the page marks it up (`<article>` then `<main>`), else `<body>`
-/// (or the root). Only trusts the region if it actually carries prose — some pages ship an empty
-/// `<main>` shell. Avoids pulling in the surrounding nav/sidebar/footer.
+/// Class-name substrings marking a blog's main post-body container (WordPress `.post-content` /
+/// `.entry-content` and the common variants). The site header and tagline, the post title and meta,
+/// the share widget, the comment thread and the footer all live OUTSIDE it, so narrowing here drops
+/// that chrome in one move where a `<body>` fallback would sweep it all in.
+const CONTENT_CLASS_TOKENS: &[&str] = &[
+    "post-content",
+    "entry-content",
+    "article-content",
+    "article-body",
+    "post-body",
+    "entry-body",
+];
+
+/// Narrow to the article body when the page marks it up (`<article>` then `<main>`, then a known
+/// content-container class), else `<body>` (or the root). Only trusts a region if it actually carries
+/// prose — some pages ship an empty `<main>` shell. Avoids pulling in the surrounding
+/// header/tagline/title/meta/nav/sidebar/share/comments/footer.
 fn main_node(root: NodeRef<Node>) -> NodeRef<Node> {
     for tag in ["article", "main"] {
         if let Some(n) = find_element(root, tag) {
             if text_len(n) > 200 {
                 return n;
             }
+        }
+    }
+    // No semantic wrapper: fall back to a blog content container by class before the whole <body>,
+    // so the title/meta/tagline above it and the share/comments/footer below it are left out.
+    if let Some(n) = find_element_by_class(root, CONTENT_CLASS_TOKENS) {
+        if text_len(n) > 200 {
+            return n;
         }
     }
     find_element(root, "body").unwrap_or(root)
@@ -252,6 +637,27 @@ fn find_element<'a>(node: NodeRef<'a, Node>, name: &str) -> Option<NodeRef<'a, N
             }
         }
         if let Some(found) = find_element(child, name) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+/// Depth-first search for the first element whose `class` attribute contains any of `tokens`.
+fn find_element_by_class<'a>(
+    node: NodeRef<'a, Node>,
+    tokens: &[&str],
+) -> Option<NodeRef<'a, Node>> {
+    for child in node.children() {
+        if let Node::Element(el) = child.value() {
+            if el
+                .attr("class")
+                .is_some_and(|c| tokens.iter().any(|t| c.contains(t)))
+            {
+                return Some(child);
+            }
+        }
+        if let Some(found) = find_element_by_class(child, tokens) {
             return Some(found);
         }
     }
@@ -287,10 +693,14 @@ fn walk(node: NodeRef<Node>, cur: &mut String, blocks: &mut Vec<Blk>) {
                             blocks.push(Blk::Math(latex));
                         } else {
                             // Inline math: the plain-text body has no place for an image mid-line,
-                            // so keep the formula readable as its LaTeX source in the running text.
-                            cur.push(' ');
-                            cur.push_str(&latex);
-                            cur.push(' ');
+                            // so render the formula to a readable Unicode approximation (never raw
+                            // LaTeX, which would leak backslashes and braces onto the page).
+                            let text = latex_to_unicode(&latex);
+                            if !text.is_empty() {
+                                cur.push(' ');
+                                cur.push_str(&text);
+                                cur.push(' ');
+                            }
                         }
                     }
                     continue; // a non-math image carries no readable text — drop it as before
@@ -416,7 +826,7 @@ fn is_tail_boilerplate(t: &str) -> bool {
         "sign up for the",
         "subscribe to our",
         "read more:",
-        "share this story",
+        "share this", // WordPress/Jetpack end-of-post widget ("Share this:"); also "share this story"
         "comments (",
     ];
     // "-- " opening a block is the email signature delimiter (RFC 3676): the signature, and any
@@ -737,6 +1147,73 @@ Please check out the Open Source Software Security Wiki, a mailing-list footer t
     }
 
     #[test]
+    fn a_wordpress_share_widget_ends_the_article() {
+        // A WordPress/Jetpack post with no <article>/<main> wrapper falls back to <body>, so the
+        // trailing share widget ("Share this:"), reader comments, next/prev nav and footer would
+        // otherwise flow in as prose. The "Share this:" heading marks the end of the post: drop it
+        // and everything after it, keeping only the real body.
+        let html = "<body><div class=\"post-content\">\
+            <p>The department invites applications for a tenure-track faculty position in mathematics.</p>\
+            <div class=\"sharedaddy sd-sharing-enabled\"><h3 class=\"sd-title\">Share this:</h3>\
+              <a href=\"#\">Share on WhatsApp (Opens in new window) WhatsApp</a>\
+              <a href=\"#\">Share on Bluesky (Opens in new window) Bluesky</a></div>\
+            <div class=\"comments\"><p>One consequence of the Riemann hypothesis is polynomial-time testing.</p></div>\
+            <p>Blog at WordPress.com. Ben Eastaugh and Chris Sternal-Johnson.</p>\
+            </div></body>";
+        let out = extract_readable(html);
+        assert!(
+            out.contains("tenure-track faculty position"),
+            "real body kept: {out}"
+        );
+        assert!(
+            !out.contains("Opens in new window"),
+            "share links dropped: {out}"
+        );
+        assert!(
+            !out.contains("Riemann hypothesis"),
+            "reader comments dropped: {out}"
+        );
+        assert!(!out.contains("WordPress.com"), "footer dropped: {out}");
+    }
+
+    #[test]
+    fn a_blog_post_narrows_to_its_content_container() {
+        // A WordPress-style page with no <article>/<main>: the site tagline, the post title and the
+        // meta line sit ABOVE the .post-content container, the share widget and footer BELOW it, all
+        // in non-chrome tags and long enough to clear the length filter. Narrowing to .post-content
+        // is what drops them, keeping only the real post body.
+        let html = "<body>\
+            <div class=\"site-tagline\"><p>Updates on my research and expository papers and other maths-related topics.</p></div>\
+            <h2 class=\"post-title\">Finite-Time Singularity Formation for the Three-Dimensional Euler Equations</h2>\
+            <div class=\"post-meta\">23 November, 2026 in expository, math.AP | Tags: Euler equations | by Someone</div>\
+            <div class=\"post-content\">\
+              <p>The Euler equations model the motion of an inviscid fluid: fluid motion in the absence of shear stresses arising from fluid particles sliding past each other. In an ideal fluid the dynamics are time-reversible, which already sets them apart from real viscous flow.</p>\
+            </div>\
+            <div class=\"sharedaddy\"><h3>Share this:</h3><a>Share on WhatsApp (Opens in new window) WhatsApp</a></div>\
+            <div class=\"site-footer\"><p>Blog at WordPress.com, powered by an open-source theme.</p></div>\
+            </body>";
+        let out = extract_readable(html);
+        assert!(
+            out.contains("Euler equations model the motion"),
+            "real body kept: {out}"
+        );
+        assert!(
+            !out.contains("Updates on my research"),
+            "tagline dropped: {out}"
+        );
+        assert!(
+            !out.contains("Finite-Time Singularity"),
+            "title echo dropped: {out}"
+        );
+        assert!(
+            !out.contains("in expository, math.AP"),
+            "meta dropped: {out}"
+        );
+        assert!(!out.contains("Opens in new window"), "share dropped: {out}");
+        assert!(!out.contains("WordPress.com"), "footer dropped: {out}");
+    }
+
+    #[test]
     fn chrome_only_extracts_empty_then_falls_back_to_the_summary() {
         // A page with only chrome yields no prose: extraction is empty, and the caller falls back.
         let out =
@@ -824,21 +1301,54 @@ Please check out the Open Source Software Security Wiki, a mailing-list footer t
     }
 
     #[test]
-    fn an_inline_equation_degrades_to_its_latex_text() {
+    fn an_inline_equation_renders_to_readable_unicode() {
         // An inline formula (no \displaystyle) cannot be placed mid-line in the plain-text body, so
-        // it stays readable as its LaTeX source inside the paragraph rather than disappearing.
+        // it is rendered to a readable Unicode approximation in the running text, never raw LaTeX.
         let html = "<article><p>We write the golden ratio \
             <img class=\"latex\" alt=\"\\phi = (1+\\sqrt 5)/2\" src=\"/latex/x.png\"/> \
             throughout the remainder of this discussion for brevity.</p></article>";
         let out = extract_readable(html);
         assert!(
-            out.contains("golden ratio \\phi = (1+\\sqrt 5)/2 throughout"),
-            "inline math degrades to LaTeX text in the running line: {out}"
+            out.contains("golden ratio φ = (1+√5)/2 throughout"),
+            "inline math renders to Unicode in the running line: {out}"
+        );
+        assert!(
+            !out.contains('\\') && !out.contains('{') && !out.contains('}'),
+            "no LaTeX backslashes or braces leak onto the page: {out}"
         );
         assert!(
             !out.contains("<img"),
             "inline math does not emit an image: {out}"
         );
+    }
+
+    #[test]
+    fn latex_to_unicode_handles_common_inline_math() {
+        assert_eq!(latex_to_unicode("x^2 + y^2 = z^2"), "x² + y² = z²");
+        assert_eq!(latex_to_unicode("a_i"), "aᵢ");
+        assert_eq!(latex_to_unicode("\\frac{N(N+1)}{2}"), "(N(N+1))/2");
+        assert_eq!(latex_to_unicode("\\sqrt{2}"), "√2");
+        assert_eq!(latex_to_unicode("O(n \\log n)"), "O(n log n)");
+        assert_eq!(latex_to_unicode("\\mathbb{R}^n"), "ℝⁿ");
+        assert_eq!(latex_to_unicode("\\alpha \\le \\beta"), "α ≤ β");
+        assert_eq!(latex_to_unicode("x \\in \\mathbb{Z}"), "x ∈ ℤ");
+    }
+
+    #[test]
+    fn latex_to_unicode_never_leaks_backslashes_or_braces() {
+        // An unmodelled command and its braces are stripped, not leaked, so nothing reads as a bug.
+        for src in [
+            "\\displaystyle \\int_0^\\infty e^{-x} dx",
+            "\\operatorname{Hom}(A, B)",
+            "\\widehat{\\mathcal{F}}_{\\xi}",
+            "\\unknowncmd{stuff}",
+        ] {
+            let out = latex_to_unicode(src);
+            assert!(
+                !out.contains('\\') && !out.contains('{') && !out.contains('}'),
+                "no backslash/brace leaks for {src:?}: got {out:?}"
+            );
+        }
     }
 
     #[test]
