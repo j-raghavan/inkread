@@ -94,6 +94,7 @@ fn layout_digest_is_pinned_against_algorithm_drift() {
         align: Align::Left,
         columns: 1,
         band: false,
+        column_rule: false,
     };
     assert_eq!(opts.layout_digest(), 17_685_407_801_978_826_572);
 }
@@ -110,6 +111,7 @@ fn band_flag_folds_into_digest_only_when_set() {
         base.layout_digest(),
         LayoutOpts {
             band: false,
+            column_rule: false,
             ..base
         }
         .layout_digest(),
@@ -170,6 +172,7 @@ fn band_opts() -> LayoutOpts {
         align: Align::Left,
         columns: 2,
         band: true,
+        column_rule: false,
     }
 }
 
@@ -443,6 +446,7 @@ fn band_off_keeps_the_heading_in_a_column() {
     // With the band off (every non-daily book) the heading is laid to the column measure, as before.
     let opts = LayoutOpts {
         band: false,
+        column_rule: false,
         ..band_opts()
     };
     let blocks = vec![
@@ -476,6 +480,7 @@ fn style_opts() -> LayoutOpts {
         align: Align::Left,
         columns: 1,
         band: false,
+        column_rule: false,
     }
 }
 
@@ -702,6 +707,7 @@ fn long_paragraph_wraps_to_multiple_lines() {
         align: Align::Left,
         columns: 1,
         band: false,
+        column_rule: false,
     };
     let words = "aaaa ".repeat(12); // 12 words of 4 chars → ~ wraps
     let pages = paginate(&[para(words.trim())], &opts, &Mono);
@@ -734,6 +740,7 @@ fn cjk_opts() -> LayoutOpts {
         align: Align::Left,
         columns: 1,
         band: false,
+        column_rule: false,
     }
 }
 
@@ -872,6 +879,7 @@ fn content_overflow_breaks_into_pages() {
         align: Align::Left,
         columns: 1,
         band: false,
+        column_rule: false,
     };
     let blocks: Vec<Block> = (0..7).map(|_| para("x")).collect();
     let pages = paginate(&blocks, &opts, &Mono);
@@ -892,6 +900,7 @@ fn heading_uses_a_larger_line_height() {
         align: Align::Left,
         columns: 1,
         band: false,
+        column_rule: false,
     };
     let pages = paginate(
         &[Block::Heading {
@@ -968,6 +977,7 @@ fn wide(font_px: f32) -> LayoutOpts {
         align: Align::Left,
         columns: 1,
         band: false,
+        column_rule: false,
     }
 }
 
@@ -1046,6 +1056,7 @@ fn narrow_para() -> LayoutOpts {
         align: Align::Left,
         columns: 1,
         band: false,
+        column_rule: false,
     }
 }
 
@@ -1181,6 +1192,7 @@ fn image_opts() -> LayoutOpts {
         align: Align::Left,
         columns: 1,
         band: false,
+        column_rule: false,
     }
 }
 
@@ -1771,6 +1783,7 @@ fn two_col_opts() -> LayoutOpts {
         align: Align::Left,
         columns: 2,
         band: false,
+        column_rule: false,
     }
 }
 

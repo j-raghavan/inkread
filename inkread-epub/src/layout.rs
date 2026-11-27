@@ -150,6 +150,10 @@ pub struct LayoutOpts {
     /// full-width above the columns, with the body reflowing beneath. Set only for daily issues;
     /// `false` leaves multi-column reading byte-identical to before the band existed.
     pub band: bool,
+    /// Draw a dotted rule down the centre gutter between two body columns, the newspaper divider
+    /// (Vintage, ADR-INKREAD-0018 D1). A render-time overlay: it changes no line positions, so it is
+    /// not part of the pagination key. `false` for every other style.
+    pub column_rule: bool,
 }
 
 impl LayoutOpts {
@@ -166,6 +170,7 @@ impl LayoutOpts {
             align: Align::Left,
             columns: 1,
             band: false,
+            column_rule: false,
         }
     }
 

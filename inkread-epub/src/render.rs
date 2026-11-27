@@ -740,6 +740,30 @@ pub fn render_page_with_images(
             }
         }
     }
+
+    // A dotted rule down the centre gutter between two body columns, the newspaper divider (Vintage,
+    // ADR-INKREAD-0018 D1). Drawn only on a genuine two-column page; the full-width band lines above
+    // and a short article's single column are left alone. The gutter equals the margin, so its centre
+    // sits half a margin past the first column.
+    if opts.column_rule && opts.effective_columns() == 2 {
+        let col_w = opts.column_width();
+        let x = (margin + col_w + margin * 0.5).round() as i32;
+        let body = || {
+            page.lines
+                .iter()
+                .filter(|l| !l.rule && l.image.is_none() && (l.column_w - col_w).abs() < 1.0)
+        };
+        let top = body().map(|l| margin + l.top).reduce(f32::min);
+        let bottom = body().map(|l| margin + l.top + l.height).reduce(f32::max);
+        if let (Some(top), Some(bottom)) = (top, bottom) {
+            let (mut y, y1) = (top.round() as i32, bottom.round() as i32);
+            while y + 1 < y1 {
+                canvas.blend(x, y, 0.55);
+                canvas.blend(x, y + 1, 0.55);
+                y += 9; // 2 px on, 7 px off: a dotted rule
+            }
+        }
+    }
 }
 
 /// A glyph with its pixel box on the page (top-left origin), mirroring [`render_page`]'s layout
@@ -1213,6 +1237,55 @@ mod tests {
             .filter(|&(y, x)| canvas.pixels[y * 400 + x] < 250)
             .count();
         assert_eq!(top_band, 0, "no ink above the top margin");
+    }
+
+    #[test]
+    fn column_rule_draws_a_dotted_divider_down_the_gutter() {
+        // Vintage's newspaper divider (ADR-INKREAD-0018 D1): a dotted rule down the centre of the
+        // gutter between two body columns, drawn only when `column_rule` is on. The gutter is
+        // whitespace, so any ink there is the divider and nothing else.
+        let font = AbFont::default_font();
+        let body: Vec<Block> = (0..40)
+            .map(|_| paragraph("The agreement binds nearly two hundred nations to steeper cuts."))
+            .collect();
+        let mut opts = LayoutOpts::new(1200.0, 900.0, 18.0);
+        opts.columns = 2;
+        assert_eq!(
+            opts.effective_columns(),
+            2,
+            "page is wide enough for two columns"
+        );
+
+        // Centre of the gutter (gutter == margin), where only a divider can leave ink.
+        let gx = (opts.margin + opts.column_width() + opts.margin * 0.5).round() as usize;
+        let w = 1200usize;
+        let inked_rows = |c: &GrayCanvas| -> usize {
+            (0..c.height as usize)
+                .filter(|&y| {
+                    (gx.saturating_sub(1)..=gx + 1).any(|x| x < w && c.pixels[y * w + x] < 250)
+                })
+                .count()
+        };
+
+        opts.column_rule = false;
+        let bare = paginate(&body, &opts, &font);
+        let mut plain = GrayCanvas::new(1200, 900);
+        render_page(&bare[0], &opts, &font, &mut plain);
+
+        opts.column_rule = true;
+        let ruled_pages = paginate(&body, &opts, &font);
+        let mut ruled = GrayCanvas::new(1200, 900);
+        render_page(&ruled_pages[0], &opts, &font, &mut ruled);
+
+        let (p, r) = (inked_rows(&plain), inked_rows(&ruled));
+        assert!(p <= 2, "the bare gutter carries no rule: {p} inked rows");
+        assert!(r > 20, "the divider inks a run of gutter rows: {r}");
+        // Dotted, not solid: the gaps leave well under half the rows inked.
+        assert!(
+            r < ruled.height as usize / 2,
+            "divider is dotted, with gaps: {r} of {} rows",
+            ruled.height
+        );
     }
 
     #[test]

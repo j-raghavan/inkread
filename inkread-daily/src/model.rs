@@ -144,6 +144,13 @@ impl DailyLayoutStyle {
         )
     }
 
+    /// Whether a dotted rule is drawn down the centre gutter between the columns (the newspaper
+    /// divider): Vintage only (ADR-INKREAD-0018 D1).
+    #[must_use]
+    pub fn has_column_rule(self) -> bool {
+        matches!(self, DailyLayoutStyle::Vintage)
+    }
+
     /// The stable lowercase token used in the OPF identifier and over JNI.
     #[must_use]
     pub fn as_str(self) -> &'static str {

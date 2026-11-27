@@ -655,6 +655,7 @@ mod tests {
             align: Align::Left,
             columns: 1,
             band: false,
+            column_rule: false,
         };
         let sizer = StoreSizer(&pkg.images);
         for (i, want) in [(0usize, "images/cover.png"), (1, "images/pic.webp")] {
