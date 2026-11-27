@@ -656,6 +656,7 @@ mod tests {
             columns: 1,
             band: false,
             column_rule: false,
+            drop_cap: false,
         };
         let sizer = StoreSizer(&pkg.images);
         for (i, want) in [(0usize, "images/cover.png"), (1, "images/pic.webp")] {

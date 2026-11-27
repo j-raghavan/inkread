@@ -144,10 +144,16 @@ impl DailyLayoutStyle {
         )
     }
 
-    /// Whether a dotted rule is drawn down the centre gutter between the columns (the newspaper
+    /// Whether a hairline rule is drawn down the centre gutter between the columns (the newspaper
     /// divider): Vintage only (ADR-INKREAD-0018 D1).
     #[must_use]
     pub fn has_column_rule(self) -> bool {
+        matches!(self, DailyLayoutStyle::Vintage)
+    }
+
+    /// Whether the body's first paragraph opens with a drop cap: Vintage only (ADR-INKREAD-0018 D1).
+    #[must_use]
+    pub fn has_drop_cap(self) -> bool {
         matches!(self, DailyLayoutStyle::Vintage)
     }
 

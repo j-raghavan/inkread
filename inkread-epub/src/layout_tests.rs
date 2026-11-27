@@ -95,6 +95,7 @@ fn layout_digest_is_pinned_against_algorithm_drift() {
         columns: 1,
         band: false,
         column_rule: false,
+        drop_cap: false,
     };
     assert_eq!(opts.layout_digest(), 17_685_407_801_978_826_572);
 }
@@ -112,6 +113,7 @@ fn band_flag_folds_into_digest_only_when_set() {
         LayoutOpts {
             band: false,
             column_rule: false,
+            drop_cap: false,
             ..base
         }
         .layout_digest(),
@@ -173,6 +175,7 @@ fn band_opts() -> LayoutOpts {
         columns: 2,
         band: true,
         column_rule: false,
+        drop_cap: false,
     }
 }
 
@@ -336,6 +339,71 @@ fn band_folds_a_full_vintage_lead_above_the_columns() {
 }
 
 #[test]
+fn drop_cap_raises_the_initial_and_keeps_offsets() {
+    // Vintage opens the body's first paragraph with a drop cap (ADR-INKREAD-0018 D1): the initial is
+    // set large at the column's left edge, it takes the block's first character, and the prose resumes
+    // from the second so a highlight or search offset is unbroken.
+    let mut opts = band_opts();
+    opts.drop_cap = true;
+    let mut blocks = vec![
+        heading_block(1, "Big Climate Deal Reached"),
+        para("Reuters byline here"),
+    ];
+    for _ in 0..30 {
+        blocks.push(para(
+            "the agreement binds nearly two hundred nations to steeper cuts",
+        ));
+    }
+    let pages = paginate(&blocks, &opts, &Mono);
+    let runs: Vec<_> = pages
+        .iter()
+        .flat_map(|p| p.lines.iter())
+        .flat_map(|l| l.runs.iter())
+        .collect();
+
+    // The cap: one run set far larger than the body, at the column's left edge.
+    let cap = runs
+        .iter()
+        .find(|r| r.size_px > opts.font_px * 2.0)
+        .expect("a raised initial");
+    assert_eq!(cap.text, "T", "the initial is capitalised");
+    assert!(
+        cap.x.abs() < 1.0,
+        "the cap sits at the left edge: x={}",
+        cap.x
+    );
+
+    // The prose resumes exactly one character after the cap, with the initial removed from the flow.
+    let after = runs
+        .iter()
+        .filter(|r| r.anchor.block == cap.anchor.block && r.size_px <= opts.font_px * 2.0)
+        .min_by(|a, b| a.anchor.char_offset.cmp(&b.anchor.char_offset))
+        .expect("body text after the cap");
+    assert_eq!(
+        after.anchor.char_offset,
+        cap.anchor.char_offset + 1,
+        "prose resumes one character after the cap",
+    );
+    assert!(
+        after.text.starts_with("he"),
+        "the initial is lifted out of the flow: {:?}",
+        after.text,
+    );
+
+    // With the drop cap off, nothing is set oversized.
+    opts.drop_cap = false;
+    let plain = paginate(&blocks, &opts, &Mono);
+    assert!(
+        plain
+            .iter()
+            .flat_map(|p| p.lines.iter())
+            .flat_map(|l| l.runs.iter())
+            .all(|r| r.size_px <= opts.font_px * 2.0),
+        "no oversized run without the drop cap",
+    );
+}
+
+#[test]
 fn band_sets_a_short_article_in_one_column() {
     // A short body collapses lopsidedly into the left column of two; instead it is set in a single
     // full-width column beneath the band (ADR-INKREAD-0017 D3).
@@ -447,6 +515,7 @@ fn band_off_keeps_the_heading_in_a_column() {
     let opts = LayoutOpts {
         band: false,
         column_rule: false,
+        drop_cap: false,
         ..band_opts()
     };
     let blocks = vec![
@@ -481,6 +550,7 @@ fn style_opts() -> LayoutOpts {
         columns: 1,
         band: false,
         column_rule: false,
+        drop_cap: false,
     }
 }
 
@@ -708,6 +778,7 @@ fn long_paragraph_wraps_to_multiple_lines() {
         columns: 1,
         band: false,
         column_rule: false,
+        drop_cap: false,
     };
     let words = "aaaa ".repeat(12); // 12 words of 4 chars → ~ wraps
     let pages = paginate(&[para(words.trim())], &opts, &Mono);
@@ -741,6 +812,7 @@ fn cjk_opts() -> LayoutOpts {
         columns: 1,
         band: false,
         column_rule: false,
+        drop_cap: false,
     }
 }
 
@@ -880,6 +952,7 @@ fn content_overflow_breaks_into_pages() {
         columns: 1,
         band: false,
         column_rule: false,
+        drop_cap: false,
     };
     let blocks: Vec<Block> = (0..7).map(|_| para("x")).collect();
     let pages = paginate(&blocks, &opts, &Mono);
@@ -901,6 +974,7 @@ fn heading_uses_a_larger_line_height() {
         columns: 1,
         band: false,
         column_rule: false,
+        drop_cap: false,
     };
     let pages = paginate(
         &[Block::Heading {
@@ -978,6 +1052,7 @@ fn wide(font_px: f32) -> LayoutOpts {
         columns: 1,
         band: false,
         column_rule: false,
+        drop_cap: false,
     }
 }
 
@@ -1057,6 +1132,7 @@ fn narrow_para() -> LayoutOpts {
         columns: 1,
         band: false,
         column_rule: false,
+        drop_cap: false,
     }
 }
 
@@ -1193,6 +1269,7 @@ fn image_opts() -> LayoutOpts {
         columns: 1,
         band: false,
         column_rule: false,
+        drop_cap: false,
     }
 }
 
@@ -1784,6 +1861,7 @@ fn two_col_opts() -> LayoutOpts {
         columns: 2,
         band: false,
         column_rule: false,
+        drop_cap: false,
     }
 }
 
