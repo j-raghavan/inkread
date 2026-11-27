@@ -741,26 +741,38 @@ pub fn render_page_with_images(
         }
     }
 
-    // A dotted rule down the centre gutter between two body columns, the newspaper divider (Vintage,
-    // ADR-INKREAD-0018 D1). Drawn only on a genuine two-column page; the full-width band lines above
-    // and a short article's single column are left alone. The gutter equals the margin, so its centre
-    // sits half a margin past the first column.
+    // A faint hairline down the centre gutter between two body columns, the newspaper divider
+    // (Vintage, ADR-INKREAD-0018 D1). Drawn only on a genuine two-column page; a short article's single
+    // column is left alone. The gutter equals the margin, so its centre sits half a margin past the
+    // first column.
     if opts.column_rule && opts.effective_columns() == 2 {
         let col_w = opts.column_width();
+        let full_w = 2.0 * col_w + margin; // the whole two-column measure (gutter == margin)
         let x = (margin + col_w + margin * 0.5).round() as i32;
+        // The band's full-width lead (masthead, rules, headline, byline) sits above the columns and
+        // takes no divider. A folio table in the band is laid in half-width cells that look like body
+        // columns, so start the rule below the band's lowest full-width line, not at the first
+        // half-width one.
+        let band_bottom = page
+            .lines
+            .iter()
+            .filter(|l| (l.column_w - full_w).abs() < 2.0)
+            .map(|l| margin + l.top + l.height)
+            .fold(0.0_f32, f32::max);
         let body = || {
-            page.lines
-                .iter()
-                .filter(|l| !l.rule && l.image.is_none() && (l.column_w - col_w).abs() < 1.0)
+            page.lines.iter().filter(|l| {
+                !l.rule
+                    && l.image.is_none()
+                    && (l.column_w - col_w).abs() < 1.0
+                    && margin + l.top >= band_bottom - 0.5
+            })
         };
         let top = body().map(|l| margin + l.top).reduce(f32::min);
         let bottom = body().map(|l| margin + l.top + l.height).reduce(f32::max);
         if let (Some(top), Some(bottom)) = (top, bottom) {
-            let (mut y, y1) = (top.round() as i32, bottom.round() as i32);
-            while y + 1 < y1 {
-                canvas.blend(x, y, 0.55);
-                canvas.blend(x, y + 1, 0.55);
-                y += 9; // 2 px on, 7 px off: a dotted rule
+            let (y0, y1) = (top.round() as i32, bottom.round() as i32);
+            for y in y0..y1 {
+                canvas.blend(x, y, 0.3); // a faint, continuous hairline
             }
         }
     }
@@ -1240,10 +1252,10 @@ mod tests {
     }
 
     #[test]
-    fn column_rule_draws_a_dotted_divider_down_the_gutter() {
-        // Vintage's newspaper divider (ADR-INKREAD-0018 D1): a dotted rule down the centre of the
-        // gutter between two body columns, drawn only when `column_rule` is on. The gutter is
-        // whitespace, so any ink there is the divider and nothing else.
+    fn column_rule_draws_a_faint_hairline_down_the_gutter() {
+        // Vintage's newspaper divider (ADR-INKREAD-0018 D1): a faint, continuous hairline down the
+        // centre of the gutter between two body columns, drawn only when `column_rule` is on. The
+        // gutter is whitespace, so any ink there is the divider and nothing else.
         let font = AbFont::default_font();
         let body: Vec<Block> = (0..40)
             .map(|_| paragraph("The agreement binds nearly two hundred nations to steeper cuts."))
@@ -1279,12 +1291,25 @@ mod tests {
 
         let (p, r) = (inked_rows(&plain), inked_rows(&ruled));
         assert!(p <= 2, "the bare gutter carries no rule: {p} inked rows");
-        assert!(r > 20, "the divider inks a run of gutter rows: {r}");
-        // Dotted, not solid: the gaps leave well under half the rows inked.
+        // Continuous, not dotted: the hairline runs most of the column height.
         assert!(
-            r < ruled.height as usize / 2,
-            "divider is dotted, with gaps: {r} of {} rows",
+            r > ruled.height as usize / 2,
+            "the hairline runs the length of the columns: {r} of {} rows",
             ruled.height
+        );
+        // Faint, not black ink: the darkest gutter pixel stays well above black.
+        let darkest = (0..ruled.height as usize)
+            .filter_map(|y| {
+                (gx.saturating_sub(1)..=gx + 1)
+                    .map(|x| ruled.pixels[y * w + x])
+                    .min()
+                    .filter(|&v| v < 250)
+            })
+            .min()
+            .unwrap_or(255);
+        assert!(
+            darkest > 120,
+            "the hairline is faint, not black: darkest={darkest}"
         );
     }
 

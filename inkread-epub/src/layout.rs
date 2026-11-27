@@ -757,13 +757,20 @@ fn band_run(blocks: &[Block]) -> Option<usize> {
     let first_heading = blocks
         .iter()
         .position(|b| matches!(b, Block::Heading { .. }))?;
-    // Extend across the contiguous headline run, then fold an immediately-following byline paragraph.
+    // Extend across the contiguous headline run, fold an immediately-following byline paragraph, then
+    // a closing rule the style draws between the lead and the body (Vintage, ADR-INKREAD-0018 D1), so
+    // that rule spans the full band width rather than one column.
     let mut end = first_heading;
     while matches!(blocks.get(end), Some(Block::Heading { .. })) {
         end += 1;
     }
-    let byline = usize::from(matches!(blocks.get(end), Some(Block::Paragraph { .. })));
-    Some(end + byline)
+    if matches!(blocks.get(end), Some(Block::Paragraph { .. })) {
+        end += 1;
+    }
+    if matches!(blocks.get(end), Some(Block::Rule { .. })) {
+        end += 1;
+    }
+    Some(end)
 }
 
 /// Lay a chapter's body (the blocks after the band) into pages at `opts`'s column measure, with the

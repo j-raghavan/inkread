@@ -248,28 +248,44 @@ fn article_xhtml(issue: &Issue, i: usize) -> String {
             s.to_string()
         }
     };
-    let byline = match art
-        .published
-        .as_deref()
-        .map(clean_date)
-        .filter(|d| !d.is_empty())
-    {
-        Some(d) => format!("{} · {}", esc(&caps(&art.source)), esc(&caps(&d))),
-        None => esc(&caps(&art.source)),
+    // Vintage sets the source line as a dateline ("REUTERS · REPORTED 23 Nov 2026"); the other styles
+    // keep the plain "source · date".
+    let byline = {
+        let date = art
+            .published
+            .as_deref()
+            .map(clean_date)
+            .filter(|d| !d.is_empty())
+            .map(|d| {
+                let label = if issue.style == DailyLayoutStyle::Vintage {
+                    "REPORTED "
+                } else {
+                    ""
+                };
+                format!(" · {label}{}", esc(&caps(&d)))
+            })
+            .unwrap_or_default();
+        format!("{}{date}", esc(&caps(&art.source)))
     };
-    // Vintage opens each article with a blackletter nameplate, a rule, the dateline in capitals and
-    // another rule, all drawn full-width above the headline in the band (ADR-INKREAD-0018 D1).
-    let lead = if issue.style == DailyLayoutStyle::Vintage {
-        format!(
-            "<p class=\"masthead\"><img src=\"vintage-masthead.png\" alt=\"The Daily\"/></p>\n\
-             <hr/>\n<p class=\"dateline\">{}</p>\n<hr/>\n",
-            esc(&issue.date.to_uppercase()),
+    // Vintage opens each article with a blackletter nameplate and a rule, then a folio line (date at
+    // the left, edition at the right), then the headline and dateline, and a closing rule above the
+    // body columns, all drawn full-width in the band (ADR-INKREAD-0018 D1).
+    let (lead, body_rule) = if issue.style == DailyLayoutStyle::Vintage {
+        (
+            format!(
+                "<p class=\"masthead\"><img src=\"vintage-masthead.png\" alt=\"The Daily\"/></p>\n\
+                 <hr/>\n\
+                 <table class=\"folio\"><tr><td>{}</td>\
+                 <td class=\"edition\">EVENING EDITION</td></tr></table>\n",
+                esc(&issue.date.to_uppercase()),
+            ),
+            "<hr/>\n",
         )
     } else {
-        String::new()
+        (String::new(), "")
     };
     let body = format!(
-        "{lead}<h1>{}</h1>\n<p class=\"byline\">{byline}</p>\n{}",
+        "{lead}<h1>{}</h1>\n<p class=\"byline\">{byline}</p>\n{body_rule}{}",
         esc(&art.title),
         art.body_html // trusted: caller's contract is already-clean, well-formed XHTML (not escaped)
     );
@@ -314,7 +330,7 @@ fn xhtml(title: &str, body: &str, style: DailyLayoutStyle) -> String {
 fn head_css(style: DailyLayoutStyle) -> &'static str {
     match style {
         DailyLayoutStyle::Vintage => {
-            "<style>h1, .masthead, .dateline, .byline { text-align: center; }</style>"
+            "<style>.masthead { text-align: center; } .edition { text-align: right; }</style>"
         }
         _ => "",
     }

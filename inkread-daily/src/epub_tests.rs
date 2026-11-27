@@ -503,11 +503,12 @@ fn the_style_is_stamped_into_the_identifier() {
     }
 }
 
-/// Vintage opens each article with a blackletter nameplate, a dateline and framing rules, centres the
-/// headline and sets the byline in capitals (ADR-INKREAD-0018 D1); the other styles add none of this,
-/// so their documents are unchanged.
+/// Vintage opens each article with a blackletter nameplate, a folio line (date left, edition right),
+/// a left-aligned headline and a dateline byline in capitals, with rules above the folio and above the
+/// body columns (ADR-INKREAD-0018 D1); the other styles add none of this, so their documents are
+/// unchanged.
 #[test]
-fn vintage_dresses_the_article_with_a_nameplate_dateline_and_rules() {
+fn vintage_dresses_the_article_with_a_nameplate_folio_and_rules() {
     let mut issue = sample_issue();
     issue.style = DailyLayoutStyle::Vintage;
     let pkg = EpubPackage::open(assemble_epub(&issue)).unwrap();
@@ -516,27 +517,31 @@ fn vintage_dresses_the_article_with_a_nameplate_dateline_and_rules() {
         .iter()
         .find(|c| c.html.contains("class=\"byline\""))
         .expect("an article chapter");
+    // The masthead is centred and the folio's edition cell is right-aligned; the headline and byline
+    // take the default left alignment.
     assert!(
         article
             .html
-            .contains("h1, .masthead, .dateline, .byline { text-align: center; }"),
-        "vintage centres the lead",
+            .contains(".masthead { text-align: center; } .edition { text-align: right; }"),
+        "vintage centres the masthead and right-aligns the edition",
     );
     assert!(
         article.html.contains("<img src=\"vintage-masthead.png\""),
         "vintage draws the blackletter nameplate image",
     );
     assert!(
-        article.html.contains("<hr/>"),
-        "vintage frames the lead with rules"
+        article.html.contains("<table class=\"folio\">")
+            && article.html.contains("EVENING EDITION"),
+        "vintage prints a folio with the edition at the right",
+    );
+    // Two rules: one under the nameplate, one above the body columns (after the byline).
+    assert!(
+        article.html.matches("<hr/>").count() == 2,
+        "vintage frames the lead with two rules",
     );
     assert!(
-        article.html.contains("class=\"dateline\""),
-        "vintage prints a dateline",
-    );
-    assert!(
-        article.html.contains("HACKER NEWS"),
-        "vintage byline is capitalised",
+        article.html.contains("HACKER NEWS · REPORTED"),
+        "vintage byline is a capitalised dateline",
     );
 
     // Papernews gets none of the Vintage furniture.
