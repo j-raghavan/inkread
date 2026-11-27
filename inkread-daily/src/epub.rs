@@ -20,6 +20,17 @@ const VINTAGE_MASTHEAD: &[u8] = include_bytes!("../assets/vintage-masthead.png")
 /// any book (honoring the shipped font-size/spacing controls + reflow-stable resume).
 #[must_use]
 pub fn assemble_epub(issue: &Issue) -> Vec<u8> {
+    // Render the articles first, collecting the display-equation images each one embeds, so the OPF
+    // manifest can list those image resources before the package is written.
+    let mut math_imgs: Vec<(String, Vec<u8>)> = Vec::new();
+    let articles: Vec<String> = (0..issue.articles.len())
+        .map(|i| {
+            let (doc, imgs) = article_xhtml(issue, i);
+            math_imgs.extend(imgs);
+            doc
+        })
+        .collect();
+
     let mut zw = ZipWriter::new(Cursor::new(Vec::new()));
 
     // OCF requires the mimetype entry FIRST and STORED (uncompressed).
@@ -33,7 +44,12 @@ pub fn assemble_epub(issue: &Issue) -> Vec<u8> {
         CONTAINER_XML.as_bytes(),
         deflate,
     );
-    add(&mut zw, "OEBPS/content.opf", opf(issue).as_bytes(), deflate);
+    add(
+        &mut zw,
+        "OEBPS/content.opf",
+        opf(issue, &math_imgs).as_bytes(),
+        deflate,
+    );
     add(&mut zw, "OEBPS/nav.xhtml", nav(issue).as_bytes(), deflate);
     add(
         &mut zw,
@@ -51,13 +67,12 @@ pub fn assemble_epub(issue: &Issue) -> Vec<u8> {
             stored,
         );
     }
-    for i in 0..issue.articles.len() {
-        add(
-            &mut zw,
-            &article_path(i),
-            article_xhtml(issue, i).as_bytes(),
-            deflate,
-        );
+    for (i, doc) in articles.iter().enumerate() {
+        add(&mut zw, &article_path(i), doc.as_bytes(), deflate);
+    }
+    // Each display equation renders to its own PNG (already compressed, so store it).
+    for (name, png) in &math_imgs {
+        add(&mut zw, &format!("OEBPS/{name}"), png, stored);
     }
 
     zw.finish()
@@ -84,7 +99,7 @@ const CONTAINER_XML: &str = r#"<?xml version="1.0" encoding="utf-8"?>
 
 /// The OPF package: metadata + a manifest of (nav, title, every article) and a spine that opens on
 /// the title page then reads the articles in order.
-fn opf(issue: &Issue) -> String {
+fn opf(issue: &Issue, math_imgs: &[(String, Vec<u8>)]) -> String {
     let mut manifest = String::from(
         r#"    <item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>
     <item id="title" href="title.xhtml" media-type="application/xhtml+xml"/>
@@ -101,6 +116,15 @@ fn opf(issue: &Issue) -> String {
             "    <item id=\"a{i}\" href=\"a{i:04}.xhtml\" media-type=\"application/xhtml+xml\"/>\n"
         ));
         spine.push_str(&format!("    <itemref idref=\"a{i}\"/>\n"));
+    }
+    // Each display-equation image is a manifest resource (not in the spine — images are referenced,
+    // not read in order). The name (`a{i}-eq{n}.png`) is a valid id and cannot collide with an
+    // article id (`a{i}`), the nav, the title or the masthead.
+    for (name, _) in math_imgs {
+        let id = name.trim_end_matches(".png");
+        manifest.push_str(&format!(
+            "    <item id=\"{id}\" href=\"{name}\" media-type=\"image/png\"/>\n"
+        ));
     }
     format!(
         r#"<?xml version="1.0" encoding="utf-8"?>
@@ -236,8 +260,10 @@ fn title_page(issue: &Issue) -> String {
 /// short enough that a dozen of them still fit a contents page.
 const EXCERPT_CHARS: usize = 160;
 
-/// One article document: headline, a source · date byline, then the clean article body.
-fn article_xhtml(issue: &Issue, i: usize) -> String {
+/// One article document: headline, a source · date byline, then the clean article body. Returns the
+/// document plus the `(resource name, PNG bytes)` of every display equation the body embeds, for the
+/// caller to add to the package and the manifest.
+fn article_xhtml(issue: &Issue, i: usize) -> (String, Vec<(String, Vec<u8>)>) {
     let art = &issue.articles[i];
     // Vintage sets the byline in capitals (ADR-INKREAD-0018 D1). Uppercase the raw text *before*
     // escaping, so an entity like `&amp;` is not mangled into `&AMP;`.
@@ -284,12 +310,66 @@ fn article_xhtml(issue: &Issue, i: usize) -> String {
     } else {
         (String::new(), "")
     };
+    // Render and embed the body's display equations, rewriting each math <img> to its resource.
+    let (body_html, math_imgs) = embed_math(&art.body_html, i);
     let body = format!(
-        "{lead}<h1>{}</h1>\n<p class=\"byline\">{byline}</p>\n{body_rule}{}",
+        "{lead}<h1>{}</h1>\n<p class=\"byline\">{byline}</p>\n{body_rule}{body_html}",
         esc(&art.title),
-        art.body_html // trusted: caller's contract is already-clean, well-formed XHTML (not escaped)
     );
-    xhtml(&art.title, &body, issue.style)
+    (xhtml(&art.title, &body, issue.style), math_imgs)
+}
+
+/// Render the display-equation images the extractor left in `body` (each `<img class="latex"
+/// alt="LATEX"/>`, LaTeX in the `alt`), returning the body with every equation pointed at a unique
+/// per-article image resource, plus the `(resource name, PNG bytes)` to embed.
+///
+/// A formula that does not render keeps its LaTeX as the visible text (the image is dropped), so one
+/// unsupported equation degrades gracefully instead of breaking the issue. The extractor emits the
+/// marker in an exact shape (quotes and `>` are escaped inside the `alt`, so `"/>` first appears at
+/// the tag's close), which lets this scan it without a full HTML parse.
+fn embed_math(body: &str, article_index: usize) -> (String, Vec<(String, Vec<u8>)>) {
+    const OPEN: &str = "<img class=\"latex\" alt=\"";
+    const CLOSE: &str = "\"/>";
+    if !body.contains(OPEN) {
+        return (body.to_string(), Vec::new());
+    }
+    let mut out = String::with_capacity(body.len());
+    let mut imgs: Vec<(String, Vec<u8>)> = Vec::new();
+    let mut rest = body;
+    while let Some(i) = rest.find(OPEN) {
+        out.push_str(&rest[..i]);
+        let after = &rest[i + OPEN.len()..];
+        let Some(j) = after.find(CLOSE) else {
+            // Not the extractor's shape (cannot happen for emitted markers) — keep it verbatim.
+            out.push_str(&rest[i..]);
+            return (out, imgs);
+        };
+        let escaped_latex = &after[..j];
+        rest = &after[j + CLOSE.len()..];
+        match crate::math::render_display(&unescape(escaped_latex)) {
+            Some(png) => {
+                let name = format!("a{article_index}-eq{}.png", imgs.len());
+                out.push_str(&format!(
+                    "<img class=\"latex\" src=\"{name}\" alt=\"{escaped_latex}\"/>"
+                ));
+                imgs.push((name, png));
+            }
+            // Keep the formula readable as its LaTeX source when it does not render.
+            None => out.push_str(escaped_latex),
+        }
+    }
+    out.push_str(rest);
+    (out, imgs)
+}
+
+/// Reverse [`esc`] for the five XML entities, to recover the raw LaTeX from an escaped `alt` value.
+/// `&amp;` is decoded last so an input like `&amp;lt;` becomes `&lt;`, not `<`.
+fn unescape(s: &str) -> String {
+    s.replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&apos;", "'")
+        .replace("&amp;", "&")
 }
 
 /// Turn a raw feed date into a short display date — drop the weekday prefix and the time/zone, so
