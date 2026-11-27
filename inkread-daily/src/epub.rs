@@ -330,7 +330,14 @@ fn xhtml(title: &str, body: &str, style: DailyLayoutStyle) -> String {
 fn head_css(style: DailyLayoutStyle) -> &'static str {
     match style {
         DailyLayoutStyle::Vintage => {
-            "<style>.masthead { text-align: center; } .edition { text-align: right; }</style>"
+            "<style>\
+             .masthead { text-align: center; margin: 0 0 0.1em; } \
+             hr { margin: 0.12em 0; } \
+             .folio { margin: 0.1em 0; } \
+             .edition { text-align: right; } \
+             h1 { text-align: center; margin: 0.3em 0 0.05em; } \
+             .byline { text-align: center; margin: 0 0 0.15em; }\
+             </style>"
         }
         _ => "",
     }

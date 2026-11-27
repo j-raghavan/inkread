@@ -517,14 +517,18 @@ fn vintage_dresses_the_article_with_a_nameplate_folio_and_rules() {
         .iter()
         .find(|c| c.html.contains("class=\"byline\""))
         .expect("an article chapter");
-    // The masthead is centred and the folio's edition cell is right-aligned; the headline and byline
-    // take the default left alignment.
-    assert!(
-        article
-            .html
-            .contains(".masthead { text-align: center; } .edition { text-align: right; }"),
-        "vintage centres the masthead and right-aligns the edition",
-    );
+    // The masthead, headline and byline are centred and the folio's edition cell is right-aligned.
+    for rule in [
+        ".masthead { text-align: center;",
+        ".edition { text-align: right; }",
+        "h1 { text-align: center;",
+        ".byline { text-align: center;",
+    ] {
+        assert!(
+            article.html.contains(rule),
+            "vintage head CSS carries {rule:?}",
+        );
+    }
     assert!(
         article.html.contains("<img src=\"vintage-masthead.png\""),
         "vintage draws the blackletter nameplate image",

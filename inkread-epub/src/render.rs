@@ -717,7 +717,15 @@ pub fn render_page_with_images(
                 let glyph = id.with_scale_and_position(scale, point(pen_x, baseline));
                 if let Some(outlined) = face.outline_glyph(glyph) {
                     let bb = outlined.px_bounds();
-                    let (ox, oy) = (bb.min.x as i32, bb.min.y as i32);
+                    // A drop cap is seated by its ink top at the line's top, not on the ascent-based
+                    // baseline, so a face whose ascent sits far above the cap height does not drop the
+                    // initial below the first line (ADR-INKREAD-0018 D1).
+                    let oy = if run.drop_cap {
+                        (margin + line.top).round() as i32
+                    } else {
+                        bb.min.y as i32
+                    };
+                    let ox = bb.min.x as i32;
                     outlined.draw(|gx, gy, c| {
                         let py = oy + gy as i32;
                         // Faux italic: shift each row sideways in proportion to its height above the

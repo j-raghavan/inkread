@@ -327,6 +327,10 @@ pub struct PlacedRun {
     /// text. Its `text` is then empty, so selection, search and copy pass over it; its width is the
     /// image's, not a measured string's (see [`PlacedRun::width`]).
     pub image: Option<InlineImage>,
+    /// A drop-cap initial (Vintage, ADR-INKREAD-0018 D1): set much larger than the line and seated by
+    /// its ink top at the line's top, not on the ascent-based baseline, so a tall-ascent face does not
+    /// drop it below the first line. `false` for every ordinary run.
+    pub drop_cap: bool,
 }
 
 impl PlacedRun {
@@ -1664,6 +1668,7 @@ impl<'o> Pager<'o> {
             anchor: cap_anchor,
             wrap: None,
             image: None,
+            drop_cap: true,
         };
         let n = lines.len();
         for (i, mut runs) in lines.into_iter().enumerate() {
@@ -1876,6 +1881,7 @@ impl<'o> Pager<'o> {
             anchor: marker_anchor,
             wrap: None,
             image: None,
+            drop_cap: false,
         };
         if let Some(first) = lines.first_mut() {
             first.insert(0, marker_run);
@@ -2171,6 +2177,7 @@ fn break_lines(
                         width,
                         height,
                     }),
+                    drop_cap: false,
                 });
                 x = start + w;
                 need_space = false;
@@ -2220,6 +2227,7 @@ fn break_lines(
                                 anchor,
                                 wrap,
                                 image: None,
+                                drop_cap: false,
                             });
                         };
                     if rest_w <= room {
