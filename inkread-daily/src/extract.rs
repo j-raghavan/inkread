@@ -70,6 +70,13 @@ pub fn extract_readable(html: &str) -> String {
     let mut last = String::new();
     for block in to_blocks(html) {
         let t = collapse_ws(&strip_zero_width(&block));
+        // Newsletter / related-stories boilerplate and an email signature mark the end of the article
+        // — drop them and everything after (the "Follow topics…" CTA, a "More from …" link list, or a
+        // mailing-list footer under a signature). Checked before the length filter so a short marker
+        // (a bare "-- " signature line) still ends the article rather than being skipped as too short.
+        if is_tail_boilerplate(&t) {
+            break;
+        }
         if t.chars().count() < MIN_BLOCK_CHARS || is_diagram_source(&t) || is_author_bio(&t) {
             continue;
         }
@@ -78,11 +85,6 @@ pub fn extract_readable(html: &str) -> String {
         // filter but are not article prose.
         if is_email_headers(&t) || is_bracket_nav(&t) || is_social_cta(&t) {
             continue;
-        }
-        // Newsletter / related-stories boilerplate marks the end of the article — drop it + the rest
-        // (the "Follow topics…" CTA and the trailing "More from …" link list).
-        if is_tail_boilerplate(&t) {
-            break;
         }
         if t == last {
             continue; // drop a duplicated consecutive paragraph (e.g. a caption repeated)
@@ -294,7 +296,9 @@ fn is_tail_boilerplate(t: &str) -> bool {
         "share this story",
         "comments (",
     ];
-    MARKERS.iter().any(|m| lower.starts_with(m))
+    // "-- " opening a block is the email signature delimiter (RFC 3676): the signature, and any
+    // mailing-list footer appended after it, are not article prose.
+    MARKERS.iter().any(|m| lower.starts_with(m)) || t.starts_with("-- ")
 }
 
 /// Split preformatted text into paragraphs on blank lines, joining the soft-wrapped lines within
@@ -482,11 +486,22 @@ mod tests {
 From: A Person &lt;a@host&gt;\nTo: list@host\nSubject: The Real Subject\n\nHello,\n\n\
 This is the first real paragraph of the message, long enough to read comfortably.\n\
 It is soft-wrapped across two source lines.\n\n\
-And this is a second real paragraph that also comfortably exceeds the minimum length.\n</pre>\
+And this is a second real paragraph that also comfortably exceeds the minimum length.\n\n\
+-- A Person, somewhere\n\n\
+Please check out the Open Source Software Security Wiki, a mailing-list footer to drop.\n</pre>\
             </body></html>";
         let out = extract_readable(html);
         assert!(out.contains("first real paragraph of the message"), "{out}");
         assert!(out.contains("second real paragraph"), "{out}");
+        // The signature delimiter and the footer after it are dropped.
+        assert!(
+            !out.contains("A Person, somewhere"),
+            "signature dropped: {out}"
+        );
+        assert!(
+            !out.contains("mailing-list footer"),
+            "footer after signature dropped: {out}"
+        );
         // Soft-wrapped lines within a paragraph are joined.
         assert!(
             out.contains("read comfortably. It is soft-wrapped"),
