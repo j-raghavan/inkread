@@ -68,7 +68,23 @@ const MIN_BLOCK_CHARS: usize = 40;
 pub fn extract_readable(html: &str) -> String {
     let mut out = String::new();
     let mut last = String::new();
-    for block in to_blocks(html) {
+    for blk in to_blocks(html) {
+        let block = match blk {
+            Blk::Code(raw) => {
+                // A code/command block: keep every line. HTML ignores one newline after <pre>; drop it
+                // and the trailing whitespace, then emit verbatim (escaped, newlines kept) so the reflow
+                // engine sets it monospace. The prose filters below do not apply — short code is valid
+                // and a listing never ends the article.
+                let code = raw.strip_prefix('\n').unwrap_or(&raw).trim_end();
+                if !code.is_empty() {
+                    out.push_str("<pre>");
+                    out.push_str(&escape(code));
+                    out.push_str("</pre>\n");
+                }
+                continue;
+            }
+            Blk::Prose(block) => block,
+        };
         let t = collapse_ws(&strip_zero_width(&block));
         // Newsletter / related-stories boilerplate and an email signature mark the end of the article
         // — drop them and everything after (the "Follow topics…" CTA, a "More from …" link list, or a
@@ -115,18 +131,50 @@ pub(crate) fn summary_fallback(summary: Option<&str>) -> String {
     "<p>(No readable text could be extracted. Open the original to read it.)</p>".to_string()
 }
 
-/// Split `html` into text blocks. Parses with html5ever, narrows to the article body, then walks the
-/// tree: text accumulates into the current block, [`BLOCK_TAGS`] elements end it, and [`SKIP_TAGS`]
-/// subtrees are dropped. Comments/CDATA/doctype nodes are never text, so they cannot leak. The parser
-/// already decodes entities in text nodes, so no manual entity pass is needed here.
-fn to_blocks(html: &str) -> Vec<String> {
+/// One extracted block: ordinary prose (whitespace-collapsed, emitted as a `<p>`) or a preformatted
+/// code/command block (lines kept, emitted as a `<pre>` the reflow engine sets monospace).
+enum Blk {
+    Prose(String),
+    Code(String),
+}
+
+/// A `<pre>` is code — not a plain-text mailing-list post — when it wraps a `<code>` element or
+/// carries a syntax-highlighting class. Code keeps its lines; a bare `<pre>` of wrapped prose is split
+/// into paragraphs by [`split_pre_paragraphs`] as before.
+fn is_code_pre(pre: NodeRef<Node>) -> bool {
+    fn has_code(node: NodeRef<Node>) -> bool {
+        node.children().any(|c| match c.value() {
+            Node::Element(el) => el.name() == "code" || has_code(c),
+            _ => false,
+        })
+    }
+    if let Node::Element(el) = pre.value() {
+        if el.attr("class").is_some_and(|c| {
+            let c = c.to_ascii_lowercase();
+            c.contains("language-")
+                || c.contains("highlight")
+                || c.contains("sourcecode")
+                || c.contains("hljs")
+                || c.contains("codehilite")
+        }) {
+            return true;
+        }
+    }
+    has_code(pre)
+}
+
+/// Split `html` into blocks. Parses with html5ever, narrows to the article body, then walks the tree:
+/// text accumulates into the current block, [`BLOCK_TAGS`] elements end it, [`SKIP_TAGS`] subtrees are
+/// dropped, and a code `<pre>` becomes a [`Blk::Code`]. Comments/CDATA/doctype nodes are never text, so
+/// they cannot leak. The parser already decodes entities in text nodes, so no manual pass is needed.
+fn to_blocks(html: &str) -> Vec<Blk> {
     let doc = Html::parse_document(html);
     let start = main_node(doc.tree.root());
     let mut blocks = Vec::new();
     let mut cur = String::new();
     walk(start, &mut cur, &mut blocks);
     if !cur.trim().is_empty() {
-        blocks.push(cur);
+        blocks.push(Blk::Prose(cur));
     }
     blocks
 }
@@ -169,7 +217,7 @@ fn text_len(node: NodeRef<Node>) -> usize {
 
 /// Walk block-level structure under `node`, emitting block text into `blocks`. Loose inline text
 /// accumulates in `cur` and flushes at each block boundary; [`SKIP_TAGS`] subtrees are skipped whole.
-fn walk(node: NodeRef<Node>, cur: &mut String, blocks: &mut Vec<String>) {
+fn walk(node: NodeRef<Node>, cur: &mut String, blocks: &mut Vec<Blk>) {
     for child in node.children() {
         match child.value() {
             Node::Text(t) => cur.push_str(t),
@@ -179,26 +227,32 @@ fn walk(node: NodeRef<Node>, cur: &mut String, blocks: &mut Vec<String>) {
                     continue; // chrome (script/style/nav/…) — drop the whole subtree
                 }
                 if name == "pre" {
-                    // Preformatted text (mailing-list posts, plain-text articles) carries its
-                    // structure as newlines, not markup. Split it on blank lines here, before the
-                    // whitespace collapse, so the body keeps its paragraphs instead of flattening into
-                    // one run-on block with the email headers merged in.
                     if !cur.trim().is_empty() {
-                        blocks.push(std::mem::take(cur));
+                        blocks.push(Blk::Prose(std::mem::take(cur)));
                     }
                     let text: String = ElementRef::wrap(child)
                         .map(|e| e.text().collect())
                         .unwrap_or_default();
-                    blocks.extend(split_pre_paragraphs(&text));
+                    if is_code_pre(child) {
+                        // Genuine code/commands: every line is significant, so keep the block whole and
+                        // let the reflow engine set it monospace line-for-line.
+                        blocks.push(Blk::Code(text));
+                    } else {
+                        // A plain-text <pre> (mailing-list post) carries its structure as newlines, not
+                        // markup. Split it on blank lines before the whitespace collapse, so the body
+                        // keeps its paragraphs instead of flattening into one run-on block with the email
+                        // headers merged in.
+                        blocks.extend(split_pre_paragraphs(&text).into_iter().map(Blk::Prose));
+                    }
                     continue;
                 }
                 let is_block = BLOCK_TAGS.contains(&name);
                 if is_block && !cur.trim().is_empty() {
-                    blocks.push(std::mem::take(cur));
+                    blocks.push(Blk::Prose(std::mem::take(cur)));
                 }
                 walk(child, cur, blocks);
                 if is_block && !cur.trim().is_empty() {
-                    blocks.push(std::mem::take(cur));
+                    blocks.push(Blk::Prose(std::mem::take(cur)));
                 }
             }
             _ => {} // Comment / Doctype / ProcessingInstruction — never content
@@ -638,6 +692,58 @@ Please check out the Open Source Software Security Wiki, a mailing-list footer t
         assert!(
             !with.contains('\u{2014}') && !without.contains('\u{2014}'),
             "no em dash in the fallbacks"
+        );
+    }
+
+    #[test]
+    fn a_code_pre_is_kept_whole_with_its_lines() {
+        // A <pre><code> block is emitted as a <pre> with its newlines preserved, not collapsed into a
+        // run-on paragraph, so the reflow engine can set it monospace line-for-line.
+        let html = "<article><p>Here is the smallest program that greets you politely:</p>\
+            <pre><code>fn main() {\n    println!(\"hi\");\n}</code></pre>\
+            <p>That prints a greeting to standard output on your terminal screen.</p></article>";
+        let out = extract_readable(html);
+        assert!(
+            out.contains("<pre>"),
+            "a code block must emit a <pre>: {out}"
+        );
+        assert!(
+            out.contains("fn main() {\n    println!"),
+            "the code's newlines and indentation must be preserved: {out:?}",
+        );
+        assert!(
+            out.contains("<p>Here is the smallest program that greets you politely:</p>"),
+            "prose around it still emits <p>: {out}",
+        );
+    }
+
+    #[test]
+    fn a_language_classed_pre_without_code_is_still_code() {
+        // Syntax-highlight markup often puts the hint on the <pre> class with no <code> child.
+        let html = "<article><pre class=\"language-sh highlight\">sudo apt update\nsudo apt upgrade</pre>\
+            <p>Those two commands refresh the package index and install the pending upgrades.</p></article>";
+        let out = extract_readable(html);
+        assert!(
+            out.contains("<pre>sudo apt update\nsudo apt upgrade</pre>"),
+            "got: {out:?}"
+        );
+    }
+
+    #[test]
+    fn a_bare_text_pre_still_splits_into_paragraphs() {
+        // A mailing-list <pre> (no <code>, no language class) keeps the old behaviour: blank-line
+        // separated paragraphs, not a monospace block.
+        let html = "<article><pre>First paragraph of a plain-text post that is long enough to keep.\n\n\
+            Second paragraph of the same plain-text post, also plenty long to survive.</pre></article>";
+        let out = extract_readable(html);
+        assert!(
+            !out.contains("<pre>"),
+            "a bare text <pre> must not become a code block: {out}"
+        );
+        assert_eq!(
+            out.matches("<p>").count(),
+            2,
+            "it splits into two paragraphs: {out}"
         );
     }
 }
