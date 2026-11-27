@@ -593,15 +593,36 @@ fn to_blocks(html: &str) -> Vec<Blk> {
     blocks
 }
 
-/// Narrow to the article body when the page marks it up (`<article>` then `<main>`), else `<body>`
-/// (or the root). Only trusts the region if it actually carries prose — some pages ship an empty
-/// `<main>` shell. Avoids pulling in the surrounding nav/sidebar/footer.
+/// Class-name substrings marking a blog's main post-body container (WordPress `.post-content` /
+/// `.entry-content` and the common variants). The site header and tagline, the post title and meta,
+/// the share widget, the comment thread and the footer all live OUTSIDE it, so narrowing here drops
+/// that chrome in one move where a `<body>` fallback would sweep it all in.
+const CONTENT_CLASS_TOKENS: &[&str] = &[
+    "post-content",
+    "entry-content",
+    "article-content",
+    "article-body",
+    "post-body",
+    "entry-body",
+];
+
+/// Narrow to the article body when the page marks it up (`<article>` then `<main>`, then a known
+/// content-container class), else `<body>` (or the root). Only trusts a region if it actually carries
+/// prose — some pages ship an empty `<main>` shell. Avoids pulling in the surrounding
+/// header/tagline/title/meta/nav/sidebar/share/comments/footer.
 fn main_node(root: NodeRef<Node>) -> NodeRef<Node> {
     for tag in ["article", "main"] {
         if let Some(n) = find_element(root, tag) {
             if text_len(n) > 200 {
                 return n;
             }
+        }
+    }
+    // No semantic wrapper: fall back to a blog content container by class before the whole <body>,
+    // so the title/meta/tagline above it and the share/comments/footer below it are left out.
+    if let Some(n) = find_element_by_class(root, CONTENT_CLASS_TOKENS) {
+        if text_len(n) > 200 {
+            return n;
         }
     }
     find_element(root, "body").unwrap_or(root)
@@ -616,6 +637,27 @@ fn find_element<'a>(node: NodeRef<'a, Node>, name: &str) -> Option<NodeRef<'a, N
             }
         }
         if let Some(found) = find_element(child, name) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+/// Depth-first search for the first element whose `class` attribute contains any of `tokens`.
+fn find_element_by_class<'a>(
+    node: NodeRef<'a, Node>,
+    tokens: &[&str],
+) -> Option<NodeRef<'a, Node>> {
+    for child in node.children() {
+        if let Node::Element(el) = child.value() {
+            if el
+                .attr("class")
+                .is_some_and(|c| tokens.iter().any(|t| c.contains(t)))
+            {
+                return Some(child);
+            }
+        }
+        if let Some(found) = find_element_by_class(child, tokens) {
             return Some(found);
         }
     }
@@ -1131,6 +1173,43 @@ Please check out the Open Source Software Security Wiki, a mailing-list footer t
             !out.contains("Riemann hypothesis"),
             "reader comments dropped: {out}"
         );
+        assert!(!out.contains("WordPress.com"), "footer dropped: {out}");
+    }
+
+    #[test]
+    fn a_blog_post_narrows_to_its_content_container() {
+        // A WordPress-style page with no <article>/<main>: the site tagline, the post title and the
+        // meta line sit ABOVE the .post-content container, the share widget and footer BELOW it, all
+        // in non-chrome tags and long enough to clear the length filter. Narrowing to .post-content
+        // is what drops them, keeping only the real post body.
+        let html = "<body>\
+            <div class=\"site-tagline\"><p>Updates on my research and expository papers and other maths-related topics.</p></div>\
+            <h2 class=\"post-title\">Finite-Time Singularity Formation for the Three-Dimensional Euler Equations</h2>\
+            <div class=\"post-meta\">23 November, 2026 in expository, math.AP | Tags: Euler equations | by Someone</div>\
+            <div class=\"post-content\">\
+              <p>The Euler equations model the motion of an inviscid fluid: fluid motion in the absence of shear stresses arising from fluid particles sliding past each other. In an ideal fluid the dynamics are time-reversible, which already sets them apart from real viscous flow.</p>\
+            </div>\
+            <div class=\"sharedaddy\"><h3>Share this:</h3><a>Share on WhatsApp (Opens in new window) WhatsApp</a></div>\
+            <div class=\"site-footer\"><p>Blog at WordPress.com, powered by an open-source theme.</p></div>\
+            </body>";
+        let out = extract_readable(html);
+        assert!(
+            out.contains("Euler equations model the motion"),
+            "real body kept: {out}"
+        );
+        assert!(
+            !out.contains("Updates on my research"),
+            "tagline dropped: {out}"
+        );
+        assert!(
+            !out.contains("Finite-Time Singularity"),
+            "title echo dropped: {out}"
+        );
+        assert!(
+            !out.contains("in expository, math.AP"),
+            "meta dropped: {out}"
+        );
+        assert!(!out.contains("Opens in new window"), "share dropped: {out}");
         assert!(!out.contains("WordPress.com"), "footer dropped: {out}");
     }
 
