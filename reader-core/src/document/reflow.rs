@@ -185,6 +185,11 @@ pub struct EpubBackend {
     /// Whether this book is an inkread-daily issue (OPF id `urn:inkread-daily:…`), which switches on
     /// the full-width headline band in multi-column mode (ADR-INKREAD-0017 D5).
     band: bool,
+    /// For a daily issue: whether a dotted rule is drawn down the centre gutter (Vintage only). Like
+    /// `band`, derived from the stamped style; `false` for an ordinary book.
+    column_rule: bool,
+    /// For a daily issue: whether the body's first paragraph opens with a drop cap (Vintage only).
+    drop_cap: bool,
     /// For a daily issue, the column count its *stamped* style opens in (ADR-INKREAD-0018 D3); `None`
     /// for an ordinary book. A daily's columns follow the style baked into the issue, not the reader's
     /// live column pref, so a back issue built as Standard never renders two-column-without-a-band
@@ -278,6 +283,8 @@ impl EpubBackend {
                 inkread_daily::DailyLayoutStyle::from_token(token)
             });
         let band = daily_style.is_some_and(inkread_daily::DailyLayoutStyle::has_band);
+        let column_rule = daily_style.is_some_and(inkread_daily::DailyLayoutStyle::has_column_rule);
+        let drop_cap = daily_style.is_some_and(inkread_daily::DailyLayoutStyle::has_drop_cap);
         let daily_columns = daily_style.map(inkread_daily::DailyLayoutStyle::columns);
         let chapter_anchors = RefCell::new(vec![Vec::new(); chapter_keys.len()]);
         Ok(Self {
@@ -290,6 +297,8 @@ impl EpubBackend {
             nav: pkg.toc,
             meta,
             band,
+            column_rule,
+            drop_cap,
             daily_columns,
             font: RefCell::new(AbFont::default_font()),
             hyph: EnHyphenator::new(),
@@ -355,6 +364,8 @@ impl EpubBackend {
                 author: None,
             },
             band: false,
+            column_rule: false,
+            drop_cap: false,
             daily_columns: None,
             font: RefCell::new(AbFont::default_font()),
             hyph: EnHyphenator::new(),
@@ -566,6 +577,8 @@ impl EpubBackend {
             // the layout, so it is set before the cache key is derived — a daily pagination keys
             // apart from a would-be non-band one of the same geometry.
             opts.band = self.band;
+            opts.column_rule = self.column_rule;
+            opts.drop_cap = self.drop_cap;
             let key = layout_key(&opts, request.font_id, self.chapter_count());
             let cache = self.pagination_cache.borrow();
 

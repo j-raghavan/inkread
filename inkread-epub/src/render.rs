@@ -717,7 +717,15 @@ pub fn render_page_with_images(
                 let glyph = id.with_scale_and_position(scale, point(pen_x, baseline));
                 if let Some(outlined) = face.outline_glyph(glyph) {
                     let bb = outlined.px_bounds();
-                    let (ox, oy) = (bb.min.x as i32, bb.min.y as i32);
+                    // A drop cap is seated by its ink top at the line's top, not on the ascent-based
+                    // baseline, so a face whose ascent sits far above the cap height does not drop the
+                    // initial below the first line (ADR-INKREAD-0018 D1).
+                    let oy = if run.drop_cap {
+                        (margin + line.top).round() as i32
+                    } else {
+                        bb.min.y as i32
+                    };
+                    let ox = bb.min.x as i32;
                     outlined.draw(|gx, gy, c| {
                         let py = oy + gy as i32;
                         // Faux italic: shift each row sideways in proportion to its height above the
@@ -737,6 +745,42 @@ pub fn render_page_with_images(
                 }
                 pen_x += sf.h_advance(id) + smear as f32;
                 prev = Some((face, id));
+            }
+        }
+    }
+
+    // A faint hairline down the centre gutter between two body columns, the newspaper divider
+    // (Vintage, ADR-INKREAD-0018 D1). Drawn only on a genuine two-column page; a short article's single
+    // column is left alone. The gutter equals the margin, so its centre sits half a margin past the
+    // first column.
+    if opts.column_rule && opts.effective_columns() == 2 {
+        let col_w = opts.column_width();
+        let full_w = 2.0 * col_w + margin; // the whole two-column measure (gutter == margin)
+        let x = (margin + col_w + margin * 0.5).round() as i32;
+        // The band's full-width lead (masthead, rules, headline, byline) sits above the columns and
+        // takes no divider. A folio table in the band is laid in half-width cells that look like body
+        // columns, so start the rule below the band's lowest full-width line, not at the first
+        // half-width one.
+        let band_bottom = page
+            .lines
+            .iter()
+            .filter(|l| (l.column_w - full_w).abs() < 2.0)
+            .map(|l| margin + l.top + l.height)
+            .fold(0.0_f32, f32::max);
+        let body = || {
+            page.lines.iter().filter(|l| {
+                !l.rule
+                    && l.image.is_none()
+                    && (l.column_w - col_w).abs() < 1.0
+                    && margin + l.top >= band_bottom - 0.5
+            })
+        };
+        let top = body().map(|l| margin + l.top).reduce(f32::min);
+        let bottom = body().map(|l| margin + l.top + l.height).reduce(f32::max);
+        if let (Some(top), Some(bottom)) = (top, bottom) {
+            let (y0, y1) = (top.round() as i32, bottom.round() as i32);
+            for y in y0..y1 {
+                canvas.blend(x, y, 0.3); // a faint, continuous hairline
             }
         }
     }
@@ -1213,6 +1257,68 @@ mod tests {
             .filter(|&(y, x)| canvas.pixels[y * 400 + x] < 250)
             .count();
         assert_eq!(top_band, 0, "no ink above the top margin");
+    }
+
+    #[test]
+    fn column_rule_draws_a_faint_hairline_down_the_gutter() {
+        // Vintage's newspaper divider (ADR-INKREAD-0018 D1): a faint, continuous hairline down the
+        // centre of the gutter between two body columns, drawn only when `column_rule` is on. The
+        // gutter is whitespace, so any ink there is the divider and nothing else.
+        let font = AbFont::default_font();
+        let body: Vec<Block> = (0..40)
+            .map(|_| paragraph("The agreement binds nearly two hundred nations to steeper cuts."))
+            .collect();
+        let mut opts = LayoutOpts::new(1200.0, 900.0, 18.0);
+        opts.columns = 2;
+        assert_eq!(
+            opts.effective_columns(),
+            2,
+            "page is wide enough for two columns"
+        );
+
+        // Centre of the gutter (gutter == margin), where only a divider can leave ink.
+        let gx = (opts.margin + opts.column_width() + opts.margin * 0.5).round() as usize;
+        let w = 1200usize;
+        let inked_rows = |c: &GrayCanvas| -> usize {
+            (0..c.height as usize)
+                .filter(|&y| {
+                    (gx.saturating_sub(1)..=gx + 1).any(|x| x < w && c.pixels[y * w + x] < 250)
+                })
+                .count()
+        };
+
+        opts.column_rule = false;
+        let bare = paginate(&body, &opts, &font);
+        let mut plain = GrayCanvas::new(1200, 900);
+        render_page(&bare[0], &opts, &font, &mut plain);
+
+        opts.column_rule = true;
+        let ruled_pages = paginate(&body, &opts, &font);
+        let mut ruled = GrayCanvas::new(1200, 900);
+        render_page(&ruled_pages[0], &opts, &font, &mut ruled);
+
+        let (p, r) = (inked_rows(&plain), inked_rows(&ruled));
+        assert!(p <= 2, "the bare gutter carries no rule: {p} inked rows");
+        // Continuous, not dotted: the hairline runs most of the column height.
+        assert!(
+            r > ruled.height as usize / 2,
+            "the hairline runs the length of the columns: {r} of {} rows",
+            ruled.height
+        );
+        // Faint, not black ink: the darkest gutter pixel stays well above black.
+        let darkest = (0..ruled.height as usize)
+            .filter_map(|y| {
+                (gx.saturating_sub(1)..=gx + 1)
+                    .map(|x| ruled.pixels[y * w + x])
+                    .min()
+                    .filter(|&v| v < 250)
+            })
+            .min()
+            .unwrap_or(255);
+        assert!(
+            darkest > 120,
+            "the hairline is faint, not black: darkest={darkest}"
+        );
     }
 
     #[test]

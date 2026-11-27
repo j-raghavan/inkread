@@ -70,13 +70,21 @@ pub fn extract_readable(html: &str) -> String {
     let mut last = String::new();
     for block in to_blocks(html) {
         let t = collapse_ws(&strip_zero_width(&block));
+        // Newsletter / related-stories boilerplate and an email signature mark the end of the article
+        // — drop them and everything after (the "Follow topics…" CTA, a "More from …" link list, or a
+        // mailing-list footer under a signature). Checked before the length filter so a short marker
+        // (a bare "-- " signature line) still ends the article rather than being skipped as too short.
+        if is_tail_boilerplate(&t) {
+            break;
+        }
         if t.chars().count() < MIN_BLOCK_CHARS || is_diagram_source(&t) || is_author_bio(&t) {
             continue;
         }
-        // Newsletter / related-stories boilerplate marks the end of the article — drop it + the rest
-        // (the "Follow topics…" CTA and the trailing "More from …" link list).
-        if is_tail_boilerplate(&t) {
-            break;
+        // Mailing-list archive chrome (openwall/oss-security and the like): the email-header block,
+        // the bracketed prev/next nav, and the "Follow us on …" call to action all pass the length
+        // filter but are not article prose.
+        if is_email_headers(&t) || is_bracket_nav(&t) || is_social_cta(&t) {
+            continue;
         }
         if t == last {
             continue; // drop a duplicated consecutive paragraph (e.g. a caption repeated)
@@ -169,6 +177,20 @@ fn walk(node: NodeRef<Node>, cur: &mut String, blocks: &mut Vec<String>) {
                 let name = el.name();
                 if SKIP_TAGS.contains(&name) {
                     continue; // chrome (script/style/nav/…) — drop the whole subtree
+                }
+                if name == "pre" {
+                    // Preformatted text (mailing-list posts, plain-text articles) carries its
+                    // structure as newlines, not markup. Split it on blank lines here, before the
+                    // whitespace collapse, so the body keeps its paragraphs instead of flattening into
+                    // one run-on block with the email headers merged in.
+                    if !cur.trim().is_empty() {
+                        blocks.push(std::mem::take(cur));
+                    }
+                    let text: String = ElementRef::wrap(child)
+                        .map(|e| e.text().collect())
+                        .unwrap_or_default();
+                    blocks.extend(split_pre_paragraphs(&text));
+                    continue;
                 }
                 let is_block = BLOCK_TAGS.contains(&name);
                 if is_block && !cur.trim().is_empty() {
@@ -274,7 +296,81 @@ fn is_tail_boilerplate(t: &str) -> bool {
         "share this story",
         "comments (",
     ];
-    MARKERS.iter().any(|m| lower.starts_with(m))
+    // "-- " opening a block is the email signature delimiter (RFC 3676): the signature, and any
+    // mailing-list footer appended after it, are not article prose.
+    MARKERS.iter().any(|m| lower.starts_with(m)) || t.starts_with("-- ")
+}
+
+/// Split preformatted text into paragraphs on blank lines, joining the soft-wrapped lines within
+/// each. Without this a `<pre>` collapses into one run-on paragraph and its email headers merge into
+/// the body (mailing-list archives). The resulting blocks still pass [`extract_readable`]'s length
+/// and chrome filters, so a short header or a signature line is dropped there.
+fn split_pre_paragraphs(text: &str) -> Vec<String> {
+    let mut paras = Vec::new();
+    let mut cur: Vec<&str> = Vec::new();
+    for line in text.lines() {
+        if line.trim().is_empty() {
+            if !cur.is_empty() {
+                paras.push(cur.join(" "));
+                cur.clear();
+            }
+        } else {
+            cur.push(line.trim());
+        }
+    }
+    if !cur.is_empty() {
+        paras.push(cur.join(" "));
+    }
+    paras
+}
+
+/// Email header keys that mark a mailing-list archive's header block rather than article prose.
+const EMAIL_HEADERS: &[&str] = &[
+    "message-id:",
+    "date:",
+    "from:",
+    "to:",
+    "cc:",
+    "subject:",
+    "in-reply-to:",
+    "references:",
+    "reply-to:",
+    "sender:",
+    "list-id:",
+    "precedence:",
+    "mime-version:",
+    "content-type:",
+];
+
+/// Whether a block is a mailing-list archive's email-header block: it opens with a header key and
+/// carries at least two. A real paragraph that merely mentions one ("Date: to be confirmed") is not
+/// matched, which keeps prose safe.
+fn is_email_headers(t: &str) -> bool {
+    let l = t.to_ascii_lowercase();
+    EMAIL_HEADERS.iter().any(|h| l.starts_with(h))
+        && EMAIL_HEADERS.iter().filter(|h| l.contains(*h)).count() >= 2
+}
+
+/// Whether a block is a row of bracketed nav links ("[<prev] [next>] [day] [month] [year] [list]"),
+/// the archive chrome around a post.
+fn is_bracket_nav(t: &str) -> bool {
+    t.trim_start().starts_with('[') && t.matches('[').count() >= 3
+}
+
+/// Whether a block is a "follow us on <platform>" call to action (site chrome, not prose).
+fn is_social_cta(t: &str) -> bool {
+    let l = t.to_ascii_lowercase();
+    l.starts_with("follow ")
+        && [
+            "twitter",
+            " on x",
+            "facebook",
+            "instagram",
+            "mastodon",
+            "bluesky",
+        ]
+        .iter()
+        .any(|p| l.contains(p))
 }
 
 /// Whether a short block reads as an author byline/bio ("X is a senior reporter … joined …") rather
@@ -377,6 +473,71 @@ mod tests {
             !out.contains("Home") && !out.contains("Copyright"),
             "nav/footer dropped: {out}"
         );
+    }
+
+    #[test]
+    fn mailing_list_archive_drops_chrome_headers_and_keeps_paragraphs() {
+        // An openwall/oss-security-style archive page: a follow CTA, a bracketed nav row, then the
+        // email in a <pre> whose structure is newlines (headers, then blank-line-separated body).
+        let html = "<html><body>\
+            <p>Follow @Example on Twitter for new release announcements and other news here</p>\
+            <p>[&lt;prev] [next&gt;] [day] [month] [year] [list]</p>\
+            <pre>\nMessage-ID: &lt;abc@host&gt;\nDate: Wed, 25 Nov 2026 17:26:38 +0100\n\
+From: A Person &lt;a@host&gt;\nTo: list@host\nSubject: The Real Subject\n\nHello,\n\n\
+This is the first real paragraph of the message, long enough to read comfortably.\n\
+It is soft-wrapped across two source lines.\n\n\
+And this is a second real paragraph that also comfortably exceeds the minimum length.\n\n\
+-- A Person, somewhere\n\n\
+Please check out the Open Source Software Security Wiki, a mailing-list footer to drop.\n</pre>\
+            </body></html>";
+        let out = extract_readable(html);
+        assert!(out.contains("first real paragraph of the message"), "{out}");
+        assert!(out.contains("second real paragraph"), "{out}");
+        // The signature delimiter and the footer after it are dropped.
+        assert!(
+            !out.contains("A Person, somewhere"),
+            "signature dropped: {out}"
+        );
+        assert!(
+            !out.contains("mailing-list footer"),
+            "footer after signature dropped: {out}"
+        );
+        // Soft-wrapped lines within a paragraph are joined.
+        assert!(
+            out.contains("read comfortably. It is soft-wrapped"),
+            "soft wrap joined: {out}"
+        );
+        // The two real paragraphs stay separate blocks (blank-line split, not one run-on).
+        assert!(out.matches("<p>").count() >= 2, "paragraphs split: {out}");
+        // Chrome is gone: headers, nav, CTA, and the bare greeting.
+        assert!(
+            !out.contains("Message-ID") && !out.contains("Subject"),
+            "headers dropped: {out}"
+        );
+        assert!(
+            !out.to_lowercase().contains("follow @example"),
+            "CTA dropped: {out}"
+        );
+        assert!(!out.contains("[next"), "bracket nav dropped: {out}");
+        assert!(!out.contains("Hello,"), "bare greeting dropped: {out}");
+    }
+
+    #[test]
+    fn chrome_filters_spare_real_prose() {
+        // The chrome detectors must not fire on ordinary sentences.
+        assert!(!is_email_headers(
+            "From the beginning the project aimed to date the artifacts precisely."
+        ));
+        assert!(!is_bracket_nav(
+            "The array was initialised as [1, 2, 3] in the example we studied."
+        ));
+        assert!(!is_social_cta(
+            "Follow the money and you will usually find the real motive behind it."
+        ));
+        // But the actual chrome is caught.
+        assert!(is_email_headers("Message-ID: <x> Date: y From: z"));
+        assert!(is_bracket_nav("[<prev] [next>] [day] [month]"));
+        assert!(is_social_cta("Follow @Example on Twitter for updates"));
     }
 
     #[test]

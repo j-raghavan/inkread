@@ -150,6 +150,13 @@ pub struct LayoutOpts {
     /// full-width above the columns, with the body reflowing beneath. Set only for daily issues;
     /// `false` leaves multi-column reading byte-identical to before the band existed.
     pub band: bool,
+    /// Draw a dotted rule down the centre gutter between two body columns, the newspaper divider
+    /// (Vintage, ADR-INKREAD-0018 D1). A render-time overlay: it changes no line positions, so it is
+    /// not part of the pagination key. `false` for every other style.
+    pub column_rule: bool,
+    /// Set the first body paragraph with a drop cap: a large initial in the top-left corner the first
+    /// lines indent to clear (Vintage, ADR-INKREAD-0018 D1). `false` for every other style.
+    pub drop_cap: bool,
 }
 
 impl LayoutOpts {
@@ -166,6 +173,8 @@ impl LayoutOpts {
             align: Align::Left,
             columns: 1,
             band: false,
+            column_rule: false,
+            drop_cap: false,
         }
     }
 
@@ -278,6 +287,14 @@ impl LayoutOpts {
         if self.band {
             eat(0xBD);
         }
+        // Like `band`, folded only when set. The drop cap moves line positions (it narrows the first
+        // lines of the body's first paragraph), so a pagination cached by an older build that laid the
+        // same issue without it must not be served (the upgrade path); `0xDC` is its stable
+        // domain-separator. `column_rule` is deliberately NOT folded: it is a render-time overlay that
+        // changes no line positions (see the field doc).
+        if self.drop_cap {
+            eat(0xDC);
+        }
         h
     }
 }
@@ -318,6 +335,10 @@ pub struct PlacedRun {
     /// text. Its `text` is then empty, so selection, search and copy pass over it; its width is the
     /// image's, not a measured string's (see [`PlacedRun::width`]).
     pub image: Option<InlineImage>,
+    /// A drop-cap initial (Vintage, ADR-INKREAD-0018 D1): set much larger than the line and seated by
+    /// its ink top at the line's top, not on the ascent-based baseline, so a tall-ascent face does not
+    /// drop it below the first line. `false` for every ordinary run.
+    pub drop_cap: bool,
 }
 
 impl PlacedRun {
@@ -735,6 +756,7 @@ pub fn paginate_upto(
         images,
         max_pages,
         &mut cursor,
+        false, // no band was stripped here, so the lead (byline) must not take a drop cap
     );
     (combine_columns(laid, opts, columns), complete)
 }
@@ -743,22 +765,29 @@ pub fn paginate_upto(
 /// start, plus an immediately-following byline paragraph (ADR-INKREAD-0017 D2/D4). `None` when the
 /// chapter does not open with a heading, which leaves the ordinary column path untouched.
 fn band_run(blocks: &[Block]) -> Option<usize> {
-    let headings = blocks
+    // The band is the article's full-width lead: whatever nameplate, rule and dateline blocks the
+    // style places *before* the headline (Vintage, ADR-INKREAD-0018 D1), the headline run itself,
+    // and the byline paragraph that follows it (ADR-INKREAD-0017 D4). A chapter with no leading
+    // heading forms no band and the ordinary column path is left untouched. This path is daily-gated,
+    // so anything ahead of the headline is nameplate furniture and the block after it is the byline,
+    // never body prose.
+    let first_heading = blocks
         .iter()
-        .take_while(|b| matches!(b, Block::Heading { .. }))
-        .count();
-    if headings == 0 {
-        return None;
+        .position(|b| matches!(b, Block::Heading { .. }))?;
+    // Extend across the contiguous headline run, fold an immediately-following byline paragraph, then
+    // a closing rule the style draws between the lead and the body (Vintage, ADR-INKREAD-0018 D1), so
+    // that rule spans the full band width rather than one column.
+    let mut end = first_heading;
+    while matches!(blocks.get(end), Some(Block::Heading { .. })) {
+        end += 1;
     }
-    // Fold an immediately-following paragraph into the band: in a daily article that is the byline
-    // (`<h1>` then `<p class="byline">`, see `inkread-daily`), which belongs under the headline, not
-    // at the top of the first column (ADR-INKREAD-0017 D4). This path is daily-gated, so the block
-    // after the heading is the byline, never body prose.
-    let byline = usize::from(matches!(
-        blocks.get(headings),
-        Some(Block::Paragraph { .. })
-    ));
-    Some(headings + byline)
+    if matches!(blocks.get(end), Some(Block::Paragraph { .. })) {
+        end += 1;
+    }
+    if matches!(blocks.get(end), Some(Block::Rule { .. })) {
+        end += 1;
+    }
+    Some(end)
 }
 
 /// Lay a chapter's body (the blocks after the band) into pages at `opts`'s column measure, with the
@@ -766,6 +795,7 @@ fn band_run(blocks: &[Block]) -> Option<usize> {
 /// (ADR-INKREAD-0017 D2/D3). `index_base` re-bases the source-block index so anchors name the
 /// original block, and `cursor` threads the chapter-relative char offset (ADR-INKREAD-0012). Returns
 /// the column pages and whether the whole body was laid within `max_pages`.
+#[allow(clippy::too_many_arguments)]
 #[allow(clippy::too_many_arguments)]
 fn lay_body_columns(
     body: &[Block],
@@ -778,6 +808,10 @@ fn lay_body_columns(
     images: &dyn ImageSizer,
     max_pages: usize,
     cursor: &mut usize,
+    // The drop cap applies only when the band has stripped the heading + byline, so the first body
+    // paragraph is real prose. The caller passes `false` on the no-band path (a daily collapsed to one
+    // column, or an ordinary book), where `body` still leads with the byline.
+    drop_cap: bool,
 ) -> (Vec<Page>, bool) {
     let cols = opts.effective_columns();
     // `max_pages` counts pages, but the pager is producing *columns* — a two-column page needs two
@@ -786,6 +820,7 @@ fn lay_body_columns(
     let mut pager = Pager::new(opts, hyph);
     pager.reserve_top = reserve_top;
     pager.reserve_cols = reserve_cols;
+    pager.drop_cap_pending = drop_cap;
     let mut complete = true;
     // Walked in keep-runs rather than block by block: `page-break-after: avoid` binds a block to the
     // next one, so what may be split across a page is a run, not always a single block (#251).
@@ -874,6 +909,7 @@ fn paginate_with_band(
         images,
         1,
         &mut single_cursor,
+        opts.drop_cap, // the band stripped the lead, so the first body paragraph may take the cap
     );
     let (laid, used_cols, complete) = if single_fits {
         (single, 1u8, true)
@@ -891,6 +927,7 @@ fn paginate_with_band(
             images,
             max_pages,
             &mut multi_cursor,
+            opts.drop_cap,
         );
         (multi, columns, complete)
     };
@@ -984,6 +1021,9 @@ struct Pager<'o> {
     /// How many leading columns the reservation applies to — the columns of the first physical page
     /// ([`LayoutOpts::effective_columns`]), so both columns beneath the band are shortened equally.
     reserve_cols: usize,
+    /// Set the next paragraph this pager lays with a drop cap, then clear it: only the body's first
+    /// paragraph gets one (Vintage, ADR-INKREAD-0018 D1). Never set on the band or a cell pager.
+    drop_cap_pending: bool,
 }
 
 impl<'o> Pager<'o> {
@@ -1002,6 +1042,7 @@ impl<'o> Pager<'o> {
             kept_one: false,
             reserve_top: 0.0,
             reserve_cols: 0,
+            drop_cap_pending: false,
         }
     }
 
@@ -1409,19 +1450,36 @@ impl<'o> Pager<'o> {
                 } else {
                     indent
                 };
-                self.add_paragraph(
-                    content,
-                    self.opts.font_px,
-                    first_indent,
-                    0.0,
-                    style.bold.unwrap_or(false),
-                    style.italic.unwrap_or(false),
-                    align,
-                    block_index,
-                    cursor,
-                    m,
-                    images,
-                );
+                // The body's first paragraph takes the drop cap (Vintage). A one-shot: cleared whether
+                // or not this paragraph can carry one, so a later paragraph never inherits it, and
+                // skipped on a decorative centred opener.
+                if std::mem::take(&mut self.drop_cap_pending) && !centred {
+                    self.add_drop_cap_paragraph(
+                        content,
+                        first_indent,
+                        align,
+                        style.bold.unwrap_or(false),
+                        style.italic.unwrap_or(false),
+                        block_index,
+                        cursor,
+                        m,
+                        images,
+                    );
+                } else {
+                    self.add_paragraph(
+                        content,
+                        self.opts.font_px,
+                        first_indent,
+                        0.0,
+                        style.bold.unwrap_or(false),
+                        style.italic.unwrap_or(false),
+                        align,
+                        block_index,
+                        cursor,
+                        m,
+                        images,
+                    );
+                }
             }
             Block::ListItem {
                 ordered,
@@ -1539,11 +1597,109 @@ impl<'o> Pager<'o> {
             m,
             self.hyph,
             &self.inline_sizer(images),
+            0.0,
+            0,
         );
         let line_h = size * self.opts.line_spacing;
         let n = lines.len();
         for (i, mut runs) in lines.into_iter().enumerate() {
             align_line(&mut runs, align, self.measure, i + 1 == n, m);
+            self.emit_text_line(runs, size, line_h);
+        }
+    }
+
+    /// Lay a paragraph with a drop cap: the initial is set large in the top-left corner and the first
+    /// few lines are indented to clear it (Vintage, ADR-INKREAD-0018 D1). The cap glyph keeps the
+    /// block's first character offset, so a highlight or search hit on it still resolves; the rest of
+    /// the prose flows from the second character on. Falls back to an ordinary paragraph when there is
+    /// no letter to raise (an empty or non-letter opening).
+    #[allow(clippy::too_many_arguments)]
+    fn add_drop_cap_paragraph(
+        &mut self,
+        inlines: &[Inline],
+        first_indent: f32,
+        align: Align,
+        bold_all: bool,
+        italic_all: bool,
+        block: usize,
+        cursor: &mut usize,
+        m: &dyn Metrics,
+        images: &dyn ImageSizer,
+    ) {
+        let size = self.opts.font_px;
+        let line_h = size * self.opts.line_spacing;
+        let Some((cap, rest)) = split_initial(inlines) else {
+            // No letter to raise: lay it as a normal paragraph.
+            return self.add_paragraph(
+                inlines,
+                size,
+                first_indent,
+                0.0,
+                bold_all,
+                italic_all,
+                align,
+                block,
+                cursor,
+                m,
+                images,
+            );
+        };
+        // The cap spans three lines; its advance plus a thin sidebearing is the measure the first
+        // three lines give up on the left. Drawn through the ordinary run path, so its top aligns with
+        // the first line and it overhangs the two below, which are indented clear of it.
+        const CAP_LINES: usize = 3;
+        // Sized so the initial's cap height fills the three lines it clears: the run path seats its
+        // baseline at the first line's top plus the glyph ascent, and the extra over three line
+        // heights drops that baseline onto the third line.
+        let cap_size = line_h * (CAP_LINES as f32) * 1.3;
+        let cap_w = m.advance(&cap, cap_size, true, false) + size * 0.12;
+        let cap_anchor = SourceAnchor {
+            block,
+            char_offset: *cursor,
+        };
+        *cursor += 1; // the initial is one source character, however many it uppercases to
+        let lines = break_lines(
+            &rest,
+            size,
+            0.0,
+            0.0,
+            self.measure,
+            bold_all,
+            italic_all,
+            block,
+            cursor,
+            m,
+            self.hyph,
+            &self.inline_sizer(images),
+            cap_w,
+            CAP_LINES,
+        );
+        let cap_run = PlacedRun {
+            x: 0.0,
+            text: cap,
+            size_px: cap_size,
+            bold: true,
+            italic: false,
+            href: None,
+            anchor: cap_anchor,
+            wrap: None,
+            image: None,
+            drop_cap: true,
+        };
+        // A paragraph that is nothing but the initial (its remainder breaks to no lines) still shows
+        // the cap: emit it on a line of its own rather than dropping the character.
+        if lines.is_empty() {
+            self.emit_text_line(vec![cap_run], size, line_h);
+            return;
+        }
+        let n = lines.len();
+        for (i, mut runs) in lines.into_iter().enumerate() {
+            align_line(&mut runs, align, self.measure, i + 1 == n, m);
+            // Prepend the cap after alignment so it anchors the corner rather than joining the
+            // justified run of words.
+            if i == 0 {
+                runs.insert(0, cap_run.clone());
+            }
             self.emit_text_line(runs, size, line_h);
         }
     }
@@ -1733,6 +1889,8 @@ impl<'o> Pager<'o> {
             m,
             self.hyph,
             &self.inline_sizer(images),
+            0.0,
+            0,
         );
         // Prepend the marker to the first line at the content origin (hanging indent).
         let marker_run = PlacedRun {
@@ -1745,6 +1903,7 @@ impl<'o> Pager<'o> {
             anchor: marker_anchor,
             wrap: None,
             image: None,
+            drop_cap: false,
         };
         if let Some(first) = lines.first_mut() {
             first.insert(0, marker_run);
@@ -1917,6 +2076,27 @@ fn align_line(
     }
 }
 
+/// Split a drop cap off the front of a run of inlines: the uppercased first letter, and the inlines
+/// with that one source character removed. `None` when the paragraph does not open with a letter (an
+/// empty run, a leading quote mark or digit), which leaves it to be set as ordinary prose.
+fn split_initial(inlines: &[Inline]) -> Option<(String, Vec<Inline>)> {
+    let Some(Inline::Run(run)) = inlines.first() else {
+        return None;
+    };
+    let mut chars = run.text.chars();
+    let first = chars.next()?;
+    if !first.is_alphabetic() {
+        return None;
+    }
+    let cap: String = first.to_uppercase().collect();
+    let mut head = run.clone();
+    head.text = chars.as_str().to_string();
+    let mut rest = Vec::with_capacity(inlines.len());
+    rest.push(Inline::Run(head));
+    rest.extend_from_slice(&inlines[1..]);
+    Some((cap, rest))
+}
+
 /// Greedy line-break: returns each line as its positioned runs (x relative to content origin; the
 /// body is offset by `indent`). A word that won't fit is soft-hyphenated via `hyph` when a break
 /// point fits the remaining space; otherwise it wraps whole (a word too wide even alone overflows).
@@ -1934,14 +2114,28 @@ fn break_lines(
     m: &dyn Metrics,
     hyph: &dyn Hyphenator,
     size_of: &SizeOf<'_>,
+    cap_indent: f32,
+    cap_lines: usize,
 ) -> Vec<Vec<PlacedRun>> {
     let space_w = m.advance(" ", size, false, false);
     let mut lines: Vec<Vec<PlacedRun>> = Vec::new();
     let mut cur: Vec<PlacedRun> = Vec::new();
     let mut x = 0.0f32; // offset within the body column (excludes indent)
     let mut need_space = false;
+    // The left indent of line `i`: the first `cap_lines` lines clear a drop cap (Vintage,
+    // ADR-INKREAD-0018 D1), the first line takes the prose indent, the rest sit flush. With
+    // `cap_lines == 0` this is exactly the old first/rest split, so non-dropcap callers are unchanged.
+    let indent_at = |i: usize| -> f32 {
+        if i < cap_lines {
+            cap_indent
+        } else if i == 0 {
+            first_indent
+        } else {
+            rest_indent
+        }
+    };
     // An inline image is sized to fit whichever line it lands on, so it never overflows the measure.
-    let max_image_w = (content_w - first_indent.max(rest_indent)).max(1.0);
+    let max_image_w = (content_w - first_indent.max(rest_indent).max(cap_indent)).max(1.0);
     // Where in `cur` the run of tokens with no space between them begins, and whether it holds an
     // inline image. Such a run wraps as one: the full stop after a formula must not start a line.
     let mut glue = Glue::default();
@@ -1982,20 +2176,13 @@ fn break_lines(
                 } else {
                     0.0
                 };
-                let indent_now = if lines.is_empty() {
-                    first_indent
-                } else {
-                    rest_indent
-                };
+                let indent_now = indent_at(lines.len());
                 let mut start = if cur.is_empty() { 0.0 } else { x + lead };
                 if !cur.is_empty() && start + w > (content_w - indent_now).max(1.0) {
-                    start = break_line(&mut lines, &mut cur, &mut glue, rest_indent, m);
+                    let next = indent_at(lines.len() + 1);
+                    start = break_line(&mut lines, &mut cur, &mut glue, next, m);
                 }
-                let indent = if lines.is_empty() {
-                    first_indent
-                } else {
-                    rest_indent
-                };
+                let indent = indent_at(lines.len());
                 glue.start.get_or_insert(cur.len());
                 glue.has_image = true;
                 cur.push(PlacedRun {
@@ -2012,6 +2199,7 @@ fn break_lines(
                         width,
                         height,
                     }),
+                    drop_cap: false,
                 });
                 x = start + w;
                 need_space = false;
@@ -2034,11 +2222,7 @@ fn break_lines(
                     // `lines` holds the lines already finished, so its length is the index of the
                     // one being built — which is what decides whether this is the indented first
                     // line or a subsequent one. Both the offset and the room available move with it.
-                    let indent = if lines.is_empty() {
-                        first_indent
-                    } else {
-                        rest_indent
-                    };
+                    let indent = indent_at(lines.len());
                     let avail = (content_w - indent).max(1.0);
                     let lead = if first && need_space && !cur.is_empty() {
                         space_w
@@ -2065,6 +2249,7 @@ fn break_lines(
                                 anchor,
                                 wrap,
                                 image: None,
+                                drop_cap: false,
                             });
                         };
                     if rest_w <= room {
@@ -2103,7 +2288,8 @@ fn break_lines(
                     }
                     if !cur.is_empty() {
                         // Wrap the whole remaining word to a fresh line, then retry it there.
-                        x = break_line(&mut lines, &mut cur, &mut glue, rest_indent, m);
+                        let next = indent_at(lines.len() + 1);
+                        x = break_line(&mut lines, &mut cur, &mut glue, next, m);
                         first = false;
                         continue;
                     }
@@ -2141,7 +2327,7 @@ fn break_line(
     lines: &mut Vec<Vec<PlacedRun>>,
     cur: &mut Vec<PlacedRun>,
     glue: &mut Glue,
-    rest_indent: f32,
+    next_indent: f32,
     m: &dyn Metrics,
 ) -> f32 {
     let carried = match glue.start {
@@ -2153,12 +2339,13 @@ fn break_line(
         *glue = Glue::default();
         return 0.0;
     };
-    // The new line is never the first, so its runs sit at the rest indent.
-    let dx = first.x - rest_indent;
+    // The continuation sits at the indent the caller computed for the line now being started (the
+    // rest indent, or a drop-cap indent while the cap is still being cleared).
+    let dx = first.x - next_indent;
     let mut end = 0.0f32;
     for mut run in carried {
         run.x -= dx;
-        end = end.max(run.x - rest_indent + run.width(m));
+        end = end.max(run.x - next_indent + run.width(m));
         cur.push(run);
     }
     glue.start = Some(0);

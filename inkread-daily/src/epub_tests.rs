@@ -503,10 +503,12 @@ fn the_style_is_stamped_into_the_identifier() {
     }
 }
 
-/// Vintage sets the byline in capitals and centres the headline; the other styles add no head CSS
-/// (ADR-INKREAD-0018 D1), so their documents are unchanged.
+/// Vintage opens each article with a blackletter nameplate, a folio line (date left, edition right),
+/// a left-aligned headline and a dateline byline in capitals, with rules above the folio and above the
+/// body columns (ADR-INKREAD-0018 D1); the other styles add none of this, so their documents are
+/// unchanged.
 #[test]
-fn vintage_capitalises_the_byline_and_centres_the_headline() {
+fn vintage_dresses_the_article_with_a_nameplate_folio_and_rules() {
     let mut issue = sample_issue();
     issue.style = DailyLayoutStyle::Vintage;
     let pkg = EpubPackage::open(assemble_epub(&issue)).unwrap();
@@ -515,15 +517,47 @@ fn vintage_capitalises_the_byline_and_centres_the_headline() {
         .iter()
         .find(|c| c.html.contains("class=\"byline\""))
         .expect("an article chapter");
+    // The masthead, headline and byline are centred and the folio's edition cell is right-aligned.
+    for rule in [
+        ".masthead { text-align: center;",
+        ".edition { text-align: right; }",
+        "h1 { text-align: center;",
+        ".byline { text-align: center;",
+    ] {
+        assert!(
+            article.html.contains(rule),
+            "vintage head CSS carries {rule:?}",
+        );
+    }
     assert!(
-        article
-            .html
-            .contains("<style>h1 { text-align: center; }</style>"),
-        "vintage centres the headline",
+        article.html.contains("<img src=\"vintage-masthead.png\""),
+        "vintage draws the blackletter nameplate image",
     );
     assert!(
-        article.html.contains("HACKER NEWS"),
-        "vintage byline is capitalised",
+        article.html.contains("<table class=\"folio\">")
+            && article.html.contains("EVENING EDITION"),
+        "vintage prints a folio with the edition at the right",
+    );
+    // Two rules: one under the nameplate, one above the body columns (after the byline).
+    assert!(
+        article.html.matches("<hr/>").count() == 2,
+        "vintage frames the lead with two rules",
+    );
+    assert!(
+        article.html.contains("HACKER NEWS · REPORTED"),
+        "vintage byline is a capitalised dateline",
+    );
+
+    // Papernews gets none of the Vintage furniture.
+    let mut plain = sample_issue();
+    plain.style = DailyLayoutStyle::Papernews;
+    let plain_pkg = EpubPackage::open(assemble_epub(&plain)).unwrap();
+    assert!(
+        plain_pkg
+            .chapters
+            .iter()
+            .all(|c| !c.html.contains("vintage-masthead.png")),
+        "only Vintage carries the nameplate",
     );
 }
 
@@ -535,4 +569,55 @@ fn non_vintage_adds_no_head_css() {
         pkg.chapters.iter().all(|c| !c.html.contains("<style>")),
         "papernews adds no head CSS",
     );
+}
+
+/// Host preview (#66): assemble a Vintage issue with realistic prose and write it where
+/// `daily_render_dump` (reader-core) can rasterise it, so the nameplate/rules/dateline band and the
+/// two-column body can be eyeballed on a host. Run:
+///   `INKREAD_VINTAGE_OUT=/tmp/vintage.epub cargo test -p inkread-daily dump_vintage_preview -- --ignored`
+#[test]
+#[ignore = "host preview: set INKREAD_VINTAGE_OUT=<path>"]
+fn dump_vintage_preview() {
+    let Ok(path) = std::env::var("INKREAD_VINTAGE_OUT") else {
+        eprintln!("SKIP: set INKREAD_VINTAGE_OUT to a .epub path");
+        return;
+    };
+    let body = "<p>The agreement, reached in the early hours after two sleepless nights of \
+        negotiation, binds nearly two hundred nations to steeper cuts than any prior accord.</p>\
+        <p>Delegates described a final session that ran long past midnight, with the chair shuttling \
+        between rooms to broker the last holdouts into line. Markets opened cautiously higher on the \
+        news, though analysts warned that the hardest work, turning pledges into verified reductions, \
+        still lies ahead.</p>\
+        <p>Smaller island states, long the most exposed, called the text imperfect but historic, a \
+        floor to build on rather than a ceiling to celebrate. Implementation will be reviewed every \
+        two years, with an independent panel publishing the figures that each signatory would rather \
+        keep quiet.</p>\
+        <p>Several ministers left the hall before the final gavel, unwilling to be photographed \
+        beside a deal they had spent the week resisting. Others lingered, trading the small talk of \
+        people who have agreed to something larger than they can yet picture.</p>\
+        <p>The compromise language on finance, the thorniest thread of all, was settled only when a \
+        coalition of mid-sized economies offered to front the first tranche themselves, daring the \
+        wealthier delegations to match them. By dawn the matching had begun.</p>";
+    let issue = Issue {
+        sources: vec!["Reuters".into()],
+        style: DailyLayoutStyle::Vintage,
+        title: "inkread daily".into(),
+        date: "Tuesday, 24 November 2026".into(),
+        articles: vec![
+            article(
+                "Sweeping New Climate Deal Reached After Marathon Talks",
+                "Reuters",
+                &body.repeat(4),
+                Some("23 Nov 2026"),
+            ),
+            article(
+                "The Age of Local AI",
+                "Hacker News",
+                body,
+                Some("24 Nov 2026"),
+            ),
+        ],
+    };
+    std::fs::write(&path, assemble_epub(&issue)).expect("write vintage preview epub");
+    eprintln!("wrote {path}");
 }

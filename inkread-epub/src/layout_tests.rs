@@ -94,6 +94,8 @@ fn layout_digest_is_pinned_against_algorithm_drift() {
         align: Align::Left,
         columns: 1,
         band: false,
+        column_rule: false,
+        drop_cap: false,
     };
     assert_eq!(opts.layout_digest(), 17_685_407_801_978_826_572);
 }
@@ -110,6 +112,8 @@ fn band_flag_folds_into_digest_only_when_set() {
         base.layout_digest(),
         LayoutOpts {
             band: false,
+            column_rule: false,
+            drop_cap: false,
             ..base
         }
         .layout_digest(),
@@ -119,6 +123,32 @@ fn band_flag_folds_into_digest_only_when_set() {
         base.layout_digest(),
         LayoutOpts { band: true, ..base }.layout_digest(),
         "band=true must flip the digest"
+    );
+}
+
+#[test]
+fn drop_cap_folds_into_digest_but_column_rule_does_not() {
+    // The drop cap moves line positions (it narrows the first lines of a paragraph), so like `band`
+    // it must flip the digest so an older build's cached pagination is not reused (ADR-INKREAD-0018
+    // D1). The gutter rule is a render-time overlay that changes no positions, so it must NOT.
+    let base = LayoutOpts::new(400.0, 600.0, 16.0);
+    assert_eq!(
+        base.layout_digest(),
+        LayoutOpts {
+            column_rule: true,
+            ..base
+        }
+        .layout_digest(),
+        "column_rule is render-only and must not change the digest",
+    );
+    assert_ne!(
+        base.layout_digest(),
+        LayoutOpts {
+            drop_cap: true,
+            ..base
+        }
+        .layout_digest(),
+        "drop_cap=true must flip the digest",
     );
 }
 
@@ -170,6 +200,8 @@ fn band_opts() -> LayoutOpts {
         align: Align::Left,
         columns: 2,
         band: true,
+        column_rule: false,
+        drop_cap: false,
     }
 }
 
@@ -273,6 +305,157 @@ fn band_includes_the_byline() {
         .map(|l| l.top)
         .fold(f32::INFINITY, f32::min);
     assert!(byline.top < body_top, "byline sits above the body columns");
+}
+
+#[test]
+fn band_folds_a_full_vintage_lead_above_the_columns() {
+    // A Vintage article opens with a nameplate image, a rule, the dateline, a rule, then the headline
+    // and byline (ADR-INKREAD-0018 D1). The band folds all of that leading run full width, leaving the
+    // body prose after the byline in the columns.
+    let rule = || Block::Rule {
+        style: BlockStyle::default(),
+    };
+    assert_eq!(
+        super::band_run(&[
+            image_block("masthead.png"),
+            rule(),
+            para("TUESDAY"),
+            rule(),
+            heading_block(1, "Headline"),
+            para("byline"),
+            para("body"),
+        ]),
+        Some(6),
+        "nameplate, rules, dateline, headline and byline all fold into the band",
+    );
+    // An article that opens straight with the headline (Standard/Papernews) still folds only the
+    // headline and its byline.
+    assert_eq!(
+        super::band_run(&[heading_block(1, "H"), para("byline"), para("body")]),
+        Some(2),
+    );
+    // No leading heading means no band at all.
+    assert_eq!(super::band_run(&[para("just body")]), None);
+
+    // End to end: a pre-headline dateline lays out full width in the band, not in a column.
+    let opts = band_opts();
+    let mut blocks = vec![
+        rule(),
+        para("TUESDAY 24 NOVEMBER 2026"),
+        rule(),
+        heading_block(1, "Big Headline"),
+        para("Reuters"),
+    ];
+    for _ in 0..40 {
+        blocks.push(para(
+            "body text long enough to fill two columns on the page",
+        ));
+    }
+    let pages = paginate(&blocks, &opts, &Mono);
+    let dateline = pages[0]
+        .lines
+        .iter()
+        .find(|l| l.runs.iter().any(|r| r.text.contains("NOVEMBER")))
+        .expect("dateline present");
+    assert!(
+        (dateline.column_w - 600.0).abs() < 1.0,
+        "dateline is in the full-width band, not a column: {}",
+        dateline.column_w,
+    );
+}
+
+#[test]
+fn drop_cap_raises_the_initial_and_keeps_offsets() {
+    // Vintage opens the body's first paragraph with a drop cap (ADR-INKREAD-0018 D1): the initial is
+    // set large at the column's left edge, it takes the block's first character, and the prose resumes
+    // from the second so a highlight or search offset is unbroken.
+    let mut opts = band_opts();
+    opts.drop_cap = true;
+    let mut blocks = vec![
+        heading_block(1, "Big Climate Deal Reached"),
+        para("Reuters byline here"),
+    ];
+    for _ in 0..30 {
+        blocks.push(para(
+            "the agreement binds nearly two hundred nations to steeper cuts",
+        ));
+    }
+    let pages = paginate(&blocks, &opts, &Mono);
+    let runs: Vec<_> = pages
+        .iter()
+        .flat_map(|p| p.lines.iter())
+        .flat_map(|l| l.runs.iter())
+        .collect();
+
+    // The cap: one run set far larger than the body, at the column's left edge.
+    let cap = runs
+        .iter()
+        .find(|r| r.size_px > opts.font_px * 2.0)
+        .expect("a raised initial");
+    assert_eq!(cap.text, "T", "the initial is capitalised");
+    assert!(
+        cap.x.abs() < 1.0,
+        "the cap sits at the left edge: x={}",
+        cap.x
+    );
+
+    // The prose resumes exactly one character after the cap, with the initial removed from the flow.
+    let after = runs
+        .iter()
+        .filter(|r| r.anchor.block == cap.anchor.block && r.size_px <= opts.font_px * 2.0)
+        .min_by(|a, b| a.anchor.char_offset.cmp(&b.anchor.char_offset))
+        .expect("body text after the cap");
+    assert_eq!(
+        after.anchor.char_offset,
+        cap.anchor.char_offset + 1,
+        "prose resumes one character after the cap",
+    );
+    assert!(
+        after.text.starts_with("he"),
+        "the initial is lifted out of the flow: {:?}",
+        after.text,
+    );
+
+    // With the drop cap off, nothing is set oversized.
+    opts.drop_cap = false;
+    let plain = paginate(&blocks, &opts, &Mono);
+    assert!(
+        plain
+            .iter()
+            .flat_map(|p| p.lines.iter())
+            .flat_map(|l| l.runs.iter())
+            .all(|r| r.size_px <= opts.font_px * 2.0),
+        "no oversized run without the drop cap",
+    );
+}
+
+#[test]
+fn drop_cap_is_suppressed_when_a_daily_collapses_to_one_column() {
+    // At a large font the two-column band is declined, so the heading + byline are never stripped and
+    // the body is laid as one column from the top. The drop cap must NOT fall on the byline: it only
+    // applies on the band path, where the lead is removed first (correctness review, ADR-INKREAD-0018).
+    let mut opts = band_opts();
+    opts.font_px = 30.0; // each column now falls below the two-column floor
+    opts.drop_cap = true;
+    assert_eq!(opts.effective_columns(), 1, "forced to a single column");
+    let mut blocks = vec![
+        heading_block(1, "Big Headline"),
+        para("Reuters byline here goes on"),
+    ];
+    for _ in 0..20 {
+        blocks.push(para(
+            "the agreement binds nearly two hundred nations to steeper cuts than before",
+        ));
+    }
+    let pages = paginate(&blocks, &opts, &Mono);
+    assert!(
+        pages
+            .iter()
+            .flat_map(|p| p.lines.iter())
+            .flat_map(|l| l.runs.iter())
+            .all(|r| r.size_px <= opts.font_px * 2.0),
+        "no drop cap when the band collapses to one column",
+    );
 }
 
 #[test]
@@ -386,6 +569,8 @@ fn band_off_keeps_the_heading_in_a_column() {
     // With the band off (every non-daily book) the heading is laid to the column measure, as before.
     let opts = LayoutOpts {
         band: false,
+        column_rule: false,
+        drop_cap: false,
         ..band_opts()
     };
     let blocks = vec![
@@ -419,6 +604,8 @@ fn style_opts() -> LayoutOpts {
         align: Align::Left,
         columns: 1,
         band: false,
+        column_rule: false,
+        drop_cap: false,
     }
 }
 
@@ -645,6 +832,8 @@ fn long_paragraph_wraps_to_multiple_lines() {
         align: Align::Left,
         columns: 1,
         band: false,
+        column_rule: false,
+        drop_cap: false,
     };
     let words = "aaaa ".repeat(12); // 12 words of 4 chars → ~ wraps
     let pages = paginate(&[para(words.trim())], &opts, &Mono);
@@ -677,6 +866,8 @@ fn cjk_opts() -> LayoutOpts {
         align: Align::Left,
         columns: 1,
         band: false,
+        column_rule: false,
+        drop_cap: false,
     }
 }
 
@@ -815,6 +1006,8 @@ fn content_overflow_breaks_into_pages() {
         align: Align::Left,
         columns: 1,
         band: false,
+        column_rule: false,
+        drop_cap: false,
     };
     let blocks: Vec<Block> = (0..7).map(|_| para("x")).collect();
     let pages = paginate(&blocks, &opts, &Mono);
@@ -835,6 +1028,8 @@ fn heading_uses_a_larger_line_height() {
         align: Align::Left,
         columns: 1,
         band: false,
+        column_rule: false,
+        drop_cap: false,
     };
     let pages = paginate(
         &[Block::Heading {
@@ -911,6 +1106,8 @@ fn wide(font_px: f32) -> LayoutOpts {
         align: Align::Left,
         columns: 1,
         band: false,
+        column_rule: false,
+        drop_cap: false,
     }
 }
 
@@ -989,6 +1186,8 @@ fn narrow_para() -> LayoutOpts {
         align: Align::Left,
         columns: 1,
         band: false,
+        column_rule: false,
+        drop_cap: false,
     }
 }
 
@@ -1124,6 +1323,8 @@ fn image_opts() -> LayoutOpts {
         align: Align::Left,
         columns: 1,
         band: false,
+        column_rule: false,
+        drop_cap: false,
     }
 }
 
@@ -1714,6 +1915,8 @@ fn two_col_opts() -> LayoutOpts {
         align: Align::Left,
         columns: 2,
         band: false,
+        column_rule: false,
+        drop_cap: false,
     }
 }
 

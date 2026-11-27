@@ -13,6 +13,7 @@ import android.view.View
 import android.view.ViewGroup
 import android.widget.CheckBox
 import android.widget.EditText
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
@@ -55,6 +56,42 @@ class DailyActivity : Activity() {
     private var compileDialog: Dialog? = null
     private var compileInProgress = false
 
+    /** The first-run layout chooser and its pieces — held so a selection can move the highlight, fill
+     *  the progress bar, and dismiss. Cleared when the dialog goes away. */
+    private var chooserDialog: AlertDialog? = null
+    private var chooserStatus: TextView? = null
+    private var chooserBar: View? = null
+    private var chooserProgress: List<View> = emptyList()
+    private var chooserCards: List<StyleCard> = emptyList()
+
+    /** Coordination for a non-default selection: the issue is opened only once the rebuild has landed
+     *  (`chooserRestyleOk` set) AND the progress bar has filled (`chooserCountdownDone`), so a slow
+     *  rebuild is never opened half-written. */
+    private var chooserRestyleOk: Boolean? = null
+    private var chooserCountdownDone = false
+
+    /** Greys for the chooser: the empty progress segment (two uses must match) and the unselected card
+     *  border. Named so the pair can't drift. */
+    private val chooserSegmentEmpty = Color.parseColor("#DDDDDD")
+    private val chooserUnselectedBorder = Color.parseColor("#CCCCCC")
+
+    /** One preview card in the chooser, with its named parts so the selection/dim logic never depends
+     *  on child positions. */
+    private class StyleCard(
+        val style: DailyController.LayoutStyle,
+        val root: LinearLayout,
+        val name: TextView,
+        val marker: TextView,
+    )
+
+    private companion object {
+        /** Progress-bar segments; the per-second countdown runs for this many seconds. */
+        const val COUNTDOWN_STEPS = 5
+
+        /** Opacity of the styles not chosen while the selected one rebuilds. */
+        const val CARD_DIMMED = 0.4f
+    }
+
     private var scale = 1f
     private fun dim(u: Number) = dp((u.toFloat() * scale).toInt()).coerceAtLeast(1)
     private fun fs(u: Number) = u.toFloat() * scale
@@ -66,6 +103,7 @@ class DailyActivity : Activity() {
         Ink.uiScale = DisplayPrefs(this).uiScale
         daily.ensureSeeded() // curated feeds ready on first run — no manual set-up
         setContentView(buildView())
+        maybeShowStyleChooser() // first open only: let a new reader meet the layout styles up front
     }
 
     override fun onResume() {
@@ -80,10 +118,255 @@ class DailyActivity : Activity() {
 
     override fun onPause() {
         super.onPause()
-        // Drop the dialog window before the activity goes away (leak guard); the compile itself
-        // keeps running and its completion callback still refreshes the view / toasts the result.
+        // Drop the dialog windows before the activity goes away (leak guard); the compile itself keeps
+        // running and its completion callback still refreshes the view / toasts the result, and the
+        // chooser's pending countdown tick no-ops once its refs are cleared on dismiss.
         compileDialog?.let { runCatching { it.dismiss() } }
         compileDialog = null
+        chooserDialog?.let { runCatching { it.dismiss() } }
+    }
+
+    /**
+     * First open only: offer the one-time layout-style chooser (ADR-INKREAD-0018 D4) so a new reader
+     * meets the three styles with a preview of each, rather than discovering them only in Settings.
+     * Papernews is the default. Choosing another style re-assembles today's issue in it while a short
+     * progress bar fills, then opens the issue once the rebuild has landed; dismissing keeps the
+     * default. Shown once (the flag is set up front), and never over an in-flight compile.
+     */
+    private fun maybeShowStyleChooser() {
+        if (daily.styleChooserShown() || compileInProgress) return
+        daily.markStyleChooserShown()
+        val dialog = AlertDialog.Builder(this, R.style.InkDialog).setView(styleChooserView()).create()
+        chooserDialog = dialog
+        // Clearing the refs on dismiss also aborts a running countdown: its next tick finds no status
+        // view and returns, and finishChooserIfReady no-ops once the dialog ref is gone.
+        dialog.setOnDismissListener {
+            chooserDialog = null
+            chooserStatus = null
+            chooserBar = null
+            chooserProgress = emptyList()
+            chooserCards = emptyList()
+        }
+        dialog.show()
+    }
+
+    /** The chooser body, centred: a title, then the three style previews at the same size, a little
+     *  larger so each layout reads clearly. The chosen style is outlined and marked "Selected" (Papernews
+     *  to start, the default). A selection is handled by [onStyleChosen]; the progress bar beneath carries
+     *  its countdown. */
+    private fun styleChooserView(): View {
+        val root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_HORIZONTAL
+            setPadding(dp(16), dp(18), dp(16), dp(16))
+        }
+        root.addView(TextView(this).apply {
+            text = "Choose your Daily layout"
+            typeface = serifBold
+            textSize = 18f
+            setTextColor(ink)
+            gravity = Gravity.CENTER
+        })
+        root.addView(TextView(this).apply {
+            text = "Tap a style to use it · Papernews is the default"
+            typeface = serif
+            textSize = 12f
+            setTextColor(ink)
+            gravity = Gravity.CENTER
+            setPadding(0, dp(3), 0, dp(14))
+        })
+        val previews = mapOf(
+            DailyController.LayoutStyle.STANDARD to R.drawable.daily_preview_standard,
+            DailyController.LayoutStyle.PAPERNEWS to R.drawable.daily_preview_papernews,
+            DailyController.LayoutStyle.VINTAGE to R.drawable.daily_preview_vintage,
+        )
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+        }
+        val cards = mutableListOf<StyleCard>()
+        for (style in DailyController.LayoutStyle.entries) {
+            val name = TextView(this).apply {
+                text = style.label
+                textSize = 13f
+                setTextColor(ink)
+                gravity = Gravity.CENTER
+                setPadding(0, dp(6), 0, 0)
+            }
+            val marker = TextView(this).apply {
+                textSize = 11f
+                setTextColor(ink)
+                gravity = Gravity.CENTER
+            }
+            val card = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                gravity = Gravity.CENTER_HORIZONTAL
+                setPadding(dp(8), dp(8), dp(8), dp(8))
+                background = GradientDrawable().apply {
+                    setColor(paper)
+                    cornerRadius = dp(6).toFloat()
+                }
+                isClickable = true
+                setOnClickListener { onStyleChosen(style) }
+                layoutParams = LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                ).apply {
+                    marginStart = dp(6)
+                    marginEnd = dp(6)
+                }
+                addView(ImageView(this@DailyActivity).apply {
+                    setImageResource(previews.getValue(style))
+                    adjustViewBounds = true
+                    scaleType = ImageView.ScaleType.FIT_CENTER
+                    contentDescription = "${style.label} preview"
+                    layoutParams =
+                        LinearLayout.LayoutParams(dp(172), ViewGroup.LayoutParams.WRAP_CONTENT)
+                })
+                addView(name)
+                addView(marker)
+            }
+            cards.add(StyleCard(style, card, name, marker))
+            row.addView(card)
+        }
+        chooserCards = cards
+        highlightChoice(daily.layoutStyle()) // pre-select the current style (Papernews by default)
+        root.addView(row)
+        // The progress shown while a non-default issue rebuilds: a label and a five-segment bar that
+        // fills toward "open". Hidden until a style is chosen; the discrete steps suit the e-ink panel,
+        // where a ticking number or a smooth animation would flicker.
+        val label = TextView(this).apply {
+            typeface = serifBold
+            textSize = 14f
+            setTextColor(ink)
+            gravity = Gravity.CENTER
+            setPadding(0, dp(14), 0, dp(8))
+            visibility = View.GONE
+        }
+        val segments = mutableListOf<View>()
+        val bar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+            visibility = View.GONE
+        }
+        repeat(COUNTDOWN_STEPS) {
+            val seg = View(this).apply {
+                background = GradientDrawable().apply {
+                    cornerRadius = dp(3).toFloat()
+                    setColor(chooserSegmentEmpty)
+                }
+                layoutParams = LinearLayout.LayoutParams(dp(30), dp(6)).apply {
+                    marginStart = dp(3)
+                    marginEnd = dp(3)
+                }
+            }
+            segments.add(seg)
+            bar.addView(seg)
+        }
+        chooserStatus = label
+        chooserBar = bar
+        chooserProgress = segments
+        root.addView(label)
+        root.addView(bar)
+        return root
+    }
+
+    /**
+     * Apply a style chosen in the chooser. Picking the style the issue is already built in (Papernews on
+     * first run) opens it at once. Picking another re-assembles today's issue in the background while the
+     * progress bar fills; the issue is opened only once BOTH the bar has filled AND the rebuild has
+     * landed ([finishChooserIfReady]), so a slow rebuild is never opened half-written. A failed rebuild
+     * reverts to the previous style and returns to the front page.
+     */
+    private fun onStyleChosen(style: DailyController.LayoutStyle) {
+        val previous = daily.layoutStyle()
+        daily.setLayoutStyle(style)
+        highlightChoice(style) // move the selection onto the tapped card
+        val issue = daily.todayIssue()
+        if (issue == null) {
+            dismissChooserAndShow(null) // no issue yet: the style is set for the next compile
+            return
+        }
+        if (style == previous) {
+            dismissChooserAndShow(issue) // already built in this style — open it as it stands
+            return
+        }
+        // Lock the row, dim the styles not chosen, and rebuild in the background while the bar fills.
+        chooserCards.forEach {
+            it.root.isClickable = false
+            it.root.alpha = if (it.style == style) 1f else CARD_DIMMED
+        }
+        chooserRestyleOk = null
+        chooserCountdownDone = false
+        daily.restyle(style) { ok ->
+            runOnUiThread {
+                chooserRestyleOk = ok
+                finishChooserIfReady(issue, style, previous)
+            }
+        }
+        fillChooserBar(style, issue, previous, 0)
+    }
+
+    /** Move the selection indicator — the outlined border and the "Selected" marker — onto [selected]'s
+     *  card and revert the others, so the highlight follows the tap rather than staying on the default. */
+    private fun highlightChoice(selected: DailyController.LayoutStyle) {
+        for (card in chooserCards) {
+            val isSel = card.style == selected
+            (card.root.background as? GradientDrawable)?.setStroke(
+                dp(if (isSel) 3 else 1),
+                if (isSel) ink else chooserUnselectedBorder,
+            )
+            card.name.typeface = if (isSel) serifBold else serif
+            card.marker.text = if (isSel) "Selected" else ""
+        }
+    }
+
+    /** Fill the progress bar one segment per second toward "open"; the final tick marks the countdown
+     *  done and tries to finish. A tick that finds the bar gone (dialog dismissed early) simply stops. */
+    private fun fillChooserBar(
+        style: DailyController.LayoutStyle,
+        issue: File,
+        previous: DailyController.LayoutStyle,
+        filled: Int,
+    ) {
+        val label = chooserStatus ?: return
+        label.visibility = View.VISIBLE
+        chooserBar?.visibility = View.VISIBLE
+        label.text = "Opening your ${style.label} issue…"
+        chooserProgress.forEachIndexed { i, seg ->
+            (seg.background as? GradientDrawable)?.setColor(if (i < filled) ink else chooserSegmentEmpty)
+        }
+        if (filled >= chooserProgress.size) {
+            chooserCountdownDone = true
+            finishChooserIfReady(issue, style, previous)
+            return
+        }
+        label.postDelayed({ fillChooserBar(style, issue, previous, filled + 1) }, 1000L)
+    }
+
+    /** Open the chosen issue once the bar has filled AND the rebuild has landed; until both are ready it
+     *  no-ops (or shows "Almost ready…" if the rebuild outlasts the bar). A failed rebuild reverts the
+     *  style and drops to the front page. No-op once the dialog is gone. */
+    private fun finishChooserIfReady(
+        issue: File,
+        style: DailyController.LayoutStyle,
+        previous: DailyController.LayoutStyle,
+    ) {
+        if (chooserDialog == null || !chooserCountdownDone) return
+        when (chooserRestyleOk) {
+            null -> chooserStatus?.text = "Almost ready…" // bar filled, rebuild still running
+            false -> {
+                daily.setLayoutStyle(previous) // rebuild failed: keep pref and on-disk issue in step
+                dismissChooserAndShow(null)
+            }
+            true -> dismissChooserAndShow(issue)
+        }
+    }
+
+    /** Dismiss the chooser and show the issue in the chosen layout (opening the reader on it). */
+    private fun dismissChooserAndShow(issue: File?) {
+        chooserDialog?.let { runCatching { it.dismiss() } }
+        if (issue != null) openIssue(issue) else setContentView(buildView())
     }
 
     private fun buildView(): View {

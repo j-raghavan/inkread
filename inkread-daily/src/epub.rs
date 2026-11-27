@@ -12,6 +12,10 @@ use zip::{CompressionMethod, ZipWriter};
 
 use crate::model::{DailyLayoutStyle, Issue};
 
+/// The Vintage nameplate, "The Inkread Daily" in blackletter, shipped as a grayscale PNG because the
+/// reflow engine has no per-block font selection (see `assets/NOTICE.md`).
+const VINTAGE_MASTHEAD: &[u8] = include_bytes!("../assets/vintage-masthead.png");
+
 /// Build the issue EPUB as bytes. The result opens with the reader's EPUB backend and reflows like
 /// any book (honoring the shipped font-size/spacing controls + reflow-stable resume).
 #[must_use]
@@ -37,6 +41,16 @@ pub fn assemble_epub(issue: &Issue) -> Vec<u8> {
         title_page(issue).as_bytes(),
         deflate,
     );
+    // Vintage draws a blackletter nameplate at the head of each article (ADR-INKREAD-0018 D1); it is
+    // one shared image, referenced from every article. PNG is already compressed, so store it.
+    if issue.style == DailyLayoutStyle::Vintage {
+        add(
+            &mut zw,
+            "OEBPS/vintage-masthead.png",
+            VINTAGE_MASTHEAD,
+            stored,
+        );
+    }
     for i in 0..issue.articles.len() {
         add(
             &mut zw,
@@ -76,6 +90,11 @@ fn opf(issue: &Issue) -> String {
     <item id="title" href="title.xhtml" media-type="application/xhtml+xml"/>
 "#,
     );
+    if issue.style == DailyLayoutStyle::Vintage {
+        manifest.push_str(
+            "    <item id=\"masthead\" href=\"vintage-masthead.png\" media-type=\"image/png\"/>\n",
+        );
+    }
     let mut spine = String::from("    <itemref idref=\"title\"/>\n");
     for i in 0..issue.articles.len() {
         manifest.push_str(&format!(
@@ -229,17 +248,44 @@ fn article_xhtml(issue: &Issue, i: usize) -> String {
             s.to_string()
         }
     };
-    let byline = match art
-        .published
-        .as_deref()
-        .map(clean_date)
-        .filter(|d| !d.is_empty())
-    {
-        Some(d) => format!("{} · {}", esc(&caps(&art.source)), esc(&caps(&d))),
-        None => esc(&caps(&art.source)),
+    // Vintage sets the source line as a dateline ("REUTERS · REPORTED 23 Nov 2026"); the other styles
+    // keep the plain "source · date".
+    let byline = {
+        let date = art
+            .published
+            .as_deref()
+            .map(clean_date)
+            .filter(|d| !d.is_empty())
+            .map(|d| {
+                let label = if issue.style == DailyLayoutStyle::Vintage {
+                    "REPORTED "
+                } else {
+                    ""
+                };
+                format!(" · {label}{}", esc(&caps(&d)))
+            })
+            .unwrap_or_default();
+        format!("{}{date}", esc(&caps(&art.source)))
+    };
+    // Vintage opens each article with a blackletter nameplate and a rule, then a folio line (date at
+    // the left, edition at the right), then the headline and dateline, and a closing rule above the
+    // body columns, all drawn full-width in the band (ADR-INKREAD-0018 D1).
+    let (lead, body_rule) = if issue.style == DailyLayoutStyle::Vintage {
+        (
+            format!(
+                "<p class=\"masthead\"><img src=\"vintage-masthead.png\" alt=\"The Daily\"/></p>\n\
+                 <hr/>\n\
+                 <table class=\"folio\"><tr><td>{}</td>\
+                 <td class=\"edition\">EVENING EDITION</td></tr></table>\n",
+                esc(&issue.date.to_uppercase()),
+            ),
+            "<hr/>\n",
+        )
+    } else {
+        (String::new(), "")
     };
     let body = format!(
-        "<h1>{}</h1>\n<p class=\"byline\">{byline}</p>\n{}",
+        "{lead}<h1>{}</h1>\n<p class=\"byline\">{byline}</p>\n{body_rule}{}",
         esc(&art.title),
         art.body_html // trusted: caller's contract is already-clean, well-formed XHTML (not escaped)
     );
@@ -277,12 +323,22 @@ fn xhtml(title: &str, body: &str, style: DailyLayoutStyle) -> String {
     )
 }
 
-/// Extra per-style CSS for a document head (ADR-INKREAD-0018 D1). Vintage centres the headline for a
-/// classic masthead/nameplate feel (centre alignment is honoured by the reflow engine, #188); the
-/// other styles add nothing, so their documents stay byte-identical to before styles existed.
+/// Extra per-style CSS for a document head (ADR-INKREAD-0018 D1). Vintage centres the headline and
+/// its nameplate, dateline and byline for a classic masthead feel (centre alignment and class
+/// selectors are honoured by the reflow engine, #188); the other styles add nothing, so their
+/// documents stay byte-identical to before styles existed.
 fn head_css(style: DailyLayoutStyle) -> &'static str {
     match style {
-        DailyLayoutStyle::Vintage => "<style>h1 { text-align: center; }</style>",
+        DailyLayoutStyle::Vintage => {
+            "<style>\
+             .masthead { text-align: center; margin: 0 0 0.1em; } \
+             hr { margin: 0.12em 0; } \
+             .folio { margin: 0.1em 0; } \
+             .edition { text-align: right; } \
+             h1 { text-align: center; margin: 0.3em 0 0.05em; } \
+             .byline { text-align: center; margin: 0 0 0.15em; }\
+             </style>"
+        }
         _ => "",
     }
 }
