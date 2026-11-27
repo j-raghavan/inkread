@@ -784,7 +784,7 @@ fn is_tail_boilerplate(t: &str) -> bool {
         "sign up for the",
         "subscribe to our",
         "read more:",
-        "share this story",
+        "share this", // WordPress/Jetpack end-of-post widget ("Share this:"); also "share this story"
         "comments (",
     ];
     // "-- " opening a block is the email signature delimiter (RFC 3676): the signature, and any
@@ -1102,6 +1102,36 @@ Please check out the Open Source Software Security Wiki, a mailing-list footer t
             !out.contains("Slate Truck"),
             "trailing related link dropped: {out}"
         );
+    }
+
+    #[test]
+    fn a_wordpress_share_widget_ends_the_article() {
+        // A WordPress/Jetpack post with no <article>/<main> wrapper falls back to <body>, so the
+        // trailing share widget ("Share this:"), reader comments, next/prev nav and footer would
+        // otherwise flow in as prose. The "Share this:" heading marks the end of the post: drop it
+        // and everything after it, keeping only the real body.
+        let html = "<body><div class=\"post-content\">\
+            <p>The department invites applications for a tenure-track faculty position in mathematics.</p>\
+            <div class=\"sharedaddy sd-sharing-enabled\"><h3 class=\"sd-title\">Share this:</h3>\
+              <a href=\"#\">Share on WhatsApp (Opens in new window) WhatsApp</a>\
+              <a href=\"#\">Share on Bluesky (Opens in new window) Bluesky</a></div>\
+            <div class=\"comments\"><p>One consequence of the Riemann hypothesis is polynomial-time testing.</p></div>\
+            <p>Blog at WordPress.com. Ben Eastaugh and Chris Sternal-Johnson.</p>\
+            </div></body>";
+        let out = extract_readable(html);
+        assert!(
+            out.contains("tenure-track faculty position"),
+            "real body kept: {out}"
+        );
+        assert!(
+            !out.contains("Opens in new window"),
+            "share links dropped: {out}"
+        );
+        assert!(
+            !out.contains("Riemann hypothesis"),
+            "reader comments dropped: {out}"
+        );
+        assert!(!out.contains("WordPress.com"), "footer dropped: {out}");
     }
 
     #[test]
