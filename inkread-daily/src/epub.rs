@@ -10,7 +10,11 @@ use std::io::{Cursor, Write};
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipWriter};
 
+use crate::extract::{MATH_IMG_CLOSE, MATH_IMG_OPEN};
 use crate::model::{DailyLayoutStyle, Issue};
+
+/// A rendered display equation: its EPUB resource name (`a{i}-eq{n}.png`) and the PNG bytes.
+type MathImg = (String, Vec<u8>);
 
 /// The Vintage nameplate, "The Inkread Daily" in blackletter, shipped as a grayscale PNG because the
 /// reflow engine has no per-block font selection (see `assets/NOTICE.md`).
@@ -22,7 +26,7 @@ const VINTAGE_MASTHEAD: &[u8] = include_bytes!("../assets/vintage-masthead.png")
 pub fn assemble_epub(issue: &Issue) -> Vec<u8> {
     // Render the articles first, collecting the display-equation images each one embeds, so the OPF
     // manifest can list those image resources before the package is written.
-    let mut math_imgs: Vec<(String, Vec<u8>)> = Vec::new();
+    let mut math_imgs: Vec<MathImg> = Vec::new();
     let articles: Vec<String> = (0..issue.articles.len())
         .map(|i| {
             let (doc, imgs) = article_xhtml(issue, i);
@@ -99,7 +103,7 @@ const CONTAINER_XML: &str = r#"<?xml version="1.0" encoding="utf-8"?>
 
 /// The OPF package: metadata + a manifest of (nav, title, every article) and a spine that opens on
 /// the title page then reads the articles in order.
-fn opf(issue: &Issue, math_imgs: &[(String, Vec<u8>)]) -> String {
+fn opf(issue: &Issue, math_imgs: &[MathImg]) -> String {
     let mut manifest = String::from(
         r#"    <item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>
     <item id="title" href="title.xhtml" media-type="application/xhtml+xml"/>
@@ -263,7 +267,7 @@ const EXCERPT_CHARS: usize = 160;
 /// One article document: headline, a source · date byline, then the clean article body. Returns the
 /// document plus the `(resource name, PNG bytes)` of every display equation the body embeds, for the
 /// caller to add to the package and the manifest.
-fn article_xhtml(issue: &Issue, i: usize) -> (String, Vec<(String, Vec<u8>)>) {
+fn article_xhtml(issue: &Issue, i: usize) -> (String, Vec<MathImg>) {
     let art = &issue.articles[i];
     // Vintage sets the byline in capitals (ADR-INKREAD-0018 D1). Uppercase the raw text *before*
     // escaping, so an entity like `&amp;` is not mangled into `&AMP;`.
@@ -327,26 +331,31 @@ fn article_xhtml(issue: &Issue, i: usize) -> (String, Vec<(String, Vec<u8>)>) {
 /// unsupported equation degrades gracefully instead of breaking the issue. The extractor emits the
 /// marker in an exact shape (quotes and `>` are escaped inside the `alt`, so `"/>` first appears at
 /// the tag's close), which lets this scan it without a full HTML parse.
-fn embed_math(body: &str, article_index: usize) -> (String, Vec<(String, Vec<u8>)>) {
-    const OPEN: &str = "<img class=\"latex\" alt=\"";
-    const CLOSE: &str = "\"/>";
-    if !body.contains(OPEN) {
+fn embed_math(body: &str, article_index: usize) -> (String, Vec<MathImg>) {
+    if !body.contains(MATH_IMG_OPEN) {
         return (body.to_string(), Vec::new());
     }
+    // Load the bundled math font once for the whole article (not per equation). If it fails to load,
+    // every equation below degrades to its LaTeX text, which is the same graceful path as a formula
+    // that does not render.
+    let font = crate::math::load_font();
     let mut out = String::with_capacity(body.len());
-    let mut imgs: Vec<(String, Vec<u8>)> = Vec::new();
+    let mut imgs: Vec<MathImg> = Vec::new();
     let mut rest = body;
-    while let Some(i) = rest.find(OPEN) {
+    while let Some(i) = rest.find(MATH_IMG_OPEN) {
         out.push_str(&rest[..i]);
-        let after = &rest[i + OPEN.len()..];
-        let Some(j) = after.find(CLOSE) else {
+        let after = &rest[i + MATH_IMG_OPEN.len()..];
+        let Some(j) = after.find(MATH_IMG_CLOSE) else {
             // Not the extractor's shape (cannot happen for emitted markers) — keep it verbatim.
             out.push_str(&rest[i..]);
             return (out, imgs);
         };
         let escaped_latex = &after[..j];
-        rest = &after[j + CLOSE.len()..];
-        match crate::math::render_display(&unescape(escaped_latex)) {
+        rest = &after[j + MATH_IMG_CLOSE.len()..];
+        match font
+            .as_ref()
+            .and_then(|f| crate::math::render_display(f, &unescape(escaped_latex)))
+        {
             Some(png) => {
                 let name = format!("a{article_index}-eq{}.png", imgs.len());
                 out.push_str(&format!(

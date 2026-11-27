@@ -61,7 +61,8 @@ quick-xml = "0.42"
 # no C deps) so the Android cdylib cross-compiles the same engine. MIT/Apache → auto-passes
 # check-licenses.sh. Pinned =2.1.1: its MSRV 1.76 builds under the project's pinned 1.90, while the
 # 3.x line needs MSRV 1.99. `default-features = false` keeps the optional `egui` GUI dep out of the
-# headless renderer; the `png` feature pulls only tiny-skia. Bundles STIX Two Math (OFL) — see
+# headless renderer; the `png` feature pulls only tiny-skia (at 0.11, a second minor alongside our
+# own 0.12 — an accepted cost of the 1.76-MSRV pin). Bundles STIX Two Math (OFL) — see
 # inkread-daily/assets/NOTICE.md.
 latex-rust = { version = "=2.1.1", default-features = false, features = ["png"] }
 # RSS/Atom/JSON-feed model shared by inkread-daily (#66) and inkread-opds (ADR-INKREAD-0016) — OPDS

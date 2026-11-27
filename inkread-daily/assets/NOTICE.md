@@ -11,3 +11,5 @@
   The font software ships inside the `latex-rust` dependency, not in this repository; the equation
   images the daily embeds are documents produced with that font, carrying inkread's own AGPL-3.0
   license. STIX Two Math is (c) the STIX Fonts project; the OFL permits this embedding and bundling.
+  Because the font software is compiled into the shipped binary, its OFL 1.1 text travels with the
+  distribution in `STIXTwoMath-OFL.txt` (this directory).

@@ -679,6 +679,63 @@ fn a_display_equation_is_rendered_to_an_embedded_png_resource() {
     );
 }
 
+/// The extractor's own marker output, fed straight into assembly, renders to an embedded PNG. This
+/// pins the extract→assemble contract end to end, so a drift in the shared marker shape fails here
+/// rather than silently degrading every equation to text in the field.
+#[test]
+fn an_extracted_display_equation_renders_end_to_end() {
+    let raw = "<article><p>The sum of the first N positive integers has the closed form</p>\
+        <p><img class=\"latex\" alt=\"\\displaystyle \\sum_{n=1}^N n = \\frac{N(N+1)}{2}\" \
+           src=\"https://s0.wp.com/latex.php?latex=x\"/></p>\
+        <p>which a short induction on the number of terms confirms.</p></article>";
+    let body = crate::extract::extract_readable(raw);
+    assert!(
+        body.contains("class=\"eq\""),
+        "extraction keeps the equation marker: {body}"
+    );
+    let issue = Issue {
+        sources: vec![],
+        style: DailyLayoutStyle::Papernews,
+        title: "inkread daily".into(),
+        date: "27 Nov 2026".into(),
+        articles: vec![article("Gauss", "A Blog", &body, None)],
+    };
+    let bytes = assemble_epub(&issue);
+    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).expect("zip opens");
+    assert!(
+        zip.by_name("OEBPS/a0-eq0.png").is_ok(),
+        "the extracted equation renders to an embedded PNG end to end"
+    );
+}
+
+/// A display equation whose LaTeX does not render keeps its LaTeX as visible text and embeds no
+/// image — the feature's graceful-degrade guarantee (one bad formula never breaks the issue).
+#[test]
+fn an_unrenderable_equation_degrades_to_latex_text_with_no_image() {
+    let body = "<p>Consider the identity</p>\n\
+        <p class=\"eq\"><img class=\"latex\" alt=\"\\displaystyle \\frac{1}{\"/></p>\n\
+        <p>which the typesetter cannot parse.</p>";
+    let issue = Issue {
+        sources: vec![],
+        style: DailyLayoutStyle::Papernews,
+        title: "inkread daily".into(),
+        date: "27 Nov 2026".into(),
+        articles: vec![article("Broken Math", "A Blog", body, None)],
+    };
+    let bytes = assemble_epub(&issue);
+    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes.clone())).expect("zip opens");
+    assert!(
+        zip.by_name("OEBPS/a0-eq0.png").is_err(),
+        "an unrenderable equation embeds no image"
+    );
+    let pkg = EpubPackage::open(bytes).expect("the issue still opens");
+    let html: String = pkg.chapters.iter().map(|c| c.html.clone()).collect();
+    assert!(
+        html.contains("\\frac{1}{") && !html.contains("src=\"a0-eq0.png\""),
+        "the formula degrades to its LaTeX text: {html}"
+    );
+}
+
 /// Host preview (#66 math): assemble an issue with display equations and write it to a path, to
 /// rasterise and eyeball the equation size/sharpness among prose. Run:
 ///   `INKREAD_MATH_OUT=/tmp/math.epub cargo test -p inkread-daily dump_math_preview -- --ignored`

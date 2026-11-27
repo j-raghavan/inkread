@@ -60,6 +60,13 @@ const SKIP_TAGS: &[&str] = &[
 /// links), not article prose — dropped. Real paragraphs comfortably exceed it.
 const MIN_BLOCK_CHARS: usize = 40;
 
+/// The exact markup the extractor emits for a display equation, and that the assembler scans back
+/// for ([`crate::epub::embed_math`]): `MATH_IMG_OPEN` + the escaped LaTeX + `MATH_IMG_CLOSE`, wrapped
+/// in a `<p class="eq">`. Shared so the two ends cannot drift. Because `>` and `"` are escaped inside
+/// the `alt`, `MATH_IMG_CLOSE` first appears at the tag's close, which lets the scan skip a full parse.
+pub(crate) const MATH_IMG_OPEN: &str = "<img class=\"latex\" alt=\"";
+pub(crate) const MATH_IMG_CLOSE: &str = "\"/>";
+
 /// Extract the main readable body of `html` as well-formed XHTML (one `<p>` per real text block).
 ///
 /// Returns an **empty** string when the page carries no extractable prose (an interactive page, a
@@ -89,9 +96,11 @@ pub fn extract_readable(html: &str) -> String {
                 // — it is the assembler's render source, and the visible fallback if a formula does
                 // not render. Like code, it bypasses the prose filters: an equation is short and
                 // never ends the article.
-                out.push_str("<p class=\"eq\"><img class=\"latex\" alt=\"");
+                out.push_str("<p class=\"eq\">");
+                out.push_str(MATH_IMG_OPEN);
                 out.push_str(&escape(&latex));
-                out.push_str("\"/></p>\n");
+                out.push_str(MATH_IMG_CLOSE);
+                out.push_str("</p>\n");
                 continue;
             }
             Blk::Prose(block) => block,

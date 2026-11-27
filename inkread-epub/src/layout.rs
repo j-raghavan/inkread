@@ -774,9 +774,6 @@ pub fn paginate_upto(
     (combine_columns(laid, opts, columns), complete)
 }
 
-/// The number of leading blocks that form the headline band — the run of headings at the chapter
-/// start, plus an immediately-following byline paragraph (ADR-INKREAD-0017 D2/D4). `None` when the
-/// chapter does not open with a heading, which leaves the ordinary column path untouched.
 /// True for a preformatted (`<pre>`) block. The daily lays an article that contains one full-width in
 /// a single column so its code and commands span the whole measure (ADR-INKREAD-0018) rather than
 /// char-wrapping into a narrow newspaper column.
@@ -784,6 +781,9 @@ fn block_is_preformatted(b: &Block) -> bool {
     matches!(b, Block::Paragraph { style, .. } if style.preformatted)
 }
 
+/// The number of leading blocks that form the headline band — the run of headings at the chapter
+/// start, plus an immediately-following byline paragraph (ADR-INKREAD-0017 D2/D4). `None` when the
+/// chapter does not open with a heading, which leaves the ordinary column path untouched.
 fn band_run(blocks: &[Block]) -> Option<usize> {
     // The band is the article's full-width lead: whatever nameplate, rule and dateline blocks the
     // style places *before* the headline (Vintage, ADR-INKREAD-0018 D1), the headline run itself,
