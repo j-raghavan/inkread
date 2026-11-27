@@ -287,6 +287,14 @@ impl LayoutOpts {
         if self.band {
             eat(0xBD);
         }
+        // Like `band`, folded only when set. The drop cap moves line positions (it narrows the first
+        // lines of the body's first paragraph), so a pagination cached by an older build that laid the
+        // same issue without it must not be served (the upgrade path); `0xDC` is its stable
+        // domain-separator. `column_rule` is deliberately NOT folded: it is a render-time overlay that
+        // changes no line positions (see the field doc).
+        if self.drop_cap {
+            eat(0xDC);
+        }
         h
     }
 }
@@ -748,6 +756,7 @@ pub fn paginate_upto(
         images,
         max_pages,
         &mut cursor,
+        false, // no band was stripped here, so the lead (byline) must not take a drop cap
     );
     (combine_columns(laid, opts, columns), complete)
 }
@@ -787,6 +796,7 @@ fn band_run(blocks: &[Block]) -> Option<usize> {
 /// original block, and `cursor` threads the chapter-relative char offset (ADR-INKREAD-0012). Returns
 /// the column pages and whether the whole body was laid within `max_pages`.
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 fn lay_body_columns(
     body: &[Block],
     opts: &LayoutOpts,
@@ -798,6 +808,10 @@ fn lay_body_columns(
     images: &dyn ImageSizer,
     max_pages: usize,
     cursor: &mut usize,
+    // The drop cap applies only when the band has stripped the heading + byline, so the first body
+    // paragraph is real prose. The caller passes `false` on the no-band path (a daily collapsed to one
+    // column, or an ordinary book), where `body` still leads with the byline.
+    drop_cap: bool,
 ) -> (Vec<Page>, bool) {
     let cols = opts.effective_columns();
     // `max_pages` counts pages, but the pager is producing *columns* — a two-column page needs two
@@ -806,7 +820,7 @@ fn lay_body_columns(
     let mut pager = Pager::new(opts, hyph);
     pager.reserve_top = reserve_top;
     pager.reserve_cols = reserve_cols;
-    pager.drop_cap_pending = opts.drop_cap;
+    pager.drop_cap_pending = drop_cap;
     let mut complete = true;
     // Walked in keep-runs rather than block by block: `page-break-after: avoid` binds a block to the
     // next one, so what may be split across a page is a run, not always a single block (#251).
@@ -895,6 +909,7 @@ fn paginate_with_band(
         images,
         1,
         &mut single_cursor,
+        opts.drop_cap, // the band stripped the lead, so the first body paragraph may take the cap
     );
     let (laid, used_cols, complete) = if single_fits {
         (single, 1u8, true)
@@ -912,6 +927,7 @@ fn paginate_with_band(
             images,
             max_pages,
             &mut multi_cursor,
+            opts.drop_cap,
         );
         (multi, columns, complete)
     };
@@ -1670,6 +1686,12 @@ impl<'o> Pager<'o> {
             image: None,
             drop_cap: true,
         };
+        // A paragraph that is nothing but the initial (its remainder breaks to no lines) still shows
+        // the cap: emit it on a line of its own rather than dropping the character.
+        if lines.is_empty() {
+            self.emit_text_line(vec![cap_run], size, line_h);
+            return;
+        }
         let n = lines.len();
         for (i, mut runs) in lines.into_iter().enumerate() {
             align_line(&mut runs, align, self.measure, i + 1 == n, m);

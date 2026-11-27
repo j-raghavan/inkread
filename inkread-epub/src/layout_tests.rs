@@ -126,6 +126,32 @@ fn band_flag_folds_into_digest_only_when_set() {
     );
 }
 
+#[test]
+fn drop_cap_folds_into_digest_but_column_rule_does_not() {
+    // The drop cap moves line positions (it narrows the first lines of a paragraph), so like `band`
+    // it must flip the digest so an older build's cached pagination is not reused (ADR-INKREAD-0018
+    // D1). The gutter rule is a render-time overlay that changes no positions, so it must NOT.
+    let base = LayoutOpts::new(400.0, 600.0, 16.0);
+    assert_eq!(
+        base.layout_digest(),
+        LayoutOpts {
+            column_rule: true,
+            ..base
+        }
+        .layout_digest(),
+        "column_rule is render-only and must not change the digest",
+    );
+    assert_ne!(
+        base.layout_digest(),
+        LayoutOpts {
+            drop_cap: true,
+            ..base
+        }
+        .layout_digest(),
+        "drop_cap=true must flip the digest",
+    );
+}
+
 use super::*;
 use crate::content::{parse_blocks, TextRun};
 use crate::css::BlockStyle;
@@ -400,6 +426,35 @@ fn drop_cap_raises_the_initial_and_keeps_offsets() {
             .flat_map(|l| l.runs.iter())
             .all(|r| r.size_px <= opts.font_px * 2.0),
         "no oversized run without the drop cap",
+    );
+}
+
+#[test]
+fn drop_cap_is_suppressed_when_a_daily_collapses_to_one_column() {
+    // At a large font the two-column band is declined, so the heading + byline are never stripped and
+    // the body is laid as one column from the top. The drop cap must NOT fall on the byline: it only
+    // applies on the band path, where the lead is removed first (correctness review, ADR-INKREAD-0018).
+    let mut opts = band_opts();
+    opts.font_px = 30.0; // each column now falls below the two-column floor
+    opts.drop_cap = true;
+    assert_eq!(opts.effective_columns(), 1, "forced to a single column");
+    let mut blocks = vec![
+        heading_block(1, "Big Headline"),
+        para("Reuters byline here goes on"),
+    ];
+    for _ in 0..20 {
+        blocks.push(para(
+            "the agreement binds nearly two hundred nations to steeper cuts than before",
+        ));
+    }
+    let pages = paginate(&blocks, &opts, &Mono);
+    assert!(
+        pages
+            .iter()
+            .flat_map(|p| p.lines.iter())
+            .flat_map(|l| l.runs.iter())
+            .all(|r| r.size_px <= opts.font_px * 2.0),
+        "no drop cap when the band collapses to one column",
     );
 }
 
