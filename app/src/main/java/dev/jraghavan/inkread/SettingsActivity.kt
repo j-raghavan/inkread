@@ -12,6 +12,7 @@ import android.view.ViewGroup
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
+import android.widget.Toast
 
 /**
  * App-level settings, reached from the home gear. A calm, monochrome, scrollable page matching the
@@ -118,6 +119,20 @@ class SettingsActivity : Activity() {
                 AppSettings.setToolTips(this, !AppSettings.toolTips(this)); refresh()
             },
         )
+
+        // ── Daily (ADR-INKREAD-0018) ─────────────────────────────────────────────────
+        column.addView(spacer(dp(34)))
+        column.addView(eyebrow("Daily"))
+        column.addView(spacer(dp(12)))
+        val dailyStyle = DailyController(this).layoutStyle()
+        column.addView(actionRow("Layout style", pillLabel = dailyStyle.label) { onLayoutStyleTapped() })
+        column.addView(TextView(this).apply {
+            text = "How your daily issue is laid out. Papernews is a two-column paper with a " +
+                "full-width headline; Vintage centres the headline and sets the byline in capitals; " +
+                "Standard is the plain single-column reader. Changing it rebuilds today's issue."
+            setTextColor(inkSoft); textSize = 14f; typeface = serif
+            setPadding(0, dp(6), 0, 0); setLineSpacing(0f, 1.2f)
+        })
 
         // ── Dictionary ─────────────────────────────────────────────────────────────
         column.addView(spacer(dp(34)))
@@ -264,6 +279,53 @@ class SettingsActivity : Activity() {
         refresh()
     }
 
+    /**
+     * Pick the daily layout style (ADR-INKREAD-0018 D4). A single-choice list of the three styles
+     * with the current one marked; the section blurb explains what each does. Picking a different one
+     * persists it and rebuilds today's issue so the band and per-style markup take effect.
+     */
+    private fun onLayoutStyleTapped() {
+        val daily = DailyController(this)
+        val styles = DailyController.LayoutStyle.entries
+        val current = daily.layoutStyle()
+        val labels = styles.map { "${it.label}\n${it.blurb}" }.toTypedArray()
+        AlertDialog.Builder(this, R.style.InkDialog)
+            .setTitle("Layout style")
+            .setSingleChoiceItems(labels, styles.indexOf(current)) { dialog, which ->
+                dialog.dismiss()
+                styles[which].let { if (it != current) applyLayoutStyle(daily, it) }
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    /**
+     * Persist [style] and re-assemble today's issue in it. The reader derives the column count and
+     * the band from the style stamped into the issue (ADR-INKREAD-0018 D3), and the Vintage markup is
+     * written in at assembly, so the issue is re-stamped and re-assembled for the change to show. Only
+     * when an issue exists for today; otherwise the next compile picks the style up. [DailyController.restyle]
+     * does this locally without re-fetching, off the UI thread, with a short notice.
+     */
+    private fun applyLayoutStyle(daily: DailyController, style: DailyController.LayoutStyle) {
+        val previous = daily.layoutStyle()
+        daily.setLayoutStyle(style)
+        refresh() // reflect the new pill at once
+        if (daily.todayIssue() == null) return
+        Toast.makeText(this, "Restyling today's issue as ${style.label}…", Toast.LENGTH_SHORT).show()
+        daily.restyle(style) { ok ->
+            runOnUiThread {
+                // On failure the issue file was not rebuilt, so revert the selection to keep the pref
+                // and the on-disk issue in step (and so the reader stops waiting on the open layout).
+                if (!ok) {
+                    daily.setLayoutStyle(previous)
+                    refresh()
+                }
+                val msg = if (ok) "Daily set to ${style.label}" else "Couldn't restyle today's issue"
+                Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
     // ── Pieces ──────────────────────────────────────────────────────────────────────
 
     /** A tappable action with a title on the left and an outlined affordance pill on the right. */
@@ -319,7 +381,7 @@ class SettingsActivity : Activity() {
             .show()
     }
 
-    private fun actionRow(title: String, onTap: () -> Unit): View =
+    private fun actionRow(title: String, pillLabel: String = "Check", onTap: () -> Unit): View =
         LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -327,7 +389,7 @@ class SettingsActivity : Activity() {
             addView(TextView(this@SettingsActivity).apply {
                 text = title; setTextColor(ink); textSize = 17f; typeface = serif
             }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { marginEnd = dp(16) })
-            addView(pill("Check", false))
+            addView(pill(pillLabel, false))
         }
 
     /** A setting with a title + description on the left and an On/Off pill on the right. */

@@ -93,8 +93,33 @@ fn layout_digest_is_pinned_against_algorithm_drift() {
         para_gap: 11.2,
         align: Align::Left,
         columns: 1,
+        band: false,
     };
     assert_eq!(opts.layout_digest(), 17_685_407_801_978_826_572);
+}
+
+#[test]
+fn band_flag_folds_into_digest_only_when_set() {
+    // ADR-INKREAD-0017 D1: the band is off by default and folded into the digest only when true, so
+    // a book that never sets it hashes exactly as it did before the band existed (every pagination
+    // cached pre-band stays valid). When set, it must flip the digest so a daily issue does not
+    // reuse a non-band pagination.
+    let base = LayoutOpts::new(400.0, 600.0, 16.0);
+    assert!(!base.band, "band is off by default");
+    assert_eq!(
+        base.layout_digest(),
+        LayoutOpts {
+            band: false,
+            ..base
+        }
+        .layout_digest(),
+        "band=false must not change the digest"
+    );
+    assert_ne!(
+        base.layout_digest(),
+        LayoutOpts { band: true, ..base }.layout_digest(),
+        "band=true must flip the digest"
+    );
 }
 
 use super::*;
@@ -124,6 +149,263 @@ fn para(text: &str) -> Block {
     styled_para(text, BlockStyle::default())
 }
 
+/// A heading block for the band tests (ADR-INKREAD-0017 D2).
+fn heading_block(level: u8, text: &str) -> Block {
+    Block::Heading {
+        level,
+        content: runs(text),
+        style: BlockStyle::default(),
+    }
+}
+
+/// A wide two-column viewport with the daily band on: text width 600 → two 300px columns.
+fn band_opts() -> LayoutOpts {
+    LayoutOpts {
+        page_w: 600.0,
+        page_h: 400.0,
+        margin: 0.0,
+        font_px: 10.0,
+        line_spacing: 1.0,
+        para_gap: 5.0,
+        align: Align::Left,
+        columns: 2,
+        band: true,
+    }
+}
+
+#[test]
+fn band_lays_the_headline_full_width_above_the_columns() {
+    // text_w = 600 (margin 0); each column = 300. The headline spans the full 600, the body is laid
+    // to the 300 column measure beneath it, and the second column is used (ADR-INKREAD-0017 D2).
+    let opts = band_opts();
+    let mut blocks = vec![
+        heading_block(1, "Big Climate Deal Reached"),
+        para("Reuters byline here"),
+    ];
+    for _ in 0..40 {
+        blocks.push(para(
+            "the agreement binds nearly two hundred nations to steeper cuts",
+        ));
+    }
+    let pages = paginate(&blocks, &opts, &Mono);
+    let p0 = &pages[0];
+    let head = p0
+        .lines
+        .iter()
+        .find(|l| l.runs.iter().any(|r| r.text.contains("Climate")))
+        .expect("headline on page 0");
+    assert!(
+        (head.column_w - 600.0).abs() < 1.0,
+        "headline spans the full width: {}",
+        head.column_w
+    );
+    let body: Vec<_> = p0
+        .lines
+        .iter()
+        .filter(|l| l.runs.iter().any(|r| r.text.contains("agreement")))
+        .collect();
+    assert!(!body.is_empty(), "body on page 0");
+    assert!(
+        body.iter().all(|l| (l.column_w - 300.0).abs() < 1.0),
+        "body laid to the column measure"
+    );
+    assert!(
+        body.iter().all(|l| l.top > head.top),
+        "body sits below the headline band"
+    );
+    assert!(
+        p0.lines.iter().flat_map(|l| &l.runs).any(|r| r.x >= 299.0),
+        "the second column is used"
+    );
+}
+
+#[test]
+fn band_leaves_no_top_gap_on_later_pages() {
+    // Only the first page carries the band; continuation pages are full-height and start at the top.
+    let opts = band_opts();
+    let mut blocks = vec![heading_block(1, "Headline")];
+    for _ in 0..200 {
+        blocks.push(para("short line here"));
+    }
+    let pages = paginate(&blocks, &opts, &Mono);
+    assert!(pages.len() >= 2, "article spans pages: {}", pages.len());
+    let p1_top = pages[1]
+        .lines
+        .iter()
+        .map(|l| l.top)
+        .fold(f32::INFINITY, f32::min);
+    assert!(
+        p1_top < 5.0,
+        "continuation page starts at the top, no band-height gap: {p1_top}"
+    );
+}
+
+#[test]
+fn band_includes_the_byline() {
+    // The byline (the paragraph right after the headline) belongs under the headline in the band,
+    // full width, not at the top of the first column (ADR-INKREAD-0017 D4).
+    let opts = band_opts();
+    let mut blocks = vec![
+        heading_block(1, "Big Headline Today"),
+        para("Reuters 23 Nov 2026"),
+    ];
+    for _ in 0..40 {
+        blocks.push(para(
+            "body text that is reasonably long to fill the two columns here",
+        ));
+    }
+    let pages = paginate(&blocks, &opts, &Mono);
+    let p0 = &pages[0];
+    let byline = p0
+        .lines
+        .iter()
+        .find(|l| l.runs.iter().any(|r| r.text.contains("Reuters")))
+        .expect("byline present");
+    assert!(
+        (byline.column_w - 600.0).abs() < 1.0,
+        "byline is in the full-width band, not a column: {}",
+        byline.column_w
+    );
+    let body_top = p0
+        .lines
+        .iter()
+        .filter(|l| l.runs.iter().any(|r| r.text.contains("body text")))
+        .map(|l| l.top)
+        .fold(f32::INFINITY, f32::min);
+    assert!(byline.top < body_top, "byline sits above the body columns");
+}
+
+#[test]
+fn band_sets_a_short_article_in_one_column() {
+    // A short body collapses lopsidedly into the left column of two; instead it is set in a single
+    // full-width column beneath the band (ADR-INKREAD-0017 D3).
+    let opts = band_opts();
+    let blocks = vec![
+        heading_block(1, "Short Notice"),
+        para("the measure passed six votes to one after a brief debate"),
+        para("a residents group welcomed the decision but asked for crossings"),
+    ];
+    let pages = paginate(&blocks, &opts, &Mono);
+    assert_eq!(pages.len(), 1, "short article is one page");
+    let body: Vec<_> = pages[0]
+        .lines
+        .iter()
+        .filter(|l| {
+            l.runs
+                .iter()
+                .any(|r| r.text.contains("measure") || r.text.contains("residents"))
+        })
+        .collect();
+    assert!(!body.is_empty(), "body present");
+    assert!(
+        body.iter().all(|l| (l.column_w - 600.0).abs() < 1.0),
+        "short body is set full width, not in a half column"
+    );
+    assert!(
+        pages[0]
+            .lines
+            .iter()
+            .flat_map(|l| &l.runs)
+            .all(|r| r.x < 301.0),
+        "no second column is used for a short article"
+    );
+}
+
+#[test]
+fn band_keeps_source_anchors_contiguous_across_the_boundary() {
+    // ADR-INKREAD-0012/0017: the band must not disturb chapter-relative char offsets or source-block
+    // indices — highlights and resume re-resolve by these, so a gap/overlap in offsets, or a body
+    // block re-based to 0, would corrupt them.
+    let opts = band_opts();
+    let mut blocks = vec![heading_block(1, "HEADLINE"), para("BYLINE")];
+    for _ in 0..30 {
+        blocks.push(para("body words filling the two columns of the page here"));
+    }
+    let pages = paginate(&blocks, &opts, &Mono);
+    let anchors: Vec<(usize, usize, String)> = pages
+        .iter()
+        .flat_map(|p| &p.lines)
+        .flat_map(|l| &l.runs)
+        .map(|r| (r.anchor.block, r.anchor.char_offset, r.text.clone()))
+        .collect();
+    // The band keeps the heading at block 0 and the byline at block 1 (their original indices).
+    assert!(anchors
+        .iter()
+        .any(|(b, _, t)| *b == 0 && t.contains("HEADLINE")));
+    assert!(anchors
+        .iter()
+        .any(|(b, _, t)| *b == 1 && t.contains("BYLINE")));
+    // Body runs name the original post-band blocks (>= 2), never re-based to 0.
+    assert!(
+        anchors
+            .iter()
+            .filter(|(_, _, t)| t.contains("body"))
+            .all(|(b, _, _)| *b >= 2),
+        "body blocks are not re-based"
+    );
+    // Offsets are contiguous: every body char offset is past the whole band's text (no reset/overlap).
+    let band_max = anchors
+        .iter()
+        .filter(|(b, _, _)| *b <= 1)
+        .map(|(_, o, _)| *o)
+        .max()
+        .expect("band has runs");
+    assert!(
+        anchors
+            .iter()
+            .filter(|(_, _, t)| t.contains("body"))
+            .all(|(_, o, _)| *o > band_max),
+        "body offsets continue past the band, not reset"
+    );
+}
+
+#[test]
+fn band_partial_pagination_is_a_prefix() {
+    // The short/long decision uses a hardcoded one-page trial, so a `max_pages` prefix of a band
+    // article is byte-identical to the full pagination's first page (ADR-INKREAD-0013 prefix rule).
+    let opts = band_opts();
+    let mut blocks = vec![heading_block(1, "Headline"), para("Byline")];
+    for _ in 0..80 {
+        blocks.push(para(
+            "body text filling multiple pages of two columns here now",
+        ));
+    }
+    let full = paginate(&blocks, &opts, &Mono);
+    assert!(full.len() >= 2, "article spans pages: {}", full.len());
+    let (prefix, complete) = paginate_upto(&blocks, &opts, &Mono, &NoHyphen, &NoImages, 1);
+    assert!(!complete, "a long article is not complete in one page");
+    assert_eq!(prefix.len(), 1, "max_pages=1 yields one page");
+    assert_eq!(
+        prefix[0], full[0],
+        "the one page equals the full pagination's first page"
+    );
+}
+
+#[test]
+fn band_off_keeps_the_heading_in_a_column() {
+    // With the band off (every non-daily book) the heading is laid to the column measure, as before.
+    let opts = LayoutOpts {
+        band: false,
+        ..band_opts()
+    };
+    let blocks = vec![
+        heading_block(1, "Headline"),
+        para("body text one here"),
+        para("body text two here"),
+    ];
+    let pages = paginate(&blocks, &opts, &Mono);
+    let head = pages[0]
+        .lines
+        .iter()
+        .find(|l| l.runs.iter().any(|r| r.text.contains("Headline")))
+        .expect("heading present");
+    assert!(
+        (head.column_w - 300.0).abs() < 1.0,
+        "heading confined to one column when the band is off: {}",
+        head.column_w
+    );
+}
+
 /// Build the opts used by the #188 declared-style tests: 10px Mono font (5px/char), content
 /// width 100 → 20 chars per line, and a reader whose global alignment is the default Left.
 fn style_opts() -> LayoutOpts {
@@ -136,6 +418,7 @@ fn style_opts() -> LayoutOpts {
         para_gap: 0.0,
         align: Align::Left,
         columns: 1,
+        band: false,
     }
 }
 
@@ -361,6 +644,7 @@ fn long_paragraph_wraps_to_multiple_lines() {
         para_gap: 0.0,
         align: Align::Left,
         columns: 1,
+        band: false,
     };
     let words = "aaaa ".repeat(12); // 12 words of 4 chars → ~ wraps
     let pages = paginate(&[para(words.trim())], &opts, &Mono);
@@ -392,6 +676,7 @@ fn cjk_opts() -> LayoutOpts {
         para_gap: 0.0,
         align: Align::Left,
         columns: 1,
+        band: false,
     }
 }
 
@@ -529,6 +814,7 @@ fn content_overflow_breaks_into_pages() {
         para_gap: 0.0,
         align: Align::Left,
         columns: 1,
+        band: false,
     };
     let blocks: Vec<Block> = (0..7).map(|_| para("x")).collect();
     let pages = paginate(&blocks, &opts, &Mono);
@@ -548,6 +834,7 @@ fn heading_uses_a_larger_line_height() {
         para_gap: 0.0,
         align: Align::Left,
         columns: 1,
+        band: false,
     };
     let pages = paginate(
         &[Block::Heading {
@@ -623,6 +910,7 @@ fn wide(font_px: f32) -> LayoutOpts {
         para_gap: 0.0,
         align: Align::Left,
         columns: 1,
+        band: false,
     }
 }
 
@@ -700,6 +988,7 @@ fn narrow_para() -> LayoutOpts {
         para_gap: 0.0,
         align: Align::Left,
         columns: 1,
+        band: false,
     }
 }
 
@@ -834,6 +1123,7 @@ fn image_opts() -> LayoutOpts {
         para_gap: 0.0,
         align: Align::Left,
         columns: 1,
+        band: false,
     }
 }
 
@@ -1423,6 +1713,7 @@ fn two_col_opts() -> LayoutOpts {
         para_gap: 0.0,
         align: Align::Left,
         columns: 2,
+        band: false,
     }
 }
 

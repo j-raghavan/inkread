@@ -146,6 +146,10 @@ pub struct LayoutOpts {
     /// Text columns per page — 1 (default) or 2 (#194). A page too narrow to give two columns a
     /// readable measure falls back to one; see [`LayoutOpts::effective_columns`].
     pub columns: u8,
+    /// Daily headline band (ADR-INKREAD-0017): lay a chapter's leading heading(s) + byline
+    /// full-width above the columns, with the body reflowing beneath. Set only for daily issues;
+    /// `false` leaves multi-column reading byte-identical to before the band existed.
+    pub band: bool,
 }
 
 impl LayoutOpts {
@@ -161,6 +165,7 @@ impl LayoutOpts {
             para_gap: font_px * 0.7,
             align: Align::Left,
             columns: 1,
+            band: false,
         }
     }
 
@@ -266,6 +271,12 @@ impl LayoutOpts {
         // discarding them all for a field most books never set.
         if self.columns > 1 {
             eat(self.columns);
+        }
+        // Folded only when set, so every pagination cached before the band existed stays valid
+        // (ADR-INKREAD-0017 D1): a book that never sets `band` hashes exactly as it did before.
+        // `0xBD` is an arbitrary "band" domain-separator byte — it only has to be stable and distinct.
+        if self.band {
+            eat(0xBD);
         }
         h
     }
@@ -700,29 +711,96 @@ pub fn paginate_upto(
     images: &dyn ImageSizer,
     max_pages: usize,
 ) -> (Vec<Page>, bool) {
-    let mut pager = Pager::new(opts, hyph);
+    // A daily chapter opens with a heading; in multi-column mode lay that heading as a full-width
+    // band above the columns, with the body reflowing beneath it (ADR-INKREAD-0017 D2). Gated by
+    // `opts.band` (set only for daily issues), so ordinary reading never takes this path.
+    if opts.band && opts.effective_columns() > 1 {
+        if let Some(band_len) = band_run(blocks) {
+            return paginate_with_band(blocks, band_len, opts, m, hyph, images, max_pages);
+        }
+    }
     // Chapter-relative character cursor, advanced as source text is consumed in reading order, so
-    // every placed run/glyph carries a font-invariant offset (ADR-INKREAD-0012).
+    // every placed run/glyph carries a font-invariant offset (ADR-INKREAD-0012). The ordinary path
+    // is [`lay_body_columns`] with no band reservation — the same walk the band's body uses.
+    let columns = opts.effective_columns();
     let mut cursor = 0usize;
-    let mut complete = true;
+    let (laid, complete) = lay_body_columns(
+        blocks,
+        opts,
+        0.0,
+        0,
+        0,
+        m,
+        hyph,
+        images,
+        max_pages,
+        &mut cursor,
+    );
+    (combine_columns(laid, opts, columns), complete)
+}
+
+/// The number of leading blocks that form the headline band — the run of headings at the chapter
+/// start, plus an immediately-following byline paragraph (ADR-INKREAD-0017 D2/D4). `None` when the
+/// chapter does not open with a heading, which leaves the ordinary column path untouched.
+fn band_run(blocks: &[Block]) -> Option<usize> {
+    let headings = blocks
+        .iter()
+        .take_while(|b| matches!(b, Block::Heading { .. }))
+        .count();
+    if headings == 0 {
+        return None;
+    }
+    // Fold an immediately-following paragraph into the band: in a daily article that is the byline
+    // (`<h1>` then `<p class="byline">`, see `inkread-daily`), which belongs under the headline, not
+    // at the top of the first column (ADR-INKREAD-0017 D4). This path is daily-gated, so the block
+    // after the heading is the byline, never body prose.
+    let byline = usize::from(matches!(
+        blocks.get(headings),
+        Some(Block::Paragraph { .. })
+    ));
+    Some(headings + byline)
+}
+
+/// Lay a chapter's body (the blocks after the band) into pages at `opts`'s column measure, with the
+/// first physical page's columns shortened by `reserve_top` to clear the band above them
+/// (ADR-INKREAD-0017 D2/D3). `index_base` re-bases the source-block index so anchors name the
+/// original block, and `cursor` threads the chapter-relative char offset (ADR-INKREAD-0012). Returns
+/// the column pages and whether the whole body was laid within `max_pages`.
+#[allow(clippy::too_many_arguments)]
+fn lay_body_columns(
+    body: &[Block],
+    opts: &LayoutOpts,
+    reserve_top: f32,
+    reserve_cols: usize,
+    index_base: usize,
+    m: &dyn Metrics,
+    hyph: &dyn Hyphenator,
+    images: &dyn ImageSizer,
+    max_pages: usize,
+    cursor: &mut usize,
+) -> (Vec<Page>, bool) {
+    let cols = opts.effective_columns();
     // `max_pages` counts pages, but the pager is producing *columns* — a two-column page needs two
     // of them before it is whole.
-    let column_budget = max_pages.saturating_mul(usize::from(opts.effective_columns()));
-    // Walked in keep-runs rather than block by block: `page-break-after: avoid` binds a block to
-    // the next one, so what may be split across a page is a run, not always a single block (#251).
-    let mut i = 0;
-    while i < blocks.len() {
+    let column_budget = max_pages.saturating_mul(usize::from(cols));
+    let mut pager = Pager::new(opts, hyph);
+    pager.reserve_top = reserve_top;
+    pager.reserve_cols = reserve_cols;
+    let mut complete = true;
+    // Walked in keep-runs rather than block by block: `page-break-after: avoid` binds a block to the
+    // next one, so what may be split across a page is a run, not always a single block (#251).
+    let mut j = 0;
+    while j < body.len() {
         // Checked before the run, not after: once enough whole pages exist, laying out one more
         // block is work the caller has said it does not need.
         if pager.finished_page_count() >= column_budget {
             complete = false;
             break;
         }
-        let end = keep_run_end(blocks, i);
-        let laid = pager.add_keep_run(&blocks[i..end], |k| i + k, &mut cursor, m, images);
-        i += laid.max(1);
+        let end = keep_run_end(body, j);
+        let laid = pager.add_keep_run(&body[j..end], |k| index_base + j + k, cursor, m, images);
+        j += laid.max(1);
     }
-    let columns = opts.effective_columns();
     let mut laid = if complete {
         pager.finish()
     } else {
@@ -731,12 +809,106 @@ pub fn paginate_upto(
     if !complete {
         // A single keep-run or table row can emit several columns before the budget is looked at
         // again, so the pager may have overshot — and in two-column mode an odd column count would
-        // make `combine_columns` build a half page the full pass never produces. Trim to whole
-        // pages within the budget, so a partial pagination stays a true prefix.
-        let whole = laid.len().min(column_budget) / usize::from(columns) * usize::from(columns);
+        // make `combine_columns` build a half page the full pass never produces. Trim to whole pages
+        // within the budget, so a partial pagination stays a true prefix.
+        let whole = laid.len().min(column_budget) / usize::from(cols) * usize::from(cols);
         laid.truncate(whole);
     }
-    (combine_columns(laid, opts, columns), complete)
+    (laid, complete)
+}
+
+/// Lay a chapter's leading heading(s) as a full-width band, then the body beneath it
+/// (ADR-INKREAD-0017 D2/D3). The band is laid to the full text measure; the body is laid with the
+/// **first physical page** shortened by the band height, so only page 0 carries the band and every
+/// later page is a normal full-height page (no top gap). A short body that fits on the first page is
+/// set in a single full-width column rather than two columns with a near-empty second one.
+#[allow(clippy::too_many_arguments)]
+fn paginate_with_band(
+    blocks: &[Block],
+    band_len: usize,
+    opts: &LayoutOpts,
+    m: &dyn Metrics,
+    hyph: &dyn Hyphenator,
+    images: &dyn ImageSizer,
+    max_pages: usize,
+) -> (Vec<Page>, bool) {
+    // 1. The band: the heading run, laid to the full text measure (one column = whole width). The
+    // cursor is shared so the body's chapter-relative offsets continue contiguously (ADR-0012).
+    let mut band_opts = *opts;
+    band_opts.columns = 1;
+    // Unpaged (like a table cell: full measure, no page budget, top margin collapsed) so the band is
+    // one segment even for a tall multi-line headline — a paged pager would restart `top` at 0 on an
+    // overflow and make `flow_height` under-report the band height (ADR-INKREAD-0017 D2).
+    let mut band_pager = Pager::cell(&band_opts, hyph, band_opts.content_w());
+    let mut cursor = 0usize;
+    let mut bi = 0;
+    while bi < band_len {
+        let end = keep_run_end(&blocks[..band_len], bi);
+        let laid = band_pager.add_keep_run(&blocks[bi..end], |k| bi + k, &mut cursor, m, images);
+        bi += laid.max(1);
+    }
+    let band_lines: Vec<LayoutLine> = band_pager
+        .finish()
+        .into_iter()
+        .flat_map(|p| p.lines)
+        .collect();
+    let band_h = flow_height(&band_lines) + opts.para_gap;
+
+    // 2. The body. A short article is set in a single full-width column beneath the band rather than
+    // two columns with a near-empty second one (ADR-INKREAD-0017 D3): lay one full-width column
+    // first, and if the whole body fits on the first page keep it, else lay two columns. `band_len`
+    // re-bases the source-block index so anchors still name the original block (ADR-0012).
+    let body = &blocks[band_len..];
+    let cursor_after_band = cursor;
+    let mut single_opts = *opts;
+    single_opts.columns = 1;
+    let mut single_cursor = cursor_after_band;
+    let (single, single_fits) = lay_body_columns(
+        body,
+        &single_opts,
+        band_h,
+        1,
+        band_len,
+        m,
+        hyph,
+        images,
+        1,
+        &mut single_cursor,
+    );
+    let (laid, used_cols, complete) = if single_fits {
+        (single, 1u8, true)
+    } else {
+        let columns = opts.effective_columns();
+        let mut multi_cursor = cursor_after_band;
+        let (multi, complete) = lay_body_columns(
+            body,
+            opts,
+            band_h,
+            usize::from(columns),
+            band_len,
+            m,
+            hyph,
+            images,
+            max_pages,
+            &mut multi_cursor,
+        );
+        (multi, columns, complete)
+    };
+    let mut pages = combine_columns(laid, opts, used_cols);
+
+    // 3. Drop the first page's body beneath the band and set the band atop it. Only page 0 moves —
+    // later pages are full-height and already correct.
+    if let Some(first) = pages.first_mut() {
+        for line in &mut first.lines {
+            line.top += band_h;
+        }
+        let mut lines = band_lines;
+        lines.append(&mut first.lines);
+        first.lines = lines;
+    } else {
+        pages.push(Page { lines: band_lines });
+    }
+    (pages, complete)
 }
 
 /// Fold a run of single-column pages into multi-column ones (#194).
@@ -805,6 +977,13 @@ struct Pager<'o> {
     /// Whether such a block has emitted a line yet — the first line of a block is where a break is
     /// allowed to fall, so only the ones after it are bound to what precedes them.
     kept_one: bool,
+    /// Height reserved at the top of the first physical page's columns, for a full-width band laid
+    /// above them (ADR-INKREAD-0017 D2). Zero for every ordinary flow — then [`Self::page_limit`] is
+    /// just `page_h` and pagination is byte-identical to before the band existed.
+    reserve_top: f32,
+    /// How many leading columns the reservation applies to — the columns of the first physical page
+    /// ([`LayoutOpts::effective_columns`]), so both columns beneath the band are shortened equally.
+    reserve_cols: usize,
 }
 
 impl<'o> Pager<'o> {
@@ -821,6 +1000,20 @@ impl<'o> Pager<'o> {
             collapse_at_top: true,
             keep_lines: false,
             kept_one: false,
+            reserve_top: 0.0,
+            reserve_cols: 0,
+        }
+    }
+
+    /// The vertical budget for the column currently being filled. The first physical page's columns
+    /// are shortened by `reserve_top` to make room for the full-width band above them
+    /// (ADR-INKREAD-0017 D2); every later column, and every pager with no reservation, gets the full
+    /// `page_h`, so ordinary pagination is unchanged.
+    fn page_limit(&self) -> f32 {
+        if self.pages.len() < self.reserve_cols {
+            (self.page_h - self.reserve_top).max(1.0)
+        } else {
+            self.page_h
         }
     }
 
@@ -867,7 +1060,7 @@ impl<'o> Pager<'o> {
     /// [`LayoutLine::text_top`]).
     fn emit_line(&mut self, runs: Vec<PlacedRun>, height: f32, text_top: f32, rule: bool) {
         self.flush_gap();
-        if self.cursor_y + height > self.page_h && !self.current.is_empty() {
+        if self.cursor_y + height > self.page_limit() && !self.current.is_empty() {
             self.break_page();
         }
         let top = self.cursor_y;
@@ -921,7 +1114,7 @@ impl<'o> Pager<'o> {
         }
         self.flush_gap();
         if !self.current.is_empty()
-            && self.cursor_y + total_h > self.page_h
+            && self.cursor_y + total_h > self.page_limit()
             && total_h <= self.page_h
         {
             self.break_page();
@@ -930,7 +1123,7 @@ impl<'o> Pager<'o> {
         // spills: the lines below the break keep their spacing relative to each other.
         let mut base = self.cursor_y;
         for mut line in lines {
-            if base + line.top + line.height > self.page_h && !self.current.is_empty() {
+            if base + line.top + line.height > self.page_limit() && !self.current.is_empty() {
                 // A line bound to the one above takes that whole group with it, so a stanza the
                 // book asked to keep whole moves rather than being halved (#251). If the group
                 // would empty the page it is taller than any page and the request cannot be met —

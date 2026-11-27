@@ -44,6 +44,10 @@ class AdjustSheetController(private val host: Host) {
         /** Whether PDF reflow mode is currently on (ADR-INKREAD-0011). */
         val reflowOn: Boolean
 
+        /** Whether the open book is a daily issue, whose column count is fixed by its layout style
+         *  (ADR-INKREAD-0018 D3), so the manual Columns control does not apply and is hidden. */
+        val isDailyIssue: Boolean
+
         /** Current zoom as a percentage, for the Zoom tab's label. */
         val zoomPercent: Int
 
@@ -416,29 +420,33 @@ class AdjustSheetController(private val host: Host) {
             host.diag { "DIAG alignment=$which" }
             applyReflow { NativeBridge.nativeSetAlignment(host.docHandle, which) }
         }))
-        // #194. The core declines two columns on a page too narrow for a readable measure. Say so:
-        // silently doing nothing is indistinguishable from a broken control, and the setting is
-        // still stored — it takes effect once the text is smaller or the page wider.
-        container.addView(settingRow("Columns", segmented(listOf("Single", "Two"), prefs.columns - 1) { which ->
-            prefs.columns = which + 1
-            applyReflow {
-                val page = NativeBridge.nativeSetColumns(host.docHandle, prefs.columns)
-                val effective =
-                    runCatching { NativeBridge.nativeEffectiveColumns(host.docHandle) }.getOrDefault(1)
-                android.util.Log.i(
-                    "AdjustSheet",
-                    "columns: asked ${prefs.columns}, layout using $effective, page=$page",
-                )
-                if (prefs.columns > effective) activity.runOnUiThread {
-                    Toast.makeText(
-                        activity,
-                        "Two columns need a wider page or smaller text",
-                        Toast.LENGTH_SHORT,
-                    ).show()
+        // A daily issue's columns follow its layout style (ADR-INKREAD-0018 D3), so the manual control
+        // does not apply: hide it rather than show a toggle that does nothing on a daily.
+        if (!host.isDailyIssue) {
+            // #194. The core declines two columns on a page too narrow for a readable measure. Say so:
+            // silently doing nothing is indistinguishable from a broken control, and the setting is
+            // still stored — it takes effect once the text is smaller or the page wider.
+            container.addView(settingRow("Columns", segmented(listOf("Single", "Two"), prefs.columns - 1) { which ->
+                prefs.columns = which + 1
+                applyReflow {
+                    val page = NativeBridge.nativeSetColumns(host.docHandle, prefs.columns)
+                    val effective =
+                        runCatching { NativeBridge.nativeEffectiveColumns(host.docHandle) }.getOrDefault(1)
+                    android.util.Log.i(
+                        "AdjustSheet",
+                        "columns: asked ${prefs.columns}, layout using $effective, page=$page",
+                    )
+                    if (prefs.columns > effective) activity.runOnUiThread {
+                        Toast.makeText(
+                            activity,
+                            "Two columns need a wider page or smaller text",
+                            Toast.LENGTH_SHORT,
+                        ).show()
+                    }
+                    page
                 }
-                page
-            }
-        }))
+            }))
+        }
         return container
     }
 
