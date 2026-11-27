@@ -14,6 +14,11 @@ number is given in parentheses.
 
 ### Added
 
+- **Daily layout styles**: a daily issue can be read as **Papernews** (the default: two columns under
+  a full-width headline band), **Standard** (one plain column, no band), or **Vintage** (two columns
+  with a centred headline and an uppercased byline). Pick it in Settings under Daily. Changing the
+  style re-styles today's issue in place, without going back to the network, and the reader shows the
+  new layout the moment it is ready rather than the old one (#66).
 - Hands-free **auto page-turn**: an Auto control in the reader's bottom bar turns the page by itself
   every 15, 30, 45, 60 or 90 seconds until you touch the screen or the book ends. The pace you pick
   is remembered for next time (#97).
@@ -73,6 +78,9 @@ number is given in parentheses.
 
 ### Fixed
 
+- A daily article whose page has no extractable prose (an interactive page, a link-only post) now
+  shows the feed's own summary rather than a dead "no readable text" placeholder, and that message
+  no longer uses an em dash (#66).
 - EPUB images inside a paragraph or heading are drawn instead of printing their alt text (usually
   the word "image"). A paragraph or heading that holds only a picture, the way most converters wrap
   figures, display equations and chapter-number art, is laid out as a figure. A picture set among

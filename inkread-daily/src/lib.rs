@@ -17,7 +17,7 @@ pub mod quote;
 pub use epub::assemble_epub;
 pub use extract::extract_readable;
 pub use feed::{parse_feed, FeedItem, ParsedFeed};
-pub use model::{Article, Issue, Source};
+pub use model::{Article, DailyLayoutStyle, Issue, Source};
 
 use serde::Deserialize;
 
@@ -39,6 +39,10 @@ struct RawIssue {
     /// Source names in the reader's order (#269); optional so an issue from an older shell parses.
     #[serde(default)]
     sources: Vec<String>,
+    /// The reader's chosen layout style (ADR-INKREAD-0018); optional so an older shell's JSON (no
+    /// style) assembles as the default Papernews.
+    #[serde(default)]
+    style: model::DailyLayoutStyle,
 }
 
 #[derive(Deserialize)]
@@ -67,8 +71,15 @@ pub fn assemble_issue_from_json(json: &str) -> Result<Vec<u8>, String> {
         .into_iter()
         .map(|a| {
             // The page's own <h1> usually repeats the article title; drop that leading paragraph so
-            // the title isn't shown twice (the issue already renders the title above the body).
-            let body_html = without_leading_title(&extract_readable(&a.html), &a.title);
+            // the title isn't shown twice (the issue already renders the title above the body). When
+            // the page had no extractable prose, fall back to the feed's own summary (#198) rather
+            // than a dead placeholder.
+            let extracted = extract_readable(&a.html);
+            let body_html = if extracted.trim().is_empty() {
+                extract::summary_fallback(a.summary.as_deref())
+            } else {
+                without_leading_title(&extracted, &a.title)
+            };
             Article {
                 title: a.title,
                 source: a.source,
@@ -84,6 +95,7 @@ pub fn assemble_issue_from_json(json: &str) -> Result<Vec<u8>, String> {
         date: raw.date,
         articles,
         sources: raw.sources,
+        style: raw.style,
     };
     Ok(assemble_epub(&issue))
 }

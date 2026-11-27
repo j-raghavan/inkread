@@ -182,6 +182,14 @@ pub struct EpubBackend {
     nav: Vec<NavPoint>,
     /// Title/author.
     meta: DocumentMetadata,
+    /// Whether this book is an inkread-daily issue (OPF id `urn:inkread-daily:…`), which switches on
+    /// the full-width headline band in multi-column mode (ADR-INKREAD-0017 D5).
+    band: bool,
+    /// For a daily issue, the column count its *stamped* style opens in (ADR-INKREAD-0018 D3); `None`
+    /// for an ordinary book. A daily's columns follow the style baked into the issue, not the reader's
+    /// live column pref, so a back issue built as Standard never renders two-column-without-a-band
+    /// (and a Papernews issue is always two-column) whatever the pref is today.
+    daily_columns: Option<u8>,
     /// The reading face; `RefCell` so the `&self` font-family setter can swap it (RR4 / font select).
     font: RefCell<AbFont>,
     /// Soft-hyphenation for justified/narrow lines (book typography, like KOReader).
@@ -255,6 +263,22 @@ impl EpubBackend {
             title: pkg.title.clone(),
             author: pkg.author.clone(),
         };
+        // A daily issue's OPF id is `urn:inkread-daily:<style>:<date>` (ADR-0017 D5 / ADR-0018 D2).
+        // The stamped style decides both the band and the column count (ADR-0018 D3): Papernews and
+        // Vintage are two-column with a band, Standard is one-column with none. Reading them from the
+        // same stamp is what keeps a daily's columns and band in agreement no matter the reader's live
+        // pref. A legacy issue with no `<style>` segment parses as the default Papernews. An ordinary
+        // book has no such id, so `daily_style` is `None`: no band, and columns follow the pref.
+        let daily_style = pkg
+            .identifier
+            .as_deref()
+            .and_then(|id| id.strip_prefix("urn:inkread-daily:"))
+            .map(|rest| {
+                let token = rest.split(':').next().unwrap_or(rest);
+                inkread_daily::DailyLayoutStyle::from_token(token)
+            });
+        let band = daily_style.is_some_and(inkread_daily::DailyLayoutStyle::has_band);
+        let daily_columns = daily_style.map(inkread_daily::DailyLayoutStyle::columns);
         let chapter_anchors = RefCell::new(vec![Vec::new(); chapter_keys.len()]);
         Ok(Self {
             chapters: RefCell::new(chapters),
@@ -265,6 +289,8 @@ impl EpubBackend {
             image_sizes: RefCell::new(HashMap::new()),
             nav: pkg.toc,
             meta,
+            band,
+            daily_columns,
             font: RefCell::new(AbFont::default_font()),
             hyph: EnHyphenator::new(),
             font_id: Cell::new(0),
@@ -328,6 +354,8 @@ impl EpubBackend {
                 title: Some("Synthetic".into()),
                 author: None,
             },
+            band: false,
+            daily_columns: None,
             font: RefCell::new(AbFont::default_font()),
             hyph: EnHyphenator::new(),
             font_id: Cell::new(0),
@@ -503,7 +531,11 @@ impl EpubBackend {
             scale: self.scale.get(),
             line_spacing: self.line_spacing.get(),
             align: self.align.get(),
-            columns: self.columns.get(),
+            // A daily issue's column count is fixed by its stamped style (ADR-INKREAD-0018 D3), so it
+            // overrides the live column pref `set_columns` stores. This is what keeps columns and the
+            // band in step: both read the stamp, so a Standard issue never renders two-column (band
+            // off) and a Papernews/Vintage issue is always two-column, whatever the pref is today.
+            columns: self.daily_columns.unwrap_or_else(|| self.columns.get()),
             margin_pct: self.margin_pct.get(),
             font_id: self.font_id.get(),
         }
@@ -529,7 +561,11 @@ impl EpubBackend {
             Some(laid) => laid.request != request,
         };
         if stale {
-            let opts = Self::opts_for(&request);
+            let mut opts = Self::opts_for(&request);
+            // A daily issue lays out with the headline band on (ADR-INKREAD-0017 D5). It is part of
+            // the layout, so it is set before the cache key is derived — a daily pagination keys
+            // apart from a would-be non-band one of the same geometry.
+            opts.band = self.band;
             let key = layout_key(&opts, request.font_id, self.chapter_count());
             let cache = self.pagination_cache.borrow();
 
@@ -1202,7 +1238,7 @@ pub(crate) fn reset_layout_passes() {
 /// how a style measures. Both invalidate a stored index. A change to run styling has to bump this
 /// by hand.
 fn layout_key(opts: &LayoutOpts, font_id: usize, chapters: usize) -> String {
-    format!("v8|{:016x}|{font_id}|{chapters}", opts.layout_digest())
+    format!("v9|{:016x}|{font_id}|{chapters}", opts.layout_digest())
 }
 
 /// A materialized chapter: the pages laid out so far, and whether that is all of them (#186).

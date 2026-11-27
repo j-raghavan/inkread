@@ -61,6 +61,9 @@ const SKIP_TAGS: &[&str] = &[
 const MIN_BLOCK_CHARS: usize = 40;
 
 /// Extract the main readable body of `html` as well-formed XHTML (one `<p>` per real text block).
+///
+/// Returns an **empty** string when the page carries no extractable prose (an interactive page, a
+/// link-only feed entry). The caller decides what to show instead; see [`summary_fallback`].
 #[must_use]
 pub fn extract_readable(html: &str) -> String {
     let mut out = String::new();
@@ -83,12 +86,25 @@ pub fn extract_readable(html: &str) -> String {
         out.push_str(&escape(&t));
         out.push_str("</p>\n");
     }
-    if out.is_empty() {
-        out.push_str(
-            "<p>(No readable text could be extracted — open the original to read it.)</p>",
-        );
-    }
     out
+}
+
+/// The body to show when [`extract_readable`] found no prose: the feed's own `description`/`summary`
+/// rendered as one clean paragraph (#198), or a plain note when the feed gave no summary either.
+///
+/// The summary is the publisher's own line about the piece, so it is a better fallback than a dead
+/// placeholder. It may carry markup and entities, so it is reduced to plain text and re-escaped; the
+/// extractor's length and boilerplate filters are deliberately *not* applied, since a short summary
+/// is exactly what we want to keep here.
+#[must_use]
+pub(crate) fn summary_fallback(summary: Option<&str>) -> String {
+    if let Some(text) = summary
+        .map(|s| collapse_ws(&crate::model::strip_markup(s)))
+        .filter(|s| !s.is_empty())
+    {
+        return format!("<p>{}</p>\n", escape(&text));
+    }
+    "<p>(No readable text could be extracted. Open the original to read it.)</p>".to_string()
 }
 
 /// Split `html` into text blocks. Parses with html5ever, narrows to the article body, then walks the
@@ -437,9 +453,30 @@ mod tests {
     }
 
     #[test]
-    fn empty_or_chrome_only_yields_a_placeholder() {
+    fn chrome_only_extracts_empty_then_falls_back_to_the_summary() {
+        // A page with only chrome yields no prose: extraction is empty, and the caller falls back.
         let out =
             extract_readable("<html><body><nav>Home About</nav><script>x</script></body></html>");
-        assert!(out.starts_with("<p>") && out.ends_with("</p>"), "{out}");
+        assert!(out.is_empty(), "no prose extracts to empty: {out:?}");
+
+        // With a feed summary, the fallback shows it as a clean paragraph: tags stripped and a bare
+        // `&` (feed summaries are entity-decoded upstream) escaped exactly once, not doubled.
+        let with = summary_fallback(Some("<b>A short</b> feed & blurb."));
+        assert!(with.contains("A short feed &amp; blurb."), "{with}");
+        assert!(
+            !with.contains("&amp;amp;"),
+            "escaped once, not twice: {with}"
+        );
+        assert!(!with.contains("<b>"), "tags stripped: {with}");
+        // With no summary, a plain note, and no em dash in either (house style).
+        let without = summary_fallback(None);
+        assert!(
+            without.contains("No readable text could be extracted"),
+            "{without}"
+        );
+        assert!(
+            !with.contains('\u{2014}') && !without.contains('\u{2014}'),
+            "no em dash in the fallbacks"
+        );
     }
 }
