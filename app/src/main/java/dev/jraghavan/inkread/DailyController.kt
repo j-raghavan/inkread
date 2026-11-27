@@ -60,11 +60,11 @@ class DailyController(private val context: Context) {
         /** Today's plain reader look: one column, no band. */
         STANDARD("standard", "Standard", "One column, no headline band: the plain reader look."),
 
-        /** The default: two columns with a full-width headline band. */
-        PAPERNEWS("papernews", "Papernews", "Two columns with a full-width headline across the top."),
+        /** The default: two columns with a full-width headline band and a centre rule. */
+        PAPERNEWS("papernews", "Papernews", "Two columns with a full-width headline and a centre rule."),
 
-        /** Papernews plus a centred headline and an uppercased byline. */
-        VINTAGE("vintage", "Vintage", "Two columns, with a centred headline and an uppercased byline.");
+        /** Papernews plus a blackletter nameplate, a centred headline and a drop-cap opening. */
+        VINTAGE("vintage", "Vintage", "A blackletter nameplate, a centred headline and a drop cap.");
 
         companion object {
             /** Parse a stored [token]; unknown or legacy (none stored yet) → Papernews, so the
@@ -86,6 +86,16 @@ class DailyController(private val context: Context) {
      *  always renders in the style it was built with (ADR-INKREAD-0018 D3). */
     fun setLayoutStyle(style: LayoutStyle) {
         prefs().edit().putString("layout_style", style.token).apply()
+    }
+
+    /** Whether the one-time layout-style chooser has been shown (ADR-INKREAD-0018 D4). It appears the
+     *  first time the Daily is opened, so a new reader meets the styles; after that it is set only in
+     *  Settings. */
+    fun styleChooserShown(): Boolean = prefs().getBoolean("style_chooser_shown", false)
+
+    /** Record that the one-time layout-style chooser has been shown, so it is offered only once. */
+    fun markStyleChooserShown() {
+        prefs().edit().putBoolean("style_chooser_shown", true).apply()
     }
 
     private fun dailyDir(): File = File(context.filesDir, DIR).apply { mkdirs() }
