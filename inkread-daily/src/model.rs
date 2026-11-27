@@ -145,10 +145,13 @@ impl DailyLayoutStyle {
     }
 
     /// Whether a hairline rule is drawn down the centre gutter between the columns (the newspaper
-    /// divider): Vintage only (ADR-INKREAD-0018 D1).
+    /// divider): the two-column paper styles, Papernews and Vintage (ADR-INKREAD-0018 D1).
     #[must_use]
     pub fn has_column_rule(self) -> bool {
-        matches!(self, DailyLayoutStyle::Vintage)
+        matches!(
+            self,
+            DailyLayoutStyle::Papernews | DailyLayoutStyle::Vintage
+        )
     }
 
     /// Whether the body's first paragraph opens with a drop cap: Vintage only (ADR-INKREAD-0018 D1).
@@ -221,6 +224,13 @@ mod tests {
         assert!(DailyLayoutStyle::Vintage.has_band());
         assert_eq!(DailyLayoutStyle::Standard.columns(), 1);
         assert!(!DailyLayoutStyle::Standard.has_band());
+        // The gutter divider is drawn for both two-column paper styles, not for one-column Standard.
+        assert!(DailyLayoutStyle::Papernews.has_column_rule());
+        assert!(DailyLayoutStyle::Vintage.has_column_rule());
+        assert!(!DailyLayoutStyle::Standard.has_column_rule());
+        // The drop cap stays Vintage-only.
+        assert!(DailyLayoutStyle::Vintage.has_drop_cap());
+        assert!(!DailyLayoutStyle::Papernews.has_drop_cap());
     }
 
     #[test]
