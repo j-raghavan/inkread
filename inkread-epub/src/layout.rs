@@ -777,6 +777,13 @@ pub fn paginate_upto(
 /// The number of leading blocks that form the headline band — the run of headings at the chapter
 /// start, plus an immediately-following byline paragraph (ADR-INKREAD-0017 D2/D4). `None` when the
 /// chapter does not open with a heading, which leaves the ordinary column path untouched.
+/// True for a preformatted (`<pre>`) block. The daily lays an article that contains one full-width in
+/// a single column so its code and commands span the whole measure (ADR-INKREAD-0018) rather than
+/// char-wrapping into a narrow newspaper column.
+fn block_is_preformatted(b: &Block) -> bool {
+    matches!(b, Block::Paragraph { style, .. } if style.preformatted)
+}
+
 fn band_run(blocks: &[Block]) -> Option<usize> {
     // The band is the article's full-width lead: whatever nameplate, rule and dateline blocks the
     // style places *before* the headline (Vintage, ADR-INKREAD-0018 D1), the headline run itself,
@@ -908,6 +915,11 @@ fn paginate_with_band(
     // re-bases the source-block index so anchors still name the original block (ADR-0012).
     let body = &blocks[band_len..];
     let cursor_after_band = cursor;
+    // A code-bearing article is set full-width in a single column so its `<pre>` blocks and commands
+    // span the whole measure instead of being char-wrapped into a narrow newspaper column
+    // (ADR-INKREAD-0018). Otherwise the short-article rule stands: lay one full-width page and keep it
+    // only if the whole body fits there, else go to two columns.
+    let force_single = body.iter().any(block_is_preformatted);
     let mut single_opts = *opts;
     single_opts.columns = 1;
     let mut single_cursor = cursor_after_band;
@@ -920,11 +932,13 @@ fn paginate_with_band(
         m,
         hyph,
         images,
-        1,
+        if force_single { max_pages } else { 1 },
         &mut single_cursor,
         opts.drop_cap, // the band stripped the lead, so the first body paragraph may take the cap
     );
-    let (laid, used_cols, complete) = if single_fits {
+    let (laid, used_cols, complete) = if force_single {
+        (single, 1u8, single_fits)
+    } else if single_fits {
         (single, 1u8, true)
     } else {
         let columns = opts.effective_columns();

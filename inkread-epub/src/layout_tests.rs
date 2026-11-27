@@ -2460,3 +2460,55 @@ fn a_long_preformatted_line_char_wraps_without_overflow() {
         );
     }
 }
+
+/// A daily article whose body contains a `<pre>` is set full-width in a single column so the code
+/// spans the whole measure, even though the issue asks for two columns (ADR-INKREAD-0018).
+#[test]
+fn a_daily_code_article_is_laid_full_width_single_column() {
+    let opts = band_opts(); // two columns, band on: text_w 600, each column 300
+    let code = Block::Paragraph {
+        content: vec![Inline::Run(TextRun {
+            text: "let x = 1;\nlet y = 2;\nprintln!(\"{}\", x + y);".into(),
+            bold: false,
+            italic: false,
+            mono: true,
+            href: None,
+        })],
+        style: BlockStyle {
+            preformatted: true,
+            ..BlockStyle::default()
+        },
+    };
+    let prose = "Some prose that fills the body with enough lines to exceed a single page and \
+                 would otherwise flow into a narrow second column of the newspaper layout.";
+    let mut blocks = vec![heading_block(2, "A Build Note")];
+    for _ in 0..12 {
+        blocks.push(para(prose));
+    }
+    blocks.push(code);
+    for _ in 0..12 {
+        blocks.push(para(prose));
+    }
+    let pages = paginate(&blocks, &opts, &Mono);
+    let col_w = opts.column_width(); // one column in two-column mode (300)
+    let max_right = pages
+        .iter()
+        .flat_map(|p| p.lines.iter())
+        .flat_map(|l| &l.runs)
+        .map(|r| r.x + r.width(&Mono))
+        .fold(0.0_f32, f32::max);
+    assert!(
+        max_right > col_w + 10.0,
+        "a code article must use the full width ({max_right} should exceed one column {col_w})",
+    );
+    // The code lines are present and monospace.
+    let has_mono = pages
+        .iter()
+        .flat_map(|p| p.lines.iter())
+        .flat_map(|l| &l.runs)
+        .any(|r| r.mono && r.text.contains("println!"));
+    assert!(
+        has_mono,
+        "the preformatted code lines must be laid in the mono face"
+    );
+}
