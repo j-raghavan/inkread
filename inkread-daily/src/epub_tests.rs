@@ -621,3 +621,152 @@ fn dump_vintage_preview() {
     std::fs::write(&path, assemble_epub(&issue)).expect("write vintage preview epub");
     eprintln!("wrote {path}");
 }
+
+// ---------------------------------------------------------------------------------------------
+// #66 — display-equation rendering (basic math).
+// ---------------------------------------------------------------------------------------------
+
+/// A display equation (the extractor's `<img class="latex" alt="\displaystyle …"/>` marker) is
+/// rendered to a PNG, embedded as a per-article image resource, listed in the OPF manifest, and
+/// referenced from the article body — and the issue still opens with the reader's EPUB backend.
+#[test]
+fn a_display_equation_is_rendered_to_an_embedded_png_resource() {
+    use std::io::Read;
+    let body = "<p>The sum of the first N positive integers is given by the closed form</p>\n\
+        <p class=\"eq\"><img class=\"latex\" \
+        alt=\"\\displaystyle \\sum_{n=1}^N n = \\frac{N(N+1)}{2}\"/></p>\n\
+        <p>which follows by a short induction on the number of terms.</p>";
+    let issue = Issue {
+        sources: vec![],
+        style: DailyLayoutStyle::Papernews,
+        title: "inkread daily".into(),
+        date: "27 Nov 2026".into(),
+        articles: vec![article("Gauss's Trick", "A Blog", body, None)],
+    };
+    let bytes = assemble_epub(&issue);
+
+    // Still a valid EPUB, and the body now points at the rendered image rather than the raw marker.
+    let pkg = EpubPackage::open(bytes.clone()).expect("an issue with math opens");
+    let html: String = pkg.chapters.iter().map(|c| c.html.clone()).collect();
+    assert!(
+        html.contains("src=\"a0-eq0.png\""),
+        "the equation image is rewritten to its resource: {html}"
+    );
+    assert!(
+        html.contains("\\displaystyle"),
+        "the LaTeX is kept in the alt as a fallback: {html}"
+    );
+
+    // The PNG resource is embedded and the manifest lists it.
+    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).expect("zip opens");
+    let mut png = Vec::new();
+    zip.by_name("OEBPS/a0-eq0.png")
+        .expect("the equation PNG is embedded")
+        .read_to_end(&mut png)
+        .unwrap();
+    assert!(
+        png.len() > 8 && &png[..8] == b"\x89PNG\r\n\x1a\n",
+        "a real PNG is embedded"
+    );
+    let mut opf = String::new();
+    zip.by_name("OEBPS/content.opf")
+        .unwrap()
+        .read_to_string(&mut opf)
+        .unwrap();
+    assert!(
+        opf.contains("href=\"a0-eq0.png\" media-type=\"image/png\""),
+        "the manifest lists the equation image: {opf}"
+    );
+}
+
+/// The extractor's own marker output, fed straight into assembly, renders to an embedded PNG. This
+/// pins the extract→assemble contract end to end, so a drift in the shared marker shape fails here
+/// rather than silently degrading every equation to text in the field.
+#[test]
+fn an_extracted_display_equation_renders_end_to_end() {
+    let raw = "<article><p>The sum of the first N positive integers has the closed form</p>\
+        <p><img class=\"latex\" alt=\"\\displaystyle \\sum_{n=1}^N n = \\frac{N(N+1)}{2}\" \
+           src=\"https://s0.wp.com/latex.php?latex=x\"/></p>\
+        <p>which a short induction on the number of terms confirms.</p></article>";
+    let body = crate::extract::extract_readable(raw);
+    assert!(
+        body.contains("class=\"eq\""),
+        "extraction keeps the equation marker: {body}"
+    );
+    let issue = Issue {
+        sources: vec![],
+        style: DailyLayoutStyle::Papernews,
+        title: "inkread daily".into(),
+        date: "27 Nov 2026".into(),
+        articles: vec![article("Gauss", "A Blog", &body, None)],
+    };
+    let bytes = assemble_epub(&issue);
+    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).expect("zip opens");
+    assert!(
+        zip.by_name("OEBPS/a0-eq0.png").is_ok(),
+        "the extracted equation renders to an embedded PNG end to end"
+    );
+}
+
+/// A display equation whose LaTeX does not render keeps its LaTeX as visible text and embeds no
+/// image — the feature's graceful-degrade guarantee (one bad formula never breaks the issue).
+#[test]
+fn an_unrenderable_equation_degrades_to_latex_text_with_no_image() {
+    let body = "<p>Consider the identity</p>\n\
+        <p class=\"eq\"><img class=\"latex\" alt=\"\\displaystyle \\frac{1}{\"/></p>\n\
+        <p>which the typesetter cannot parse.</p>";
+    let issue = Issue {
+        sources: vec![],
+        style: DailyLayoutStyle::Papernews,
+        title: "inkread daily".into(),
+        date: "27 Nov 2026".into(),
+        articles: vec![article("Broken Math", "A Blog", body, None)],
+    };
+    let bytes = assemble_epub(&issue);
+    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes.clone())).expect("zip opens");
+    assert!(
+        zip.by_name("OEBPS/a0-eq0.png").is_err(),
+        "an unrenderable equation embeds no image"
+    );
+    let pkg = EpubPackage::open(bytes).expect("the issue still opens");
+    let html: String = pkg.chapters.iter().map(|c| c.html.clone()).collect();
+    assert!(
+        html.contains("\\frac{1}{") && !html.contains("src=\"a0-eq0.png\""),
+        "the formula degrades to its LaTeX text: {html}"
+    );
+}
+
+/// Host preview (#66 math): assemble an issue with display equations and write it to a path, to
+/// rasterise and eyeball the equation size/sharpness among prose. Run:
+///   `INKREAD_MATH_OUT=/tmp/math.epub cargo test -p inkread-daily dump_math_preview -- --ignored`
+#[test]
+#[ignore = "host preview: set INKREAD_MATH_OUT=<path>"]
+fn dump_math_preview() {
+    let Ok(path) = std::env::var("INKREAD_MATH_OUT") else {
+        eprintln!("SKIP: set INKREAD_MATH_OUT to a .epub path");
+        return;
+    };
+    let body = "<p>A classical identity relates the sum of the first N integers to a product, a \
+        result attributed (perhaps apocryphally) to a young Gauss silencing a tedious lesson:</p>\n\
+        <p class=\"eq\"><img class=\"latex\" \
+        alt=\"\\displaystyle \\sum_{n=1}^{N} n = \\frac{N(N+1)}{2}\"/></p>\n\
+        <p>The same pairing argument gives the sum of an arithmetic progression in general, and a \
+        second line of reasoning recovers the sum of squares,</p>\n\
+        <p class=\"eq\"><img class=\"latex\" \
+        alt=\"\\displaystyle \\sum_{n=1}^{N} n^2 = \\frac{N(N+1)(2N+1)}{6}\"/></p>\n\
+        <p>which in turn feeds the standard estimate for the integral of a quadratic.</p>";
+    let issue = Issue {
+        sources: vec!["A Blog".into()],
+        style: DailyLayoutStyle::Papernews,
+        title: "inkread daily".into(),
+        date: "27 Nov 2026".into(),
+        articles: vec![article(
+            "Sums and Squares",
+            "A Blog",
+            body,
+            Some("27 Nov 2026"),
+        )],
+    };
+    std::fs::write(&path, assemble_epub(&issue)).expect("write math preview epub");
+    eprintln!("wrote {path}");
+}

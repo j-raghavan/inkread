@@ -11,6 +11,7 @@
 mod epub;
 mod extract;
 mod feed;
+mod math;
 mod model;
 pub mod quote;
 

@@ -25,6 +25,11 @@ use crate::layout::{Hyphenator, LayoutOpts, Metrics, Page, SourceAnchor, Wrap};
 /// The bundled default reading face — Spectral Regular (SIL OFL 1.1; see `fonts/OFL.txt`).
 const DEFAULT_FONT: &[u8] = include_bytes!("../fonts/Spectral-Regular.ttf");
 
+/// The bundled fixed-pitch face (Apache-2.0), used for preformatted `<pre>` blocks and inline
+/// `<code>` runs so a command or listing keeps its own column alignment instead of being set in the
+/// proportional reading face.
+const MONO_FONT: &[u8] = include_bytes!("../fonts/DroidSansMono.ttf");
+
 /// One selectable reading family. Only `regular` is required; a style the family does not bundle is
 /// synthesized from the nearest face it does (see [`Synth`]), so a family may ship as little as one
 /// file and still render bold and italic text distinguishably.
@@ -324,6 +329,15 @@ fn parse_face(bytes: &'static [u8]) -> Option<FontVec> {
     FontVec::try_from_vec(bytes.to_vec()).ok()
 }
 
+/// The bundled fixed-pitch face, parsed. Like the regular reading face it is `include_bytes!` of a
+/// file in this crate that `every_bundled_face_parses` checks, so a break is caught at build time;
+/// it falls back to the default face only to keep the constructor total rather than panicking.
+fn mono_face() -> FontVec {
+    parse_face(MONO_FONT)
+        .or_else(|| parse_face(DEFAULT_FONT))
+        .expect("a bundled mono face is valid")
+}
+
 /// A font for measuring + rasterizing reflow text. Owns its bytes (so it is `Send + Sync`, usable
 /// from the `reader-core` document handle across the JNI thread). One reading *family* — a regular
 /// face plus whichever of bold/italic/bold-italic it bundles — over the shared fallback chain,
@@ -335,6 +349,9 @@ pub struct AbFont {
     bold: Option<FontVec>,
     italic: Option<FontVec>,
     bold_italic: Option<FontVec>,
+    /// The fixed-pitch face for preformatted/`<code>` runs. Always present (the mono face is bundled),
+    /// shared by every reading family — a `<pre>` looks the same whatever body face the reader picked.
+    mono: FontVec,
     fallbacks: Vec<Arc<FontVec>>,
 }
 
@@ -378,6 +395,7 @@ impl AbFont {
                         bold: owned(bold),
                         italic: owned(italic),
                         bold_italic: owned(bold_italic),
+                        mono: mono_face(),
                         fallbacks: fallback_chain(),
                     };
                 }
@@ -398,6 +416,7 @@ impl AbFont {
             bold: family.bold.and_then(parse_face),
             italic: family.italic.and_then(parse_face),
             bold_italic: family.bold_italic.and_then(parse_face),
+            mono: mono_face(),
             fallbacks: fallback_chain(),
         }
     }
@@ -412,6 +431,7 @@ impl AbFont {
             bold: None,
             italic: None,
             bold_italic: None,
+            mono: mono_face(),
             fallbacks: fallback_chain(),
         })
     }
@@ -458,6 +478,28 @@ impl AbFont {
                 },
             ),
             None => (face, synth),
+        }
+    }
+
+    /// The face for a monospace run's `ch`: the fixed-pitch face if it has the glyph, else the first
+    /// fallback that does (so a symbol the mono face lacks still renders), else the mono face itself.
+    /// No synthesis — preformatted text and `<code>` are set regular-weight.
+    fn mono_face_for(&self, ch: char) -> (&FontVec, Synth) {
+        if self.mono.glyph_id(ch).0 != 0 {
+            return (&self.mono, Synth::default());
+        }
+        match self.fallbacks.iter().find(|f| f.glyph_id(ch).0 != 0) {
+            Some(f) => (f.as_ref(), Synth::default()),
+            None => (&self.mono, Synth::default()),
+        }
+    }
+
+    /// The face to render `ch` with, honouring the run's monospace flag.
+    fn run_face_for(&self, ch: char, bold: bool, italic: bool, mono: bool) -> (&FontVec, Synth) {
+        if mono {
+            self.mono_face_for(ch)
+        } else {
+            self.face_for(ch, bold, italic)
         }
     }
 }
@@ -523,6 +565,14 @@ impl Metrics for AbFont {
             prev = Some((face, id));
         }
         width
+    }
+
+    /// The fixed-pitch cell: the mono face's advance for a representative glyph. Every glyph shares it,
+    /// so a preformatted run's width is its character count times this (the layout wraps `<pre>` lines
+    /// by it), and it is measured against the same bundled mono face the renderer draws.
+    fn mono_advance(&self, size_px: f32) -> f32 {
+        let sf = self.mono.as_scaled(PxScale::from(size_px));
+        sf.h_advance(self.mono.glyph_id('0'))
     }
 }
 
@@ -699,7 +749,7 @@ pub fn render_page_with_images(
             let mut pen_x = margin + run.x;
             let mut prev: Option<(&FontVec, GlyphId)> = None;
             for ch in run.text.chars() {
-                let (face, synth) = font.face_for(ch, run.bold, run.italic);
+                let (face, synth) = font.run_face_for(ch, run.bold, run.italic, run.mono);
                 let sf = face.as_scaled(scale);
                 let id = face.glyph_id(ch);
                 if let Some((pf, pid)) = prev {
@@ -849,7 +899,7 @@ pub fn page_glyphs(page: &Page, opts: &LayoutOpts, font: &AbFont) -> Vec<PlacedG
             let run_first = out.len();
             // The glyph's chapter-relative offset = the run's first-char offset + its index in the run.
             for (i, ch) in run.text.chars().enumerate() {
-                let (face, synth) = font.face_for(ch, run.bold, run.italic);
+                let (face, synth) = font.run_face_for(ch, run.bold, run.italic, run.mono);
                 let sf = face.as_scaled(scale);
                 let id = face.glyph_id(ch);
                 if let Some((pf, pid)) = prev {
@@ -1019,6 +1069,7 @@ mod tests {
                 text: text.into(),
                 bold: false,
                 italic: false,
+                mono: false,
                 href: None,
             })],
             style: BlockStyle::default(),
@@ -1033,12 +1084,14 @@ mod tests {
                     text: plain.into(),
                     bold: false,
                     italic: false,
+                    mono: false,
                     href: None,
                 }),
                 Inline::Run(TextRun {
                     text: link.into(),
                     bold: false,
                     italic: false,
+                    mono: false,
                     href: Some(href.into()),
                 }),
             ],
@@ -1398,6 +1451,7 @@ mod tests {
                 text: text.into(),
                 bold,
                 italic,
+                mono: false,
                 href: None,
             })],
             style: BlockStyle::default(),
@@ -1703,6 +1757,7 @@ mod tests {
                 text: "Title".into(),
                 bold: false,
                 italic: false,
+                mono: false,
                 href: None,
             })],
             style: BlockStyle::default(),
@@ -1799,6 +1854,7 @@ mod tests {
                 text: t.into(),
                 bold: false,
                 italic: false,
+                mono: false,
                 href: None,
             })
         };

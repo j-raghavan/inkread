@@ -627,6 +627,7 @@ fn text_block(text: &str, heading: Option<u8>) -> Block {
         text: text.to_string(),
         bold: false,
         italic: false,
+        mono: false,
         href: None,
     })];
     // A PDF carries no stylesheet, so nothing is declared and the reader's own typography governs.

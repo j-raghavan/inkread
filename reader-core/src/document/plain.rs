@@ -115,6 +115,7 @@ fn push_paragraph(blocks: &mut Vec<Block>, para: &mut String) {
                 text: text.to_string(),
                 bold: false,
                 italic: false,
+                mono: false,
                 href: None,
             })],
             // Plain text carries no stylesheet: the reader's own typography governs throughout.

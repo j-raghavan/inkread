@@ -720,3 +720,61 @@ fn an_id_on_a_blank_block_carries_to_the_next_real_block() {
     let a = anchors_of(&body(r#"<p id="anchor"></p><p>the real content</p>"#));
     assert_eq!(a, vec![("anchor".into(), 0)]);
 }
+
+#[test]
+fn pre_block_is_preformatted_and_preserves_whitespace() {
+    // A <pre><code> block keeps its newlines and indentation verbatim, becomes one monospace run,
+    // and the block is marked preformatted so the layout sets it line-for-line.
+    let b = parse_blocks(&body(
+        "<pre><code>fn main() {\n    println!(\"hi\");\n}</code></pre>",
+    ));
+    assert_eq!(b.len(), 1);
+    let Block::Paragraph { content, style } = &b[0] else {
+        panic!("expected a paragraph for <pre>");
+    };
+    assert!(style.preformatted, "pre block must be preformatted");
+    assert_eq!(content.len(), 1);
+    let Inline::Run(r) = &content[0] else {
+        panic!("pre content should be a single run");
+    };
+    assert!(r.mono, "pre run must be monospace");
+    assert_eq!(r.text, "fn main() {\n    println!(\"hi\");\n}");
+}
+
+#[test]
+fn pre_drops_one_leading_newline_and_trailing_space() {
+    // HTML ignores a single newline right after <pre>; trailing whitespace is dropped too.
+    let b = parse_blocks(&body("<pre>\nalpha\nbeta\n</pre>"));
+    let Block::Paragraph { content, .. } = &b[0] else {
+        panic!("paragraph");
+    };
+    let Inline::Run(r) = &content[0] else {
+        panic!("run")
+    };
+    assert_eq!(r.text, "alpha\nbeta");
+}
+
+#[test]
+fn inline_code_is_monospace_but_prose_is_not() {
+    // `<code>` mid-sentence marks its run monospace; the surrounding prose stays proportional, and
+    // whitespace is still collapsed (only <pre> preserves it).
+    let b = parse_blocks(&body("<p>run <code>grep  -n</code> now</p>"));
+    let Block::Paragraph { content, style } = &b[0] else {
+        panic!("paragraph");
+    };
+    assert!(
+        !style.preformatted,
+        "an ordinary paragraph is not preformatted"
+    );
+    let code = content
+        .iter()
+        .any(|i| matches!(i, Inline::Run(r) if r.text == "grep -n" && r.mono));
+    let prose = content
+        .iter()
+        .any(|i| matches!(i, Inline::Run(r) if r.text.contains("run") && !r.mono));
+    assert!(
+        code,
+        "inline <code> run must be monospace and whitespace-collapsed"
+    );
+    assert!(prose, "surrounding prose must stay proportional");
+}

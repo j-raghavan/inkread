@@ -60,6 +60,13 @@ const SKIP_TAGS: &[&str] = &[
 /// links), not article prose — dropped. Real paragraphs comfortably exceed it.
 const MIN_BLOCK_CHARS: usize = 40;
 
+/// The exact markup the extractor emits for a display equation, and that the assembler scans back
+/// for ([`crate::epub::embed_math`]): `MATH_IMG_OPEN` + the escaped LaTeX + `MATH_IMG_CLOSE`, wrapped
+/// in a `<p class="eq">`. Shared so the two ends cannot drift. Because `>` and `"` are escaped inside
+/// the `alt`, `MATH_IMG_CLOSE` first appears at the tag's close, which lets the scan skip a full parse.
+pub(crate) const MATH_IMG_OPEN: &str = "<img class=\"latex\" alt=\"";
+pub(crate) const MATH_IMG_CLOSE: &str = "\"/>";
+
 /// Extract the main readable body of `html` as well-formed XHTML (one `<p>` per real text block).
 ///
 /// Returns an **empty** string when the page carries no extractable prose (an interactive page, a
@@ -68,7 +75,36 @@ const MIN_BLOCK_CHARS: usize = 40;
 pub fn extract_readable(html: &str) -> String {
     let mut out = String::new();
     let mut last = String::new();
-    for block in to_blocks(html) {
+    for blk in to_blocks(html) {
+        let block = match blk {
+            Blk::Code(raw) => {
+                // A code/command block: keep every line. HTML ignores one newline after <pre>; drop it
+                // and the trailing whitespace, then emit verbatim (escaped, newlines kept) so the reflow
+                // engine sets it monospace. The prose filters below do not apply — short code is valid
+                // and a listing never ends the article.
+                let code = raw.strip_prefix('\n').unwrap_or(&raw).trim_end();
+                if !code.is_empty() {
+                    out.push_str("<pre>");
+                    out.push_str(&escape(code));
+                    out.push_str("</pre>\n");
+                }
+                continue;
+            }
+            Blk::Math(latex) => {
+                // A display equation: keep it as a math image the assembler renders to a PNG and
+                // embeds (the reflow engine has no math typesetting). The LaTeX rides in the `alt`
+                // — it is the assembler's render source, and the visible fallback if a formula does
+                // not render. Like code, it bypasses the prose filters: an equation is short and
+                // never ends the article.
+                out.push_str("<p class=\"eq\">");
+                out.push_str(MATH_IMG_OPEN);
+                out.push_str(&escape(&latex));
+                out.push_str(MATH_IMG_CLOSE);
+                out.push_str("</p>\n");
+                continue;
+            }
+            Blk::Prose(block) => block,
+        };
         let t = collapse_ws(&strip_zero_width(&block));
         // Newsletter / related-stories boilerplate and an email signature mark the end of the article
         // — drop them and everything after (the "Follow topics…" CTA, a "More from …" link list, or a
@@ -115,18 +151,80 @@ pub(crate) fn summary_fallback(summary: Option<&str>) -> String {
     "<p>(No readable text could be extracted. Open the original to read it.)</p>".to_string()
 }
 
-/// Split `html` into text blocks. Parses with html5ever, narrows to the article body, then walks the
-/// tree: text accumulates into the current block, [`BLOCK_TAGS`] elements end it, and [`SKIP_TAGS`]
-/// subtrees are dropped. Comments/CDATA/doctype nodes are never text, so they cannot leak. The parser
-/// already decodes entities in text nodes, so no manual entity pass is needed here.
-fn to_blocks(html: &str) -> Vec<String> {
+/// One extracted block: ordinary prose (whitespace-collapsed, emitted as a `<p>`), a preformatted
+/// code/command block (lines kept, emitted as a `<pre>` the reflow engine sets monospace), or a
+/// display equation (its LaTeX, emitted as a math `<img>` the assembler renders and embeds).
+enum Blk {
+    Prose(String),
+    Code(String),
+    Math(String),
+}
+
+/// A `<pre>` is code — not a plain-text mailing-list post — when it wraps a `<code>` element or
+/// carries a syntax-highlighting class. Code keeps its lines; a bare `<pre>` of wrapped prose is split
+/// into paragraphs by [`split_pre_paragraphs`] as before.
+fn is_code_pre(pre: NodeRef<Node>) -> bool {
+    fn has_code(node: NodeRef<Node>) -> bool {
+        node.children().any(|c| match c.value() {
+            Node::Element(el) => el.name() == "code" || has_code(c),
+            _ => false,
+        })
+    }
+    if let Node::Element(el) = pre.value() {
+        if el.attr("class").is_some_and(|c| {
+            let c = c.to_ascii_lowercase();
+            c.contains("language-")
+                || c.contains("highlight")
+                || c.contains("sourcecode")
+                || c.contains("hljs")
+                || c.contains("codehilite")
+        }) {
+            return true;
+        }
+    }
+    has_code(pre)
+}
+
+/// The LaTeX of a WordPress-style math image, or `None` for an ordinary illustration. WordPress
+/// (and the common `latex.php` renderers) ship an equation as `<img class="latex" alt="…LaTeX…">`,
+/// so the formula is in the `alt` attribute; a `latex.php`/`/latex/` src is the same thing served
+/// by other engines. An ordinary `<img>` returns `None` and is dropped as before.
+fn math_latex(el: &scraper::node::Element) -> Option<String> {
+    let is_math = el.attr("class").is_some_and(|c| {
+        c.to_ascii_lowercase()
+            .split_whitespace()
+            .any(|w| w == "latex")
+    }) || el
+        .attr("src")
+        .is_some_and(|s| s.contains("latex.php") || s.contains("/latex/"));
+    if !is_math {
+        return None;
+    }
+    el.attr("alt")
+        .map(str::trim)
+        .filter(|a| !a.is_empty())
+        .map(str::to_string)
+}
+
+/// A display (block) equation is marked `\displaystyle` by WordPress; an inline formula is not. Only
+/// display equations become their own math image; inline formulas degrade to their LaTeX text, since
+/// the plain-text body cannot carry an image mid-sentence.
+fn is_display_math(latex: &str) -> bool {
+    latex.contains("displaystyle")
+}
+
+/// Split `html` into blocks. Parses with html5ever, narrows to the article body, then walks the tree:
+/// text accumulates into the current block, [`BLOCK_TAGS`] elements end it, [`SKIP_TAGS`] subtrees are
+/// dropped, and a code `<pre>` becomes a [`Blk::Code`]. Comments/CDATA/doctype nodes are never text, so
+/// they cannot leak. The parser already decodes entities in text nodes, so no manual pass is needed.
+fn to_blocks(html: &str) -> Vec<Blk> {
     let doc = Html::parse_document(html);
     let start = main_node(doc.tree.root());
     let mut blocks = Vec::new();
     let mut cur = String::new();
     walk(start, &mut cur, &mut blocks);
     if !cur.trim().is_empty() {
-        blocks.push(cur);
+        blocks.push(Blk::Prose(cur));
     }
     blocks
 }
@@ -169,7 +267,7 @@ fn text_len(node: NodeRef<Node>) -> usize {
 
 /// Walk block-level structure under `node`, emitting block text into `blocks`. Loose inline text
 /// accumulates in `cur` and flushes at each block boundary; [`SKIP_TAGS`] subtrees are skipped whole.
-fn walk(node: NodeRef<Node>, cur: &mut String, blocks: &mut Vec<String>) {
+fn walk(node: NodeRef<Node>, cur: &mut String, blocks: &mut Vec<Blk>) {
     for child in node.children() {
         match child.value() {
             Node::Text(t) => cur.push_str(t),
@@ -178,27 +276,52 @@ fn walk(node: NodeRef<Node>, cur: &mut String, blocks: &mut Vec<String>) {
                 if SKIP_TAGS.contains(&name) {
                     continue; // chrome (script/style/nav/…) — drop the whole subtree
                 }
+                if name == "img" {
+                    if let Some(latex) = math_latex(el) {
+                        if is_display_math(&latex) {
+                            // A block equation: end the running paragraph and keep it as its own
+                            // math block for the assembler to render and embed.
+                            if !cur.trim().is_empty() {
+                                blocks.push(Blk::Prose(std::mem::take(cur)));
+                            }
+                            blocks.push(Blk::Math(latex));
+                        } else {
+                            // Inline math: the plain-text body has no place for an image mid-line,
+                            // so keep the formula readable as its LaTeX source in the running text.
+                            cur.push(' ');
+                            cur.push_str(&latex);
+                            cur.push(' ');
+                        }
+                    }
+                    continue; // a non-math image carries no readable text — drop it as before
+                }
                 if name == "pre" {
-                    // Preformatted text (mailing-list posts, plain-text articles) carries its
-                    // structure as newlines, not markup. Split it on blank lines here, before the
-                    // whitespace collapse, so the body keeps its paragraphs instead of flattening into
-                    // one run-on block with the email headers merged in.
                     if !cur.trim().is_empty() {
-                        blocks.push(std::mem::take(cur));
+                        blocks.push(Blk::Prose(std::mem::take(cur)));
                     }
                     let text: String = ElementRef::wrap(child)
                         .map(|e| e.text().collect())
                         .unwrap_or_default();
-                    blocks.extend(split_pre_paragraphs(&text));
+                    if is_code_pre(child) {
+                        // Genuine code/commands: every line is significant, so keep the block whole and
+                        // let the reflow engine set it monospace line-for-line.
+                        blocks.push(Blk::Code(text));
+                    } else {
+                        // A plain-text <pre> (mailing-list post) carries its structure as newlines, not
+                        // markup. Split it on blank lines before the whitespace collapse, so the body
+                        // keeps its paragraphs instead of flattening into one run-on block with the email
+                        // headers merged in.
+                        blocks.extend(split_pre_paragraphs(&text).into_iter().map(Blk::Prose));
+                    }
                     continue;
                 }
                 let is_block = BLOCK_TAGS.contains(&name);
                 if is_block && !cur.trim().is_empty() {
-                    blocks.push(std::mem::take(cur));
+                    blocks.push(Blk::Prose(std::mem::take(cur)));
                 }
                 walk(child, cur, blocks);
                 if is_block && !cur.trim().is_empty() {
-                    blocks.push(std::mem::take(cur));
+                    blocks.push(Blk::Prose(std::mem::take(cur)));
                 }
             }
             _ => {} // Comment / Doctype / ProcessingInstruction — never content
@@ -638,6 +761,118 @@ Please check out the Open Source Software Security Wiki, a mailing-list footer t
         assert!(
             !with.contains('\u{2014}') && !without.contains('\u{2014}'),
             "no em dash in the fallbacks"
+        );
+    }
+
+    #[test]
+    fn a_code_pre_is_kept_whole_with_its_lines() {
+        // A <pre><code> block is emitted as a <pre> with its newlines preserved, not collapsed into a
+        // run-on paragraph, so the reflow engine can set it monospace line-for-line.
+        let html = "<article><p>Here is the smallest program that greets you politely:</p>\
+            <pre><code>fn main() {\n    println!(\"hi\");\n}</code></pre>\
+            <p>That prints a greeting to standard output on your terminal screen.</p></article>";
+        let out = extract_readable(html);
+        assert!(
+            out.contains("<pre>"),
+            "a code block must emit a <pre>: {out}"
+        );
+        assert!(
+            out.contains("fn main() {\n    println!"),
+            "the code's newlines and indentation must be preserved: {out:?}",
+        );
+        assert!(
+            out.contains("<p>Here is the smallest program that greets you politely:</p>"),
+            "prose around it still emits <p>: {out}",
+        );
+    }
+
+    #[test]
+    fn a_language_classed_pre_without_code_is_still_code() {
+        // Syntax-highlight markup often puts the hint on the <pre> class with no <code> child.
+        let html = "<article><pre class=\"language-sh highlight\">sudo apt update\nsudo apt upgrade</pre>\
+            <p>Those two commands refresh the package index and install the pending upgrades.</p></article>";
+        let out = extract_readable(html);
+        assert!(
+            out.contains("<pre>sudo apt update\nsudo apt upgrade</pre>"),
+            "got: {out:?}"
+        );
+    }
+
+    #[test]
+    fn a_display_equation_becomes_a_math_image_marker() {
+        // WordPress (Terry Tao) ships a display equation as <img class="latex" alt="\displaystyle …">
+        // inside a paragraph. It must survive extraction as a math <img> the assembler can render,
+        // carrying its LaTeX in the alt — not vanish the way an ordinary image does.
+        let html = "<article>\
+            <p>The partial sums of the first N positive integers satisfy the identity</p>\
+            <p><img class=\"latex\" alt=\"\\displaystyle \\sum_{n=1}^N n = \\frac{N(N+1)}{2}\" \
+               src=\"https://s0.wp.com/latex.php?latex=x\"/></p>\
+            <p>which is proved by induction on the number of terms involved here.</p></article>";
+        let out = extract_readable(html);
+        assert!(
+            out.contains("<p class=\"eq\"><img class=\"latex\" alt=\""),
+            "a display equation emits a math image: {out}"
+        );
+        assert!(
+            out.contains("\\displaystyle \\sum_{n=1}^N n = \\frac{N(N+1)}{2}"),
+            "the LaTeX rides in the alt: {out}"
+        );
+        assert!(
+            out.contains("partial sums of the first") && out.contains("proved by induction"),
+            "the prose around it is kept: {out}"
+        );
+    }
+
+    #[test]
+    fn an_inline_equation_degrades_to_its_latex_text() {
+        // An inline formula (no \displaystyle) cannot be placed mid-line in the plain-text body, so
+        // it stays readable as its LaTeX source inside the paragraph rather than disappearing.
+        let html = "<article><p>We write the golden ratio \
+            <img class=\"latex\" alt=\"\\phi = (1+\\sqrt 5)/2\" src=\"/latex/x.png\"/> \
+            throughout the remainder of this discussion for brevity.</p></article>";
+        let out = extract_readable(html);
+        assert!(
+            out.contains("golden ratio \\phi = (1+\\sqrt 5)/2 throughout"),
+            "inline math degrades to LaTeX text in the running line: {out}"
+        );
+        assert!(
+            !out.contains("<img"),
+            "inline math does not emit an image: {out}"
+        );
+    }
+
+    #[test]
+    fn an_ordinary_image_is_still_dropped() {
+        // A plain illustration is not math and carries no prose — extraction drops it as before.
+        let html = "<article><p>A chart follows that summarises the quarterly revenue figures here.</p>\
+            <p><img class=\"wp-image-123\" alt=\"Revenue by quarter\" src=\"/chart.png\"/></p></article>";
+        let out = extract_readable(html);
+        assert!(!out.contains("<img"), "a non-math image is dropped: {out}");
+        assert!(
+            !out.contains("class=\"eq\""),
+            "no math block emitted: {out}"
+        );
+        assert!(
+            out.contains("quarterly revenue figures"),
+            "prose kept: {out}"
+        );
+    }
+
+    #[test]
+    fn a_bare_text_pre_still_splits_into_paragraphs() {
+        // A mailing-list <pre> (no <code>, no language class) keeps the old behaviour: blank-line
+        // separated paragraphs, not a monospace block.
+        let html = "<article><pre>First paragraph of a plain-text post that is long enough to keep.\n\n\
+            Second paragraph of the same plain-text post, also plenty long to survive.</pre></article>";
+        let out = extract_readable(html);
+        assert!(
+            !out.contains("<pre>"),
+            "a bare text <pre> must not become a code block: {out}"
+        );
+        assert_eq!(
+            out.matches("<p>").count(),
+            2,
+            "it splits into two paragraphs: {out}"
         );
     }
 }

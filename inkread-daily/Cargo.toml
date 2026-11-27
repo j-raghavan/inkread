@@ -22,6 +22,9 @@ ego-tree = "0.11"
 serde = { workspace = true }
 serde_json = { workspace = true }
 feed-rs = { workspace = true }
+# Render WordPress alt-LaTeX display equations to grayscale PNGs embedded in the issue EPUB. See the
+# workspace manifest for the pin rationale (=2.1.1) and the STIX Two Math (OFL) notice.
+latex-rust = { workspace = true }
 
 [dev-dependencies]
 # Round-trip the assembled issue through the real EPUB parser the reader uses, so a malformed

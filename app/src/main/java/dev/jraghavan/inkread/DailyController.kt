@@ -639,6 +639,9 @@ class DailyController(private val context: Context) {
             Source("Quanta Magazine", "https://api.quantamagazine.org/feed/"),
             Source("Daring Fireball", "https://daringfireball.net/feeds/main"),
             Source("Smashing Magazine", "https://www.smashingmagazine.com/feed/"),
+            Source("Julia Evans", "https://jvns.ca/atom.xml"),
+            Source("Drew DeVault", "https://drewdevault.com/blog/index.xml"),
+            Source("Terence Tao", "https://terrytao.wordpress.com/feed/"),
         )
         const val PER_SOURCE = 5 // default articles taken per source; per-source override in #193
         const val MIN_PER_SOURCE = 1 // a source taking nothing should be muted, not set to zero
