@@ -276,6 +276,63 @@ fn band_includes_the_byline() {
 }
 
 #[test]
+fn band_folds_a_full_vintage_lead_above_the_columns() {
+    // A Vintage article opens with a nameplate image, a rule, the dateline, a rule, then the headline
+    // and byline (ADR-INKREAD-0018 D1). The band folds all of that leading run full width, leaving the
+    // body prose after the byline in the columns.
+    let rule = || Block::Rule {
+        style: BlockStyle::default(),
+    };
+    assert_eq!(
+        super::band_run(&[
+            image_block("masthead.png"),
+            rule(),
+            para("TUESDAY"),
+            rule(),
+            heading_block(1, "Headline"),
+            para("byline"),
+            para("body"),
+        ]),
+        Some(6),
+        "nameplate, rules, dateline, headline and byline all fold into the band",
+    );
+    // An article that opens straight with the headline (Standard/Papernews) still folds only the
+    // headline and its byline.
+    assert_eq!(
+        super::band_run(&[heading_block(1, "H"), para("byline"), para("body")]),
+        Some(2),
+    );
+    // No leading heading means no band at all.
+    assert_eq!(super::band_run(&[para("just body")]), None);
+
+    // End to end: a pre-headline dateline lays out full width in the band, not in a column.
+    let opts = band_opts();
+    let mut blocks = vec![
+        rule(),
+        para("TUESDAY 24 NOVEMBER 2026"),
+        rule(),
+        heading_block(1, "Big Headline"),
+        para("Reuters"),
+    ];
+    for _ in 0..40 {
+        blocks.push(para(
+            "body text long enough to fill two columns on the page",
+        ));
+    }
+    let pages = paginate(&blocks, &opts, &Mono);
+    let dateline = pages[0]
+        .lines
+        .iter()
+        .find(|l| l.runs.iter().any(|r| r.text.contains("NOVEMBER")))
+        .expect("dateline present");
+    assert!(
+        (dateline.column_w - 600.0).abs() < 1.0,
+        "dateline is in the full-width band, not a column: {}",
+        dateline.column_w,
+    );
+}
+
+#[test]
 fn band_sets_a_short_article_in_one_column() {
     // A short body collapses lopsidedly into the left column of two; instead it is set in a single
     // full-width column beneath the band (ADR-INKREAD-0017 D3).

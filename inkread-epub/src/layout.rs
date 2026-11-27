@@ -743,22 +743,22 @@ pub fn paginate_upto(
 /// start, plus an immediately-following byline paragraph (ADR-INKREAD-0017 D2/D4). `None` when the
 /// chapter does not open with a heading, which leaves the ordinary column path untouched.
 fn band_run(blocks: &[Block]) -> Option<usize> {
-    let headings = blocks
+    // The band is the article's full-width lead: whatever nameplate, rule and dateline blocks the
+    // style places *before* the headline (Vintage, ADR-INKREAD-0018 D1), the headline run itself,
+    // and the byline paragraph that follows it (ADR-INKREAD-0017 D4). A chapter with no leading
+    // heading forms no band and the ordinary column path is left untouched. This path is daily-gated,
+    // so anything ahead of the headline is nameplate furniture and the block after it is the byline,
+    // never body prose.
+    let first_heading = blocks
         .iter()
-        .take_while(|b| matches!(b, Block::Heading { .. }))
-        .count();
-    if headings == 0 {
-        return None;
+        .position(|b| matches!(b, Block::Heading { .. }))?;
+    // Extend across the contiguous headline run, then fold an immediately-following byline paragraph.
+    let mut end = first_heading;
+    while matches!(blocks.get(end), Some(Block::Heading { .. })) {
+        end += 1;
     }
-    // Fold an immediately-following paragraph into the band: in a daily article that is the byline
-    // (`<h1>` then `<p class="byline">`, see `inkread-daily`), which belongs under the headline, not
-    // at the top of the first column (ADR-INKREAD-0017 D4). This path is daily-gated, so the block
-    // after the heading is the byline, never body prose.
-    let byline = usize::from(matches!(
-        blocks.get(headings),
-        Some(Block::Paragraph { .. })
-    ));
-    Some(headings + byline)
+    let byline = usize::from(matches!(blocks.get(end), Some(Block::Paragraph { .. })));
+    Some(end + byline)
 }
 
 /// Lay a chapter's body (the blocks after the band) into pages at `opts`'s column measure, with the
