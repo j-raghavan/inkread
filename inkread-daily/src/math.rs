@@ -10,13 +10,16 @@
 
 use latex_rust::{latex_to_png, Dim, MathFont, PngBackground, PngOptions};
 
-/// The on-screen point size of a rendered equation. Close to the reader's body text so a display
-/// equation sits at a natural size among the prose (the engine scales the raster to fit the column).
+/// Equation point size at the render DPI below. The product (`FONT_SIZE_PT * DPI / 72`) is the em in
+/// intrinsic pixels, and that is what matters: the reflow engine treats an image's intrinsic pixels
+/// as CSS pixels authored at body = 16px (`inkread-epub` `CSS_PX_PER_EM`) and scales it to the
+/// reader's font. So the em must be 16px for an equation to sit at body height among the prose.
 const FONT_SIZE_PT: i64 = 12;
 
-/// Render resolution. High enough that the engine down-scales (sharp) rather than up-scales (blurry)
-/// the raster to the column on a ~300-DPI panel. `latex-rust` caps DPI at 2400.
-const DPI: i64 = 300;
+/// Render DPI chosen so the em lands at the engine's 16px CSS reference: `12 * 96 / 72 = 16`. A
+/// higher DPI (e.g. 300) makes the raster larger, which the engine reads as more CSS pixels and
+/// over-scales, so the equation would tower over the text beside it.
+const DPI: i64 = 96;
 
 /// Load the bundled STIX Two Math face once, to render a batch of equations with (see
 /// [`render_display`]). `None` if the embedded font fails to parse (a build-time invariant, so this
