@@ -142,6 +142,11 @@ pub struct BlockStyle {
     /// `page-break-inside` / `break-inside` (#251): `Avoid` asks for the block not to be split
     /// across a page boundary, so a stanza moves whole to the next page rather than being halved.
     pub break_inside: Option<PageBreak>,
+    /// `white-space: pre` — the block is preformatted (it came from `<pre>`): its whitespace and
+    /// newlines are significant, so the layout sets it line-for-line in a monospace face and never
+    /// collapses or justifies it. Structural rather than a cascaded length, so it is a plain flag, not
+    /// an `Option`; it is not inherited by nested blocks (a `<pre>` lowers to a single block anyway).
+    pub preformatted: bool,
 }
 
 impl BlockStyle {

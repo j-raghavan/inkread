@@ -38,6 +38,10 @@ pub struct TextRun {
     pub bold: bool,
     /// Italic (`<i>`/`<em>`/`<cite>`).
     pub italic: bool,
+    /// Monospace (`<code>`/`<kbd>`/`<samp>`/`<tt>`/`<var>`, or any run inside a `<pre>`): set in a
+    /// fixed-pitch face so a command or identifier keeps its own spacing instead of being set in the
+    /// reading face like prose.
+    pub mono: bool,
     /// Hyperlink target if this run is inside an `<a href>`.
     pub href: Option<String>,
 }
@@ -153,6 +157,7 @@ pub struct ChapterContent {
 struct Style {
     bold: bool,
     italic: bool,
+    mono: bool,
 }
 
 /// Tags whose *contents* are code/data, never prose. Their text nodes must never reach a [`Block`]:
@@ -513,6 +518,33 @@ fn walk_blocks(
                             bind_anchors(anchors, pending_ids, idx, own_anchor_ids(el));
                         }
                     }
+                    "pre" => {
+                        // A preformatted block: whitespace and line breaks are significant, so it is
+                        // not reflowed as prose. Its text is gathered verbatim (inline children like
+                        // <code>/<span> flattened) into one monospace run, and the block carries
+                        // `preformatted` so the layout sets it line-for-line in the mono face instead
+                        // of collapsing and justifying it.
+                        flush_paragraph(out, pending, anchors, pending_ids, inherited);
+                        let idx = out.len();
+                        let text = collect_preformatted_text(child);
+                        if text.trim().is_empty() {
+                            pending_ids.extend(subtree_anchor_ids(child));
+                        } else {
+                            let mut style = declared(child, el, sheet, inherited);
+                            style.preformatted = true;
+                            out.push(Block::Paragraph {
+                                content: vec![Inline::Run(TextRun {
+                                    text,
+                                    bold: false,
+                                    italic: false,
+                                    mono: true,
+                                    href: None,
+                                })],
+                                style,
+                            });
+                            bind_anchors(anchors, pending_ids, idx, subtree_anchor_ids(child));
+                        }
+                    }
                     _ if NON_CONTENT_TAGS.contains(&name) => {}
                     _ if INLINE_TAGS.contains(&name) => {
                         // Inline emphasis at block level → fold into the anonymous paragraph, the
@@ -765,6 +797,28 @@ fn collect_inlines(node: NodeRef<Node>) -> Vec<Inline> {
     out
 }
 
+/// Gather a `<pre>` subtree's text verbatim — every space and newline kept — flattening inline tags
+/// (`<code>`, `<span>`, …) to their text and turning `<br>` into a newline. HTML ignores a single
+/// newline right after the `<pre>` open tag and we drop trailing whitespace, so the block begins and
+/// ends on real content.
+fn collect_preformatted_text(node: NodeRef<Node>) -> String {
+    let mut s = String::new();
+    collect_pre_into(node, &mut s);
+    let trimmed = s.strip_prefix('\n').unwrap_or(&s);
+    trimmed.trim_end().to_string()
+}
+
+fn collect_pre_into(node: NodeRef<Node>, out: &mut String) {
+    for child in node.children() {
+        match child.value() {
+            Node::Text(t) => out.push_str(t),
+            Node::Element(el) if el.name() == "br" => out.push('\n'),
+            Node::Element(_) => collect_pre_into(child, out),
+            _ => {}
+        }
+    }
+}
+
 /// Recursively collect inline content under `node`, accumulating emphasis/link state.
 fn collect_inlines_into(
     node: NodeRef<Node>,
@@ -808,6 +862,18 @@ fn collect_element(
             node,
             Style {
                 italic: true,
+                ..style
+            },
+            href,
+            out,
+        ),
+        // Inline code/command spans render in a fixed-pitch face so a flag or identifier mid-sentence
+        // keeps its own spacing (`grep -n`, `--release`). Whitespace is still collapsed: only a `<pre>`
+        // block preserves it.
+        "code" | "kbd" | "samp" | "tt" | "var" => collect_inlines_into(
+            node,
+            Style {
+                mono: true,
                 ..style
             },
             href,
@@ -868,7 +934,11 @@ fn push_text(out: &mut Vec<Inline>, raw: &str, style: Style, href: Option<&str>)
     }
     // Merge adjacent same-styled runs so emphasis spans don't fragment the text needlessly.
     if let Some(Inline::Run(prev)) = out.last_mut() {
-        if prev.bold == style.bold && prev.italic == style.italic && prev.href.as_deref() == href {
+        if prev.bold == style.bold
+            && prev.italic == style.italic
+            && prev.mono == style.mono
+            && prev.href.as_deref() == href
+        {
             prev.text.push_str(&text);
             return;
         }
@@ -877,6 +947,7 @@ fn push_text(out: &mut Vec<Inline>, raw: &str, style: Style, href: Option<&str>)
         text,
         bold: style.bold,
         italic: style.italic,
+        mono: style.mono,
         href: href.map(str::to_string),
     }));
 }

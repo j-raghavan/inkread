@@ -25,6 +25,14 @@ use crate::css::{BlockStyle, Length, PageBreak};
 pub trait Metrics {
     /// The advance width, in pixels, of `text` rendered at `size_px` with the given emphasis.
     fn advance(&self, text: &str, size_px: f32, bold: bool, italic: bool) -> f32;
+
+    /// The advance of a single cell in the monospace face at `size_px` — every glyph shares it, so a
+    /// preformatted run's width is its character count times this. The default measures one glyph in
+    /// the reading face, which is enough for the stub metrics the layout tests use; the real renderer
+    /// overrides it with the bundled fixed-pitch face's cell so on-device wrapping is exact.
+    fn mono_advance(&self, size_px: f32) -> f32 {
+        self.advance("0", size_px, false, false)
+    }
 }
 
 /// Soft-hyphenation opportunities for a word, so justified/narrow lines break long words like a book
@@ -324,6 +332,10 @@ pub struct PlacedRun {
     pub size_px: f32,
     pub bold: bool,
     pub italic: bool,
+    /// Set in the fixed-pitch face (a preformatted `<pre>` line or an inline `<code>` run), so the
+    /// renderer draws it monospace and its width is measured against the mono cell, not the reading
+    /// face.
+    pub mono: bool,
     pub href: Option<String>,
     /// Source anchor of this run's first character (ADR-INKREAD-0012).
     pub anchor: SourceAnchor,
@@ -348,6 +360,7 @@ impl PlacedRun {
     pub fn width(&self, m: &dyn Metrics) -> f32 {
         match &self.image {
             Some(image) => image.width as f32,
+            None if self.mono => self.text.chars().count() as f32 * m.mono_advance(self.size_px),
             None => m.advance(&self.text, self.size_px, self.bold, self.italic),
         }
     }
@@ -1433,6 +1446,12 @@ impl<'o> Pager<'o> {
                     images,
                 );
             }
+            Block::Paragraph { content, style } if style.preformatted => {
+                // A preformatted code/command block: set line-for-line in the mono face, wrapped only
+                // when a source line is wider than the measure. Never justified, never indented,
+                // never a drop-cap carrier.
+                self.add_preformatted(content, size, block_index, cursor, m);
+            }
             Block::Paragraph { content, style } => {
                 // First line indented, the rest flush left, no trailing gap — dense and book-like.
                 // The indent is the *only* thing marking where one paragraph ends and the next
@@ -1532,6 +1551,7 @@ impl<'o> Pager<'o> {
                         text: label,
                         bold: false,
                         italic: true,
+                        mono: false,
                         href: None,
                     })];
                     // The label is synthetic, like a list item's marker: it must not consume
@@ -1608,6 +1628,74 @@ impl<'o> Pager<'o> {
         }
     }
 
+    /// Lay a preformatted block (`<pre>`): each source line set verbatim in the mono face, wrapped to
+    /// the measure only when it is wider than one line, with a two-cell hanging indent marking a wrap
+    /// so it reads as a continuation rather than a new logical line. No justification, no hyphenation,
+    /// no paragraph indent — code and commands keep their own spacing. Blank source lines keep their
+    /// vertical space, and the block paginates across columns/pages line by line like any other.
+    fn add_preformatted(
+        &mut self,
+        content: &[Inline],
+        size: f32,
+        block: usize,
+        cursor: &mut usize,
+        m: &dyn Metrics,
+    ) {
+        let mut text = String::new();
+        for inl in content {
+            match inl {
+                Inline::Run(r) => text.push_str(&r.text),
+                Inline::Break => text.push('\n'),
+                Inline::Image { .. } => {}
+            }
+        }
+        let line_h = size * self.opts.line_spacing;
+        let cell = m.mono_advance(size).max(1.0);
+        let max_chars = (self.measure / cell).floor().max(1.0) as usize;
+        // A wrapped continuation hangs two cells in; too narrow a measure for that falls back to flush.
+        let hang = if max_chars > 4 { 2 } else { 0 };
+        let mut offset = *cursor;
+        let src_lines: Vec<&str> = text.split('\n').collect();
+        let n = src_lines.len();
+        for (li, src) in src_lines.iter().enumerate() {
+            let chars: Vec<char> = src.chars().collect();
+            if chars.is_empty() {
+                self.emit_text_line(Vec::new(), size, line_h);
+            } else {
+                let mut i = 0;
+                let mut first = true;
+                while i < chars.len() {
+                    let take = (if first { max_chars } else { max_chars - hang }).max(1);
+                    let end = (i + take).min(chars.len());
+                    let run = PlacedRun {
+                        x: if first { 0.0 } else { hang as f32 * cell },
+                        text: chars[i..end].iter().collect(),
+                        size_px: size,
+                        bold: false,
+                        italic: false,
+                        mono: true,
+                        href: None,
+                        anchor: SourceAnchor {
+                            block,
+                            char_offset: offset + i,
+                        },
+                        wrap: None,
+                        image: None,
+                        drop_cap: false,
+                    };
+                    self.emit_text_line(vec![run], size, line_h);
+                    i = end;
+                    first = false;
+                }
+            }
+            offset += chars.len();
+            if li + 1 < n {
+                offset += 1; // the newline separating source lines is one source character
+            }
+        }
+        *cursor = offset;
+    }
+
     /// Lay a paragraph with a drop cap: the initial is set large in the top-left corner and the first
     /// few lines are indented to clear it (Vintage, ADR-INKREAD-0018 D1). The cap glyph keeps the
     /// block's first character offset, so a highlight or search hit on it still resolves; the rest of
@@ -1680,6 +1768,7 @@ impl<'o> Pager<'o> {
             size_px: cap_size,
             bold: true,
             italic: false,
+            mono: false,
             href: None,
             anchor: cap_anchor,
             wrap: None,
@@ -1899,6 +1988,7 @@ impl<'o> Pager<'o> {
             size_px: size,
             bold: false,
             italic: false,
+            mono: false,
             href: None,
             anchor: marker_anchor,
             wrap: None,
@@ -1951,6 +2041,7 @@ enum Tok<'a> {
         text: &'a str,
         bold: bool,
         italic: bool,
+        mono: bool,
         href: Option<&'a str>,
         anchor: SourceAnchor,
     },
@@ -2007,6 +2098,7 @@ fn tokenize<'a>(
                         text: label,
                         bold: false,
                         italic: true,
+                        mono: false,
                         href: None,
                         anchor,
                     },
@@ -2024,6 +2116,7 @@ fn tokenize<'a>(
                             text: part,
                             bold: r.bold || bold_all,
                             italic: r.italic || italic_all,
+                            mono: r.mono,
                             href: r.href.as_deref(),
                             anchor: SourceAnchor {
                                 block,
@@ -2191,6 +2284,7 @@ fn break_lines(
                     size_px: size,
                     bold: false,
                     italic: false,
+                    mono: false,
                     href: None,
                     anchor,
                     wrap: None,
@@ -2208,6 +2302,7 @@ fn break_lines(
                 text,
                 bold,
                 italic,
+                mono,
                 href,
                 anchor,
             } => {
@@ -2231,7 +2326,11 @@ fn break_lines(
                     };
                     let start = if cur.is_empty() { 0.0 } else { x + lead };
                     let room = avail - start;
-                    let rest_w = m.advance(rest, size, bold, italic);
+                    let rest_w = if mono {
+                        rest.chars().count() as f32 * m.mono_advance(size)
+                    } else {
+                        m.advance(rest, size, bold, italic)
+                    };
                     let anchor = SourceAnchor {
                         block: anchor.block,
                         char_offset: anchor.char_offset + off,
@@ -2245,6 +2344,7 @@ fn break_lines(
                                 size_px: size,
                                 bold,
                                 italic,
+                                mono,
                                 href: href.map(str::to_string),
                                 anchor,
                                 wrap,
